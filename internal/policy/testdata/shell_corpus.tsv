@@ -366,11 +366,12 @@ ruff format /tmp/x.py	write_outside
 black /tmp/x.py	write_outside
 gofmt -w /tmp/x.go	write_outside
 gofmt -w main.go	write_in_project
-# 指定远端执行程序的选项：本地路径的远端会在本机执行任意命令，抬到 outward
-git push --receive-pack='sh -c x' /tmp/repo main	outward
-git push --exec=x origin	outward
-git clone --upload-pack='sh -c x' /tmp/repo	outward
-git clone -u 'sh -c x' /tmp/repo	outward
-git fetch --upload-pack=x origin	outward
-git pull --upload=x origin	outward
+# 指定远端执行程序的选项执行任意命令（本地路径的远端就在本机执行），按不可逆处理
+git push --receive-pack='sh -c x' /tmp/repo main	destructive
+git push --exec=x origin	destructive
+git push origin main --rece=x	destructive
+git clone --upload-pack='sh -c x' /tmp/repo	destructive
+git clone -u 'sh -c x' /tmp/repo	destructive
+git fetch --upload-pack=x origin	destructive
+git pull --upload=x origin	destructive
 git fetch origin	network

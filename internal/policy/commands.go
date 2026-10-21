@@ -113,8 +113,13 @@ func buildCommandTable() []cmdPattern {
 		{name: "rm", flagChars: "rR", any: []string{"--recursive"}, risk: RiskDestructive},
 		// git 的长选项可以缩写（longAbbrev），短选项可以成簇（flagChars）
 		{name: "git", sub: "reset", longAbbrev: []string{"--hard", "--merge"}, risk: RiskDestructive},
-		// + 开头的 refspec 是强推，: 开头的删除远端引用；--force 前缀兜住 --force-with-lease=<ref> 与 --force-if-includes
-		{name: "git", sub: "push", flagChars: "fd", longAbbrev: []string{"--force", "--force-with-lease", "--delete", "--mirror", "--prune"}, anyPrefix: []string{"+", ":", "--force"}, risk: RiskDestructive},
+		// + 开头的 refspec 是强推，: 开头的删除远端引用；--force 前缀兜住 --force-with-lease=<ref> 与 --force-if-includes。
+		// --receive-pack、--exec（以及 clone、fetch、pull 的 --upload-pack，clone 的 -u）指定远端执行的程序，
+		// 执行任意命令，本地路径的远端就在本机执行：按不可逆处理
+		{name: "git", sub: "push", flagChars: "fd", longAbbrev: []string{"--force", "--force-with-lease", "--delete", "--mirror", "--prune", "--receive-pack", "--exec"}, anyPrefix: []string{"+", ":", "--force"}, risk: RiskDestructive},
+		{name: "git", sub: "clone", flagChars: "u", longAbbrev: []string{"--upload-pack"}, risk: RiskDestructive},
+		{name: "git", sub: "fetch", longAbbrev: []string{"--upload-pack"}, risk: RiskDestructive},
+		{name: "git", sub: "pull", longAbbrev: []string{"--upload-pack"}, risk: RiskDestructive},
 		{name: "git", sub: "clean", risk: RiskDestructive},
 		// --delete 只有和 --force 一起才强删，--force 单独就命中
 		{name: "git", sub: "branch", flagChars: "Df", longAbbrev: []string{"--force"}, risk: RiskDestructive},
@@ -140,11 +145,6 @@ func buildCommandTable() []cmdPattern {
 		{name: "systemctl", risk: RiskDestructive},
 		{name: "crontab", risk: RiskDestructive},
 		// ---- 对外 ----
-		// --upload-pack（clone 的 -u）指定远端执行的程序，本地路径的远端会在本机执行任意命令：无法分析，抬到 outward。
-		// push 的 --receive-pack、--exec 同理，push 本身已是 outward。
-		{name: "git", sub: "clone", flagChars: "u", longAbbrev: []string{"--upload-pack"}, risk: RiskOutward},
-		{name: "git", sub: "fetch", longAbbrev: []string{"--upload-pack"}, risk: RiskOutward},
-		{name: "git", sub: "pull", longAbbrev: []string{"--upload-pack"}, risk: RiskOutward},
 		{name: "git", sub: "push", risk: RiskOutward},
 		{name: "gh", sub: "pr", any: []string{"create", "merge", "close", "comment", "review", "edit", "ready", "reopen"}, risk: RiskOutward},
 		{name: "gh", sub: "issue", any: []string{"create", "close", "comment", "edit", "delete", "reopen"}, risk: RiskOutward},

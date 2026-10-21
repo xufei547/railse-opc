@@ -261,6 +261,7 @@ rules:
 	}{
 		{"user 规则放行 outward", implicit, "git push origin main", ActionAllow, "push", RiskOutward},
 		{"未写 risk 不放行 destructive", implicit, "git push origin main --force", ActionAsk, "", RiskDestructive},
+		{"自定义 receive-pack 执行任意命令", implicit, "git push origin main --receive-pack='sh -c x'", ActionAsk, "", RiskDestructive},
 		{"显式 risk: destructive 放行强推", explicit, "git push origin main --force", ActionAllow, "push-force", RiskDestructive},
 		{"risk: destructive 不覆盖 outward", explicit, "git push origin main", ActionAsk, "", RiskOutward},
 	}
