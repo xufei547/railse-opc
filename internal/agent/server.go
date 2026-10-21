@@ -300,12 +300,14 @@ func (s *Server) writeAudit(e AuditEntry) {
 }
 
 // handleEvent 记录只展示的事件。同一会话有未完成审批时压掉 question，避免一件事进两条。
+// 消息先按文本语境脱敏再写审计：Gemini 的 ToolPermission 通知会拼进完整命令，
+// last_assistant_message、prompt_response 也可能原样带出凭据。
 func (s *Server) handleEvent(ev proto.Event) proto.EventAck {
 	state := "recorded"
 	if ev.Kind == "question" && s.pending.HasSession(ev.Session.CLISessionID) {
 		state = "suppressed"
 	}
-	s.writeAudit(AuditEntry{TS: time.Now(), Kind: ev.Kind, Session: ev.Session, Message: ev.Message, State: state})
+	s.writeAudit(AuditEntry{TS: time.Now(), Kind: ev.Kind, Session: ev.Session, Message: redact.Text(ev.Message), State: state})
 	return proto.EventAck{V: proto.Version, OK: true}
 }
 

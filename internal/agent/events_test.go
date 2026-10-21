@@ -164,3 +164,27 @@ func TestPauseTightensExistingStateFile(t *testing.T) {
 		t.Fatalf("已有的 state.json 应收紧为 0600: %v, %v", st, err)
 	}
 }
+
+func TestEventMessageIsRedacted(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	// Gemini 的 ToolPermission 通知、Claude/Codex 的 last_assistant_message 都可能带出完整命令
+	msg := "Gemini CLI requires execution: export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123 && npm publish"
+	for _, kind := range []string{"question", "done"} {
+		var ack proto.EventAck
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, event(kind, "s-redact", msg)), &ack)
+		if !ack.OK {
+			t.Fatalf("%s: %+v", kind, ack)
+		}
+	}
+	b, err := os.ReadFile(env.cfg.AuditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "ghp_") {
+		t.Fatalf("事件消息写审计前应脱敏:\n%s", b)
+	}
+	entries := readAudit(t, env.cfg.AuditPath)
+	if len(entries) != 2 || entries[0].Message != "Gemini CLI requires execution: export GITHUB_TOKEN=<redacted> && npm publish" {
+		t.Fatalf("审计: %+v", entries)
+	}
+}

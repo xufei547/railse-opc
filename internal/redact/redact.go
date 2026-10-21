@@ -77,12 +77,18 @@ func String(s string) string {
 	return redact(s, shellRules)
 }
 
+// Text 按普通文本语境返回脱敏后的副本，规则与 DiffPreview 相同：值一直抹到空白或引号。
+// 用于事件消息这类可能夹带命令原文的自由文本。
+func Text(s string) string {
+	return redact(s, textRules)
+}
+
 // Payload 对载荷里可能含凭据的字段脱敏，返回副本。每个字段按自己的语境处理。
 func Payload(p policy.Payload) policy.Payload {
 	out := p
 	out.Command = String(p.Command)
 	out.Path = redact(p.Path, textRules)
-	out.DiffPreview = redact(p.DiffPreview, textRules)
+	out.DiffPreview = Text(p.DiffPreview)
 	out.URL = redact(p.URL, urlRules)
 	if len(p.Args) > 0 {
 		out.Args = args(p.Args)

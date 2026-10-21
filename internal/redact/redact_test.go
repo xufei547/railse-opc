@@ -169,3 +169,19 @@ func TestPayloadFieldModes(t *testing.T) {
 		}
 	}
 }
+
+func TestText(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// Gemini 的 ToolPermission 通知把完整命令拼进消息
+		{`Gemini CLI requires execution: export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123 && npm publish`, `Gemini CLI requires execution: export GITHUB_TOKEN=<redacted> && npm publish`},
+		// 文本语境：值一直抹到空白，含 & ( 的强密码不只抹掉前半截
+		{`已设置 POSTGRES_PASSWORD=Xy7&kP(2)q 完成`, `已设置 POSTGRES_PASSWORD=<redacted> 完成`},
+		{`用 ghp_abcdefghijklmnopqrstuvwxyz0123 推送`, `用 <redacted> 推送`},
+		{`改完了，测试全过。`, `改完了，测试全过。`},
+	}
+	for _, c := range cases {
+		if got := Text(c.in); got != c.want {
+			t.Errorf("Text(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+	}
+}
