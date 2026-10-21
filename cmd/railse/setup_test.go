@@ -46,6 +46,9 @@ func TestSetupHooksWritesAllThree(t *testing.T) {
 	if !strings.Contains(out.String(), "Codex") || !strings.Contains(out.String(), "Gemini") || !strings.Contains(out.String(), "yolo") {
 		t.Fatalf("应打印提醒: %s", out.String())
 	}
+	if !strings.Contains(out.String(), `notify = ["/opt/railse", "hook", "codex-notify"]`) {
+		t.Fatalf("Codex 提醒应给出 TOML 数组形式的 notify: %s", out.String())
+	}
 }
 
 func TestSetupHooksIsIdempotentAndPreservesOthers(t *testing.T) {

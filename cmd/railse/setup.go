@@ -294,7 +294,8 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "已写入 %s\n", w.show)
 	}
 	if *doCodex {
-		fmt.Fprintf(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify 需手动配置为 %q。\n", *bin+" hook codex-notify")
+		// notify 是 argv 数组，bin 必须单独作为第一个元素；%q 的转义对普通路径与 TOML 基本字符串一致
+		fmt.Fprintf(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify 需手动写在用户级 ~/.codex/config.toml：notify = [%q, \"hook\", \"codex-notify\"]。\n", *bin)
 	}
 	if *doGemini {
 		fmt.Fprintln(stdout, "提醒 Gemini：钩子只能拒绝不能放行，需要 Gemini CLI 0.65.0 以上，不要开 yolo 模式。")
