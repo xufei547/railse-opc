@@ -111,6 +111,8 @@ func actionRank(a Action) int {
 
 // betterRule 判断 a 是否比 b 更优先：用户的 deny 压一切；其次用户规则整体压内置和学来的规则；
 // 同一层内范围更具体者优先，再按 deny > allow > ask。
+// 注意：中枢把用户在审批时选的"记住拒绝"存成规则时必须用 source: user；存成 learned 的 deny
+// 会输给任何命中的用户 allow（哪怕是很宽的一条），记住的拒绝就失效了。
 func betterRule(a, b *compiledRule) bool {
 	if ua, ub := a.userDeny(), b.userDeny(); ua != ub {
 		return ua
@@ -235,6 +237,53 @@ func globMatch(pattern, abs string, fold bool) bool {
 // fetchCommands 的参数不带协议时也按 URL 理解（curl evil.com/x 默认走 http）。
 var fetchCommands = []string{"curl", "wget"}
 
+// fetchHostOptions 是 curl 带主机的选项：值按 : 拆开，每一段都当主机名看（--connect-to H1:P1:H2:P2、
+// --resolve H:P:ADDR、-x/--proxy [协议://]H[:P]）。
+var fetchHostOptions = []string{"--connect-to", "--resolve", "--proxy", "-x"}
+
+// fetchHostValues 取出 curl、wget 参数里带主机的选项值：--opt value、--opt=value、-x value、-xvalue（含选项簇）。
+func fetchHostValues(argv []string) []string {
+	spec := outputOptions["curl"]
+	withArg := spec.short + spec.taint + spec.shortArg // 带参数的短选项：簇里遇到就停
+	var out []string
+	for i := 1; i < len(argv); i++ {
+		a := argv[i]
+		if strings.HasPrefix(a, "--") {
+			name, val, hasVal := strings.Cut(a, "=")
+			if !slices.Contains(fetchHostOptions, name) {
+				continue
+			}
+			if hasVal {
+				out = append(out, val)
+			} else if i+1 < len(argv) {
+				i++
+				out = append(out, argv[i])
+			}
+			continue
+		}
+		if len(a) < 2 || a[0] != '-' {
+			continue
+		}
+		for j := 1; j < len(a); j++ {
+			if strings.IndexByte(withArg, a[j]) < 0 {
+				continue
+			}
+			if a[j] == 'x' {
+				if j+1 < len(a) {
+					out = append(out, a[j+1:])
+				} else if i+1 < len(argv) {
+					i++
+					out = append(out, argv[i])
+				}
+			} else if j+1 == len(a) {
+				i++ // 其他带参数的短选项，参数是下一个词
+			}
+			break
+		}
+	}
+	return out
+}
+
 // shellMentionsHost 判断命令（看穿 sh -c）里是否有词是主机名命中 domain 的 URL。
 // 含 = 的词（--opt=value、VAR=value）也看 = 之后的部分；curl、wget 不带协议的操作数补上 http:// 再看。
 func shellMentionsHost(command, domain string) bool {
@@ -251,6 +300,19 @@ func shellMentionsHost(command, domain string) bool {
 					return true
 				}
 				if fetch && !strings.HasPrefix(c, "-") && !strings.Contains(c, "://") && hostMatches("http://"+c, domain) {
+					return true
+				}
+			}
+		}
+		if !fetch {
+			continue
+		}
+		for _, v := range fetchHostValues(argv) {
+			if hostMatches(v, domain) {
+				return true
+			}
+			for _, part := range strings.Split(v, ":") {
+				if part != "" && hostMatches("http://"+part, domain) {
 					return true
 				}
 			}
@@ -348,9 +410,19 @@ func harmlessTargets(targets []string, flags []wordFlags) bool {
 }
 
 // hostMatches 判断 URL 的主机名等于 domain 或是它的子域。两边都转小写并去掉末尾一个点。
+// Go 的 url.Parse 拒绝主机里的百分号编码（curl 会解码），解析失败时先整体解码再解析一次。
 func hostMatches(rawURL, domain string) bool {
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Hostname() == "" {
+	if err != nil {
+		dec, derr := url.PathUnescape(rawURL)
+		if derr != nil {
+			return false
+		}
+		if u, err = url.Parse(dec); err != nil {
+			return false
+		}
+	}
+	if u.Hostname() == "" {
 		return false
 	}
 	host, domain := normalizeHost(u.Hostname()), normalizeHost(domain)

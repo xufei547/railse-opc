@@ -162,14 +162,19 @@ func hasPathsRow(name string) bool {
 
 // shellWriteTargets 返回 shell 命令会写入的路径（已解析成绝对路径）：输出重定向的目标，
 // curl、wget、git 等的输出文件与联网安装的目录，以及命令表里带路径分析的行的操作数（命中行不带路径分析、
-// 但同名命令有这类行且命中行会写时也算，如 rm -rf）。跟踪 cd，看穿 sh -c；无法解析的目标跳过。
-// 供 deny 与 ask 规则的 path_glob 匹配 shell 请求用。
+// 但同名命令有这类行且命中行会写时也算，如 rm -rf）。此外，定级至少 write_in_project 的段按隐式写入处理：
+// 它的工作目录与全部操作数、选项值（经 pathOperand）都算写入目标（go build -o、git init、git -C dir …）。
+// 跟踪 cd，看穿 sh -c；无法解析的目标跳过。供 deny 与 ask 规则的 path_glob 匹配 shell 请求用，宁多勿漏。
 func shellWriteTargets(command, cwd string, ctx Context) []string {
 	var out []string
 	lost := false
 	for _, text := range splitSegments(command) {
 		seg := parseSegment(text)
-		out = append(out, segmentWriteTargets(seg, cwd, lost, ctx)...)
+		risk := classifySegment(seg, cwd, ctx)
+		if lost {
+			risk = maxRisk(risk, RiskUnknown)
+		}
+		out = append(out, segmentWriteTargets(seg, cwd, lost, risk >= RiskWriteInProject, ctx)...)
 		argv := stripWrappers(seg.argv)
 		if len(argv) > 0 && isShell(filepath.Base(argv[0])) {
 			if call, ok := parseShellCall(filepath.Base(argv[0]), argv); ok && !lost {
@@ -187,8 +192,9 @@ func shellWriteTargets(command, cwd string, ctx Context) []string {
 	return out
 }
 
-// segmentWriteTargets 返回单段的写入目标，见 shellWriteTargets。lost 为 true 时工作目录已无法确定，相对路径跳过。
-func segmentWriteTargets(seg segment, cwd string, lost bool, ctx Context) []string {
+// segmentWriteTargets 返回单段的写入目标，见 shellWriteTargets。lost 为 true 时工作目录已无法确定，相对路径跳过；
+// implicit 为 true 时再加上工作目录与全部操作数、选项值。
+func segmentWriteTargets(seg segment, cwd string, lost, implicit bool, ctx Context) []string {
 	raw := redirectPaths(seg.redirects)
 	rflags := append([]wordFlags(nil), seg.redirectFlags...)
 	add := func(ts []string, fs []wordFlags) {
@@ -198,6 +204,14 @@ func segmentWriteTargets(seg segment, cwd string, lost bool, ctx Context) []stri
 		}
 	}
 	argv, flags := commandWords(seg)
+	if implicit {
+		add([]string{"."}, nil)
+		for i, a := range argv {
+			if p, ok := pathOperand(a); ok && i > 0 {
+				add([]string{p}, []wordFlags{flagAt(flags, i)})
+			}
+		}
+	}
 	if len(argv) > 0 {
 		name := filepath.Base(argv[0])
 		orig, origFlags := argv, flags

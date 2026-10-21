@@ -476,6 +476,9 @@ type outputSpec struct {
 	shortArg   string      // 其余带参数的短选项字符：选项簇里遇到就停，参数不再当选项看
 	remoteName string      // 按远端文件名写进当前目录的短选项字符
 	remoteLong []string    // 同上的长选项
+	longArg    []string    // 其余带参数的长选项：不带 = 时跳过下一个词，找操作数时不把它当操作数
+	operand    int         // 第几个操作数是输出文件（uniq 的第二个），0 表示没有
+	singleDash bool        // Go 风格：-name 与 --name 等价，没有选项簇（go build -o）
 	fetch      bool
 }
 
@@ -501,6 +504,13 @@ var outputOptions = map[string]outputSpec{
 		fetch:    true,
 	},
 	"git": {long: []outputOpt{{"--output", "--output"}}},
+	// uniq [选项] [输入 [输出]]
+	"uniq": {
+		shortArg: "fsw",
+		longArg:  []string{"--skip-fields", "--skip-chars", "--check-chars"},
+		operand:  2,
+	},
+	"go": {long: []outputOpt{{"--o", "--o"}}, singleDash: true},
 }
 
 // matchesLong 判断 --name（不含 =value）是否为 opts 里某个长选项或其可接受的缩写。
@@ -524,9 +534,21 @@ func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string,
 		tflags = append(tflags, f)
 	}
 	remote := false
+	operands := 0
 	for i := 1; i < len(argv); i++ {
 		a, f := argv[i], flagAt(flags, i)
+		if spec.singleDash && len(a) > 1 && a[0] == '-' {
+			a = "--" + strings.TrimLeft(a, "-") // 统一成 --name 形式
+		}
 		switch {
+		case a == "--" && !spec.singleDash:
+			// 选项结束，其后都是操作数
+			for j := i + 1; j < len(argv); j++ {
+				if operands++; operands == spec.operand {
+					add(argv[j], flagAt(flags, j))
+				}
+			}
+			i = len(argv)
 		case strings.HasPrefix(a, "--"):
 			name, val, hasVal := strings.Cut(a, "=")
 			if slices.Contains(spec.remoteLong, name) {
@@ -539,6 +561,9 @@ func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string,
 			}
 			file, dir, taint := matchesLong(spec.long, name), matchesLong(spec.dirLong, name), matchesLong(spec.taintLong, name)
 			if !file && !dir && !taint {
+				if !hasVal && slices.Contains(spec.longArg, name) {
+					i++ // 跳过参数
+				}
 				continue
 			}
 			if !hasVal {
@@ -587,6 +612,10 @@ func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string,
 					continue
 				}
 				break
+			}
+		default:
+			if operands++; operands == spec.operand {
+				add(a, f)
 			}
 		}
 	}
@@ -740,35 +769,49 @@ func firstOperand(argv []string) string {
 }
 
 // npmInstallTargets 找出 npm 安装类子命令的写入目录：--prefix 的值，全局安装记一个空目标。
+// --global、--location、--prefix 接受至少 4 个字符的缩写。
 func npmInstallTargets(argv []string, flags []wordFlags) ([]string, []wordFlags) {
 	var targets []string
 	var tflags []wordFlags
-	sub, global := "", false
+	mutating, global := false, false
+	// value 取 --name=value 的值，或下一个词（并跳过它）
+	value := func(i *int, val string, hasVal bool) (string, wordFlags, bool) {
+		if hasVal {
+			return val, flagAt(flags, *i), true
+		}
+		if *i+1 >= len(argv) {
+			return "", wordFlags{}, false
+		}
+		*i++
+		return argv[*i], flagAt(flags, *i), true
+	}
 	for i := 1; i < len(argv); i++ {
 		a := argv[i]
+		name, val, hasVal := strings.Cut(a, "=")
 		switch {
-		case a == "-g", strings.HasPrefix(a, "--global"), a == "--location=global":
+		case a == "-g", npmAbbrev(name, "--global"):
 			global = true
-		case a == "--location" && i+1 < len(argv):
-			global = global || argv[i+1] == "global"
-			i++
-		case a == "--prefix" && i+1 < len(argv):
-			targets = append(targets, argv[i+1])
-			tflags = append(tflags, flagAt(flags, i+1))
-			i++
-		case strings.HasPrefix(a, "--prefix="):
-			targets = append(targets, strings.TrimPrefix(a, "--prefix="))
-			tflags = append(tflags, flagAt(flags, i))
+		case npmAbbrev(name, "--location"):
+			if v, _, ok := value(&i, val, hasVal); ok && v == "global" {
+				global = true
+			}
+		case npmAbbrev(name, "--prefix"):
+			if v, f, ok := value(&i, val, hasVal); ok {
+				targets = append(targets, v)
+				tflags = append(tflags, f)
+			}
 		case a == "-w" || a == "--workspace":
 			i++
-		case sub == "" && !strings.HasPrefix(a, "-"):
-			sub = a
+		case !strings.HasPrefix(a, "-"):
+			// 不逐个认识子命令前的选项，任一操作数是会写的子命令就算：只会多判
+			sub := a
 			if c, ok := pmSubcommandAliases[a]; ok {
 				sub = c
 			}
+			mutating = mutating || slices.Contains(npmGlobalSubcommands, sub)
 		}
 	}
-	if !slices.Contains(npmGlobalSubcommands, sub) {
+	if !mutating {
 		return nil, nil
 	}
 	if global {
@@ -776,6 +819,12 @@ func npmInstallTargets(argv []string, flags []wordFlags) ([]string, []wordFlags)
 		tflags = append(tflags, wordFlags{})
 	}
 	return targets, tflags
+}
+
+// npmAbbrev 判断 --name 是否为 full 或它至少 4 个字符的缩写（npm 的选项解析接受无歧义的前缀；
+// 有歧义的前缀这里也算，只会多判）。
+func npmAbbrev(name, full string) bool {
+	return strings.HasPrefix(name, "--") && len(name) >= len("--")+4 && strings.HasPrefix(full, name)
 }
 
 // gitCloneTargets 返回 git clone 写入的目录：仓库之后的操作数（目标目录），--separate-git-dir 的值；

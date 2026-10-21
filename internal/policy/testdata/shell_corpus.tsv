@@ -345,3 +345,32 @@ pip3 install --prefix=/usr/local requests	outward
 pip install requests	network
 cargo install --root /usr/local ripgrep	outward
 cargo install --root tools ripgrep	network
+# npm 长选项接受至少 4 个字符的缩写
+npm install --prefi /usr/local foo	outward
+npm install --locat=global foo	outward
+npm install --locat global foo	outward
+npm install --glob foo	outward
+npm --pref /usr/local install foo	outward
+# uniq 的第二个操作数是输出文件
+uniq x /home/u/.config/foo	write_outside
+uniq in.txt out.txt	write_in_project
+uniq -c in.txt	read
+uniq -f 1 in.txt	read
+# 构建与格式化工具写出的路径要看
+go build -o /usr/local/bin/git .	write_outside
+go build -o=/tmp/x .	write_outside
+go build -o bin/app .	write_in_project
+go test -c -o /tmp/t.test ./pkg	write_outside
+prettier --write /etc/x.js	write_outside
+ruff format /tmp/x.py	write_outside
+black /tmp/x.py	write_outside
+gofmt -w /tmp/x.go	write_outside
+gofmt -w main.go	write_in_project
+# 指定远端执行程序的选项：本地路径的远端会在本机执行任意命令，抬到 outward
+git push --receive-pack='sh -c x' /tmp/repo main	outward
+git push --exec=x origin	outward
+git clone --upload-pack='sh -c x' /tmp/repo	outward
+git clone -u 'sh -c x' /tmp/repo	outward
+git fetch --upload-pack=x origin	outward
+git pull --upload=x origin	outward
+git fetch origin	network
