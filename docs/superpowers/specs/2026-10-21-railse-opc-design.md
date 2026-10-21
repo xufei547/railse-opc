@@ -228,7 +228,7 @@ rules:
   - id: learned-0042
     source: learned
     scope: {project: "~/Projects/blog"}
-    match: {payload: shell, command_prefix: "npm run"}
+    match: {payload: shell, command_prefix: "npm run", risk: write_in_project}
     action: allow
     created_from: "6f1c…"
 ```
