@@ -92,6 +92,13 @@ func TestParseRuleSetInvalid(t *testing.T) {
 		{"learned 放行 destructive", "version: 1\nrules:\n  - id: a\n    source: learned\n    scope: global\n    match: {risk: destructive}\n    action: allow\n", "user"},
 		{"learned 放行无 risk", "version: 1\nrules:\n  - id: a\n    source: learned\n    scope: global\n    match: {command_prefix: ls}\n    action: allow\n", "risk"},
 		{"未知风险名", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {risk: scary}\n    action: allow\n", "风险等级"},
+		{"scope 未知字段", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: {projet: x}\n    match: {risk: read}\n    action: allow\n", "projet"},
+		{"match 未知字段", "version: 1\nrules:\n  - id: a\n    source: learned\n    scope: global\n    match: {risk: network, comand_prefix: npm}\n    action: allow\n", "comand_prefix"},
+		{"规则未知字段", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {risk: read}\n    actoin: allow\n", "actoin"},
+		{"payload 错误", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {payload: shelll}\n    action: allow\n", "payload"},
+		{"path_glob 无效", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {path_glob: \"[\"}\n    action: allow\n", "path_glob"},
+		{"scope.project 无效", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: {project: \"[\"}\n    match: {risk: read}\n    action: allow\n", "scope.project"},
+		{"空文件", "", "version"},
 	}
 	for _, c := range cases {
 		_, err := ParseRuleSet([]byte(c.yaml))

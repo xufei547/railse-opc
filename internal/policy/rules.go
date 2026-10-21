@@ -1,9 +1,14 @@
 package policy
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
+	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
 )
 
@@ -53,6 +58,16 @@ func (s *Scope) UnmarshalYAML(n *yaml.Node) error {
 			return nil
 		}
 		return fmt.Errorf("scope 字符串只能是 global，得到 %q", n.Value)
+	}
+	// n.Decode 不继承外层解码器的 KnownFields，这里逐个检查键，拒绝拼错的字段。
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			switch k := n.Content[i].Value; k {
+			case "machine", "project":
+			default:
+				return fmt.Errorf("scope 不支持字段 %q，只能是 machine 或 project", k)
+			}
+		}
 	}
 	type raw Scope
 	var r raw
@@ -111,10 +126,13 @@ type RuleSet struct {
 // RuleSetVersion 是当前支持的规则文件版本。
 const RuleSetVersion = 1
 
-// ParseRuleSet 解析并校验 YAML 规则文件。
+// ParseRuleSet 解析并校验 YAML 规则文件。未知字段一律报错，拼错的键不会悄悄放宽规则。
 func ParseRuleSet(data []byte) (RuleSet, error) {
 	var rs RuleSet
-	if err := yaml.Unmarshal(data, &rs); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	// 空文件返回 io.EOF，交给 Validate 报 version 错误。
+	if err := dec.Decode(&rs); err != nil && !errors.Is(err, io.EOF) {
 		return RuleSet{}, fmt.Errorf("解析规则文件: %w", err)
 	}
 	if err := rs.Validate(); err != nil {
@@ -161,6 +179,17 @@ func (r Rule) validate() error {
 	if r.Match.isEmpty() {
 		return fmt.Errorf("match 不能为空")
 	}
+	switch r.Match.Payload {
+	case "", PayloadShell, PayloadFileWrite, PayloadMCP, PayloadNetwork:
+	default:
+		return fmt.Errorf("match.payload 必须是 shell、file_write、mcp 或 network，得到 %q", r.Match.Payload)
+	}
+	if r.Match.PathGlob != "" && !validGlob(r.Match.PathGlob) {
+		return fmt.Errorf("match.path_glob 不是合法的通配模式: %q", r.Match.PathGlob)
+	}
+	if r.Scope.Project != "" && !validGlob(r.Scope.Project) {
+		return fmt.Errorf("scope.project 不是合法的通配模式: %q", r.Scope.Project)
+	}
 	if r.Match.CommandRegex != "" {
 		if _, err := regexp.Compile(r.Match.CommandRegex); err != nil {
 			return fmt.Errorf("command_regex 无效: %w", err)
@@ -175,4 +204,9 @@ func (r Rule) validate() error {
 		}
 	}
 	return nil
+}
+
+// validGlob 检查 doublestar 通配模式，开头的 ~/ 由引擎展开，先去掉再校验。
+func validGlob(p string) bool {
+	return doublestar.ValidatePattern(strings.TrimPrefix(p, "~/"))
 }
