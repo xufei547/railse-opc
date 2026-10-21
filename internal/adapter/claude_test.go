@@ -150,3 +150,24 @@ func TestClaudeRender(t *testing.T) {
 		t.Fatalf("期限 = %d", a.DeadlineSeconds())
 	}
 }
+
+func TestClaudeToolInputTypeCollision(t *testing.T) {
+	a, _ := Get("claude")
+	mk := func(tool string, input string) []byte {
+		return []byte(`{"session_id":"s","cwd":"/p","hook_event_name":"PermissionRequest","tool_name":"` + tool + `","tool_input":` + input + `}`)
+	}
+	in, err := a.Parse(mk("mcp__fs__write", `{"content":[1,2]}`))
+	if err != nil {
+		t.Fatalf("MCP 参数里的同名异型字段不应报错: %v", err)
+	}
+	if in.Payload.Type != policy.PayloadMCP || in.Payload.Server != "fs" || in.Payload.Tool != "write" || string(in.Payload.Args) != `{"content":[1,2]}` {
+		t.Fatalf("MCP 载荷错误: %+v", in.Payload)
+	}
+	in, err = a.Parse(mk("Task", `{"prompt":{"a":1}}`))
+	if err != nil {
+		t.Fatalf("未知工具不应解析 tool_input: %v", err)
+	}
+	if in.Payload.Type != PayloadOther || in.Payload.Tool != "Task" {
+		t.Fatalf("未知工具载荷错误: %+v", in.Payload)
+	}
+}

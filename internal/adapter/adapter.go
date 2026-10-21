@@ -118,20 +118,24 @@ type toolInput struct {
 }
 
 // mapTool 把工具名和 tool_input 翻成统一载荷。cli 决定命名习惯。
+// 只有内置工具才把 tool_input 解析成 toolInput：MCP 参数原样放进 Args，未知工具不看参数，
+// 免得第三方工具里同名异型的字段让整条请求解析失败。
 func mapTool(cli, toolName string, raw json.RawMessage, cwd string) (policy.Payload, error) {
-	var ti toolInput
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &ti); err != nil {
-			return policy.Payload{}, fmt.Errorf("解析 tool_input: %w", err)
-		}
-	}
 	if server, tool, ok := mcpName(cli, toolName); ok {
 		return policy.Payload{Type: policy.PayloadMCP, Server: server, Tool: tool, Args: raw}, nil
 	}
 	switch toolName {
 	case "Bash", "run_shell_command", "shell", "exec_command":
+		ti, err := decodeToolInput(raw)
+		if err != nil {
+			return policy.Payload{}, err
+		}
 		return policy.Payload{Type: policy.PayloadShell, Command: ti.Command, Cwd: cwd}, nil
 	case "Edit", "Write", "MultiEdit", "NotebookEdit", "write_file", "replace", "apply_patch":
+		ti, err := decodeToolInput(raw)
+		if err != nil {
+			return policy.Payload{}, err
+		}
 		path := ti.FilePath
 		if path == "" {
 			path = ti.Path
@@ -154,6 +158,10 @@ func mapTool(cli, toolName string, raw json.RawMessage, cwd string) (policy.Payl
 		}
 		return policy.Payload{Type: policy.PayloadFileWrite, Path: path, DiffPreview: clip(preview, previewLimit), Cwd: cwd}, nil
 	case "WebFetch", "web_fetch":
+		ti, err := decodeToolInput(raw)
+		if err != nil {
+			return policy.Payload{}, err
+		}
 		u := ti.URL
 		if u == "" {
 			u = urlRe.FindString(ti.Prompt)
@@ -164,6 +172,17 @@ func mapTool(cli, toolName string, raw json.RawMessage, cwd string) (policy.Payl
 	default:
 		return policy.Payload{Type: PayloadOther, Tool: toolName}, nil
 	}
+}
+
+// decodeToolInput 把内置工具的 tool_input 解析成 toolInput，输入为空时得到零值。
+func decodeToolInput(raw json.RawMessage) (toolInput, error) {
+	var ti toolInput
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &ti); err != nil {
+			return toolInput{}, fmt.Errorf("解析 tool_input: %w", err)
+		}
+	}
+	return ti, nil
 }
 
 // mcpName 识别 MCP 工具名：Claude 为 mcp__<server>__<tool>，Gemini 0.65 为 mcp_<server>_<tool>，Gemini 0.28 为 <server>__<tool>。
