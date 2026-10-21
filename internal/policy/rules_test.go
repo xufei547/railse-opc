@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -70,8 +71,8 @@ func TestRuleSetMarshalRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重新解析失败: %v\n%s", err, out)
 	}
-	if len(back.Rules) != 4 || back.Rules[1].Scope.Project != "~/Projects/railse-opc" {
-		t.Errorf("往返后不一致: %+v", back.Rules)
+	if !reflect.DeepEqual(rs, back) {
+		t.Errorf("往返后不一致:\n原: %+v\n回: %+v", rs, back)
 	}
 }
 
@@ -99,6 +100,12 @@ func TestParseRuleSetInvalid(t *testing.T) {
 		{"path_glob 无效", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {path_glob: \"[\"}\n    action: allow\n", "path_glob"},
 		{"scope.project 无效", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: {project: \"[\"}\n    match: {risk: read}\n    action: allow\n", "scope.project"},
 		{"空文件", "", "version"},
+		{"scope 空映射", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: {}\n    match: {risk: read}\n    action: allow\n", "scope 映射不能为空"},
+		{"scope project 空串", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: {project: \"\"}\n    match: {risk: read}\n    action: allow\n", "值不能为空"},
+		{"scope project 为 null", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: {project: ~}\n    match: {risk: read}\n    action: allow\n", "值不能为空"},
+		{"scope machine 空串", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: {machine: \"\"}\n    match: {risk: read}\n    action: allow\n", "值不能为空"},
+		{"scope 空字符串", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: \"\"\n    match: {risk: read}\n    action: allow\n", "global"},
+		{"多个文档", "version: 1\nrules: []\n---\nversion: 1\nrules: []\n", "规则文件只能有一个 YAML 文档"},
 	}
 	for _, c := range cases {
 		_, err := ParseRuleSet([]byte(c.yaml))
@@ -109,5 +116,37 @@ func TestParseRuleSetInvalid(t *testing.T) {
 		if !strings.Contains(err.Error(), c.wantErr) {
 			t.Errorf("%s: 错误 %q 应包含 %q", c.name, err, c.wantErr)
 		}
+	}
+}
+
+func TestParseRuleSetScopeOmittedIsGlobal(t *testing.T) {
+	cases := map[string]string{
+		"缺 scope":    "version: 1\nrules:\n  - id: a\n    source: user\n    match: {risk: read}\n    action: allow\n",
+		"scope null": "version: 1\nrules:\n  - id: a\n    source: user\n    scope: null\n    match: {risk: read}\n    action: allow\n",
+	}
+	for name, y := range cases {
+		rs, err := ParseRuleSet([]byte(y))
+		if err != nil {
+			t.Errorf("%s: 不应报错: %v", name, err)
+			continue
+		}
+		if !rs.Rules[0].Scope.IsGlobal() {
+			t.Errorf("%s: 应为 global, 得到 %+v", name, rs.Rules[0].Scope)
+		}
+	}
+}
+
+func TestValidateRejectsBothScopeFields(t *testing.T) {
+	read := RiskRead
+	rs := RuleSet{Version: RuleSetVersion, Rules: []Rule{{
+		ID:     "a",
+		Source: SourceUser,
+		Scope:  Scope{Machine: "m1", Project: "~/p"},
+		Match:  Match{Risk: &read},
+		Action: ActionAllow,
+	}}}
+	err := rs.Validate()
+	if err == nil || !strings.Contains(err.Error(), "同时") {
+		t.Fatalf("同时设置 machine 和 project 应报错, 得到 %v", err)
 	}
 }

@@ -50,10 +50,15 @@ func (s Scope) specificity() int {
 	}
 }
 
+// errScopeBoth 由解析和 Validate 共用，保证代码构造的规则集写出后能再读回。
+var errScopeBoth = errors.New("scope 不能同时指定 machine 和 project")
+
 // UnmarshalYAML 同时接受字符串 global 和映射 {project: …} 或 {machine: …}。
+// 缺少 scope 键或写 scope: null 时 yaml.v3 不调用本方法，Scope 保持零值，即 global，这是约定的默认。
+// 其余写法必须显式：空字符串、空映射和空值都报错，不会悄悄变成 global。
 func (s *Scope) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind == yaml.ScalarNode {
-		if n.Value == "global" || n.Value == "" {
+		if n.Value == "global" {
 			*s = Scope{}
 			return nil
 		}
@@ -61,11 +66,18 @@ func (s *Scope) UnmarshalYAML(n *yaml.Node) error {
 	}
 	// n.Decode 不继承外层解码器的 KnownFields，这里逐个检查键，拒绝拼错的字段。
 	if n.Kind == yaml.MappingNode {
+		if len(n.Content) == 0 {
+			return fmt.Errorf("scope 映射不能为空，全局范围请写 global")
+		}
 		for i := 0; i+1 < len(n.Content); i += 2 {
-			switch k := n.Content[i].Value; k {
+			k, v := n.Content[i].Value, n.Content[i+1]
+			switch k {
 			case "machine", "project":
 			default:
 				return fmt.Errorf("scope 不支持字段 %q，只能是 machine 或 project", k)
+			}
+			if v.Kind == yaml.ScalarNode && (v.ShortTag() == "!!null" || v.Value == "") {
+				return fmt.Errorf("scope.%s 的值不能为空", k)
 			}
 		}
 	}
@@ -74,8 +86,11 @@ func (s *Scope) UnmarshalYAML(n *yaml.Node) error {
 	if err := n.Decode(&r); err != nil {
 		return err
 	}
+	if r.Machine == "" && r.Project == "" {
+		return fmt.Errorf("scope 的值不能为空，全局范围请写 global") // 兜底：别名等解析成空值
+	}
 	if r.Machine != "" && r.Project != "" {
-		return fmt.Errorf("scope 不能同时指定 machine 和 project")
+		return errScopeBoth
 	}
 	*s = Scope(r)
 	return nil
@@ -131,9 +146,18 @@ func ParseRuleSet(data []byte) (RuleSet, error) {
 	var rs RuleSet
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
-	// 空文件返回 io.EOF，交给 Validate 报 version 错误。
-	if err := dec.Decode(&rs); err != nil && !errors.Is(err, io.EOF) {
+	err := dec.Decode(&rs)
+	switch {
+	case errors.Is(err, io.EOF):
+		// 空文件，交给 Validate 报 version 错误。
+	case err != nil:
 		return RuleSet{}, fmt.Errorf("解析规则文件: %w", err)
+	default:
+		// 后续文档会被悄悄忽略，直接拒绝。
+		var extra yaml.Node
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			return RuleSet{}, errors.New("规则文件只能有一个 YAML 文档")
+		}
 	}
 	if err := rs.Validate(); err != nil {
 		return RuleSet{}, err
@@ -186,6 +210,9 @@ func (r Rule) validate() error {
 	}
 	if r.Match.PathGlob != "" && !validGlob(r.Match.PathGlob) {
 		return fmt.Errorf("match.path_glob 不是合法的通配模式: %q", r.Match.PathGlob)
+	}
+	if r.Scope.Machine != "" && r.Scope.Project != "" {
+		return errScopeBoth
 	}
 	if r.Scope.Project != "" && !validGlob(r.Scope.Project) {
 		return fmt.Errorf("scope.project 不是合法的通配模式: %q", r.Scope.Project)
