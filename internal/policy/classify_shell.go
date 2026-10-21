@@ -71,6 +71,11 @@ func classifySegment(seg segment, cwd string, ctx Context) Risk {
 	if hasSQLDrop(seg.text) {
 		risk = maxRisk(risk, RiskDestructive)
 	}
+	// 工作目录（跟踪 cd 之后，或载荷的 Cwd）在项目外时，按项目内改动定级的段一律按项目外：
+	// 不做路径分析的写命令（git init、git commit、make）改的就是工作目录。项目根为空时没有目录在项目内
+	if risk == RiskWriteInProject && !isWithin(cwd, ctx.ProjectRoot) {
+		risk = RiskWriteOutside
+	}
 	return risk
 }
 

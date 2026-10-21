@@ -421,6 +421,12 @@ var leadingOptions = map[string]leadSpec{
 		stop: jsStop,
 	},
 	"cargo": {toolchain: true, stop: []string{"--version", "-V", "--help", "-h"}},
+	// go -C dir 在 dir 里执行子命令（Go 的 flag 包里 -C 与 --C 等价，也接受 =dir）
+	"go": {
+		opts: optSpec{longArg: []string{"-C", "--C"}},
+		dirs: []string{"-C", "--C"},
+		stop: []string{"-h", "-help", "--help"},
+	},
 	"docker": {
 		opts: optSpec{withArg: "H", longArg: []string{"--host", "--context"}},
 		stop: []string{"--version", "-v", "--help"},

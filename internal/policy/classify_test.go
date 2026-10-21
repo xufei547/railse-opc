@@ -27,6 +27,10 @@ func TestClassify(t *testing.T) {
 		{"mcp", Payload{Type: PayloadMCP, Server: "github", Tool: "create_issue"}, RiskNetwork},
 		{"network", Payload{Type: PayloadNetwork, URL: "https://example.com"}, RiskNetwork},
 		{"未知类型", Payload{Type: "bogus"}, RiskUnknown},
+		// 工作目录在项目外：不做路径分析的写命令改的是那个目录
+		{"项目外工作目录的 make", Payload{Type: PayloadShell, Command: "make", Cwd: "/home/u/other"}, RiskWriteOutside},
+		{"项目内工作目录的 make", Payload{Type: PayloadShell, Command: "make", Cwd: "/home/u/proj/sub"}, RiskWriteInProject},
+		{"项目外工作目录的只读命令", Payload{Type: PayloadShell, Command: "git status", Cwd: "/home/u/other"}, RiskRead},
 	}
 	for _, c := range cases {
 		if got := Classify(c.p, ctx); got != c.want {
