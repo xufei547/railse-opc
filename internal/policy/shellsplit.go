@@ -2,7 +2,7 @@ package policy
 
 import "strings"
 
-// segment 是一条 shell 命令里由 &&、||、;、| 分隔出的一段。
+// segment 是一条 shell 命令里由 &&、||、;、|、&、换行分隔出的一段。
 type segment struct {
 	text      string   // 原文
 	argv      []string // 按空白分词并去引号后的参数，不含重定向
@@ -10,7 +10,8 @@ type segment struct {
 	subshell  bool     // 含 $( 或反引号，无法静态分析
 }
 
-// splitSegments 在引号之外按 &&、||、;、| 拆分，去掉首尾空白，丢掉空段。
+// splitSegments 在引号之外按 &&、||、;、|、后台符 &、换行拆分，去掉首尾空白，丢掉空段。
+// &> 与 2>&1、>&2 里的 & 属于重定向，不拆。
 func splitSegments(cmd string) []string {
 	var segs []string
 	var cur strings.Builder
@@ -22,9 +23,17 @@ func splitSegments(cmd string) []string {
 		cur.Reset()
 	}
 	runes := []rune(cmd)
+	afterGT := false // 上一个字符是引号外、未转义的 >
 	for i := 0; i < len(runes); i++ {
 		c := runes[i]
+		prevGT := afterGT
+		afterGT = false
 		switch {
+		case quote == '"' && c == '\\' && i+1 < len(runes):
+			// 双引号内的反斜杠连同下一个字符原样保留，被转义的 " 不结束引号
+			cur.WriteRune(c)
+			cur.WriteRune(runes[i+1])
+			i++
 		case quote != 0:
 			cur.WriteRune(c)
 			if c == quote {
@@ -40,14 +49,17 @@ func splitSegments(cmd string) []string {
 		case c == '&' && i+1 < len(runes) && runes[i+1] == '&':
 			flush()
 			i++
+		case c == '&' && (prevGT || i+1 < len(runes) && runes[i+1] == '>'):
+			cur.WriteRune(c)
 		case c == '|':
 			flush()
 			if i+1 < len(runes) && runes[i+1] == '|' {
 				i++
 			}
-		case c == ';':
+		case c == ';' || c == '&' || c == '\n':
 			flush()
 		default:
+			afterGT = c == '>'
 			cur.WriteRune(c)
 		}
 	}
@@ -74,9 +86,17 @@ func parseSegment(text string) segment {
 		c := runes[i]
 		switch {
 		case quote != 0:
-			if c == quote {
+			switch {
+			case c == quote:
 				quote = 0
-			} else {
+			case quote == '"' && c == '\\' && i+1 < len(runes):
+				cur.WriteRune(runes[i+1])
+				i++
+			default:
+				// 双引号内 bash 照样执行 $( 与反引号；单引号内一律按字面
+				if quote == '"' && (c == '`' || (c == '$' && i+1 < len(runes) && runes[i+1] == '(')) {
+					seg.subshell = true
+				}
 				cur.WriteRune(c)
 			}
 		case c == '\'' || c == '"':

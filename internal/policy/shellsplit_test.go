@@ -17,6 +17,13 @@ func TestSplitSegments(t *testing.T) {
 		{`echo 'it''s' ; `, []string{`echo 'it''s'`}},
 		{`   `, nil},
 		{`a \&\& b`, []string{`a \&\& b`}},
+		{`ls & rm -rf /`, []string{"ls", "rm -rf /"}},
+		{`cmd &> all.log`, []string{"cmd &> all.log"}},
+		{`cmd 2>&1 | grep x`, []string{"cmd 2>&1", "grep x"}},
+		{"echo a\necho b", []string{"echo a", "echo b"}},
+		{`echo "a\"" && ls`, []string{`echo "a\""`, "ls"}},
+		{`echo 'a\' && ls`, []string{`echo 'a\'`, "ls"}},
+		{`cat x\>&rm -rf /`, []string{`cat x\>`, "rm -rf /"}},
 	}
 	for _, c := range cases {
 		if got := splitSegments(c.in); !reflect.DeepEqual(got, c.want) {
@@ -43,6 +50,10 @@ func TestParseSegment(t *testing.T) {
 		{`echo "x > y"`, []string{"echo", "x > y"}, nil, false},
 		{`sleep 2 > out`, []string{"sleep", "2"}, []string{"out"}, false},
 		{`a\ b c`, []string{"a b", "c"}, nil, false},
+		{`echo "$(date)"`, []string{"echo", "$(date)"}, nil, true},
+		{"echo \"`date`\"", []string{"echo", "`date`"}, nil, true},
+		{`echo '$(date)'`, []string{"echo", "$(date)"}, nil, false},
+		{`echo "a\"b"`, []string{"echo", `a"b`}, nil, false},
 	}
 	for _, c := range cases {
 		got := parseSegment(c.in)
