@@ -121,3 +121,25 @@ func TestPausedConsistentUnderConcurrentReload(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadRulesTightensExistingFileMode(t *testing.T) {
+	path := filepath.Join(shortTempDir(t), "rules.yaml")
+	content := []byte("version: 1\nrules:\n  - id: deny-rm\n    source: user\n    scope: global\n    match: {payload: shell, command_prefix: rm}\n    action: deny\n")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil { // 不受 umask 影响，确保起点是 0644
+		t.Fatal(err)
+	}
+	r, err := LoadRules(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 || r.Count() != 1 {
+		t.Fatalf("已有规则文件应收紧为 0600 并正常加载: mode=%v Count=%d", st.Mode().Perm(), r.Count())
+	}
+}

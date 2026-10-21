@@ -24,10 +24,14 @@ type Rules struct {
 	paused   atomic.Bool // 只在持有 mu 写锁时修改，与换引擎互斥
 }
 
-// LoadRules 读规则文件；文件不存在时先写出内置规则包。
+// LoadRules 读规则文件；文件不存在时先写出内置规则包，已存在时收紧为 0600。
 func LoadRules(path string) (*Rules, error) {
 	if err := writeDefaultRules(path); err != nil {
 		return nil, err
+	}
+	// O_CREATE 的 0600 只对新建文件生效，已有文件（如编辑器保存后变成 0644）在这里收紧。
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, fmt.Errorf("收紧规则文件权限: %w", err)
 	}
 	r := &Rules{path: path}
 	if err := r.Reload(); err != nil {
