@@ -358,3 +358,45 @@ func readJSON(t *testing.T, path string) map[string]any {
 	}
 	return doc
 }
+
+func TestSetupHooksKeepsOthersEntriesInOurGroup(t *testing.T) {
+	// 用户在 Railse 的条目组里追加了自己的钩子：重跑只删我们的条目，别人的条目留在原组里
+	project := t.TempDir()
+	path := filepath.Join(project, ".claude", "settings.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	existing := `{"hooks":{"PermissionRequest":[{"matcher":"","hooks":[` +
+		`{"type":"command","command":"/opt/railse hook claude","timeout":86400},` +
+		`{"type":"command","command":"my-notify-logger"}]}],` +
+		`"Stop":[{"hooks":[{"type":"command","command":"/old/place/railse hook claude"}]}]}}`
+	os.WriteFile(path, []byte(existing), 0o644)
+	args := []string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse"}
+	var out, errOut bytes.Buffer
+	if code := run(args, &out, &errOut); code != 0 {
+		t.Fatal(errOut.String())
+	}
+	first, _ := os.ReadFile(path)
+	if code := run(args, &out, &errOut); code != 0 {
+		t.Fatal(errOut.String())
+	}
+	second, _ := os.ReadFile(path)
+	if !bytes.Equal(first, second) {
+		t.Fatalf("两次运行结果应相同:\n%s\n---\n%s", first, second)
+	}
+	hooks := readJSON(t, path)["hooks"].(map[string]any)
+	commands := map[string]int{}
+	for _, g := range hooks["PermissionRequest"].([]any) {
+		for _, h := range g.(map[string]any)["hooks"].([]any) {
+			commands[h.(map[string]any)["command"].(string)]++
+		}
+	}
+	if commands["my-notify-logger"] != 1 {
+		t.Fatalf("我们组里别人的条目应保留: %v", commands)
+	}
+	if commands["/opt/railse hook claude"] != 1 || len(commands) != 2 {
+		t.Fatalf("我们的条目应只有一份: %v", commands)
+	}
+	// 只含我们条目的组删空后整组去掉，不留空组
+	if n := len(hooks["Stop"].([]any)); n != 1 {
+		t.Fatalf("Stop 应只剩本次写的一组, 得到 %d: %+v", n, hooks["Stop"])
+	}
+}

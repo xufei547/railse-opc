@@ -73,23 +73,50 @@ func hookPlan(cli, bin string) map[string][]hookGroup {
 	return nil
 }
 
-// isOurs 判断一个钩子条目组是不是 Railse 写的：任一条目的 name 以 railse- 开头，
+// isOurs 判断单个钩子条目是不是 Railse 写的：name 以 railse- 开头，
 // 或命令是“<程序> hook …”且程序是本次的 bin，
 // 或命令恰好是“<程序> hook claude|codex|gemini”且程序文件名是 railse（换过安装路径时留下的旧条目）。
-func isOurs(group map[string]any, bin string) bool {
-	hooks, _ := group["hooks"].([]any)
-	for _, h := range hooks {
-		m, _ := h.(map[string]any)
-		cmd, _ := m["command"].(string)
-		name, _ := m["name"].(string)
-		if strings.HasPrefix(name, "railse-") || strings.HasPrefix(cmd, shellQuote(bin)+" hook ") {
-			return true
-		}
-		if prog, ok := hookCommandProgram(cmd); ok && filepath.Base(prog) == "railse" {
-			return true
-		}
+func isOurs(entry any, bin string) bool {
+	m, ok := entry.(map[string]any)
+	if !ok {
+		return false
+	}
+	cmd, _ := m["command"].(string)
+	name, _ := m["name"].(string)
+	if strings.HasPrefix(name, "railse-") || strings.HasPrefix(cmd, shellQuote(bin)+" hook ") {
+		return true
+	}
+	if prog, ok := hookCommandProgram(cmd); ok && filepath.Base(prog) == "railse" {
+		return true
 	}
 	return false
+}
+
+// withoutOurs 从一个条目组里删掉我们的条目。返回去掉后的组，以及这个组是否因此删空、应整组去掉。
+// 组里没有我们的条目时原样返回；别人追加在我们组里的条目连同组的其他字段（如 matcher）都保留。
+func withoutOurs(group any, bin string) (kept any, drop bool) {
+	gm, ok := group.(map[string]any)
+	if !ok {
+		return group, false
+	}
+	hooks, ok := gm["hooks"].([]any)
+	if !ok {
+		return group, false
+	}
+	rest := []any{}
+	for _, h := range hooks {
+		if !isOurs(h, bin) {
+			rest = append(rest, h)
+		}
+	}
+	switch {
+	case len(rest) == len(hooks):
+		return group, false
+	case len(rest) == 0:
+		return nil, true
+	}
+	gm["hooks"] = rest
+	return gm, false
 }
 
 // hookCommandProgram 认出 hookPlan 写过的命令形状“<一个词> hook claude|codex|gemini”，返回去掉引号的程序路径。
@@ -127,7 +154,7 @@ func hookCommandProgram(cmd string) (string, bool) {
 	return "", false
 }
 
-// mergeHooks 把我们的条目并进现有配置：删旧的 Railse 条目，保留别人的，追加新的。
+// mergeHooks 把我们的条目并进现有配置：逐个条目删旧的 Railse 条目（组删空了才删组），保留别人的，追加新的。
 // 现有内容不是合法 JSON、顶层或 hooks 不是对象、本次要写的事件不是数组时都视为损坏，返回错误不覆盖；
 // hooks 里其他非数组的值（如 Gemini 的开关项）原样保留。
 func mergeHooks(existing []byte, bin string, entries map[string][]hookGroup) ([]byte, error) {
@@ -163,7 +190,7 @@ func mergeHooks(existing []byte, bin string, entries map[string][]hookGroup) ([]
 			}
 		}
 	}
-	// 先从所有事件里删掉我们旧的条目组
+	// 先从所有事件里逐个条目删掉我们旧的条目；组里只剩我们的条目时整组删掉
 	for ev, raw := range hooks {
 		groups, ok := raw.([]any)
 		if !ok {
@@ -171,15 +198,12 @@ func mergeHooks(existing []byte, bin string, entries map[string][]hookGroup) ([]
 		}
 		kept := []any{}
 		for _, g := range groups {
-			if gm, ok := g.(map[string]any); ok && isOurs(gm, bin) {
-				continue
+			if g2, drop := withoutOurs(g, bin); !drop {
+				kept = append(kept, g2)
 			}
-			kept = append(kept, g)
 		}
 		switch {
-		case len(kept) == len(groups):
-			// 没有我们的条目，原样不动
-		case len(kept) == 0:
+		case len(kept) == 0 && len(groups) > 0:
 			delete(hooks, ev)
 		default:
 			hooks[ev] = kept
