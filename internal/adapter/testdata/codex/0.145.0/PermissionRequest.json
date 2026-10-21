@@ -1,0 +1,14 @@
+{
+  "session_id": "01a15d8c-e149-77e3-94fc-1b693482f9b7",
+  "turn_id": "01a15d8c-e330-7c93-8bed-9553cbb63f95",
+  "transcript_path": "/Users/xufei/.codex/sessions/2026/10/21/rollout-2026-10-21T16-21-16-01a15d8c-e149-77e3-94fc-1b693482f9b7.jsonl",
+  "cwd": "/Users/xufei/RailseWork/.claude/worktrees/dreamy-poitras-68f89d/spike/codex",
+  "hook_event_name": "PermissionRequest",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "touch spike-proof.txt",
+    "description": "Allow the requested command to create spike-proof.txt in the workspace?"
+  }
+}

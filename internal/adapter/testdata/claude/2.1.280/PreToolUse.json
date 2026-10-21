@@ -1,0 +1,17 @@
+{
+  "session_id": "62ca6ca9-7d34-4035-8b37-d6eae531ec2c",
+  "transcript_path": "/Users/xufei/.claude/projects/-Users-xufei-RailseWork--claude-worktrees-dreamy-poitras-68f89d-spike-claude/62ca6ca9-7d34-4035-8b37-d6eae531ec2c.jsonl",
+  "cwd": "/Users/xufei/RailseWork/.claude/worktrees/dreamy-poitras-68f89d/spike/claude",
+  "prompt_id": "d90923b6-0fe8-4ee1-a729-967ccd797f73",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git push origin main",
+    "description": "Push main branch to origin"
+  },
+  "tool_use_id": "toolu_01EpkFw6AvMP6hJErYQ2Q6cM"
+}

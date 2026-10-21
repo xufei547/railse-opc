@@ -1,0 +1,16 @@
+{
+  "session_id": "ee1ff4d1-248f-4b9c-a225-c2eb6efae68d",
+  "transcript_path": "/Users/xufei/.claude/projects/-Users-xufei-RailseWork--claude-worktrees-dreamy-poitras-68f89d-spike-claude/ee1ff4d1-248f-4b9c-a225-c2eb6efae68d.jsonl",
+  "cwd": "/Users/xufei/RailseWork/.claude/worktrees/dreamy-poitras-68f89d/spike/claude",
+  "scratchpad_dir": "/private/tmp/claude-501/-Users-xufei-RailseWork--claude-worktrees-dreamy-poitras-68f89d-spike-claude/ee1ff4d1-248f-4b9c-a225-c2eb6efae68d/scratchpad",
+  "prompt_id": "410be2dd-7be4-4f73-85c5-9075345f2492",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "DONE",
+  "background_tasks": [],
+  "session_crons": []
+}
