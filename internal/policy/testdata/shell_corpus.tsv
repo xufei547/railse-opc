@@ -375,3 +375,7 @@ git clone -u 'sh -c x' /tmp/repo	destructive
 git fetch --upload-pack=x origin	destructive
 git pull --upload=x origin	destructive
 git fetch origin	network
+# wget -i 从文件读 URL，下载目标无法分析
+wget -i urls.txt	outward
+wget --input-file=urls.txt	outward
+wget -qi urls.txt	outward

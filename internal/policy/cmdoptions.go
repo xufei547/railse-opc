@@ -500,8 +500,11 @@ var outputOptions = map[string]outputSpec{
 		short: "OoaP",
 		long: []outputOpt{{"--output-document", "--output-d"}, {"--output-file", "--output-f"},
 			{"--append-output", "--ap"}, {"--directory-prefix", "--di"}},
-		shortArg: "eiBtTwQlARDIXU",
-		fetch:    true,
+		// -i 从文件读 URL：下载什么、存到哪都无法分析
+		taint:     "i",
+		taintLong: []outputOpt{{"--input-file", "--inp"}},
+		shortArg:  "eBtTwQlARDIXU",
+		fetch:     true,
 	},
 	"git": {long: []outputOpt{{"--output", "--output"}}},
 	// uniq [选项] [输入 [输出]]

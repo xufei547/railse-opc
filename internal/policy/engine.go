@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"net"
 	"net/url"
 	"path/filepath"
 	"regexp"
@@ -209,7 +210,8 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 	if m.Domain != "" {
 		switch {
 		case p.Type == PayloadNetwork:
-			if !hostMatches(p.URL, m.Domain) {
+			// deny 与 ask 宽松解析主机名，allow 严格解析
+			if anySeg && !hostMatchesLenient(p.URL, m.Domain) || !anySeg && !hostMatches(p.URL, m.Domain) {
 				return false
 			}
 		case p.Type == PayloadShell && anySeg:
@@ -296,10 +298,10 @@ func shellMentionsHost(command, domain string) bool {
 				cands = append(cands, v)
 			}
 			for _, c := range cands {
-				if hostMatches(c, domain) {
+				if hostMatchesLenient(c, domain) {
 					return true
 				}
-				if fetch && !strings.HasPrefix(c, "-") && !strings.Contains(c, "://") && hostMatches("http://"+c, domain) {
+				if fetch && !strings.HasPrefix(c, "-") && !strings.Contains(c, "://") && hostMatchesLenient("http://"+c, domain) {
 					return true
 				}
 			}
@@ -308,11 +310,11 @@ func shellMentionsHost(command, domain string) bool {
 			continue
 		}
 		for _, v := range fetchHostValues(argv) {
-			if hostMatches(v, domain) {
+			if hostMatchesLenient(v, domain) {
 				return true
 			}
 			for _, part := range strings.Split(v, ":") {
-				if part != "" && hostMatches("http://"+part, domain) {
+				if part != "" && hostMatchesLenient("http://"+part, domain) {
 					return true
 				}
 			}
@@ -409,29 +411,81 @@ func harmlessTargets(targets []string, flags []wordFlags) bool {
 	return true
 }
 
-// hostMatches 判断 URL 的主机名等于 domain 或是它的子域。两边都转小写并去掉末尾一个点。
-// Go 的 url.Parse 拒绝主机里的百分号编码（curl 会解码），解析失败时先整体解码再解析一次。
+// hostMatches 严格解析 URL，判断主机名等于 domain 或是它的子域（见 hostIn）。
 func hostMatches(rawURL, domain string) bool {
+	host, _ := parseHost(rawURL)
+	return hostIn(host, domain)
+}
+
+// hostMatchesLenient 供 deny 与 ask 规则用：严格解析（含解码后重试）失败时，宽松取出 authority
+// （:// 之后到第一个 /、?、# 为止），把最后一个 @ 之后的部分和第一个反斜杠之前的部分都当主机名看，
+// 例如 https://good.com\@evil.com/。allow 规则不用它。
+func hostMatchesLenient(rawURL, domain string) bool {
+	host, parsed := parseHost(rawURL)
+	if parsed {
+		return hostIn(host, domain)
+	}
+	_, rest, ok := strings.Cut(rawURL, "://")
+	if !ok {
+		return false
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	afterAt := func(s string) string { return s[strings.LastIndex(s, "@")+1:] }
+	beforeBackslash := func(s string) string {
+		if i := strings.IndexByte(s, '\\'); i >= 0 {
+			return s[:i]
+		}
+		return s
+	}
+	for _, c := range []string{afterAt(rest), beforeBackslash(rest), beforeBackslash(afterAt(rest)), afterAt(beforeBackslash(rest))} {
+		if h, _, err := net.SplitHostPort(c); err == nil {
+			c = h
+		}
+		if hostIn(c, domain) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseHost 用 url.Parse 取主机名。Go 拒绝主机里的百分号编码（curl 会解码），解析失败时先整体解码再解析一次；
+// parsed 为 false 表示两次都失败。
+func parseHost(rawURL string) (host string, parsed bool) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		dec, derr := url.PathUnescape(rawURL)
 		if derr != nil {
-			return false
+			return "", false
 		}
 		if u, err = url.Parse(dec); err != nil {
-			return false
+			return "", false
 		}
 	}
-	if u.Hostname() == "" {
-		return false
-	}
-	host, domain := normalizeHost(u.Hostname()), normalizeHost(domain)
-	if domain == "" {
+	return u.Hostname(), true
+}
+
+// hostIn 判断主机名等于 domain 或是它的子域，两边先按 normalizeHost 归一化。
+func hostIn(host, domain string) bool {
+	host, domain = normalizeHost(host), normalizeHost(domain)
+	if host == "" || domain == "" {
 		return false
 	}
 	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 
+// normalizeHost 把全角 ASCII（U+FF01–U+FF5E）换成半角，把 U+3002、U+FF0E、U+FF61 换成点
+// （IDNA 映射后它们就是同一个主机名），再转小写并去掉末尾一个点。
 func normalizeHost(h string) string {
+	h = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\u3002' || r == '\uff0e' || r == '\uff61':
+			return '.'
+		case r >= '\uff01' && r <= '\uff5e':
+			return r - 0xfee0
+		}
+		return r
+	}, h)
 	return strings.TrimSuffix(strings.ToLower(h), ".")
 }

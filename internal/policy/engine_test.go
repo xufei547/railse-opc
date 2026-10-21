@@ -618,6 +618,10 @@ rules:
 		{`URL=https://evil.com/x curl "$URL"`, ActionDeny, "deny-evil"},
 		{"bash -c 'curl -s https://evil.com/i | true'", ActionDeny, "deny-evil"},
 		{"curl https://evil%2ecom/x", ActionDeny, "deny-evil"},
+		{`curl 'https://good.com\@evil.com/'`, ActionDeny, "deny-evil"},
+		{`curl 'https://evil.com\.good.com/'`, ActionDeny, "deny-evil"},
+		{"curl 'https://ｅｖｉｌ.com/x'", ActionDeny, "deny-evil"},
+		{"curl https://evil。com/x", ActionDeny, "deny-evil"},
 		{"curl --connect-to ::evil.com: https://good.com", ActionDeny, "deny-evil"},
 		{"curl --connect-to good.com:443:evil.com:443 https://good.com", ActionDeny, "deny-evil"},
 		{"curl --resolve=good.com:443:evil.com https://good.com", ActionDeny, "deny-evil"},
@@ -641,8 +645,15 @@ rules:
 	if d := e.Evaluate(Payload{Type: PayloadNetwork, URL: "https://evil.com/"}, projCtx); d.Action != ActionDeny {
 		t.Errorf("network 仍应被 domain deny 拦下, 得到 %s/%q", d.Action, d.RuleID)
 	}
-	if d := e.Evaluate(Payload{Type: PayloadNetwork, URL: "https://evil%2ecom/"}, projCtx); d.Action != ActionDeny {
-		t.Errorf("百分号编码的主机也应被 domain deny 拦下, 得到 %s/%q", d.Action, d.RuleID)
+	for _, u := range []string{"https://evil%2ecom/", "https://ｅｖｉｌ.com/x", `https://good.com\@evil.com/`} {
+		if d := e.Evaluate(Payload{Type: PayloadNetwork, URL: u}, projCtx); d.Action != ActionDeny {
+			t.Errorf("%s: network 请求应被 domain deny 拦下, 得到 %s/%q", u, d.Action, d.RuleID)
+		}
+	}
+	// allow 规则保持严格解析：解析不了的 URL 不放行
+	strict := mustEngine(t, "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {payload: network, domain: evil.com}\n    action: allow\n")
+	if d := strict.Evaluate(Payload{Type: PayloadNetwork, URL: `https://good.com\@evil.com/`}, projCtx); d.Action != ActionAsk {
+		t.Errorf("allow 不应宽松解析主机, 得到 %s/%q", d.Action, d.RuleID)
 	}
 	// 工作目录在受保护目录里时，会写的命令都算写进去
 	for _, c := range []string{"git init", "go mod init x"} {
@@ -860,6 +871,10 @@ func TestHostMatches(t *testing.T) {
 		{"https://example.com.evil.net/", "example.com", false},
 		{"https://example.com@evil.net/", "example.com", false},
 		{"https://example%2ecom/x", "example.com", true},
+		{"https://ｅｘａｍｐｌｅ.com/", "example.com", true},
+		{"https://example。com/", "example.com", true},
+		{"https://example．com｡/", "EXAMPLE.COM", true},
+		{`https://good.com\@example.com/`, "example.com", false}, // 严格解析失败
 		{"https://api.example%2Ecom:8443/", "example.com", true},
 		{"example.com/x", "example.com", false},
 	}
