@@ -239,7 +239,7 @@ rules:
 
 ### 4.4 从决定里学
 
-“批准并记住”从当前请求生成规则草案：`shell` 取命令前两个词作 `command_prefix`；`file_write` 取所在目录作 `path_glob`；`mcp` 取服务加工具名。默认 scope 为当前项目，可一键改为 global。保存前展示草案。
+“批准并记住”从当前请求生成规则草案：`shell` 取命令前两个词作 `command_prefix`；文件操作、网络与远程命令、shell 包装和云/集群/包管理这类按子命令分发的 CLI 取整条命令并用锚定正则限定；`file_write` 取所在目录作 `path_glob`；`mcp` 取服务加工具名。默认 scope 为当前项目，可一键改为 global。保存前展示草案。
 
 同一项目内同一 `command_prefix` 七天内手动批准三次，收件箱显示建议建规则的条目。
 
