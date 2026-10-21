@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,6 +26,15 @@ const hookUsage = `用法:
 
 // maxStdin 是钩子 stdin 的读取上限，超出部分丢弃，截断后的 JSON 解析失败即不作决定。
 const maxStdin = 4 << 20
+
+// parentCheckInterval 是等审批答复期间检查父进程的间隔；getppid 取父进程号。两者都让测试能替换。
+var (
+	parentCheckInterval = 5 * time.Second
+	getppid             = os.Getppid
+)
+
+// errParentGone 是 CLI 已退出（钩子被过继）时取消等待的原因。
+var errParentGone = errors.New("父进程（CLI）已退出")
 
 // runHook 永远以“不作决定”收场（stdout 为空、退出 0），除非守护进程明确给了 allow 或 deny。
 // 这里绝不读取或打印环境变量：CLI 会往钩子环境里注入令牌。
@@ -141,11 +151,21 @@ func readStdin(ctx context.Context, stdin io.Reader) ([]byte, error) {
 }
 
 // hookPermission 把审批请求交给守护进程，最多等 DeadlineSeconds+10 秒；
-// ctx 因信号取消时放弃等待并关掉连接，不作决定。
+// ctx 因信号取消、CLI 已退出或守护进程无响应时放弃等待并关掉连接，不作决定。
 func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.Client, in adapter.Input, stdout, stderr io.Writer) int {
 	deadline := time.Duration(ad.DeadlineSeconds()) * time.Second
-	ctx, cancel := context.WithTimeout(ctx, deadline+10*time.Second)
-	defer cancel()
+	tctx, cancelTimeout := context.WithTimeout(ctx, deadline+10*time.Second)
+	defer cancelTimeout()
+	ctx, cancel := context.WithCancelCause(tctx)
+	parentDone := make(chan struct{})
+	go func() {
+		defer close(parentDone)
+		watchParent(ctx, cancel, getppid, parentCheckInterval)
+	}()
+	defer func() {
+		cancel(nil)
+		<-parentDone
+	}()
 	req := proto.Request{V: proto.Version, Kind: "permission", Session: in.Session, ToolName: in.ToolName, Payload: in.Payload, DeadlineSeconds: ad.DeadlineSeconds()}
 	resp, err := client.Permission(ctx, req)
 	if err != nil {
@@ -157,6 +177,29 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 	}
 	// 适配器约定只用退出码 0，决定全靠 stdout 表达；这里再兜一层，钩子进程恒以 0 退出。
 	return 0
+}
+
+// watchParent 每隔 interval 看一次父进程号，与开始时不同就以 errParentGone 取消 ctx。
+// CLI 被 SIGKILL 或崩溃时不会给钩子发信号，钩子会被过继给 init/launchd（父进程号变为 1）或 subreaper，
+// 不检查就会一直等到 24 小时期限。开始时父进程已是 1 的无从判断，不检查。ctx 结束时返回。
+func watchParent(ctx context.Context, cancel context.CancelCauseFunc, ppid func() int, interval time.Duration) {
+	orig := ppid()
+	if orig == 1 {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if ppid() != orig {
+				cancel(errParentGone)
+				return
+			}
+		}
+	}
 }
 
 // passthrough 在 stderr 说明原因，stdout 不写，退出 0。

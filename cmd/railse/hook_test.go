@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -229,5 +230,35 @@ func TestHookSignalWhileReadingStdin(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("读 stdin 时收到信号应立即返回，不等 stdin 关闭")
+	}
+}
+
+func TestHookPassthroughWhenParentDies(t *testing.T) {
+	// CLI 被 SIGKILL 时不会给钩子发信号；钩子被过继后父进程号会变，应放弃等待、不作决定
+	started := make(chan struct{}, 1)
+	sock, repo, cfg := startAgentWith(t, blockingDecider{started: started})
+	var ppid atomic.Int32
+	ppid.Store(4242)
+	oldGet, oldInterval := getppid, parentCheckInterval
+	getppid = func() int { return int(ppid.Load()) }
+	parentCheckInterval = 20 * time.Millisecond
+	defer func() { getppid, parentCheckInterval = oldGet, oldInterval }()
+	go func() {
+		<-started // 钩子已在等答复
+		ppid.Store(1)
+	}()
+	start := time.Now()
+	out, errOut, code := runHookWith(t, claudePermission(repo, "curl https://x.y"), "claude", "--socket", sock)
+	if code != 0 || out != "" || !strings.Contains(errOut, "父进程") || time.Since(start) > 5*time.Second {
+		t.Fatalf("父进程退出后应不作决定并退出 0: code=%d out=%q err=%q 用时=%v", code, out, errOut, time.Since(start))
+	}
+	for end := time.Now().Add(2 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		b, _ := os.ReadFile(cfg.AuditPath)
+		if strings.Contains(string(b), `"state":"cancelled"`) {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("钩子放弃后守护进程应把请求记为 cancelled:\n%s", b)
+		}
 	}
 }
