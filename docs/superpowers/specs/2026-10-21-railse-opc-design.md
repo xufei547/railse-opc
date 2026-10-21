@@ -194,18 +194,20 @@ Claude Code 的 Notification 钩子映射为 `question`，Stop 钩子映射为 `
 
 ### 4.1 风险分类
 
-每条请求先定级，不看规则。六档由低到高：`read`、`write_in_project`、`write_outside`、`network`、`outward`、`destructive`。
+每条请求先定级，不看规则。七档由低到高：`read`、`write_in_project`、`unknown`、`write_outside`、`network`、`outward`、`destructive`。`unknown` 是命令表之外无法判断的命令，默认询问。
 
-- `shell`：命令按 `&&`、`;`、`||`、`|` 拆段，每段按内置表定级，取最高档。只读表含 ls、cat、grep、find、git status、git diff、git log、go test、npm test 等；对外表含 git push、gh pr create、gh release、npm publish、各云 deploy、发邮件与付款 CLI；不可逆表含 rm -rf、git reset --hard、git push --force、DROP TABLE、docker system prune。安装类命令（npm install、pip install、brew install）归 `network`。表外命令一律 ask。
-- `file_write`：路径在项目根目录内为 `write_in_project`，之外为 `write_outside`。敏感路径表（`.env*`、`*.pem`、`*.key`、`~/.ssh/**`、`~/.aws/**` 等）按 `destructive` 处理。
+- `shell`：命令按 `&&`、`;`、`||`、`|` 拆段，每段按内置表定级，取最高档。只读表含 ls、cat、grep、find、git status、git diff、git log、go test、npm test 等；对外表含 git push、gh pr create、gh release、npm publish、各云 deploy、发邮件与付款 CLI；不可逆表含 rm -rf、git reset --hard、git push --force、DROP TABLE、docker system prune。安装类命令（npm install、pip install、brew install）归 `network`。表外命令一律 ask。读敏感路径与写一样按 `destructive`。
+- `file_write`：路径在项目根目录内为 `write_in_project`，之外为 `write_outside`。敏感路径表（`.env*`、`*.pem`、`*.key`、`~/.ssh/**`、`~/.aws/**` 等）按 `destructive` 处理。路径为空或无法解析（含变量、通配符、`~user`）时为 `unknown`。
 - `mcp`：默认 `network`，即默认 ask，按服务名与工具名放行。
 - `network`：默认 `network`，按域名放行。
 
 ### 4.2 匹配优先级
 
 1. **内置底线。** `outward` 和 `destructive` 只有 `source: user` 的规则能放行，`learned` 规则永远不能。引擎在生成和导入规则时都强制校验。
-2. **用户规则与学来的规则。** 范围越具体越优先：project 压 machine，machine 压 global。同一范围内 deny 压 allow，allow 压 ask。
+2. **用户规则与学来的规则。** 用户规则整体优先于内置和学来的规则。范围越具体越优先：project 压 machine，machine 压 global（用户 deny 除外）。同一范围内 deny 压 allow，allow 压 ask。
 3. **默认值。** 无规则命中时按风险等级：`read` 和 `write_in_project` 放行，其余 ask。
+
+放行 `destructive` 还必须在规则里显式写 `risk: destructive`，仅 `source: user` 不够。用户的 deny 规则优先于一切，且复合命令中任一段命中即生效；allow 规则要求每一段都命中，且遇到无法分析的段、注入型环境变量、含 `$` 展开或未加引号通配的词，或指向空设备或标准流（/dev/null、/dev/stdout、/dev/stderr、/dev/stdin、/dev/tty、/dev/fd/*）以外的重定向时不命中。
 
 ### 4.3 规则格式
 
@@ -227,7 +229,7 @@ rules:
   - id: learned-0042
     source: learned
     scope: {project: "~/Projects/blog"}
-    match: {payload: shell, command_prefix: "npm run"}
+    match: {payload: shell, command_prefix: "npm run", risk: write_in_project}
     action: allow
     created_from: "6f1c…"
 ```
@@ -238,7 +240,7 @@ rules:
 
 ### 4.4 从决定里学
 
-“批准并记住”从当前请求生成规则草案：`shell` 取命令前两个词作 `command_prefix`；`file_write` 取所在目录作 `path_glob`；`mcp` 取服务加工具名。默认 scope 为当前项目，可一键改为 global。保存前展示草案。
+“批准并记住”从当前请求生成规则草案：`shell` 取命令前两个词作 `command_prefix`；文件操作、网络与远程命令、shell 包装和云/集群/包管理这类按子命令分发的 CLI 取整条命令并用锚定正则限定；`file_write` 取所在目录作 `path_glob`；`mcp` 取服务加工具名。默认 scope 为当前项目，可一键改为 global。保存前展示草案。
 
 同一项目内同一 `command_prefix` 七天内手动批准三次，收件箱显示建议建规则的条目。
 

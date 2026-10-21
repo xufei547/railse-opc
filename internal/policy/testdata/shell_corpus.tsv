@@ -1,0 +1,515 @@
+# 只读
+git status	read
+git diff --stat	read
+ls -la	read
+cat README.md	read
+grep -rn TODO src	read
+go test ./...	read
+npm test	read
+npm run lint	read
+pytest -q	read
+sed 's/a/b/' file.txt	read
+find . -name '*.go'	read
+echo hello	read
+cd src	read
+sh -c 'ls'	read
+FOO=1 go test ./...	read
+env FOO=1 npm test	read
+# 引号里的 glob 元字符与 $ 是字面量，不影响解析
+grep -rn 'foo.*bar' src	read
+awk '{print $1}' file	read
+echo '$HOME'	read
+bash -c 'echo $HOME'	read
+bash -e -c 'ls'	read
+# 重定向到无害的伪设备不算写
+ls 2>/dev/null	read
+# awk 程序不调 system、getline 且不重定向，make 不带命令行变量，按只读
+awk '{print $1}' f	read
+make test	read
+# 子命令前的全局选项先剥掉；只读命令换个项目内目录执行仍是只读
+git -C sub status	read
+# 普通的环境变量前缀不影响定级
+FOO=1 npm test	read
+env FOO=1 ls	read
+# @{0} 不是花括号展开
+git show stash@{0}	read
+# 选项名只是前缀相同的不算
+rg --pretty foo	read
+ruff check --fixable E .	read
+git -P log	read
+export NODE_ENV=production	read
+# sed 程序不写文件、不执行命令
+sed 's/a/b/' f.txt	read
+# 项目内改动
+mkdir -p build	write_in_project
+touch src/new.go	write_in_project
+echo hi > notes.txt	write_in_project
+sed -i '' 's/a/b/' src/a.go	write_in_project
+git add . && git commit -m "feat: x"	write_in_project
+go build ./...	write_in_project
+npm run build	write_in_project
+make	write_in_project
+python scripts/gen.py	write_in_project
+rm build/out.bin	write_in_project
+cp a.txt b.txt	write_in_project
+time go build ./...	write_in_project
+nohup python app.py	write_in_project
+# 重定向目标总是路径，- 开头的也不是选项
+echo x > -foo	write_in_project
+# 含空白的参数是消息，不当路径检查
+git commit -m "see .ssh/config notes"	write_in_project
+git commit -m "fix $bug"	write_in_project
+# 只改项目内配置的普通 git config
+git config user.name x	write_in_project
+# git config 的参数里没有字面的 .git/config 路径，不受敏感路径影响
+git config core.autocrlf false	write_in_project
+# 写文件的选项
+sort -o out.txt in.txt	write_in_project
+# 不带强制的 branch -d、新建分支的 checkout -b
+git branch -d x	write_in_project
+git checkout -b feat	write_in_project
+ruff check --fix .	write_in_project
+# 引号里的 glob 元字符是字面量：路径分析与重定向目标都按扫描器标志判断
+sed -i 's/[a-z]/x/' f.txt	write_in_project
+echo x > 'out*.txt'	write_in_project
+# python -m 已知会写项目的模块；go run 本地包
+python -m build	write_in_project
+go run ./cmd/x	write_in_project
+# 无法判断
+foobar --flag	unknown
+echo $(date)	unknown
+xargs rm	unknown
+find . -name '*.log' -delete	unknown
+docker run -it ubuntu	unknown
+# 引号外的 glob 由 shell 展开，引擎不展开 glob，无法判断它会匹配到哪些路径
+find . -name *.go	unknown
+ls *.go	unknown
+# 参数或输入重定向里有变量，不读环境就无法解析
+cat $FILE	unknown
+wc -l < $INPUT	unknown
+# shell 与解释器从 stdin 读命令或执行内联代码
+echo 'rm -rf ~' | sh	unknown
+python	unknown
+python -c 'import os'	unknown
+node -e 'x'	unknown
+echo 'rm -rf ~' | bash -s	unknown
+perl -lne 'print' f	unknown
+node -p '1+1'	unknown
+deno eval 'console.log(1)'	unknown
+# cd 到无法静态确定的目录（变量、cd -、popd），后面各段至少 unknown
+cd $D && ls	unknown
+cd - && ls	unknown
+pushd /tmp && popd && ls	unknown
+# awk 调外部命令、make 的命令行变量
+awk '{ system("id") }' f	unknown
+make test 'X=$(shell id)'	unknown
+# 从 /dev 下的文件读脚本；选项参数不当成文件
+sh /dev/stdin	unknown
+python -W ignore -c 'import os'	unknown
+# 配置与环境注入
+git -c core.fsmonitor=id status	unknown
+GIT_EXTERNAL_DIFF=id git diff	unknown
+NODE_OPTIONS=--require=x npm test	unknown
+# 会执行其他命令的选项与子命令
+npm exec -- id	unknown
+fd -x rm	unknown
+rg --pre id foo	unknown
+# 不带命令的 env 打印全部环境变量
+env	unknown
+# checkout 后面是分支还是路径分不清
+git checkout src/a.go	unknown
+# 分不清是分支还是路径
+git checkout main	unknown
+# 不认识的全局选项、改变 git 执行程序位置的选项
+git --foo status	unknown
+git --exec-path=/tmp status	unknown
+git -C $D status	unknown
+# 同类的配置与环境注入
+GIT_CONFIG_COUNT=1 git status	unknown
+export PATH="$PATH:/x"	unknown
+# 从文件加载 awk 程序；预加载代码；不运行文件的子命令
+awk -f x.awk data	unknown
+perl -Mstrict x.pl	unknown
+node -r dotenv/config app.js	unknown
+deno repl	unknown
+bun exec ls	unknown
+pnpm exec x	unknown
+yarn exec x	unknown
+php -r 'x'	unknown
+sh /proc/self/fd/0	unknown
+# 不在模块表里的 python -m 模块
+python -m somemod	unknown
+# sed 程序里的 w、W 命令，s 命令的 w、e 标志，GNU 的 e 命令，以及从文件读程序
+sed -n 'w /etc/hosts' f.txt	unknown
+sed 's/a/b/w out' f.txt	unknown
+sed 's/a/b/ge' f.txt	unknown
+sed 'e id' f.txt	unknown
+sed -f prog.sed f.txt	unknown
+# ruby -S 从 PATH 找脚本；go 的 -exec、-toolexec 用任意程序运行
+ruby -S rake deploy	unknown
+go test -exec 'rm -rf ~' ./...	unknown
+# 项目外改动
+cp a.txt /tmp/a.txt	write_outside
+echo x > ~/notes.txt	write_outside
+git config --global user.name x	write_outside
+mkdir /opt/app	write_outside
+bash /tmp/x.sh	write_outside
+cd /tmp && touch a	write_outside
+sed -i.bak 's/a/b/' /etc/hosts	write_outside
+sed -Ei 's/a/b/' /etc/hosts	write_outside
+# BSD sed 的 -I
+sed -I '' 's/a/b/' /etc/hosts	write_outside
+# 全局选项里的目录在项目外
+npm --prefix /tmp run build	write_outside
+git --work-tree=/tmp commit -m x	write_outside
+# sed 程序的兜底只抬不降：就地修改项目外文件仍是 write_outside
+sed -i 's/w /x/' /etc/hosts	write_outside
+# 联网
+curl https://example.com	network
+npm install	network
+pip install requests	network
+go get github.com/x/y	network
+git pull	network
+brew install jq	network
+gh pr view 12	network
+aws s3 ls	network
+python -m pip install x	network
+git remote update	network
+# 从 /dev/tcp 读
+cat < /dev/tcp/h/80	network
+deno run https://x/y.ts	network
+python -m http.server	network
+go run github.com/x/y@latest	network
+# 对外
+git push origin main	outward
+git add . && git commit -m x && git push	outward
+gh pr create --fill	outward
+npm publish	outward
+curl -X POST https://api.example.com/x	outward
+aws s3 cp a.txt s3://bucket/	outward
+vercel deploy	outward
+scp a.txt host:/tmp/	outward
+bash -c "git push"	outward
+# 子命令前的全局选项剥掉后再匹配
+pnpm --filter x publish	outward
+cargo +nightly publish	outward
+yarn npm publish	outward
+# curl 的短选项簇
+curl -XPOST https://x.y	outward
+curl -sd a=b https://x.y	outward
+curl --json '{}' https://x	outward
+git lfs push origin main	outward
+# 写 /dev/tcp 是往外发
+echo x > /dev/tcp/h/80	outward
+python -m twine upload dist/app.whl	outward
+# 不可逆
+rm -rf node_modules	destructive
+git push --force origin main	destructive
+git reset --hard HEAD~1	destructive
+sudo rm x	destructive
+echo x > .env	destructive
+cat .env	destructive
+cat ~/.ssh/id_rsa	destructive
+chmod -R 777 .	destructive
+psql -c "DROP TABLE users"	destructive
+kubectl delete pod x	destructive
+docker system prune -f	destructive
+git checkout -- src/a.go	destructive
+git checkout .	destructive
+# 输入重定向与 --name=value 选项里的敏感路径
+cat < ~/.ssh/id_rsa	destructive
+sort --output=~/.ssh/x a.txt	destructive
+# 只有重定向、没有命令时照样看重定向目标
+> ~/.ssh/authorized_keys	destructive
+# shell 的 -c 选项簇
+bash -lc 'rm -rf ~'	destructive
+sh -xc 'git push --force'	destructive
+bash -euo pipefail -c 'rm -rf ~'	destructive
+# cd 之后的相对路径按新目录解析
+cd ~ && echo x >> .zshrc	destructive
+# 标志簇与 + refspec
+rm -rfv build	destructive
+rm -vrf ~	destructive
+git push origin +main	destructive
+git push -fu origin main	destructive
+git push --force-with-lease=main origin main	destructive
+# shell 带参数的长选项
+zsh --emulate sh -c 'rm -rf ~'	destructive
+# 全局选项之后的强推
+git -C . push --force origin main	destructive
+git --no-pager push -f origin main	destructive
+# 让 git 执行任意命令的配置
+git config core.hooksPath /tmp/h	destructive
+# 直接写或读 .git/config：写入能设置 core.hooksPath，读到的远端地址可能带令牌
+echo x >> .git/config	destructive
+cat .git/config	destructive
+# 标志簇
+chmod -Rf 000 .	destructive
+git branch -d -f x	destructive
+# 丢弃工作区改动
+git checkout -f main	destructive
+git switch --discard-changes main	destructive
+# ${HOME} 展开后是敏感路径
+cat ${HOME}/.ssh/id_rsa	destructive
+# 删除远端分支与镜像推送
+git push origin :main	destructive
+git push --mirror origin	destructive
+# 能执行命令的 git 配置；fish 的 --init-command
+git config include.path /tmp/x	destructive
+fish -C 'rm -rf ~' -c ls	destructive
+# 改家目录、配置目录与构建工具的环境变量按注入处理
+HOME=/tmp/x git status	unknown
+XDG_CONFIG_HOME=/tmp/x git status	unknown
+GOFLAGS=-toolexec=x go test ./...	unknown
+CC=/tmp/evil make	unknown
+# curl、wget 的输出文件：项目内不抬级，项目外 outward，敏感路径 destructive
+curl -o /etc/hosts https://x.y	outward
+curl https://x.y -o ~/.ssh/authorized_keys	destructive
+curl -o out.json https://x.y	network
+curl --output /tmp/x https://x.y	outward
+curl --output=/tmp/x https://x.y	outward
+curl -sSLo /tmp/x https://x.y	outward
+curl -sSL -o/tmp/x https://x.y	outward
+curl -o - https://x.y	network
+curl -o /dev/null https://x.y	network
+curl -H -o https://x.y	network
+curl -O https://x.y/a.txt	network
+curl -sLO https://x.y/.env	destructive
+cd /tmp && curl -O https://x.y/a.txt	outward
+wget -O /etc/hosts https://x.y	outward
+wget -qO out.html https://x.y	network
+wget --output-document=/tmp/x https://x.y	outward
+wget --output-document /tmp/x https://x.y	outward
+wget --output-d=/tmp/x https://x.y	outward
+# git 的 --output 把结果写进文件，按路径定级
+git log --output=/etc/hosts	write_outside
+git diff --output /tmp/x	write_outside
+git log --output=notes.txt	write_in_project
+git -C sub diff --output=/dev/null	read
+# curl、wget 其他写文件的选项与目录：同 -o 的路径定级；curl -K 从配置文件读选项，无法分析
+curl -c /tmp/jar https://x.y	outward
+curl -sc /tmp/jar https://x.y	outward
+curl --cookie-jar=/tmp/jar https://x.y	outward
+curl -D /tmp/h https://x.y	outward
+curl --dump-header h.txt https://x.y	network
+curl -b cookies.txt https://x.y	network
+curl --output-dir /tmp -O https://x.y/a	outward
+curl --output-dir sub -o a.txt https://x.y	network
+curl --output-dir /home/u -o .bashrc https://x.y	destructive
+curl -K cfg https://x.y	outward
+curl --config=cfg https://x.y	outward
+wget -P /usr/local/bin https://x.y/f	outward
+wget -P downloads https://x.y/f	network
+wget --directory-prefix=/opt https://x.y/f	outward
+wget -o /tmp/log https://x.y	outward
+wget -a log.txt https://x.y	network
+wget --output-file=/tmp/l https://x.y	outward
+wget --append-output /tmp/l https://x.y	outward
+# git 接受无歧义的长选项缩写，短选项可以成簇
+git reset --har HEAD~3	destructive
+git reset --merge	destructive
+git switch --discard main	destructive
+git branch --delet --forc x	destructive
+git branch --forc x	destructive
+git branch -d x	write_in_project
+git push -ud origin main	destructive
+git push origin --del main	destructive
+git push --mirr origin	destructive
+git push --prune origin 'refs/heads/*:refs/heads/*'	destructive
+git push --force-w origin main	destructive
+git push -u origin main	outward
+git push --dry-run origin main	outward
+git checkout --forc main	destructive
+# npm 子命令别名只会抬级，不会降级
+npm isntall	network
+npm i lodash	network
+npm rum build	write_in_project
+# curl 按远端文件名下载的其他选项
+cd /home/u && curl --remote-name-all https://x.y/.bashrc	destructive
+curl -J -O https://x.y/f	outward
+curl --remote-header-name -O https://x.y/f	outward
+CURL_HOME=/tmp/x curl https://x.y	network
+WGETRC=/tmp/rc wget https://x.y	network
+# 联网安装到别处：目标在项目外 outward，项目内保持 network
+git clone https://x.y/r.git /tmp/r	outward
+git clone --depth 1 -b main https://x.y/r.git /opt/r	outward
+git clone https://x.y/r.git vendor/r	network
+git clone https://x.y/r.git	network
+cd /tmp && git clone https://x.y/r.git	outward
+npm install -g typescript	outward
+npm i --global typescript	outward
+npm -g install typescript	outward
+npm install --prefix /usr/local typescript	outward
+npm --prefix /usr/local install typescript	outward
+npm install --prefix=vendor typescript	network
+npm install typescript	network
+npm ls -g	read
+pip install --target /opt/lib requests	outward
+pip install -t vendor requests	network
+pip3 install --prefix=/usr/local requests	outward
+pip install requests	network
+cargo install --root /usr/local ripgrep	outward
+cargo install --root tools ripgrep	network
+# npm 长选项接受至少 4 个字符的缩写
+npm install --prefi /usr/local foo	outward
+npm install --locat=global foo	outward
+npm install --locat global foo	outward
+npm install --glob foo	outward
+npm --pref /usr/local install foo	outward
+# uniq 的第二个操作数是输出文件
+uniq x /home/u/.config/foo	write_outside
+uniq in.txt out.txt	write_in_project
+uniq -c in.txt	read
+uniq -f 1 in.txt	read
+# 构建与格式化工具写出的路径要看
+go build -o /usr/local/bin/git .	write_outside
+go build -o=/tmp/x .	write_outside
+go build -o bin/app .	write_in_project
+go test -c -o /tmp/t.test ./pkg	write_outside
+prettier --write /etc/x.js	write_outside
+ruff format /tmp/x.py	write_outside
+black /tmp/x.py	write_outside
+gofmt -w /tmp/x.go	write_outside
+gofmt -w main.go	write_in_project
+# 指定远端执行程序的选项执行任意命令（本地路径的远端就在本机执行），按不可逆处理
+git push --receive-pack='sh -c x' /tmp/repo main	destructive
+git push --exec=x origin	destructive
+git push origin main --rece=x	destructive
+git clone --upload-pack='sh -c x' /tmp/repo	destructive
+git clone -u 'sh -c x' /tmp/repo	destructive
+git fetch --upload-pack=x origin	destructive
+git pull --upload=x origin	destructive
+git fetch origin	network
+# wget -i 从文件读 URL，下载目标无法分析
+wget -i urls.txt	outward
+wget --input-file=urls.txt	outward
+wget -qi urls.txt	outward
+# 重定向变体：>|、>>|、zsh 的 >!、>>!、&>!、&>>!、>&! 都是覆盖或追加写，目标是后面的词；<! 按 < 读；
+# 操作符之后又紧跟 ! 的认不出的变体按无法分析处理
+echo x >| /home/u/Documents/t.docx	write_outside
+echo x >| out.txt	write_in_project
+echo x >! /home/u/Documents/t.docx	write_outside
+echo x >!/home/u/Documents/t.docx	write_outside
+cat secret >>! /home/u/notes.txt	write_outside
+echo x >! out.txt	write_in_project
+echo x >>!/home/u/notes.txt	write_outside
+echo x >>| /home/u/notes.txt	write_outside
+echo x &>! /home/u/Documents/t.docx	write_outside
+echo x &>>! /home/u/notes.txt	write_outside
+echo x &>| /home/u/notes.txt	write_outside
+echo x >&! /home/u/notes.txt	write_outside
+echo x 2>! /home/u/err.log	write_outside
+echo x >! ~/.zshrc	destructive
+echo x >!.env	destructive
+cat <! notes.txt	read
+cat <!/home/u/.ssh/id_rsa	destructive
+cat <! ~/.ssh/id_rsa	destructive
+echo x >!! /home/u/notes.txt	unknown
+echo x >|! out.txt	unknown
+echo x &>!! out.txt	unknown
+# 持久配置、钩子与凭据：写进用户级配置（位置由 GOENV、userconfig、--location 等决定）、装 git 钩子、改写历史、
+# 登录与令牌操作都按无法判断处理；只读的查询保持只读
+go env -w GOFLAGS=-toolexec=./x.sh	unknown
+go env -w GOPROXY=https://evil.example	unknown
+go env --w=true GOPROXY=https://evil.example	unknown
+go env -u GOPROXY	unknown
+go env GOPATH	read
+go env	read
+git-lfs install	unknown
+git lfs install	unknown
+git lfs install --system	unknown
+git-lfs uninstall	unknown
+git lfs migrate import --everything --include='*.psd'	unknown
+git-lfs track '*.psd'	unknown
+git lfs untrack '*.psd'	unknown
+git lfs update --force	unknown
+git-lfs push origin main	outward
+git-lfs ls-files	read
+git lfs ls-files	read
+git lfs status	read
+git -C . lfs install	unknown
+npm config set registry https://evil.example	unknown
+npm config delete registry	unknown
+npm config edit	unknown
+pnpm config set registry https://evil.example	unknown
+yarn config set registry https://evil.example	unknown
+bun config set registry https://evil.example	unknown
+npm set registry https://evil.example	unknown
+npm c set registry https://evil.example	unknown
+npm --prefix sub config set registry https://evil.example	unknown
+npm config get registry	read
+npm config list	read
+npm login	unknown
+npm logout	unknown
+npm adduser	unknown
+npm token create	unknown
+npm whoami	unknown
+pnpm login	unknown
+yarn login	unknown
+bun login	unknown
+cargo login	unknown
+cargo owner --add someone	unknown
+cargo logout	unknown
+git credential fill	unknown
+git credential approve	unknown
+# git lfs 的其余子命令：下载是联网，锁与预推送是对外，其余写工作区或 .git 的按项目内改动，只有查询是只读
+git lfs pull	network
+git-lfs fetch origin	network
+git lfs lock big.psd	outward
+git-lfs unlock big.psd	outward
+git lfs pre-push origin	outward
+git lfs checkout	write_in_project
+git-lfs prune	write_in_project
+git-lfs version	read
+git-lfs	read
+git lfs env	read
+# 读配置时提到令牌、口令、密钥的按无法判断：老版本的包管理器会原样打印
+npm config get //registry.npmjs.org/:_authToken	unknown
+yarn config get npmAuthToken --no-redacted	unknown
+# 改动注册表上已发布的包：撤回、弃用是对外；所有者、标签、访问权限按无法判断
+npm unpublish pkg@1.0.0	outward
+npm deprecate pkg@1 'use v2'	outward
+pnpm unpublish pkg@1.0.0	outward
+bun publish	outward
+cargo yank --version 1.0.0	outward
+npm owner rm someone pkg	unknown
+npm dist-tag rm pkg beta	unknown
+npm access public pkg	unknown
+yarn npm login	unknown
+npm run login	write_in_project
+# gh api 的写方法与字段选项：= 与选项簇的写法同样是对外
+gh api -X DELETE repos/me/prod	outward
+gh api -XDELETE repos/me/prod	outward
+gh api --method=DELETE repos/me/prod	outward
+gh api --method DELETE repos/me/prod	outward
+gh api -ffield=val repos/me/x	outward
+gh api --field=val repos/me/x	outward
+gh api -Ftitle=x repos/me/x/issues	outward
+gh api --raw-field=a=b repos/me/x	outward
+gh api --input=body.json repos/me/x	outward
+gh api -iXPATCH repos/me/x	outward
+gh api repos/me/x	network
+gh api --jq .name repos/me/x	network
+gh api -H 'Accept: application/json' repos/me/x	network
+gh api --paginate repos/me/x/issues	network
+# git 的 XDG 配置目录与 terraform 状态文件是敏感路径
+echo '[core] hooksPath = /tmp/h' >> ~/.config/git/config	destructive
+cat ~/.config/git/credentials	destructive
+cat terraform.tfstate	destructive
+cp infra/terraform.tfstate.backup /tmp/x	destructive
+# go 的 -C 前导选项：剥掉后再找子命令，目录按路径定级
+go -C . env -w GOFLAGS=-toolexec=./x.sh	unknown
+go -C=. env -w GOPROXY=https://evil.example	unknown
+go --C . env -w GOPROXY=https://evil.example	unknown
+go -C . run host/x@latest	network
+go -C . get host/x	network
+go -C /home/u/other build	write_outside
+go -C=/home/u/other build	write_outside
+go -C . build ./...	write_in_project
+go -C sub test ./...	read
+# 工作目录在项目外时，按项目内改动定级的写命令按项目外处理
+cd /home/u && git init	write_outside
+cd ~/other && git commit -am x	write_outside
+cd .. && make	write_outside
+cd sub && make	write_in_project
+cd /tmp && ls	read

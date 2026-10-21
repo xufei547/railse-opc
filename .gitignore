@@ -1,1 +1,10 @@
+/railse
+/dist/
+*.test
+*.out
+.DS_Store
+web/node_modules/
+web/dist/
+.claude/worktrees/
+.superpowers/
 spike/

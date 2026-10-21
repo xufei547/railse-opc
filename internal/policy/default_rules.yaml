@@ -1,0 +1,14 @@
+# Railse OPC 内置规则包。只读和项目内改动默认放行，其余一律询问。
+# 这两条可以在网页里关掉；关掉后对应等级也会进收件箱。
+version: 1
+rules:
+  - id: builtin-readonly
+    source: builtin
+    scope: global
+    match: {risk: read}
+    action: allow
+  - id: builtin-write-in-project
+    source: builtin
+    scope: global
+    match: {risk: write_in_project}
+    action: allow
