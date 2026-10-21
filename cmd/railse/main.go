@@ -30,6 +30,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "version":
 		fmt.Fprintln(stdout, "railse "+version)
 		return 0
+	case "policy":
+		return runPolicy(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "未知子命令 %q\n\n%s\n", args[0], usage)
 		return 2
