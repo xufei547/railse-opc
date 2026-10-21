@@ -63,6 +63,8 @@ func TestIsSensitive(t *testing.T) {
 		"/home/u/proj/.git/hooks/pre-commit", "/home/u/.gitconfig", "/home/u/.zprofile", "/home/u/.bashrc",
 		"/home/u/proj/.vault-token", "/home/u/proj/k.pfx", "/home/u/proj/keys/id_dsa",
 		"/dev/nvme0n1", "/dev/mmcblk0",
+		// 写入能设置 core.hooksPath、core.fsmonitor
+		"/home/u/proj/.git/config", "/home/u/proj/.Git/CONFIG",
 	}
 	no := []string{
 		"/home/u/proj/src/a.go", "/home/u/proj/README.md", "/home/u/proj/.envrc.example",

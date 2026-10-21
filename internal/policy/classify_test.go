@@ -14,6 +14,7 @@ func TestClassify(t *testing.T) {
 		{"file_write 项目内", Payload{Type: PayloadFileWrite, Path: "src/a.go", Cwd: "/home/u/proj"}, RiskWriteInProject},
 		{"file_write 项目外", Payload{Type: PayloadFileWrite, Path: "/etc/hosts"}, RiskWriteOutside},
 		{"file_write 敏感", Payload{Type: PayloadFileWrite, Path: ".env", Cwd: "/home/u/proj"}, RiskDestructive},
+		{"file_write .git/config", Payload{Type: PayloadFileWrite, Path: ".git/config", Cwd: "/home/u/proj"}, RiskDestructive},
 		{"file_write 无路径", Payload{Type: PayloadFileWrite}, RiskUnknown},
 		{"file_write - 开头的敏感文件", Payload{Type: PayloadFileWrite, Path: "-key.pem", Cwd: "/home/u/proj"}, RiskDestructive},
 		{"file_write - 开头跳到 ~/.ssh", Payload{Type: PayloadFileWrite, Path: "-x/../../../../home/u/.ssh/authorized_keys", Cwd: "/home/u/proj"}, RiskDestructive},

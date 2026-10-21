@@ -2,6 +2,7 @@ package policy
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -97,9 +98,32 @@ func TestProposeRuleRefusesNonLearnableRisk(t *testing.T) {
 			t.Errorf("%q 应返回 ErrCannotLearn, 得到 %v", cmd, err)
 		}
 	}
-	// 没有项目根时写文件按项目外处理
-	if _, err := ProposeRule(Payload{Type: PayloadFileWrite, Path: "/home/u/x.md"}, Context{HomeDir: "/home/u"}, "id"); !errors.Is(err, ErrCannotLearn) {
-		t.Errorf("项目外写文件应返回 ErrCannotLearn, 得到 %v", err)
+}
+
+func TestProposeRuleNeedsProjectForShellAndFile(t *testing.T) {
+	// 没有项目根时 Classify 以 cwd 为根，学出来的 global 规则会放行 cwd 下的任意改动：命令与文件规则不学
+	noProj := Context{HomeDir: "/home/u"}
+	for _, p := range []Payload{
+		{Type: PayloadShell, Command: "git status", Cwd: "/home/u"},
+		{Type: PayloadShell, Command: "touch notes.md", Cwd: "/home/u"},
+		{Type: PayloadFileWrite, Path: "notes.md", Cwd: "/home/u"},
+	} {
+		_, err := ProposeRule(p, noProj, "id")
+		if err == nil || !strings.Contains(err.Error(), "没有项目根目录") {
+			t.Errorf("%+v 应因没有项目根报错, 得到 %v", p, err)
+		}
+	}
+	// mcp 与 network 仍可学成 global
+	for _, p := range []Payload{
+		{Type: PayloadMCP, Server: "s", Tool: "t"},
+		{Type: PayloadNetwork, URL: "https://api.example.com/v1"},
+	} {
+		r, err := ProposeRule(p, noProj, "id")
+		if err != nil || !r.Scope.IsGlobal() {
+			t.Errorf("%+v 无项目时应学成 global: %+v, %v", p, r.Scope, err)
+			continue
+		}
+		assertLearnedAllows(t, r, p, noProj)
 	}
 }
 
@@ -129,6 +153,18 @@ func TestProposeRuleShellLearnable(t *testing.T) {
 		{"curl https://x.y", "curl https://x.y", RiskNetwork},
 		{"ls", "ls", RiskRead},
 		{"git log '*.go'", "git log", RiskRead}, // 引号里的通配是字面量
+		// 改动路径的命令取整条命令
+		{"rm -f build.log", "rm -f build.log", RiskWriteInProject},
+		{"cp a b", "cp a b", RiskWriteInProject},
+		{"FOO=1 /bin/mv a b", "/bin/mv a b", RiskWriteInProject},
+		// 其余取前两个词；有全局选项表的命令取到子命令为止
+		{"npm run build", "npm run", RiskWriteInProject},
+		{"go test -v ./...", "go test", RiskRead},
+		{"git -C sub status", "git -C sub status", RiskRead},
+		// 第二个词是选项时取到选项之后的第一个非选项词
+		{"ls -la src", "ls -la src", RiskRead},
+		{"python3 -m pytest -q", "python3 -m pytest", RiskRead},
+		{"sh -c 'ls'", "sh -c ls", RiskRead},
 	}
 	for _, c := range cases {
 		p := shell(c.cmd)
@@ -210,5 +246,29 @@ func TestProposeRuleEscapesLiteralPaths(t *testing.T) {
 	}
 	if d := e.Evaluate(mcp, Context{ProjectRoot: "/home/u/p1", HomeDir: "/home/u"}); d.Action == ActionAllow {
 		t.Errorf("不应命中别的项目: %+v", d)
+	}
+}
+
+func TestProposeRuleFileOpsLearnWholeCommand(t *testing.T) {
+	// 批准删一个文件不等于批准删项目里任意文件
+	cases := []struct{ learn, other string }{
+		{"rm -f build.log", "rm -f src/main.go"},
+		{"cp a b", "cp a src/main.go"},
+		{"mv a b", "mv a src/main.go"},
+		{"sed -i s/a/b/ x.txt", "sed -i s/x/y/ src/main.go"},
+	}
+	for _, c := range cases {
+		r, err := ProposeRule(shell(c.learn), learnCtx, "id")
+		if err != nil {
+			t.Errorf("%q: %v", c.learn, err)
+			continue
+		}
+		e, err := NewEngine(RuleSet{Version: 1, Rules: []Rule{r}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := e.Evaluate(shell(c.other), learnCtx); d.Action == ActionAllow {
+			t.Errorf("从 %q 学来的规则不应放行 %q: %+v", c.learn, c.other, d)
+		}
 	}
 }

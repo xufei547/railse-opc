@@ -61,6 +61,8 @@ git commit -m "see .ssh/config notes"	write_in_project
 git commit -m "fix $bug"	write_in_project
 # 只改项目内配置的普通 git config
 git config user.name x	write_in_project
+# git config 的参数里没有字面的 .git/config 路径，不受敏感路径影响
+git config core.autocrlf false	write_in_project
 # 写文件的选项
 sort -o out.txt in.txt	write_in_project
 # 不带强制的 branch -d、新建分支的 checkout -b
@@ -238,6 +240,9 @@ git -C . push --force origin main	destructive
 git --no-pager push -f origin main	destructive
 # 让 git 执行任意命令的配置
 git config core.hooksPath /tmp/h	destructive
+# 直接写或读 .git/config：写入能设置 core.hooksPath，读到的远端地址可能带令牌
+echo x >> .git/config	destructive
+cat .git/config	destructive
 # 标志簇
 chmod -Rf 000 .	destructive
 git branch -d -f x	destructive

@@ -14,12 +14,17 @@ import (
 var ErrCannotLearn = errors.New("只有只读、项目内改动和联网操作能记住为自动放行规则，其余请手写规则")
 
 // ProposeRule 从一条用户已批准的请求生成 learned 规则草案：action 为 allow，risk 固定为请求当前的风险等级，
-// 范围为当前项目，没有项目时为 global。风险等级不是 read、write_in_project 或 network 时返回 ErrCannotLearn。
-// shell 取剥掉包装后的前两个词做前缀，只接受单段命令，并且不能含无法静态分析的写法、引号外的通配或 $ 展开、
+// 范围为当前项目。没有项目根时 Classify 以 cwd 为根，学出来的 global 规则会放行 cwd 下的任意改动，
+// 所以 shell 与 file_write 报错，mcp 与 network 学成 global。
+// 风险等级不是 read、write_in_project 或 network 时返回 ErrCannotLearn。
+// shell 的前缀见 learnedWords，只接受单段命令，并且不能含无法静态分析的写法、引号外的通配或 $ 展开、
 // 指向文件的重定向：引擎的放行检查（segmentAllowable）不会命中这样的命令，学出来的规则是死的。
 // file_write 取所在目录；mcp 取服务加工具；network 取主机名。路径按字面转义通配元字符。
 // 草案在返回前经过 Validate。
 func ProposeRule(p Payload, ctx Context, requestID string) (Rule, error) {
+	if ctx.ProjectRoot == "" && (p.Type == PayloadShell || p.Type == PayloadFileWrite) {
+		return Rule{}, errors.New("没有项目根目录，不能生成文件或命令规则")
+	}
 	r := Rule{
 		ID:          "learned-" + shortID(requestID),
 		Source:      SourceLearned,
@@ -36,7 +41,7 @@ func ProposeRule(p Payload, ctx Context, requestID string) (Rule, error) {
 	}
 	switch p.Type {
 	case PayloadShell:
-		prefix, err := learnablePrefix(p.Command)
+		prefix, err := learnablePrefix(p.Command, cwd, ctx)
 		if err != nil {
 			return Rule{}, err
 		}
@@ -71,8 +76,8 @@ func ProposeRule(p Payload, ctx Context, requestID string) (Rule, error) {
 	return r, nil
 }
 
-// learnablePrefix 检查单段 shell 命令能否被前缀规则放行，能则返回剥掉包装后的前两个词。
-func learnablePrefix(command string) (string, error) {
+// learnablePrefix 检查单段 shell 命令能否被前缀规则放行，能则返回剥掉包装后按 learnedWords 取的前缀。
+func learnablePrefix(command, cwd string, ctx Context) (string, error) {
 	segs := splitSegments(command)
 	if len(segs) > 1 {
 		return "", errors.New("复合命令不能生成规则，请手写")
@@ -90,11 +95,36 @@ func learnablePrefix(command string) (string, error) {
 	if !harmlessTargets(seg.redirects, seg.redirectFlags) || !harmlessTargets(seg.inputs, seg.inputFlags) {
 		return "", errors.New("命令含指向文件的重定向，不能生成规则")
 	}
-	argv := stripWrappers(seg.argv)
+	argv, flags := commandWords(seg)
 	if len(argv) == 0 {
 		return "", errors.New("空命令不能生成规则")
 	}
-	return strings.Join(argv[:min(2, len(argv))], " "), nil
+	return strings.Join(learnedWords(argv, flags, cwd, ctx), " "), nil
+}
+
+// pathOperandCommands 的参数大多是要改动的路径，学来的前缀取整条命令：
+// 否则批准 rm -f build.log 会学成 rm -f，放行项目内任意文件的删除。
+var pathOperandCommands = []string{
+	"mkdir", "touch", "cp", "mv", "ln", "rm", "rmdir", "chmod", "tee", "patch", "unzip", "tar", "sed", "sort", "uniq",
+}
+
+// learnedWords 决定学来的前缀取剥掉包装后的哪几个词：改动路径的命令取整条；
+// 有全局选项表的命令（git、npm 等）取到子命令为止，含全局选项及其参数（git -C sub status）；
+// 其余取前两个词，第二个词是选项时一直取到选项之后的第一个非选项词（ls -la src、python3 -m pytest）。
+func learnedWords(argv []string, flags []wordFlags, cwd string, ctx Context) []string {
+	name := filepath.Base(argv[0])
+	if slices.Contains(pathOperandCommands, name) {
+		return argv
+	}
+	if spec, ok := leadingOptions[name]; ok {
+		rest, _, _, _ := stripLeading(argv, flags, spec, cwd, ctx)
+		return argv[:min(len(argv)-len(rest)+2, len(argv))]
+	}
+	n := 1
+	for n < len(argv) && strings.HasPrefix(argv[n], "-") {
+		n++
+	}
+	return argv[:min(n+1, len(argv))]
 }
 
 // escapeGlob 给字面路径里的 doublestar 元字符加反斜杠，让它在规则里只匹配自己。

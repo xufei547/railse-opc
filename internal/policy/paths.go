@@ -67,8 +67,9 @@ var sensitivePatterns = []string{
 	"~/.gemini/oauth_creds.json",
 	"~/.railse/**",
 	"~/Library/Keychains/**",
-	// 写入即可让任意命令在之后自动执行：shell 启动文件、git 钩子与全局配置
+	// 写入即可让任意命令在之后自动执行：shell 启动文件、git 钩子与配置（core.hooksPath、core.fsmonitor 等）
 	"**/.git/hooks/**",
+	"**/.git/config",
 	"~/.gitconfig",
 	"~/.zlogin",
 	"~/.zshrc",
