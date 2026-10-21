@@ -60,6 +60,10 @@ func TestStringMoreForms(t *testing.T) {
 		{`TOKEN=abc TOKEN2=def`, `TOKEN=<redacted> TOKEN2=<redacted>`},
 		{`spring.datasource.password=hunter2`, `spring.datasource.password=<redacted>`},
 		{`//registry.npmjs.org/:_authToken=abc`, `//registry.npmjs.org/:_authToken=<redacted>`},
+		// 键名前面紧贴 = # 等任意字符
+		{`kubectl create secret generic db --from-literal=password=hunter2`, `kubectl create secret generic db --from-literal=password=<redacted>`},
+		{`docker run --env=DB_PASSWORD=hunter2`, `docker run --env=DB_PASSWORD=<redacted>`},
+		{`#DB_PASSWORD=hunter2`, `#DB_PASSWORD=<redacted>`},
 		// 不是凭据的普通参数原样保留
 		{`git log --author=bob`, `git log --author=bob`},
 		{`git commit --author="Bob <b@x>"`, `git commit --author="Bob <b@x>"`},
@@ -103,6 +107,9 @@ func TestPayloadArgs(t *testing.T) {
 		{`{"command":"curl -H \"Authorization: Bearer abc123\" https://x"}`, `{"command":"curl -H \"Authorization: <redacted>\" https://x"}`},
 		{`{"password":"hunter2","title":"t"}`, `{"password":"<redacted>","title":"t"}`},
 		{`{"headers":{"Authorization":"Basic dXNlcjpwYXNz"},"env":["GH_TOKEN=abc","X=1"]}`, `{"env":["GH_TOKEN=<redacted>","X=1"],"headers":{"Authorization":"<redacted>"}}`},
+		// 字符串叶子是文件内容等普通文本：键名前可带 + #，值不按 shell 元字符截断
+		{`{"content":"+DB_PASSWORD=hunter2\n#TOKEN=abc"}`, `{"content":"+DB_PASSWORD=<redacted>\n#TOKEN=<redacted>"}`},
+		{`{"content":"SECRET_KEY=a(b)&c|d"}`, `{"content":"SECRET_KEY=<redacted>"}`},
 		// 不是敏感键的原样保留，大整数不丢精度
 		{`{"author":"bob","id":12345678901234567890,"max_tokens":4096}`, `{"author":"bob","id":12345678901234567890,"max_tokens":4096}`},
 	}
@@ -124,5 +131,37 @@ func TestPayloadArgs(t *testing.T) {
 	out := Payload(policy.Payload{Type: policy.PayloadMCP, Args: json.RawMessage(bad)})
 	if strings.Contains(string(out.Args), "hunter2") {
 		t.Errorf("非法 JSON 的 Args 未脱敏: %s", out.Args)
+	}
+}
+
+// Payload 按字段语境脱敏：Command 的值遇到 shell 元字符就停，Path 与 DiffPreview 的值抹到空白或引号，
+// URL 的值在 & 处停。
+func TestPayloadFieldModes(t *testing.T) {
+	out := Payload(policy.Payload{
+		Command: `password=abc;rm -rf /`,
+		Path:    `/srv/app/password=a;b`,
+		URL:     `https://x.y/?token=abc&next=/home`,
+	})
+	if want := `password=<redacted>;rm -rf /`; out.Command != want {
+		t.Errorf("Command 得到 %q 想要 %q", out.Command, want)
+	}
+	if want := `/srv/app/password=<redacted>`; out.Path != want {
+		t.Errorf("Path 得到 %q 想要 %q", out.Path, want)
+	}
+	if want := `https://x.y/?token=<redacted>&next=/home`; out.URL != want {
+		t.Errorf("URL 得到 %q 想要 %q", out.URL, want)
+	}
+
+	diffs := []struct{ in, want string }{
+		// Codex apply_patch 的补丁原文，新增行以 + 开头
+		{"*** Add File: .env\n+DB_PASSWORD=hunter2\n+API_KEY=abc123", "*** Add File: .env\n+DB_PASSWORD=<redacted>\n+API_KEY=<redacted>"},
+		{`DB_PASSWORD=Xy7&kP(2)q`, `DB_PASSWORD=<redacted>`},
+		{`API_TOKEN=ab;cd|ef<gh>ij\kl`, `API_TOKEN=<redacted>`},
+	}
+	for _, c := range diffs {
+		got := Payload(policy.Payload{Type: policy.PayloadFileWrite, DiffPreview: c.in}).DiffPreview
+		if got != c.want {
+			t.Errorf("DiffPreview %q\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
 	}
 }

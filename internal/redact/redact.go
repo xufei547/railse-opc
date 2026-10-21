@@ -15,10 +15,6 @@ const placeholder = "<redacted>"
 // 第三种是 JSON 原文里转义过的 \"...\"，到第一个 \" 就收尾，不把后面的参数一起吞掉。
 const quoted = `"[^"]*"|'[^']*'|\\"(?:[^"\\]|\\.)*?\\"`
 
-// bare 是不带引号的值：遇到空白、引号、反斜杠或 shell 元字符就停，
-// 既不吞掉 JSON 转义，也不把后面链接的命令一起藏掉。
-const bare = `[^\s'"\\;|&<>()` + "`" + `]+`
-
 // key 是敏感键名，前面可带任意前缀。token 不认 tokens，auth 只认 auth、auth_token、
 // auth-key、authorization 这类，免得误抹 max_tokens、author。
 const key = `[a-z0-9_.-]*(?:` +
@@ -34,22 +30,38 @@ type rule struct {
 	repl string
 }
 
+// compile 用给定的“不带引号的值”字符类编译一套规则。几种语境只在值到哪里为止上不同。
 // 顺序很重要：先处理带键名的形式，再处理裸 token。
-var rules = []rule{
-	// Authorization: Bearer xxx / Authorization: Basic xxx
-	{regexp.MustCompile(`(?i)(authorization:\s*)(bearer|basic|token)?\s*` + bare), "${1}" + placeholder},
-	// 不跟在 Authorization: 后面的 Bearer xxx
-	{regexp.MustCompile(`(?i)\b(bearer\s+)` + bare), "${1}" + placeholder},
-	// --token xxx、--password "xxx"、--api-key 'xxx'
-	{regexp.MustCompile(`(?i)(--?(token|password|passwd|api[-_]?key|secret|auth)\s+)(?:` + quoted + `|` + bare + `)`), "${1}" + placeholder},
-	// token=xxx、DB2_PASSWORD="xxx"、--password=xxx、spring.datasource.password=xxx、:_authToken=xxx（含 URL 查询串与 env 赋值）
-	{regexp.MustCompile(`(?i)((?:^|[\s?&;'"\-.:/,{(])` + key + `=)(?:` + quoted + `|` + bare + `)`), "${1}" + placeholder},
-	// 裸 token：GitHub、OpenAI、Slack、AWS
-	{regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), placeholder},
+func compile(bare string) []rule {
+	value := `(?:` + quoted + `|` + bare + `)`
+	return []rule{
+		// Authorization: Bearer xxx / Authorization: Basic xxx
+		{regexp.MustCompile(`(?i)(authorization:\s*)(bearer|basic|token)?\s*` + bare), "${1}" + placeholder},
+		// 不跟在 Authorization: 后面的 Bearer xxx
+		{regexp.MustCompile(`(?i)\b(bearer\s+)` + bare), "${1}" + placeholder},
+		// --token xxx、--password "xxx"、--api-key 'xxx'
+		{regexp.MustCompile(`(?i)(--?(token|password|passwd|api[-_]?key|secret|auth)\s+)` + value), "${1}" + placeholder},
+		// token=xxx、DB2_PASSWORD="xxx"、--env=DB_PASSWORD=xxx、+API_KEY=xxx、:_authToken=xxx。
+		// 不设左边界：key 的前缀字符类会吸收键名前缀，${1} 只含键名本身。
+		{regexp.MustCompile(`(?i)(` + key + `=)` + value), "${1}" + placeholder},
+		// 裸 token：GitHub、OpenAI、Slack、AWS
+		{regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), placeholder},
+	}
 }
 
-// String 返回脱敏后的副本。
-func String(s string) string {
+var (
+	// shellRules 用于命令行：值遇到空白、引号、反斜杠或 shell 元字符就停，
+	// 既不吞掉 JSON 转义，也不把后面链接的命令一起藏掉。
+	shellRules = compile(`[^\s'"\\;|&<>()` + "`" + `]+`)
+	// textRules 用于文件内容、路径和 JSON 字符串叶子：没有 shell 语义，值一直抹到空白或引号，
+	// 免得含 & ( ; | 等符号的强密码只抹掉前半截。
+	textRules = compile(`[^\s'"]+`)
+	// urlRules 用于 URL：值在 & 处停，保留后面的查询参数。
+	urlRules = compile(`[^\s'"&]+`)
+)
+
+// redact 按给定规则集返回脱敏后的副本。
+func redact(s string, rules []rule) string {
 	out := s
 	for _, r := range rules {
 		out = r.re.ReplaceAllString(out, r.repl)
@@ -57,20 +69,25 @@ func String(s string) string {
 	return out
 }
 
-// Payload 对载荷里可能含凭据的字段脱敏，返回副本。
+// String 按命令行语境返回脱敏后的副本。
+func String(s string) string {
+	return redact(s, shellRules)
+}
+
+// Payload 对载荷里可能含凭据的字段脱敏，返回副本。每个字段按自己的语境处理。
 func Payload(p policy.Payload) policy.Payload {
 	out := p
 	out.Command = String(p.Command)
-	out.Path = String(p.Path)
-	out.DiffPreview = String(p.DiffPreview)
-	out.URL = String(p.URL)
+	out.Path = redact(p.Path, textRules)
+	out.DiffPreview = redact(p.DiffPreview, textRules)
+	out.URL = redact(p.URL, urlRules)
 	if len(p.Args) > 0 {
 		out.Args = args(p.Args)
 	}
 	return out
 }
 
-// args 对 MCP 参数脱敏。合法 JSON 按结构处理，结果仍是合法 JSON；否则当普通字符串处理。
+// args 对 MCP 参数脱敏。合法 JSON 按结构处理，结果仍是合法 JSON；否则按命令行语境当字符串处理。
 func args(raw json.RawMessage) json.RawMessage {
 	if json.Valid(raw) {
 		dec := json.NewDecoder(bytes.NewReader(raw))
@@ -88,7 +105,7 @@ func args(raw json.RawMessage) json.RawMessage {
 	return json.RawMessage(String(string(raw)))
 }
 
-// walk 递归处理 JSON 值：敏感键的值整体抹掉，其余字符串逐个脱敏。
+// walk 递归处理 JSON 值：敏感键的值整体抹掉，其余字符串按普通文本逐个脱敏。
 func walk(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
@@ -104,7 +121,7 @@ func walk(v any) any {
 			x[i] = walk(e)
 		}
 	case string:
-		return String(x)
+		return redact(x, textRules)
 	}
 	return v
 }
