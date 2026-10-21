@@ -299,11 +299,47 @@ func (s *Server) writeAudit(e AuditEntry) {
 	}
 }
 
-// handleEvent 与 handleControl 在 Task 9 实现；这里先放占位让包能编译。
+// handleEvent 记录只展示的事件。同一会话有未完成审批时压掉 question，避免一件事进两条。
 func (s *Server) handleEvent(ev proto.Event) proto.EventAck {
-	return proto.EventAck{V: proto.Version, OK: false, Error: "未实现"}
+	state := "recorded"
+	if ev.Kind == "question" && s.pending.HasSession(ev.Session.CLISessionID) {
+		state = "suppressed"
+	}
+	s.writeAudit(AuditEntry{TS: time.Now(), Kind: ev.Kind, Session: ev.Session, Message: ev.Message, State: state})
+	return proto.EventAck{V: proto.Version, OK: true}
 }
 
+// handleControl 处理本机管理命令。
 func (s *Server) handleControl(c proto.Control) proto.ControlReply {
-	return proto.ControlReply{V: proto.Version, OK: false, Error: "未实现"}
+	ok := proto.ControlReply{V: proto.Version, OK: true}
+	switch c.Op {
+	case "status":
+		ok.Status = &proto.Status{Paused: s.rules.Paused(), Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String()}
+		return ok
+	case "pause", "resume":
+		s.rules.SetPaused(c.Op == "pause")
+		if err := saveState(s.cfg.StatePath, state{Paused: s.rules.Paused()}); err != nil {
+			return proto.ControlReply{V: proto.Version, OK: false, Error: "写状态文件: " + err.Error()}
+		}
+		s.writeAudit(AuditEntry{TS: time.Now(), Kind: "control", State: "recorded", Message: c.Op})
+		return ok
+	case "reload":
+		if err := s.rules.Reload(); err != nil {
+			return proto.ControlReply{V: proto.Version, OK: false, Error: err.Error()}
+		}
+		s.writeAudit(AuditEntry{TS: time.Now(), Kind: "control", State: "recorded", Message: "reload"})
+		return ok
+	default:
+		return proto.ControlReply{V: proto.Version, OK: false, Error: "未知的管理命令 " + c.Op}
+	}
+}
+
+// LoadState 从 state.json 恢复暂停状态，启动时调用。
+func (s *Server) LoadState() error {
+	st, err := loadState(s.cfg.StatePath)
+	if err != nil {
+		return err
+	}
+	s.rules.SetPaused(st.Paused)
+	return nil
 }
