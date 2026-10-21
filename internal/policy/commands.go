@@ -191,6 +191,7 @@ func buildCommandTable() []cmdPattern {
 		{name: "poetry", any: []string{"add", "install", "update", "lock"}, risk: RiskNetwork},
 		{name: "go", sub: "get", risk: RiskNetwork},
 		{name: "go", sub: "install", risk: RiskNetwork},
+		{name: "go", sub: "run", contains: []string{"@"}, risk: RiskNetwork}, // 远程模块 path@version
 		{name: "go", sub: "mod", any: []string{"download", "tidy"}, risk: RiskNetwork},
 		{name: "cargo", any: []string{"add", "fetch", "install", "update"}, risk: RiskNetwork},
 		{name: "brew", risk: RiskNetwork},
@@ -230,6 +231,8 @@ func buildCommandTable() []cmdPattern {
 		{name: "make", contains: []string{"="}, any: []string{"--eval", "-E"}, risk: RiskUnknown},
 		{name: "just", contains: []string{"="}, any: []string{"--eval", "-E"}, risk: RiskUnknown},
 		{name: "fd", flagChars: "xX", anyPrefix: []string{"--exec"}, risk: RiskUnknown},
+		// go 的 -exec、-toolexec 用任意程序运行或包装构建出的二进制
+		{name: "go", anyPrefix: []string{"-exec", "-toolexec", "--exec", "--toolexec"}, risk: RiskUnknown},
 		{name: "rg", any: []string{"--pre"}, anyPrefix: []string{"--pre="}, risk: RiskUnknown},
 		// 不带命令的 env、printenv 打印全部环境变量
 		{name: "env", bare: true, risk: RiskUnknown},

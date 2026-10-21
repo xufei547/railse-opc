@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -223,7 +224,7 @@ var interpreters = map[string]interpSpec{
 			withArg: "IrCe",
 			long:    []string{"--version", "--help", "--verbose", "--copyright", "--yjit", "--jit"},
 		},
-		inline: []string{"-e", "-r"},
+		inline: []string{"-e", "-r", "-S"}, // -S 从 PATH 找脚本
 	},
 	"perl": {
 		opts: optSpec{
@@ -274,8 +275,11 @@ var interpreters = map[string]interpSpec{
 // unknownSubcmds 是 deno、bun 里不运行文件、也无法静态判断的子命令。
 var unknownSubcmds = []string{"eval", "exec", "repl", "x"}
 
-// moduleRisks 是 python -m 已知模块的定级，其余模块按运行项目内代码处理。
-var moduleRisks = map[string]Risk{"pytest": RiskRead, "unittest": RiskRead, "pip": RiskNetwork, "pipx": RiskNetwork}
+// moduleRisks 是 python -m 已知模块的定级，表外的模块无法判断。
+var moduleRisks = map[string]Risk{
+	"pytest": RiskRead, "unittest": RiskRead, "build": RiskWriteInProject,
+	"pip": RiskNetwork, "pipx": RiskNetwork, "http.server": RiskNetwork, "twine": RiskOutward,
+}
 
 // interpRisk 给解释器的调用定级：有不认识的选项、内联或预加载代码、没有文件时为 unknown；
 // python -m 按模块定级；deno、bun 先认子命令，run 之后再解析一遍选项，运行 URL 为 network；
@@ -298,7 +302,7 @@ func interpRisk(name string, argv []string, flags []wordFlags, cwd string, ctx C
 			if r, ok := moduleRisks[o.arg]; ok {
 				return r
 			}
-			return RiskWriteInProject
+			return RiskUnknown
 		case slices.Contains(spec.fileOpts, o.name):
 			return runFileRisk(o.arg, flagAt(flags, o.word+1), cwd, ctx)
 		}
@@ -418,6 +422,98 @@ func stripLeading(argv []string, flags []wordFlags, spec leadSpec, cwd string, c
 	outArgv := append([]string{argv[0]}, argv[i:]...)
 	outFlags := append([]wordFlags{flagAt(flags, 0)}, flags[min(i, len(flags)):]...)
 	return outArgv, outFlags, floor, dirRisk
+}
+
+// ---- 按参数抬到 unknown 的兜底 ----
+
+// unknownIf 是命中命令表之后再看的兜底：判断为真时结果至少为 unknown，只抬不降。
+var unknownIf = map[string]func(args []string) bool{"sed": sedProgramUnsafe}
+
+// sedUnsafePatterns 是 sed 程序里会写文件或执行命令的写法：w、W 命令与 s 命令的 w、e 标志。
+var sedUnsafePatterns = []string{"w ", "W ", "/w", "/e"}
+
+// sedUnsafeRegexps 补上子串兜不住的写法：GNU 的 e 命令（可带行号或 $ 地址），
+// 以及 s 命令里与其他标志连写的 e、w 标志（s/a/b/ge）。
+var sedUnsafeRegexps = []*regexp.Regexp{
+	regexp.MustCompile(`(^|[;{}\n])\s*(\d+|\$)?\s*e(\s|;|}|$)`),
+	regexp.MustCompile(`/[gpiImM0-9]+[ew](\s|;|}|$)`),
+}
+
+// sedProgramUnsafe 判断 sed 的程序会不会写文件或执行命令。程序取每个 -e、--expression 的值，
+// 没有 -e 时取第一个操作数。-f、--file 从文件读程序，不认识的选项也无法判断，都返回 true。
+// 单独的 -i、-I 后面跟空串或 . 开头的词时，那个词是 BSD sed 的备份后缀。
+func sedProgramUnsafe(args []string) bool {
+	var progs []string
+	operand, hasOperand, hasExpr := "", false, false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			if !hasOperand && i+1 < len(args) {
+				operand, hasOperand = args[i+1], true
+			}
+			i = len(args)
+		case a == "-" || !strings.HasPrefix(a, "-"):
+			if !hasOperand {
+				operand, hasOperand = a, true
+			}
+		case strings.HasPrefix(a, "--"):
+			name, val, hasVal := strings.Cut(a, "=")
+			switch name {
+			case "--expression":
+				if !hasVal {
+					if i++; i >= len(args) {
+						return true
+					}
+					val = args[i]
+				}
+				progs, hasExpr = append(progs, val), true
+			case "--in-place", "--quiet", "--silent", "--regexp-extended", "--posix", "--debug", "--sandbox",
+				"--follow-symlinks", "--separate", "--unbuffered", "--null-data", "--zero-terminated",
+				"--line-length", "--help", "--version":
+			default:
+				return true
+			}
+		default:
+			for j := 1; j < len(a); j++ {
+				switch c := a[j]; {
+				case c == 'e':
+					val := a[j+1:]
+					if val == "" {
+						if i++; i >= len(args) {
+							return true
+						}
+						val = args[i]
+					}
+					progs, hasExpr = append(progs, val), true
+					j = len(a)
+				case c == 'i' || c == 'I':
+					if j+1 == len(a) && i+1 < len(args) && (args[i+1] == "" || strings.HasPrefix(args[i+1], ".")) {
+						i++
+					}
+					j = len(a)
+				case strings.IndexByte("nErsuza", c) < 0:
+					return true // 包括 -f
+				}
+			}
+		}
+	}
+	if !hasExpr && hasOperand {
+		progs = append(progs, operand)
+	}
+	for _, p := range progs {
+		for _, pat := range sedUnsafePatterns {
+			if strings.Contains(p, pat) {
+				return true
+			}
+		}
+		for _, re := range sedUnsafeRegexps {
+			if re.MatchString(p) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ---- 配置与环境注入 ----
