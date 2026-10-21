@@ -50,9 +50,12 @@ func compile(bare string) []rule {
 }
 
 var (
-	// shellRules 用于命令行：值遇到空白、引号、反斜杠或 shell 元字符就停，
-	// 既不吞掉 JSON 转义，也不把后面链接的命令一起藏掉。
-	shellRules = compile(`[^\s'"\\;|&<>()` + "`" + `]+`)
+	// shellRules 用于命令行：值只在空白、引号、反斜杠处停。排除反斜杠是为了处理 JSON 原文时
+	// 不吞掉 \" 转义，结果仍是合法 JSON。
+	// 有意不在 ; | & < > ( ) 和反引号处截断：它们在双引号和 heredoc 里是普通字符，强密码常含这些符号，
+	// 截断会漏掉后半截（如 "POSTGRES_PASSWORD=Xy7&kP(2)q"）。策略引擎用的是原文，脱敏只影响展示，
+	// 宁可连带抹掉紧贴的命令（password=abc;rm -rf / 显示为 password=<redacted> -rf /），不要改回去。
+	shellRules = compile(`[^\s'"\\]+`)
 	// textRules 用于文件内容、路径和 JSON 字符串叶子：没有 shell 语义，值一直抹到空白或引号，
 	// 免得含 & ( ; | 等符号的强密码只抹掉前半截。
 	textRules = compile(`[^\s'"]+`)

@@ -49,7 +49,8 @@ func TestStringMoreForms(t *testing.T) {
 		{`gh auth login --token 'abc123'`, `gh auth login --token <redacted>`},
 		{`mysql --password=hunter2 -u root`, `mysql --password=<redacted> -u root`},
 		{`export PASSWORD="hunter 2"`, `export PASSWORD=<redacted>`},
-		{`curl https://x.y/?a=1&access-token=abc&b=2`, `curl https://x.y/?a=1&access-token=<redacted>&b=2`},
+		// 命令行语境不在 & 处停，后面的查询参数一并抹掉；URL 字段走 url 语境，见 TestPayloadFieldModes
+		{`curl https://x.y/?a=1&access-token=abc&b=2`, `curl https://x.y/?a=1&access-token=<redacted>`},
 		{`passwd=abc secret=def apikey=ghi`, `passwd=<redacted> secret=<redacted> apikey=<redacted>`},
 		{`sk-abcdefghijklmnopqrstuvwxyz`, `<redacted>`},
 		{`git commit -m "fix token refresh"`, `git commit -m "fix token refresh"`},
@@ -68,9 +69,12 @@ func TestStringMoreForms(t *testing.T) {
 		{`git log --author=bob`, `git log --author=bob`},
 		{`git commit --author="Bob <b@x>"`, `git commit --author="Bob <b@x>"`},
 		{`llm --max-tokens=4096`, `llm --max-tokens=4096`},
-		// 值被抹，后面链接的命令保留
-		{`password=abc;rm -rf /`, `password=<redacted>;rm -rf /`},
-		{`export GITHUB_TOKEN=$(gh auth token)`, `export GITHUB_TOKEN=<redacted>(gh auth token)`},
+		// 命令行里的值不按 shell 元字符截断：宁可连带抹掉紧贴的命令，也不在引号或 heredoc 里漏掉半截密码
+		{`password=abc;rm -rf /`, `password=<redacted> -rf /`},
+		{`export GITHUB_TOKEN=$(gh auth token)`, `export GITHUB_TOKEN=<redacted> auth token)`},
+		{`docker run -e "POSTGRES_PASSWORD=Xy7&kP(2)q" postgres`, `docker run -e "POSTGRES_PASSWORD=<redacted>" postgres`},
+		{`echo "DB_PASSWORD=Xy7&kP(2)q" >> .env`, `echo "DB_PASSWORD=<redacted>" >> .env`},
+		{"cat > .env <<'EOF'\nDB_PASSWORD=Xy7&kP(2)q\nSECRET_KEY=ab;cd|ef\nEOF", "cat > .env <<'EOF'\nDB_PASSWORD=<redacted>\nSECRET_KEY=<redacted>\nEOF"},
 	}
 	for _, c := range cases {
 		if got := String(c.in); got != c.want {
@@ -134,7 +138,7 @@ func TestPayloadArgs(t *testing.T) {
 	}
 }
 
-// Payload 按字段语境脱敏：Command 的值遇到 shell 元字符就停，Path 与 DiffPreview 的值抹到空白或引号，
+// Payload 按字段语境脱敏：Command 的值抹到空白、引号或反斜杠，Path 与 DiffPreview 的值抹到空白或引号，
 // URL 的值在 & 处停。
 func TestPayloadFieldModes(t *testing.T) {
 	out := Payload(policy.Payload{
@@ -142,7 +146,7 @@ func TestPayloadFieldModes(t *testing.T) {
 		Path:    `/srv/app/password=a;b`,
 		URL:     `https://x.y/?token=abc&next=/home`,
 	})
-	if want := `password=<redacted>;rm -rf /`; out.Command != want {
+	if want := `password=<redacted> -rf /`; out.Command != want {
 		t.Errorf("Command 得到 %q 想要 %q", out.Command, want)
 	}
 	if want := `/srv/app/password=<redacted>`; out.Path != want {
