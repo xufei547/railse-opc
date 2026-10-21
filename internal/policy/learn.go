@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -41,11 +42,12 @@ func ProposeRule(p Payload, ctx Context, requestID string) (Rule, error) {
 	}
 	switch p.Type {
 	case PayloadShell:
-		prefix, err := learnablePrefix(p.Command, cwd, ctx)
+		prefix, re, err := learnablePrefix(p.Command, cwd, ctx)
 		if err != nil {
 			return Rule{}, err
 		}
 		r.Match.CommandPrefix = prefix
+		r.Match.CommandRegex = re
 	case PayloadFileWrite:
 		dir := filepath.Dir(resolvePath(p.Path, cwd, ctx.HomeDir))
 		r.Match.PathGlob = filepath.Join(escapeGlob(dir), "**")
@@ -77,54 +79,60 @@ func ProposeRule(p Payload, ctx Context, requestID string) (Rule, error) {
 }
 
 // learnablePrefix 检查单段 shell 命令能否被前缀规则放行，能则返回剥掉包装后按 learnedWords 取的前缀。
-func learnablePrefix(command, cwd string, ctx Context) (string, error) {
+// 改动路径的命令还返回锚定这一段原文的正则：前缀按词边界匹配，整条命令之后再加操作数仍会命中，
+// 正则把它限定为原命令。引擎对 allow 规则按段的原文（seg.text）匹配正则，所以正则取原文，不取剥过包装的词。
+func learnablePrefix(command, cwd string, ctx Context) (prefix, re string, err error) {
 	segs := splitSegments(command)
 	if len(segs) > 1 {
-		return "", errors.New("复合命令不能生成规则，请手写")
+		return "", "", errors.New("复合命令不能生成规则，请手写")
 	}
 	if len(segs) == 0 {
-		return "", errors.New("空命令不能生成规则")
+		return "", "", errors.New("空命令不能生成规则")
 	}
 	seg := parseSegment(segs[0])
 	if seg.subshell {
-		return "", errors.New("命令含命令替换、子 shell、heredoc 等无法静态分析的写法，不能生成规则")
+		return "", "", errors.New("命令含命令替换、子 shell、heredoc 等无法静态分析的写法，不能生成规则")
 	}
 	if slices.ContainsFunc(seg.argvFlags, func(f wordFlags) bool { return f.glob || f.expand }) {
-		return "", errors.New("命令含引号外的通配或 $ 展开，不能生成规则")
+		return "", "", errors.New("命令含引号外的通配或 $ 展开，不能生成规则")
 	}
 	if !harmlessTargets(seg.redirects, seg.redirectFlags) || !harmlessTargets(seg.inputs, seg.inputFlags) {
-		return "", errors.New("命令含指向文件的重定向，不能生成规则")
+		return "", "", errors.New("命令含指向文件的重定向，不能生成规则")
 	}
 	argv, flags := commandWords(seg)
 	if len(argv) == 0 {
-		return "", errors.New("空命令不能生成规则")
+		return "", "", errors.New("空命令不能生成规则")
 	}
-	return strings.Join(learnedWords(argv, flags, cwd, ctx), " "), nil
+	words, whole := learnedWords(argv, flags, cwd, ctx)
+	if whole {
+		re = "^" + regexp.QuoteMeta(seg.text) + "$"
+	}
+	return strings.Join(words, " "), re, nil
 }
 
-// pathOperandCommands 的参数大多是要改动的路径，学来的前缀取整条命令：
+// pathOperandCommands 的参数大多是要改动的路径，学来的前缀取整条命令，并用锚定原文的正则限定：
 // 否则批准 rm -f build.log 会学成 rm -f，放行项目内任意文件的删除。
 var pathOperandCommands = []string{
 	"mkdir", "touch", "cp", "mv", "ln", "rm", "rmdir", "chmod", "tee", "patch", "unzip", "tar", "sed", "sort", "uniq",
 }
 
-// learnedWords 决定学来的前缀取剥掉包装后的哪几个词：改动路径的命令取整条；
+// learnedWords 决定学来的前缀取剥掉包装后的哪几个词：改动路径的命令取整条，whole 为 true；
 // 有全局选项表的命令（git、npm 等）取到子命令为止，含全局选项及其参数（git -C sub status）；
 // 其余取前两个词，第二个词是选项时一直取到选项之后的第一个非选项词（ls -la src、python3 -m pytest）。
-func learnedWords(argv []string, flags []wordFlags, cwd string, ctx Context) []string {
+func learnedWords(argv []string, flags []wordFlags, cwd string, ctx Context) (words []string, whole bool) {
 	name := filepath.Base(argv[0])
 	if slices.Contains(pathOperandCommands, name) {
-		return argv
+		return argv, true
 	}
 	if spec, ok := leadingOptions[name]; ok {
 		rest, _, _, _ := stripLeading(argv, flags, spec, cwd, ctx)
-		return argv[:min(len(argv)-len(rest)+2, len(argv))]
+		return argv[:min(len(argv)-len(rest)+2, len(argv))], false
 	}
 	n := 1
 	for n < len(argv) && strings.HasPrefix(argv[n], "-") {
 		n++
 	}
-	return argv[:min(n+1, len(argv))]
+	return argv[:min(n+1, len(argv))], false
 }
 
 // escapeGlob 给字面路径里的 doublestar 元字符加反斜杠，让它在规则里只匹配自己。

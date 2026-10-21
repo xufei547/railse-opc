@@ -2,6 +2,7 @@ package policy
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -256,6 +257,9 @@ func TestProposeRuleFileOpsLearnWholeCommand(t *testing.T) {
 		{"cp a b", "cp a src/main.go"},
 		{"mv a b", "mv a src/main.go"},
 		{"sed -i s/a/b/ x.txt", "sed -i s/x/y/ src/main.go"},
+		// 整条命令之后再加操作数也不行
+		{"rm -f build.log", "rm -f build.log src/main.go"},
+		{"tee out.txt", "tee out.txt src/main.go"},
 	}
 	for _, c := range cases {
 		r, err := ProposeRule(shell(c.learn), learnCtx, "id")
@@ -267,8 +271,30 @@ func TestProposeRuleFileOpsLearnWholeCommand(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if d := e.Evaluate(shell(c.other), learnCtx); d.Action == ActionAllow {
+		if d := e.Evaluate(shell(c.other), learnCtx); d.Action != ActionAsk {
 			t.Errorf("从 %q 学来的规则不应放行 %q: %+v", c.learn, c.other, d)
 		}
+	}
+}
+
+func TestProposeRuleFileOpsAnchoredRegex(t *testing.T) {
+	// 改动路径的命令用锚定原文的正则限定整条命令；引擎对 allow 规则按段的原文匹配正则，
+	// 所以正则取原文（含包装与引号），原命令照样放行
+	for _, cmd := range []string{"rm -f build.log", "FOO=1 /bin/mv a b", "touch 'my file.txt'"} {
+		p := shell(cmd)
+		r, err := ProposeRule(p, learnCtx, "id")
+		if err != nil {
+			t.Errorf("%q: %v", cmd, err)
+			continue
+		}
+		if want := "^" + regexp.QuoteMeta(cmd) + "$"; r.Match.CommandRegex != want {
+			t.Errorf("%q: command_regex = %q, 想要 %q", cmd, r.Match.CommandRegex, want)
+		}
+		assertLearnedAllows(t, r, p, learnCtx)
+	}
+	// 其余命令只用前缀
+	r, err := ProposeRule(shell("npm run build"), learnCtx, "id")
+	if err != nil || r.Match.CommandRegex != "" {
+		t.Errorf("npm run build 不应带 command_regex: %+v, %v", r.Match, err)
 	}
 }
