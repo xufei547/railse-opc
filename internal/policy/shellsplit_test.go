@@ -24,8 +24,8 @@ func TestSplitSegments(t *testing.T) {
 		{`echo "a\"" && ls`, []string{`echo "a\""`, "ls"}},
 		{`echo 'a\' && ls`, []string{`echo 'a\'`, "ls"}},
 		{`cat x\>&rm -rf /`, []string{`cat x\>`, "rm -rf /"}},
-		{`echo $'\'' ; rm -rf /`, []string{`echo $'\''`, "rm -rf /"}},
-		{`echo $'\'' ; rm -rf / # '`, []string{`echo $'\''`, "rm -rf /"}},
+		{`echo $'\'' ; rm -rf /`, []string{`echo $'\'' ; rm -rf /`}},
+		{`echo $'\'' ; rm -rf / # '`, []string{`echo $'\'' ; rm -rf / # '`}},
 		{"echo # \"\nrm -rf /", []string{"echo", "rm -rf /"}},
 		{"cat <<EOF\nls \"\nEOF\nrm -rf /", []string{"cat <<EOF\nls \"\nEOF\nrm -rf /"}},
 		{`a |& b`, []string{"a", "b"}},
@@ -35,6 +35,10 @@ func TestSplitSegments(t *testing.T) {
 		{`echo x >| ~/.zshrc`, []string{`echo x >| ~/.zshrc`}},
 		{`cat <&3`, []string{`cat <&3`}},
 		{"rm\\\n -rf /", []string{"rm\\\n -rf /"}},
+		{`ls && echo $(date)`, []string{`ls && echo $(date)`}},
+		{`echo "$(echo \"x\" ; rm -rf /)"`, []string{`echo "$(echo \"x\" ; rm -rf /)"`}},
+		{`cat <(ls) | grep x`, []string{`cat <(ls) | grep x`}},
+		{`echo $'ab' ; ls`, []string{`echo $'ab'`, "ls"}},
 	}
 	for _, c := range cases {
 		if got := splitSegments(c.in); !reflect.DeepEqual(got, c.want) {
@@ -127,6 +131,12 @@ func TestParseSegmentFailClosed(t *testing.T) {
 		{`echo "unclosed`, nil},
 		{`echo a >`, nil},
 		{"cat <<EOF\nls \"\nEOF\nrm -rf /", nil},
+		{`echo $'\'' ; rm -rf /`, nil},
+		{`echo $'\'' ; rm -rf / # '`, nil},
+		{`ls && echo $(date)`, nil},
+		{`echo "$(echo \"x\" ; rm -rf /)"`, nil},
+		{`cat <(ls) | grep x`, nil},
+		{`echo $'a\tb'`, nil},
 	}
 	for _, c := range cases {
 		got := parseSegment(c.in)

@@ -8,15 +8,15 @@ type segment struct {
 	argv      []string // 分词并去引号后的参数，不含重定向
 	redirects []string // 输出重定向的目标：>、>>、>|、&>、&>>、N>，以及目标不是 fd 的 >&
 	inputs    []string // 输入重定向的来源：<、N<，以及来源不是 fd 的 <&
-	subshell  bool     // 含无法静态分析的写法：命令替换、进程替换、heredoc、未闭合引号、缺目标的重定向
+	subshell  bool     // 含无法静态分析的写法：命令替换、进程替换、heredoc、带转义的 $'…'、未闭合引号、缺目标的重定向
 }
 
 // splitSegments 按 bash 语义在引号之外拆段，返回每段去掉首尾空白与续行的原文（不含注释），丢掉空段。
-// 遇到 heredoc 时整条命令作为一段返回，它的 parseSegment 结果 subshell 为 true。
+// 遇到 heredoc、命令替换、进程替换或带转义的 $'…' 时，整条命令作为一段返回，它的 parseSegment 结果 subshell 为 true。
 func splitSegments(cmd string) []string {
 	runes := []rune(cmd)
-	segs, heredoc := scanShell(runes)
-	if heredoc {
+	segs, opaque := scanShell(runes)
+	if opaque {
 		return []string{strings.TrimSpace(cmd)}
 	}
 	var out []string
@@ -28,14 +28,14 @@ func splitSegments(cmd string) []string {
 
 // parseSegment 用同一个扫描器解析单段文本。
 func parseSegment(text string) segment {
-	segs, heredoc := scanShell([]rune(text))
+	segs, opaque := scanShell([]rune(text))
 	if len(segs) == 0 {
 		return segment{text: text}
 	}
 	seg := segs[0].seg
 	seg.text = text
-	if len(segs) > 1 || heredoc {
-		// heredoc，或单段文本又切出多段（splitSegments 的产物不会如此），都按无法分析处理
+	if len(segs) > 1 || opaque {
+		// 整条命令无法静态切分，或单段文本又切出多段（splitSegments 的产物不会如此），都按无法分析处理
 		seg.subshell = true
 	}
 	return seg
@@ -73,8 +73,11 @@ const (
 )
 
 // scanShell 按 bash 词法把命令走一遍：拆段、分词、去引号、识别重定向和无法静态分析的写法。
-// 遇到 heredoc（<< 而不是 <<<）时停止扫描并返回 heredoc=true，由调用方对整条命令 fail closed。
-func scanShell(runes []rune) (segs []scanned, heredoc bool) {
+// opaque 为 true 表示命令里有无法静态切分的写法，由调用方对整条命令 fail closed：
+// heredoc（<< 而不是 <<<），引号外的 $(、反引号、<(、>(，以及含反斜杠的 $'…'。
+// 命令替换与进程替换的内部可以有自己的引号和分隔符，这里不跟踪嵌套，只继续按外层规则分词，
+// 让 argv、redirects、inputs 尽量保留信息；heredoc 的正文不是 shell 语法，遇到就停止扫描。
+func scanShell(runes []rune) (segs []scanned, opaque bool) {
 	n := len(runes)
 	at := func(i int) rune {
 		if i < n {
@@ -98,6 +101,10 @@ func scanShell(runes []rune) (segs []scanned, heredoc bool) {
 			first = from
 		}
 		last = to
+	}
+	failClosed := func() {
+		subshell = true
+		opaque = true
 	}
 	word := func(r rune) {
 		cur.WriteRune(r)
@@ -125,6 +132,9 @@ func scanShell(runes []rune) (segs []scanned, heredoc bool) {
 		c := runes[i]
 		from := i
 		if quote != quoteNone {
+			if quote == quoteANSI && c == '\\' {
+				failClosed() // 不解码 $'…' 的转义（\n、\x41、\u… 等）
+			}
 			switch {
 			case quote == quoteSingle:
 				if c == '\'' {
@@ -141,7 +151,7 @@ func scanShell(runes []rune) (segs []scanned, heredoc bool) {
 				quote = quoteNone
 			default:
 				if quote == quoteDouble && (c == '`' || (c == '$' && at(i+1) == '(')) {
-					subshell = true
+					failClosed()
 				}
 				cur.WriteRune(c)
 			}
@@ -176,9 +186,9 @@ func scanShell(runes []rune) (segs []scanned, heredoc bool) {
 			quote, inWord, quoted = quoteANSI, true, true
 			i++
 		case c == '`':
-			subshell = true
+			failClosed()
 		case c == '$' && at(i+1) == '(':
-			subshell = true
+			failClosed()
 			word(c)
 		case c == '\n' || c == ';':
 			endSeg()
@@ -206,7 +216,7 @@ func scanShell(runes []rune) (segs []scanned, heredoc bool) {
 			significant = false
 		case (c == '<' || c == '>') && at(i+1) == '(':
 			// 进程替换 <(…) 与 >(…)
-			subshell = true
+			failClosed()
 			word(c)
 			word('(')
 			i++
@@ -219,7 +229,7 @@ func scanShell(runes []rune) (segs []scanned, heredoc bool) {
 				flushWord()
 			}
 			if c == '<' && at(i+1) == '<' && at(i+2) != '<' {
-				subshell = true
+				failClosed()
 				mark(from, n)
 				endSeg()
 				return segs, true
@@ -255,7 +265,7 @@ func scanShell(runes []rune) (segs []scanned, heredoc bool) {
 		subshell = true // 引号到结尾都没闭合
 	}
 	endSeg()
-	return segs, false
+	return segs, opaque
 }
 
 // resolveTokens 把一段的词与重定向符号整理成 segment：每个重定向符号吃掉紧随其后的一个词。
