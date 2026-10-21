@@ -101,22 +101,14 @@ func classifyArgv(argv []string, flags []wordFlags, cwd string, ctx Context) Ris
 		return shellRisk(name, argv, flags, cwd, ctx)
 	}
 	floor, dirRisk := RiskRead, RiskRead
+	orig, origFlags := argv, flags
 	if spec, ok := leadingOptions[name]; ok {
 		argv, flags, floor, dirRisk = stripLeading(argv, flags, spec, cwd, ctx)
 	}
-	risk := RiskUnknown
-	for _, p := range commandTable {
-		if !p.matches(name, argv) {
-			continue
-		}
-		risk = p.risk
-		if p.interp {
-			risk = interpRisk(name, argv, flags, cwd, ctx)
-		}
-		if p.paths {
-			risk = maxRisk(risk, pathsRiskWords(argv[1:], flags[1:], cwd, ctx))
-		}
-		break
+	risk := tableRisk(name, argv, flags, cwd, ctx)
+	// 包管理器子命令别名：两种写法都定级取较大值
+	if alt, ok := canonicalSubcommand(name, argv); ok {
+		risk = maxRisk(risk, tableRisk(name, alt, flags, cwd, ctx))
 	}
 	if f, ok := unknownIf[name]; ok && f(argv[1:]) {
 		risk = maxRisk(risk, RiskUnknown)
@@ -124,11 +116,118 @@ func classifyArgv(argv []string, flags []wordFlags, cwd string, ctx Context) Ris
 	if spec, ok := outputOptions[name]; ok {
 		risk = maxRisk(risk, outputRisk(argv, flags, spec, cwd, ctx))
 	}
+	risk = maxRisk(risk, installRisk(name, orig, argv, origFlags, flags, cwd, ctx))
 	// 在别的目录执行（git -C 等）：会写的命令按目录定级；只读命令只看目录是否无法解析或敏感
 	if risk > RiskRead || dirRisk == RiskUnknown || dirRisk == RiskDestructive {
 		risk = maxRisk(risk, dirRisk)
 	}
 	return maxRisk(risk, floor)
+}
+
+// tableRisk 按命令表第一条命中的行定级，没有命中为 unknown。
+func tableRisk(name string, argv []string, flags []wordFlags, cwd string, ctx Context) Risk {
+	p, ok := matchedRow(name, argv)
+	if !ok {
+		return RiskUnknown
+	}
+	risk := p.risk
+	if p.interp {
+		risk = interpRisk(name, argv, flags, cwd, ctx)
+	}
+	if p.paths {
+		risk = maxRisk(risk, pathsRiskWords(argv[1:], flags[1:], cwd, ctx))
+	}
+	return risk
+}
+
+// matchedRow 返回命令表里第一条命中的行。
+func matchedRow(name string, argv []string) (cmdPattern, bool) {
+	for _, p := range commandTable {
+		if p.matches(name, argv) {
+			return p, true
+		}
+	}
+	return cmdPattern{}, false
+}
+
+// hasPathsRow 判断命令表里是否有这个命令带路径分析的行。
+func hasPathsRow(name string) bool {
+	for _, p := range commandTable {
+		if p.name == name && p.paths {
+			return true
+		}
+	}
+	return false
+}
+
+// shellWriteTargets 返回 shell 命令会写入的路径（已解析成绝对路径）：输出重定向的目标，
+// curl、wget、git 等的输出文件与联网安装的目录，以及命令表里带路径分析的行的操作数（命中行不带路径分析、
+// 但同名命令有这类行且命中行会写时也算，如 rm -rf）。跟踪 cd，看穿 sh -c；无法解析的目标跳过。
+// 供 deny 与 ask 规则的 path_glob 匹配 shell 请求用。
+func shellWriteTargets(command, cwd string, ctx Context) []string {
+	var out []string
+	lost := false
+	for _, text := range splitSegments(command) {
+		seg := parseSegment(text)
+		out = append(out, segmentWriteTargets(seg, cwd, lost, ctx)...)
+		argv := stripWrappers(seg.argv)
+		if len(argv) > 0 && isShell(filepath.Base(argv[0])) {
+			if call, ok := parseShellCall(filepath.Base(argv[0]), argv); ok && !lost {
+				for _, inner := range call.inline() {
+					out = append(out, shellWriteTargets(inner, cwd, ctx)...)
+				}
+			}
+		}
+		next, ok := nextCwd(seg, cwd, ctx)
+		if !ok {
+			lost = true
+		}
+		cwd = next
+	}
+	return out
+}
+
+// segmentWriteTargets 返回单段的写入目标，见 shellWriteTargets。lost 为 true 时工作目录已无法确定，相对路径跳过。
+func segmentWriteTargets(seg segment, cwd string, lost bool, ctx Context) []string {
+	raw := redirectPaths(seg.redirects)
+	rflags := append([]wordFlags(nil), seg.redirectFlags...)
+	add := func(ts []string, fs []wordFlags) {
+		raw = append(raw, ts...)
+		for i := range ts {
+			rflags = append(rflags, flagAt(fs, i))
+		}
+	}
+	argv, flags := commandWords(seg)
+	if len(argv) > 0 {
+		name := filepath.Base(argv[0])
+		orig, origFlags := argv, flags
+		if spec, ok := leadingOptions[name]; ok {
+			argv, flags, _, _ = stripLeading(argv, flags, spec, cwd, ctx)
+		}
+		if spec, ok := outputOptions[name]; ok {
+			add(outputTargets(argv, flags, spec))
+		}
+		add(installTargets(name, orig, argv, origFlags, flags))
+		if row, ok := matchedRow(name, argv); ok && (row.paths || row.risk >= RiskWriteInProject && hasPathsRow(name)) {
+			for i, a := range argv[1:] {
+				if p, ok := pathOperand(a); ok {
+					add([]string{p}, []wordFlags{flagAt(flags, i+1)})
+				}
+			}
+		}
+	}
+	var out []string
+	for i, p := range raw {
+		f := flagAt(rflags, i)
+		if p == "" || p == "-" || wordUnresolvable(p, f, ctx) {
+			continue
+		}
+		if lost && !filepath.IsAbs(expandHome(p, ctx.HomeDir)) {
+			continue
+		}
+		out = append(out, resolvePath(p, cwd, ctx.HomeDir))
+	}
+	return out
 }
 
 // nextCwd 返回这一段执行之后的工作目录：cd、pushd 到可解析的目录时返回新目录，其余命令原样返回。

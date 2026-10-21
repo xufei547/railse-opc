@@ -471,6 +471,8 @@ type outputSpec struct {
 	dirLong    []outputOpt // 输出目录（curl --output-dir）：目录本身定级，其余相对的输出文件也按落在它下面定级
 	taint      string      // 从文件读入更多选项的短选项字符（curl -K）：输出位置无法分析
 	taintLong  []outputOpt // 同上的长选项
+	opaque     string      // 不带参数、让输出文件名无法静态确定的短选项字符（curl -J 用响应头里的文件名）
+	opaqueLong []string    // 同上的长选项
 	shortArg   string      // 其余带参数的短选项字符：选项簇里遇到就停，参数不再当选项看
 	remoteName string      // 按远端文件名写进当前目录的短选项字符
 	remoteLong []string    // 同上的长选项
@@ -484,8 +486,10 @@ var outputOptions = map[string]outputSpec{
 		dirLong:    []outputOpt{{"--output-dir", "--output-dir"}},
 		taint:      "K",
 		taintLong:  []outputOpt{{"--config", "--config"}},
+		opaque:     "J",
+		opaqueLong: []string{"--remote-header-name"},
 		shortArg:   "AbCdeEFHmPQrtTuUwxXyYz",
-		remoteName: "O", remoteLong: []string{"--remote-name"},
+		remoteName: "O", remoteLong: []string{"--remote-name", "--remote-name-all"},
 		fetch: true,
 	},
 	// wget 接受 getopt 风格的长选项缩写，min 取不与别的选项混淆的最短前缀
@@ -529,6 +533,10 @@ func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string,
 				remote = true
 				continue
 			}
+			if slices.Contains(spec.opaqueLong, name) {
+				add("", wordFlags{})
+				continue
+			}
 			file, dir, taint := matchesLong(spec.long, name), matchesLong(spec.dirLong, name), matchesLong(spec.taintLong, name)
 			if !file && !dir && !taint {
 				continue
@@ -555,6 +563,9 @@ func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string,
 				switch {
 				case strings.IndexByte(spec.remoteName, c) >= 0:
 					remote = true
+					continue
+				case strings.IndexByte(spec.opaque, c) >= 0:
+					add("", wordFlags{})
 					continue
 				case strings.IndexByte(spec.taint, c) >= 0:
 					add("", wordFlags{})
@@ -611,6 +622,12 @@ func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string,
 // outputRisk 给命令写入的文件定级，见 outputSpec。没有输出文件时返回 RiskRead。
 func outputRisk(argv []string, flags []wordFlags, spec outputSpec, cwd string, ctx Context) Risk {
 	targets, tflags := outputTargets(argv, flags, spec)
+	return targetsRisk(targets, tflags, spec.fetch, cwd, ctx)
+}
+
+// targetsRisk 给一组写入目标定级。空串按无法解析处理，- 是标准输出。fetch 为 true 时按下载工具映射：
+// 敏感路径 destructive，项目外或无法解析 outward，项目内与无害伪设备不抬级（RiskRead）。
+func targetsRisk(targets []string, tflags []wordFlags, fetch bool, cwd string, ctx Context) Risk {
 	risk := RiskRead
 	for i, t := range targets {
 		if t == "-" {
@@ -620,7 +637,7 @@ func outputRisk(argv []string, flags []wordFlags, spec outputSpec, cwd string, c
 		if t != "" && !wordUnresolvable(t, tflags[i], ctx) {
 			r = resolvedPathRisk(t, cwd, ctx)
 		}
-		if spec.fetch {
+		if fetch {
 			switch r {
 			case RiskDestructive:
 			case RiskWriteOutside, RiskUnknown:
@@ -632,6 +649,190 @@ func outputRisk(argv []string, flags []wordFlags, spec outputSpec, cwd string, c
 		risk = maxRisk(risk, r)
 	}
 	return risk
+}
+
+// ---- 包管理器子命令别名 ----
+
+// pmSubcommandAliases 是 npm 的子命令别名表，换成正式名后再匹配命令表。
+var pmSubcommandAliases = map[string]string{
+	"run-script": "run", "rum": "run", "urn": "run",
+	"i": "install", "in": "install", "ins": "install", "inst": "install", "insta": "install", "instal": "install",
+	"isnt": "install", "isnta": "install", "isntal": "install", "isntall": "install", "add": "install",
+	"t": "test", "tst": "test",
+	"un": "uninstall", "unlink": "uninstall", "remove": "uninstall", "rm": "uninstall", "r": "uninstall",
+}
+
+var packageManagers = []string{"npm", "pnpm", "yarn", "bun"}
+
+// canonicalSubcommand 在 argv[1] 是包管理器子命令别名时，返回把它换成正式名的副本。
+// 分类器把两种写法都定级再取较大值：别名只会抬级，不会因为 yarn、pnpm 并不认的别名而降级。
+func canonicalSubcommand(name string, argv []string) ([]string, bool) {
+	if !slices.Contains(packageManagers, name) || len(argv) < 2 {
+		return nil, false
+	}
+	canon, ok := pmSubcommandAliases[argv[1]]
+	if !ok {
+		return nil, false
+	}
+	out := slices.Clone(argv)
+	out[1] = canon
+	return out, true
+}
+
+// ---- 联网安装到别处 ----
+
+// npmGlobalSubcommands 是带 -g 或 --prefix 时会写到项目外的 npm 子命令（已换成正式名）。
+var npmGlobalSubcommands = []string{"install", "ci", "update", "upgrade", "up", "udpate", "link", "ln", "uninstall"}
+
+var pipInstallSpec = outputSpec{
+	short:    "t",
+	long:     []outputOpt{{"--target", "--ta"}, {"--prefix", "--prefi"}, {"--root", "--root"}},
+	shortArg: "rceif",
+}
+
+var cargoInstallSpec = outputSpec{long: []outputOpt{{"--root", "--root"}}}
+
+// gitCloneShortArg、gitCloneLongArg 是 git clone 带参数的选项，跳过它们的参数才能找到仓库与目标目录。
+var (
+	gitCloneShortArg = "obucj"
+	gitCloneLongArg  = []string{"--origin", "--branch", "--upload-pack", "--reference", "--reference-if-able",
+		"--separate-git-dir", "--depth", "--shallow-since", "--shallow-exclude", "--config", "--template",
+		"--jobs", "--filter", "--bundle-uri", "--server-option", "--ref-format"}
+)
+
+// installTargets 返回联网安装命令写入的目录（未解析）：git clone 的目标目录，npm 的 --prefix 与全局安装
+// （-g、--global、--location=global，目录未知，记空目标），pip install 的 -t/--target、--prefix、--root，
+// cargo install 的 --root。orig 是剥掉全局选项之前的 argv，argv 是剥过的。
+func installTargets(name string, orig, argv []string, oflags, flags []wordFlags) ([]string, []wordFlags) {
+	switch name {
+	case "git":
+		if len(argv) > 1 && argv[1] == "clone" {
+			return gitCloneTargets(argv, flags)
+		}
+	case "npm":
+		return npmInstallTargets(orig, oflags)
+	case "pip", "pip3":
+		if firstOperand(argv) == "install" {
+			return outputTargets(argv, flags, pipInstallSpec)
+		}
+	case "cargo":
+		if len(argv) > 1 && argv[1] == "install" {
+			return outputTargets(argv, flags, cargoInstallSpec)
+		}
+	}
+	return nil, nil
+}
+
+// installRisk 按下载工具的映射给 installTargets 的目录定级：项目外 outward，敏感 destructive，项目内不抬级。
+func installRisk(name string, orig, argv []string, oflags, flags []wordFlags, cwd string, ctx Context) Risk {
+	targets, tflags := installTargets(name, orig, argv, oflags, flags)
+	return targetsRisk(targets, tflags, true, cwd, ctx)
+}
+
+// firstOperand 返回 argv[1:] 里第一个不以 - 开头的词。
+func firstOperand(argv []string) string {
+	for _, a := range argv[1:] {
+		if !strings.HasPrefix(a, "-") {
+			return a
+		}
+	}
+	return ""
+}
+
+// npmInstallTargets 找出 npm 安装类子命令的写入目录：--prefix 的值，全局安装记一个空目标。
+func npmInstallTargets(argv []string, flags []wordFlags) ([]string, []wordFlags) {
+	var targets []string
+	var tflags []wordFlags
+	sub, global := "", false
+	for i := 1; i < len(argv); i++ {
+		a := argv[i]
+		switch {
+		case a == "-g", strings.HasPrefix(a, "--global"), a == "--location=global":
+			global = true
+		case a == "--location" && i+1 < len(argv):
+			global = global || argv[i+1] == "global"
+			i++
+		case a == "--prefix" && i+1 < len(argv):
+			targets = append(targets, argv[i+1])
+			tflags = append(tflags, flagAt(flags, i+1))
+			i++
+		case strings.HasPrefix(a, "--prefix="):
+			targets = append(targets, strings.TrimPrefix(a, "--prefix="))
+			tflags = append(tflags, flagAt(flags, i))
+		case a == "-w" || a == "--workspace":
+			i++
+		case sub == "" && !strings.HasPrefix(a, "-"):
+			sub = a
+			if c, ok := pmSubcommandAliases[a]; ok {
+				sub = c
+			}
+		}
+	}
+	if !slices.Contains(npmGlobalSubcommands, sub) {
+		return nil, nil
+	}
+	if global {
+		targets = append(targets, "")
+		tflags = append(tflags, wordFlags{})
+	}
+	return targets, tflags
+}
+
+// gitCloneTargets 返回 git clone 写入的目录：仓库之后的操作数（目标目录），--separate-git-dir 的值；
+// 没有目标目录时是当前目录下按仓库名取的子目录。带参数的长选项接受缩写。
+func gitCloneTargets(argv []string, flags []wordFlags) ([]string, []wordFlags) {
+	var targets []string
+	var tflags []wordFlags
+	var operands []int
+	for i := 2; i < len(argv); i++ {
+		a := argv[i]
+		switch {
+		case a == "--":
+			for j := i + 1; j < len(argv); j++ {
+				operands = append(operands, j)
+			}
+			i = len(argv)
+		case strings.HasPrefix(a, "--"):
+			name, val, hasVal := strings.Cut(a, "=")
+			if !hitsLongAbbrev(name, gitCloneLongArg) {
+				continue
+			}
+			if !hasVal && i+1 < len(argv) {
+				i++
+				val = argv[i]
+			}
+			if len(name) >= len("--sep") && strings.HasPrefix("--separate-git-dir", name) {
+				targets = append(targets, val)
+				tflags = append(tflags, flagAt(flags, i))
+			}
+		case len(a) > 1 && a[0] == '-':
+			if j := strings.IndexAny(a[1:], gitCloneShortArg); j >= 0 && j+2 == len(a) {
+				i++ // 簇里最后一个是带参数的短选项，参数是下一个词
+			}
+		default:
+			operands = append(operands, i)
+		}
+	}
+	switch {
+	case len(operands) == 0:
+	case len(operands) == 1:
+		repo := strings.TrimSuffix(strings.TrimRight(argv[operands[0]], "/"), ".git")
+		repo = strings.TrimRight(repo, "/")
+		if k := strings.LastIndexAny(repo, "/:"); k >= 0 {
+			repo = repo[k+1:]
+		}
+		if repo != "" {
+			targets = append(targets, repo)
+			tflags = append(tflags, flagAt(flags, operands[0]))
+		}
+	default:
+		// 第一个操作数是仓库；其余都当目标目录，选项解析有偏差时也不漏掉真正的目标
+		for _, k := range operands[1:] {
+			targets = append(targets, argv[k])
+			tflags = append(tflags, flagAt(flags, k))
+		}
+	}
+	return targets, tflags
 }
 
 // ---- 按参数抬到 unknown 的兜底 ----
@@ -741,6 +942,8 @@ var injectEnv = []string{
 	"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "GIT_SEQUENCE_EDITOR", "GIT_TEMPLATE_DIR",
 	// 构建工具与远端端点
 	"GOFLAGS", "CC", "CXX", "MAKEFLAGS", "DOCKER_HOST", "KUBECONFIG",
+	// curl、wget 的配置文件位置：配置能改输出、上传与代理
+	"CURL_HOME", "WGETRC", "SYSTEM_WGETRC",
 }
 
 // injectEnvPrefixes 是同类变量的前缀：GIT_CONFIG_COUNT、GIT_CONFIG_KEY_n、GIT_CONFIG_GLOBAL 等同于 git -c 或换配置文件，

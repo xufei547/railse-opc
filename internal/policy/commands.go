@@ -3,20 +3,21 @@ package policy
 import "strings"
 
 // cmdPattern 是命令表的一行。按表中顺序匹配，第一条命中生效，所以危险的排前面。
-// any、anyPrefix、flagChars、contains、when 设了任意一个时，至少要满足其中之一才命中。
+// any、anyPrefix、longAbbrev、flagChars、contains、when 设了任意一个时，至少要满足其中之一才命中。
 // 有全局选项表的命令（git、npm 等，见 leadingOptions）先剥掉子命令前的全局选项再匹配。
 type cmdPattern struct {
-	name      string                   // argv[0] 的 basename
-	sub       string                   // 可选：要求 argv[1] 等于它
-	any       []string                 // 可选：参数等于其中之一
-	anyPrefix []string                 // 可选：参数以其中之一开头
-	flagChars string                   // 可选：单横线参数（不含 -- 开头的）含其中任一字符，如 -rfv 含 r
-	contains  []string                 // 可选：参数含其中任一子串
-	when      func(args []string) bool // 可选：对 argv[1:] 整体判断
-	bare      bool                     // 可选：只在没有任何参数时命中
-	risk      Risk
-	paths     bool // 命中后对 argv[1:] 做路径分析，取较大值
-	interp    bool // 解释器：命中后按 interpRisk 定级（选项表见 cmdoptions.go）
+	name       string                   // argv[0] 的 basename
+	sub        string                   // 可选：要求 argv[1] 等于它
+	any        []string                 // 可选：参数等于其中之一
+	anyPrefix  []string                 // 可选：参数以其中之一开头
+	longAbbrev []string                 // 可选：参数是其中某个长选项或它的缩写（git 接受无歧义的前缀），见 hitsLongAbbrev
+	flagChars  string                   // 可选：单横线参数（不含 -- 开头的）含其中任一字符，如 -rfv 含 r
+	contains   []string                 // 可选：参数含其中任一子串
+	when       func(args []string) bool // 可选：对 argv[1:] 整体判断
+	bare       bool                     // 可选：只在没有任何参数时命中
+	risk       Risk
+	paths      bool // 命中后对 argv[1:] 做路径分析，取较大值
+	interp     bool // 解释器：命中后按 interpRisk 定级（选项表见 cmdoptions.go）
 }
 
 func (p cmdPattern) matches(name string, argv []string) bool {
@@ -29,7 +30,7 @@ func (p cmdPattern) matches(name string, argv []string) bool {
 	if p.sub != "" && (len(argv) < 2 || argv[1] != p.sub) {
 		return false
 	}
-	if len(p.any) == 0 && len(p.anyPrefix) == 0 && p.flagChars == "" && len(p.contains) == 0 && p.when == nil {
+	if len(p.any) == 0 && len(p.anyPrefix) == 0 && len(p.longAbbrev) == 0 && p.flagChars == "" && len(p.contains) == 0 && p.when == nil {
 		return true
 	}
 	if p.when != nil && p.when(argv[1:]) {
@@ -43,8 +44,11 @@ func (p cmdPattern) matches(name string, argv []string) bool {
 	return false
 }
 
-// hits 判断单个参数是否满足 any、anyPrefix、flagChars、contains 中的任一条件。
+// hits 判断单个参数是否满足 any、anyPrefix、longAbbrev、flagChars、contains 中的任一条件。
 func (p cmdPattern) hits(a string) bool {
+	if hitsLongAbbrev(a, p.longAbbrev) {
+		return true
+	}
 	for _, want := range p.any {
 		if a == want {
 			return true
@@ -61,6 +65,24 @@ func (p cmdPattern) hits(a string) bool {
 		}
 	}
 	return p.flagChars != "" && len(a) > 1 && a[0] == '-' && a[1] != '-' && strings.ContainsAny(a[1:], p.flagChars)
+}
+
+// hitsLongAbbrev 判断参数 --xyz（可带 =value）是否为 opts 中某个长选项的缩写：xyz 至少两个字符，
+// 是该选项名的前缀。git 接受无歧义的前缀；有歧义时 git 报错不执行，这里多判也无害。
+func hitsLongAbbrev(a string, opts []string) bool {
+	if !strings.HasPrefix(a, "--") {
+		return false
+	}
+	name, _, _ := strings.Cut(a[2:], "=")
+	if len(name) < 2 {
+		return false
+	}
+	for _, o := range opts {
+		if strings.HasPrefix(strings.TrimPrefix(o, "--"), name) {
+			return true
+		}
+	}
+	return false
 }
 
 // cloudMutations 是云和集群 CLI 里会改变远端状态的子命令词。
@@ -89,14 +111,15 @@ func buildCommandTable() []cmdPattern {
 		// ---- 不可逆 ----
 		{name: "sudo", risk: RiskDestructive},
 		{name: "rm", flagChars: "rR", any: []string{"--recursive"}, risk: RiskDestructive},
-		{name: "git", sub: "reset", any: []string{"--hard"}, risk: RiskDestructive},
-		// + 开头的 refspec 是强推；--force 前缀兜住 --force-with-lease=<ref> 与 --force-if-includes
+		// git 的长选项可以缩写（longAbbrev），短选项可以成簇（flagChars）
+		{name: "git", sub: "reset", longAbbrev: []string{"--hard", "--merge"}, risk: RiskDestructive},
 		// + 开头的 refspec 是强推，: 开头的删除远端引用；--force 前缀兜住 --force-with-lease=<ref> 与 --force-if-includes
-		{name: "git", sub: "push", flagChars: "f", any: []string{"--force", "--force-with-lease", "-d", "--delete", "--mirror"}, anyPrefix: []string{"+", ":", "--force"}, risk: RiskDestructive},
+		{name: "git", sub: "push", flagChars: "fd", longAbbrev: []string{"--force", "--force-with-lease", "--delete", "--mirror", "--prune"}, anyPrefix: []string{"+", ":", "--force"}, risk: RiskDestructive},
 		{name: "git", sub: "clean", risk: RiskDestructive},
-		{name: "git", sub: "branch", flagChars: "Df", any: []string{"--force"}, risk: RiskDestructive},
-		{name: "git", sub: "checkout", flagChars: "f", any: []string{"--force", ".", "--"}, risk: RiskDestructive},
-		{name: "git", sub: "switch", flagChars: "f", any: []string{"--discard-changes", "--force"}, risk: RiskDestructive},
+		// --delete 只有和 --force 一起才强删，--force 单独就命中
+		{name: "git", sub: "branch", flagChars: "Df", longAbbrev: []string{"--force"}, risk: RiskDestructive},
+		{name: "git", sub: "checkout", flagChars: "f", longAbbrev: []string{"--force"}, any: []string{".", "--"}, risk: RiskDestructive},
+		{name: "git", sub: "switch", flagChars: "f", longAbbrev: []string{"--discard-changes", "--force"}, risk: RiskDestructive},
 		{name: "git", sub: "config", when: gitConfigInjects, risk: RiskDestructive},
 		{name: "git", sub: "restore", risk: RiskDestructive},
 		{name: "git", sub: "stash", any: []string{"drop", "clear"}, risk: RiskDestructive},

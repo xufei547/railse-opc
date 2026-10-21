@@ -68,7 +68,7 @@ func TestInjectsEnvNames(t *testing.T) {
 	for _, name := range []string{
 		"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_SEQUENCE_EDITOR",
 		"GIT_TEMPLATE_DIR", "GIT_TRACE", "GIT_TRACE2_EVENT", "GIT_TRACE_PACKET", "NPM_CONFIG_PREFIX", "PYTHONHOME",
-		"GOFLAGS", "CC", "CXX", "MAKEFLAGS", "DOCKER_HOST", "KUBECONFIG",
+		"GOFLAGS", "CC", "CXX", "MAKEFLAGS", "DOCKER_HOST", "KUBECONFIG", "CURL_HOME", "WGETRC", "SYSTEM_WGETRC",
 	} {
 		if !injectsEnv(name) {
 			t.Errorf("%s 应算注入型环境变量", name)

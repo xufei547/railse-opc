@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -108,9 +109,13 @@ func actionRank(a Action) int {
 	}
 }
 
-// betterRule 判断 a 是否比 b 更优先：用户的 deny 压一切；其余按范围更具体，其次 deny > allow > ask。
+// betterRule 判断 a 是否比 b 更优先：用户的 deny 压一切；其次用户规则整体压内置和学来的规则；
+// 同一层内范围更具体者优先，再按 deny > allow > ask。
 func betterRule(a, b *compiledRule) bool {
 	if ua, ub := a.userDeny(), b.userDeny(); ua != ub {
+		return ua
+	}
+	if ua, ub := a.Source == SourceUser, b.Source == SourceUser; ua != ub {
 		return ua
 	}
 	sa, sb := a.Scope.specificity(), b.Scope.specificity()
@@ -178,12 +183,18 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 		}
 	}
 	if m.PathGlob != "" {
-		if p.Type != PayloadFileWrite {
-			return false
-		}
-		// 与敏感路径表一样按 foldPath 折叠大小写，近似 APFS 不区分大小写
-		abs := foldPath(resolvePath(p.Path, cwd, ctx.HomeDir))
-		if ok, _ := doublestar.Match(foldPath(expandHome(m.PathGlob, ctx.HomeDir)), abs); !ok {
+		glob := expandHome(m.PathGlob, ctx.HomeDir)
+		switch {
+		case p.Type == PayloadFileWrite:
+			if !globMatch(glob, resolvePath(p.Path, cwd, ctx.HomeDir), anySeg) {
+				return false
+			}
+		case p.Type == PayloadShell && anySeg:
+			// deny 与 ask 规则也看 shell 命令的写入目标
+			if !slices.ContainsFunc(shellWriteTargets(p.Command, cwd, ctx), func(abs string) bool { return globMatch(glob, abs, true) }) {
+				return false
+			}
+		default:
 			return false
 		}
 	}
@@ -193,10 +204,59 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 	if m.MCPTool != "" && !(p.Type == PayloadMCP && p.Tool == m.MCPTool) {
 		return false
 	}
-	if m.Domain != "" && !(p.Type == PayloadNetwork && hostMatches(p.URL, m.Domain)) {
-		return false
+	if m.Domain != "" {
+		switch {
+		case p.Type == PayloadNetwork:
+			if !hostMatches(p.URL, m.Domain) {
+				return false
+			}
+		case p.Type == PayloadShell && anySeg:
+			// deny 与 ask 规则也看 shell 命令里出现的 URL
+			if !shellMentionsHost(p.Command, m.Domain) {
+				return false
+			}
+		default:
+			return false
+		}
 	}
 	return true
+}
+
+// globMatch 判断绝对路径是否命中通配模式。fold 为 true 时与敏感路径表一样按 foldPath 折叠大小写，
+// 近似 APFS 不区分大小写；deny 与 ask 规则折叠，allow 规则精确匹配。
+func globMatch(pattern, abs string, fold bool) bool {
+	if fold {
+		pattern, abs = foldPath(pattern), foldPath(abs)
+	}
+	ok, _ := doublestar.Match(pattern, abs)
+	return ok
+}
+
+// fetchCommands 的参数不带协议时也按 URL 理解（curl evil.com/x 默认走 http）。
+var fetchCommands = []string{"curl", "wget"}
+
+// shellMentionsHost 判断命令（看穿 sh -c）里是否有词是主机名命中 domain 的 URL。
+// 含 = 的词（--opt=value、VAR=value）也看 = 之后的部分；curl、wget 不带协议的操作数补上 http:// 再看。
+func shellMentionsHost(command, domain string) bool {
+	for _, seg := range effectiveSegments(command) {
+		argv := stripWrappers(seg.argv)
+		fetch := len(argv) > 0 && slices.Contains(fetchCommands, filepath.Base(argv[0]))
+		for _, w := range seg.argv {
+			cands := []string{w}
+			if _, v, ok := strings.Cut(w, "="); ok {
+				cands = append(cands, v)
+			}
+			for _, c := range cands {
+				if hostMatches(c, domain) {
+					return true
+				}
+				if fetch && !strings.HasPrefix(c, "-") && !strings.Contains(c, "://") && hostMatches("http://"+c, domain) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // everySegmentHasPrefix 要求复合命令的每一段（剥掉包装后）都以 prefix 开头，按词边界比较，
@@ -242,7 +302,7 @@ func wordsHavePrefix(words []string, prefix string) bool {
 }
 
 // normalizedArgv 返回 deny 与 ask 规则额外比较的归一化命令：剥掉包装，argv[0] 取 basename，
-// 有全局选项表的命令（git、npm 等）再剥掉子命令前的全局选项。没有命令时返回 nil。
+// 有全局选项表的命令（git、npm 等）再剥掉子命令前的全局选项，包管理器的子命令别名换成正式名。没有命令时返回 nil。
 func normalizedArgv(seg segment, cwd string, ctx Context) []string {
 	argv, flags := commandWords(seg)
 	if len(argv) == 0 {
@@ -251,6 +311,9 @@ func normalizedArgv(seg segment, cwd string, ctx Context) []string {
 	name := filepath.Base(argv[0])
 	if spec, ok := leadingOptions[name]; ok {
 		argv, _, _, _ = stripLeading(argv, flags, spec, cwd, ctx)
+	}
+	if alt, ok := canonicalSubcommand(name, argv); ok {
+		argv = alt
 	}
 	return append([]string{name}, argv[1:]...)
 }

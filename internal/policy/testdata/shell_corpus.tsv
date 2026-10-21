@@ -300,3 +300,48 @@ wget -o /tmp/log https://x.y	outward
 wget -a log.txt https://x.y	network
 wget --output-file=/tmp/l https://x.y	outward
 wget --append-output /tmp/l https://x.y	outward
+# git 接受无歧义的长选项缩写，短选项可以成簇
+git reset --har HEAD~3	destructive
+git reset --merge	destructive
+git switch --discard main	destructive
+git branch --delet --forc x	destructive
+git branch --forc x	destructive
+git branch -d x	write_in_project
+git push -ud origin main	destructive
+git push origin --del main	destructive
+git push --mirr origin	destructive
+git push --prune origin 'refs/heads/*:refs/heads/*'	destructive
+git push --force-w origin main	destructive
+git push -u origin main	outward
+git push --dry-run origin main	outward
+git checkout --forc main	destructive
+# npm 子命令别名只会抬级，不会降级
+npm isntall	network
+npm i lodash	network
+npm rum build	write_in_project
+# curl 按远端文件名下载的其他选项
+cd /home/u && curl --remote-name-all https://x.y/.bashrc	destructive
+curl -J -O https://x.y/f	outward
+curl --remote-header-name -O https://x.y/f	outward
+CURL_HOME=/tmp/x curl https://x.y	network
+WGETRC=/tmp/rc wget https://x.y	network
+# 联网安装到别处：目标在项目外 outward，项目内保持 network
+git clone https://x.y/r.git /tmp/r	outward
+git clone --depth 1 -b main https://x.y/r.git /opt/r	outward
+git clone https://x.y/r.git vendor/r	network
+git clone https://x.y/r.git	network
+cd /tmp && git clone https://x.y/r.git	outward
+npm install -g typescript	outward
+npm i --global typescript	outward
+npm -g install typescript	outward
+npm install --prefix /usr/local typescript	outward
+npm --prefix /usr/local install typescript	outward
+npm install --prefix=vendor typescript	network
+npm install typescript	network
+npm ls -g	read
+pip install --target /opt/lib requests	outward
+pip install -t vendor requests	network
+pip3 install --prefix=/usr/local requests	outward
+pip install requests	network
+cargo install --root /usr/local ripgrep	outward
+cargo install --root tools ripgrep	network

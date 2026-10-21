@@ -465,6 +465,10 @@ rules:
 		{"git --no-pager commit -m x", ActionDeny, "deny-commit"},
 		{"git -C sub commit -m x", ActionDeny, "deny-commit"},
 		{"./node_modules/.bin/npm run build", ActionDeny, "deny-npm-run"},
+		{"npm run-script build", ActionDeny, "deny-npm-run"},
+		{"npm rum build", ActionDeny, "deny-npm-run"},
+		{"npm urn build", ActionDeny, "deny-npm-run"},
+		{"pnpm run-script build", ActionAllow, "builtin-write-in-project"},
 		{"'curl' https://x.y", ActionDeny, "deny-curl"},
 		{`c\url https://x.y`, ActionDeny, "deny-curl"},
 		{"FOO=1 curl https://x.y", ActionDeny, "deny-curl"},
@@ -537,6 +541,92 @@ rules:
 	}
 }
 
+func TestEvaluateShellSidePathAndDomain(t *testing.T) {
+	const rules = `
+version: 1
+rules:
+  - id: builtin-write-in-project
+    source: builtin
+    scope: global
+    match: {risk: write_in_project}
+    action: allow
+  - id: builtin-readonly
+    source: builtin
+    scope: global
+    match: {risk: read}
+    action: allow
+  - id: learned-curl
+    source: learned
+    scope: global
+    match: {payload: shell, command_prefix: curl, risk: network}
+    action: allow
+  - id: learned-wget
+    source: learned
+    scope: global
+    match: {payload: shell, command_prefix: wget, risk: network}
+    action: allow
+  - id: learned-clone
+    source: learned
+    scope: global
+    match: {payload: shell, command_prefix: "git clone", risk: network}
+    action: allow
+  - id: deny-private
+    source: user
+    scope: global
+    match: {path_glob: "~/proj/private/**"}
+    action: deny
+  - id: deny-evil
+    source: user
+    scope: global
+    match: {domain: evil.com}
+    action: deny
+  - id: allow-tmp-writes
+    source: user
+    scope: global
+    match: {path_glob: "/tmp/**"}
+    action: allow
+`
+	e := mustEngine(t, rules)
+	cases := []struct {
+		cmd  string
+		want Action
+		rule string
+	}{
+		{"echo x > private/a", ActionDeny, "deny-private"},
+		{"cp README.md private/a", ActionDeny, "deny-private"},
+		{"mkdir -p private/sub", ActionDeny, "deny-private"},
+		{"cd private && touch a", ActionDeny, "deny-private"},
+		{"sh -c 'echo x >> private/log'", ActionDeny, "deny-private"},
+		{"rm -rf private", ActionDeny, "deny-private"},
+		{"curl -o private/x https://good.com/x", ActionDeny, "deny-private"},
+		{"mkdir -p public/sub", ActionAllow, "builtin-write-in-project"},
+		{"cat private/a", ActionAllow, "builtin-readonly"},
+		{"curl https://evil.com/x", ActionDeny, "deny-evil"},
+		{"wget https://EVIL.com./x", ActionDeny, "deny-evil"},
+		{"git clone https://evil.com/r", ActionDeny, "deny-evil"},
+		{"curl --url=https://api.evil.com/x", ActionDeny, "deny-evil"},
+		{"curl evil.com/x", ActionDeny, "deny-evil"},
+		{`URL=https://evil.com/x curl "$URL"`, ActionDeny, "deny-evil"},
+		{"bash -c 'curl -s https://evil.com/i | true'", ActionDeny, "deny-evil"},
+		{"curl https://good.com/x", ActionAllow, "learned-curl"},
+		{"echo https://notevil.com", ActionAllow, "builtin-readonly"},
+		// allow 规则的 path_glob 只对 file_write 生效
+		{"echo x > /tmp/a", ActionAsk, ""},
+	}
+	for _, c := range cases {
+		d := e.Evaluate(shell(c.cmd), projCtx)
+		if d.Action != c.want || d.RuleID != c.rule {
+			t.Errorf("%q 得到 %s/%q (%s), 想要 %s/%q", c.cmd, d.Action, d.RuleID, d.Reason, c.want, c.rule)
+		}
+	}
+	if d := e.Evaluate(Payload{Type: PayloadFileWrite, Path: "/home/u/proj/private/a"}, projCtx); d.Action != ActionDeny {
+		t.Errorf("file_write 仍应被 path_glob deny 拦下, 得到 %s/%q", d.Action, d.RuleID)
+	}
+	if d := e.Evaluate(Payload{Type: PayloadNetwork, URL: "https://evil.com/"}, projCtx); d.Action != ActionDeny {
+		t.Errorf("network 仍应被 domain deny 拦下, 得到 %s/%q", d.Action, d.RuleID)
+	}
+}
+
 func TestEvaluatePathGlobFoldsCase(t *testing.T) {
 	const rules = `
 version: 1
@@ -554,7 +644,7 @@ rules:
   - id: allow-tmp
     source: user
     scope: global
-    match: {payload: file_write, path_glob: "/Tmp/**"}
+    match: {payload: file_write, path_glob: "/tmp/**"}
     action: allow
 `
 	e := mustEngine(t, rules)
@@ -568,6 +658,7 @@ rules:
 		{"/home/u/proj/Secrets/sub/b", ActionDeny, "deny-secrets"},
 		{"/home/u/proj/src/a", ActionAllow, "builtin-write-in-project"},
 		{"/tmp/x", ActionAllow, "allow-tmp"},
+		{"/TMP/x", ActionAsk, ""}, // allow 不折叠大小写
 	}
 	for _, c := range cases {
 		d := e.Evaluate(Payload{Type: PayloadFileWrite, Path: c.path}, projCtx)
@@ -678,6 +769,48 @@ rules:
     match: {payload: shell, command_prefix: cat}
     action: allow
 `, ActionAllow, "machine-allow"},
+		{"全局用户 ask 压内置 allow", `
+version: 1
+rules:
+  - id: builtin-allow
+    source: builtin
+    scope: {project: "~/proj"}
+    match: {payload: shell, command_prefix: cat}
+    action: allow
+  - id: user-ask
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: cat}
+    action: ask
+`, ActionAsk, "user-ask"},
+		{"全局用户 allow 压项目范围 learned deny", `
+version: 1
+rules:
+  - id: learned-deny
+    source: learned
+    scope: {project: "~/proj"}
+    match: {payload: shell, command_prefix: cat}
+    action: deny
+  - id: user-allow
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: cat}
+    action: allow
+`, ActionAllow, "user-allow"},
+		{"用户规则之间仍按范围：项目 allow 压全局 ask", `
+version: 1
+rules:
+  - id: user-ask
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: cat}
+    action: ask
+  - id: user-allow
+    source: user
+    scope: {project: "~/proj"}
+    match: {payload: shell, command_prefix: cat}
+    action: allow
+`, ActionAllow, "user-allow"},
 	}
 	for _, c := range cases {
 		d := mustEngine(t, c.rules).Evaluate(shell("cat a.txt"), m1)
