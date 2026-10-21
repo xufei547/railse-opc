@@ -155,6 +155,7 @@ func TestProposeRuleShellLearnable(t *testing.T) {
 		{"cat a 2>/dev/null", "cat a", RiskRead}, // 重定向到无害伪设备不影响
 		{"curl https://x.y", "curl https://x.y", RiskNetwork},
 		{"ls", "ls", RiskRead},
+		{"ls -la", "ls -la", RiskRead},          // 只读命令没有操作数也能学
 		{"git log '*.go'", "git log", RiskRead}, // 引号里的通配是字面量
 		// 改动路径的命令取整条命令
 		{"rm -f build.log", "rm -f build.log", RiskWriteInProject},
@@ -272,6 +273,7 @@ func TestProposeRuleFileOpsLearnWholeCommand(t *testing.T) {
 		{"ssh build uptime", "ssh build 'rm -rf ~'"},
 		{"bash -c 'rm -f build.log'", "bash -c 'rm -f build.log src/main.go'"},
 		{"yq -i '.v = 1' chart.yaml", "yq -i '.v = 1' package.json"},
+		{"dig +short api.example.com", "dig +short evil.example"},
 	}
 	for _, c := range cases {
 		r, err := ProposeRule(shell(c.learn), learnCtx, "id")
@@ -316,8 +318,8 @@ func TestProposeRuleFileOpsAnchoredRegex(t *testing.T) {
 }
 
 func TestProposeRuleRefusesOneWordWrite(t *testing.T) {
-	// 只有一个词的前缀只在只读时能学：make、git 这样的前缀会放行这个命令的一切写操作
-	for _, cmd := range []string{"make", "git", "yarn"} {
+	// 选项之后没有操作数的前缀只在只读时能学：make、git -C sub 这样的前缀会放行这个命令的一切写操作
+	for _, cmd := range []string{"make", "git", "yarn", "git -C sub", "make -j4", "rm -f", "npm --prefix x"} {
 		_, err := ProposeRule(shell(cmd), learnCtx, "id")
 		if err == nil || errors.Is(err, ErrCannotLearn) {
 			t.Errorf("%q 应返回描述性错误, 得到 %v", cmd, err)
@@ -349,7 +351,9 @@ func TestProposeRuleRootFileIsExact(t *testing.T) {
 		t.Fatalf("x.md: %+v, %v", r.Match, err)
 	}
 	assertLearnedAllows(t, r, p, ctx)
-	if r, err = ProposeRule(Payload{Type: PayloadFileWrite, Path: ".", Cwd: "/home/u/proj"}, learnCtx, "f3"); err == nil && r.Match.PathGlob != "/home/u/proj" {
-		t.Errorf("项目根本身应取精确路径: %+v", r.Match)
+	p = Payload{Type: PayloadFileWrite, Path: ".", Cwd: "/home/u/proj"}
+	if r, err = ProposeRule(p, learnCtx, "f3"); err != nil || r.Match.PathGlob != "/home/u/proj" {
+		t.Fatalf("项目根本身应取精确路径: %+v, %v", r.Match, err)
 	}
+	assertLearnedAllows(t, r, p, learnCtx)
 }
