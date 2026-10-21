@@ -24,8 +24,8 @@ func TestSplitSegments(t *testing.T) {
 		{`echo "a\"" && ls`, []string{`echo "a\""`, "ls"}},
 		{`echo 'a\' && ls`, []string{`echo 'a\'`, "ls"}},
 		{`cat x\>&rm -rf /`, []string{`cat x\>`, "rm -rf /"}},
-		{`echo $'\'' ; rm -rf /`, []string{`echo $'\'' ; rm -rf /`}},
-		{`echo $'\'' ; rm -rf / # '`, []string{`echo $'\'' ; rm -rf / # '`}},
+		{`echo $'\'' ; rm -rf /`, []string{`echo $'\'' ; rm -rf /`, `echo $'\''`, "rm -rf /"}},
+		{`echo $'\'' ; rm -rf / # '`, []string{`echo $'\'' ; rm -rf / # '`, `echo $'\''`, "rm -rf /"}},
 		{"echo # \"\nrm -rf /", []string{"echo", "rm -rf /"}},
 		{"cat <<EOF\nls \"\nEOF\nrm -rf /", []string{"cat <<EOF\nls \"\nEOF\nrm -rf /"}},
 		{`a |& b`, []string{"a", "b"}},
@@ -35,14 +35,31 @@ func TestSplitSegments(t *testing.T) {
 		{`echo x >| ~/.zshrc`, []string{`echo x >| ~/.zshrc`}},
 		{`cat <&3`, []string{`cat <&3`}},
 		{"rm\\\n -rf /", []string{"rm\\\n -rf /"}},
-		{`ls && echo $(date)`, []string{`ls && echo $(date)`}},
+		{`ls && echo $(date)`, []string{`ls && echo $(date)`, "ls", "echo $(date)"}},
 		{`echo "$(echo \"x\" ; rm -rf /)"`, []string{`echo "$(echo \"x\" ; rm -rf /)"`}},
-		{`cat <(ls) | grep x`, []string{`cat <(ls) | grep x`}},
+		{`cat <(ls) | grep x`, []string{`cat <(ls) | grep x`, "cat <(ls)", "grep x"}},
 		{`echo $'ab' ; ls`, []string{`echo $'ab'`, "ls"}},
+		{`ls ; git push --force ; echo $(date)`, []string{`ls ; git push --force ; echo $(date)`, "ls", "git push --force", "echo $(date)"}},
+		{`(cd x && make)`, []string{`(cd x && make)`, "(cd x", "make)"}},
+		{`echo ')'`, []string{`echo ')'`}},
 	}
 	for _, c := range cases {
 		if got := splitSegments(c.in); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("splitSegments(%q) = %q, 想要 %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestSplitSegmentsWholeFirst 无法分析的命令第一段是整条命令，且解析结果标 subshell。
+func TestSplitSegmentsWholeFirst(t *testing.T) {
+	for _, in := range []string{"(#x\necho inside)"} {
+		segs := splitSegments(in)
+		if len(segs) == 0 || segs[0] != in {
+			t.Errorf("splitSegments(%q) = %q, 第一段应为整条命令", in, segs)
+			continue
+		}
+		if !parseSegment(segs[0]).subshell {
+			t.Errorf("parseSegment(%q).subshell = false, 想要 true", segs[0])
 		}
 	}
 }
@@ -70,6 +87,8 @@ func TestParseSegment(t *testing.T) {
 		{`echo '$(date)'`, []string{"echo", "$(date)"}, nil, false},
 		{`echo "a\"b"`, []string{"echo", `a"b`}, nil, false},
 		{"rm\\\n -rf /", []string{"rm", "-rf", "/"}, nil, false},
+		{`git push --force`, []string{"git", "push", "--force"}, nil, false},
+		{`echo ')'`, []string{"echo", ")"}, nil, false},
 	}
 	for _, c := range cases {
 		got := parseSegment(c.in)
@@ -137,6 +156,8 @@ func TestParseSegmentFailClosed(t *testing.T) {
 		{`echo "$(echo \"x\" ; rm -rf /)"`, nil},
 		{`cat <(ls) | grep x`, nil},
 		{`echo $'a\tb'`, nil},
+		{`ls ; git push --force ; echo $(date)`, nil},
+		{`(cd x && make)`, nil},
 	}
 	for _, c := range cases {
 		got := parseSegment(c.in)
