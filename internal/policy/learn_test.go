@@ -35,7 +35,9 @@ func TestProposeRuleShell(t *testing.T) {
 
 func TestProposeRuleRefusesOutwardAndDestructive(t *testing.T) {
 	ctx := Context{ProjectRoot: "/home/u/proj", HomeDir: "/home/u"}
-	for _, cmd := range []string{"git push origin main", "rm -rf x", "cat .env"} {
+	for _, cmd := range []string{"git push origin main", "rm -rf x", "cat .env",
+		// 同时含通配或命令替换时，风险门槛先于形状检查
+		"rm -rf *.log", "rm -rf $(pwd)"} {
 		_, err := ProposeRule(Payload{Type: PayloadShell, Command: cmd, Cwd: "/home/u/proj"}, ctx, "id")
 		if !errors.Is(err, ErrCannotLearn) {
 			t.Errorf("%q 应返回 ErrCannotLearn, 得到 %v", cmd, err)
@@ -92,7 +94,7 @@ func assertLearnedAllows(t *testing.T, r Rule, p Payload, ctx Context) {
 }
 
 func TestProposeRuleRefusesNonLearnableRisk(t *testing.T) {
-	// 只有 read、write_in_project、network 能学：两个词的前缀表达不了项目外的路径或无法解析的参数
+	// 只有 read、write_in_project、network 能学：学来的前缀表达不了项目外的路径或无法解析的参数
 	for _, cmd := range []string{"cp a /tmp/b", "foobar", "GIT_ASKPASS=x git status"} {
 		_, err := ProposeRule(shell(cmd), learnCtx, "id")
 		if !errors.Is(err, ErrCannotLearn) {
@@ -158,7 +160,7 @@ func TestProposeRuleShellLearnable(t *testing.T) {
 		{"rm -f build.log", "rm -f build.log", RiskWriteInProject},
 		{"cp a b", "cp a b", RiskWriteInProject},
 		{"FOO=1 /bin/mv a b", "/bin/mv a b", RiskWriteInProject},
-		// 其余取前两个词；有全局选项表的命令取到子命令为止
+		// 其余取前两个词；有全局选项表的命令取到子命令为止（npm、go 的第二个词就是子命令）
 		{"npm run build", "npm run", RiskWriteInProject},
 		{"go test -v ./...", "go test", RiskRead},
 		{"git -C sub status", "git -C sub status", RiskRead},
@@ -166,6 +168,10 @@ func TestProposeRuleShellLearnable(t *testing.T) {
 		{"ls -la src", "ls -la src", RiskRead},
 		{"python3 -m pytest -q", "python3 -m pytest", RiskRead},
 		{"sh -c 'ls'", "sh -c ls", RiskRead},
+		// 解释器按选项表跳过选项的参数，前缀含要运行的脚本
+		{"python3 -X dev app.py", "python3 -X dev app.py", RiskWriteInProject},
+		{"node --inspect app.js", "node --inspect app.js", RiskWriteInProject},
+		{"deno run --allow-read app.ts", "deno run --allow-read app.ts", RiskWriteInProject},
 	}
 	for _, c := range cases {
 		p := shell(c.cmd)
@@ -260,6 +266,12 @@ func TestProposeRuleFileOpsLearnWholeCommand(t *testing.T) {
 		// 整条命令之后再加操作数也不行
 		{"rm -f build.log", "rm -f build.log src/main.go"},
 		{"tee out.txt", "tee out.txt src/main.go"},
+		// 联网与远程命令、shell 调用、命令表里做路径分析的命令同样取整条命令
+		{"curl --max-time 5 https://x.y", "curl --max-time 5 https://evil.example/x"},
+		{"curl https://x.y", "curl https://x.y https://evil.example/x"},
+		{"ssh build uptime", "ssh build 'rm -rf ~'"},
+		{"bash -c 'rm -f build.log'", "bash -c 'rm -f build.log src/main.go'"},
+		{"yq -i '.v = 1' chart.yaml", "yq -i '.v = 1' package.json"},
 	}
 	for _, c := range cases {
 		r, err := ProposeRule(shell(c.learn), learnCtx, "id")
@@ -267,6 +279,7 @@ func TestProposeRuleFileOpsLearnWholeCommand(t *testing.T) {
 			t.Errorf("%q: %v", c.learn, err)
 			continue
 		}
+		assertLearnedAllows(t, r, shell(c.learn), learnCtx)
 		e, err := NewEngine(RuleSet{Version: 1, Rules: []Rule{r}})
 		if err != nil {
 			t.Fatal(err)
@@ -280,7 +293,10 @@ func TestProposeRuleFileOpsLearnWholeCommand(t *testing.T) {
 func TestProposeRuleFileOpsAnchoredRegex(t *testing.T) {
 	// 改动路径的命令用锚定原文的正则限定整条命令；引擎对 allow 规则按段的原文匹配正则，
 	// 所以正则取原文（含包装与引号），原命令照样放行
-	for _, cmd := range []string{"rm -f build.log", "FOO=1 /bin/mv a b", "touch 'my file.txt'"} {
+	for _, cmd := range []string{"rm -f build.log", "FOO=1 /bin/mv a b", "touch 'my file.txt'",
+		"curl https://x.y", "ssh build uptime", "bash script.sh", "sh -c 'ls'",
+		"prettier --write src", // 命令表里 paths: true 的行，不在手写列表里
+	} {
 		p := shell(cmd)
 		r, err := ProposeRule(p, learnCtx, "id")
 		if err != nil {
@@ -296,5 +312,44 @@ func TestProposeRuleFileOpsAnchoredRegex(t *testing.T) {
 	r, err := ProposeRule(shell("npm run build"), learnCtx, "id")
 	if err != nil || r.Match.CommandRegex != "" {
 		t.Errorf("npm run build 不应带 command_regex: %+v, %v", r.Match, err)
+	}
+}
+
+func TestProposeRuleRefusesOneWordWrite(t *testing.T) {
+	// 只有一个词的前缀只在只读时能学：make、git 这样的前缀会放行这个命令的一切写操作
+	for _, cmd := range []string{"make", "git", "yarn"} {
+		_, err := ProposeRule(shell(cmd), learnCtx, "id")
+		if err == nil || errors.Is(err, ErrCannotLearn) {
+			t.Errorf("%q 应返回描述性错误, 得到 %v", cmd, err)
+		}
+	}
+}
+
+func TestProposeRuleRootFileIsExact(t *testing.T) {
+	// 项目根下的文件只学精确路径，不学整个项目
+	p := Payload{Type: PayloadFileWrite, Path: "README.md", Cwd: "/home/u/proj"}
+	r, err := ProposeRule(p, learnCtx, "f1")
+	if err != nil || r.Match.PathGlob != "/home/u/proj/README.md" {
+		t.Fatalf("README.md: %+v, %v", r.Match, err)
+	}
+	assertLearnedAllows(t, r, p, learnCtx)
+	e, err := NewEngine(RuleSet{Version: 1, Rules: []Rule{r}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, other := range []string{".vscode/tasks.json", ".github/workflows/x.yml", "src/main.go"} {
+		if d := e.Evaluate(Payload{Type: PayloadFileWrite, Path: other, Cwd: "/home/u/proj"}, learnCtx); d.Action != ActionAsk {
+			t.Errorf("从 README.md 学来的规则不应放行 %s: %+v", other, d)
+		}
+	}
+	// 根目录本身与根里含元字符时同样取转义后的精确路径
+	ctx := Context{ProjectRoot: "/home/u/p[1]", HomeDir: "/home/u"}
+	p = Payload{Type: PayloadFileWrite, Path: "x.md", Cwd: "/home/u/p[1]"}
+	if r, err = ProposeRule(p, ctx, "f2"); err != nil || r.Match.PathGlob != `/home/u/p\[1\]/x.md` {
+		t.Fatalf("x.md: %+v, %v", r.Match, err)
+	}
+	assertLearnedAllows(t, r, p, ctx)
+	if r, err = ProposeRule(Payload{Type: PayloadFileWrite, Path: ".", Cwd: "/home/u/proj"}, learnCtx, "f3"); err == nil && r.Match.PathGlob != "/home/u/proj" {
+		t.Errorf("项目根本身应取精确路径: %+v", r.Match)
 	}
 }

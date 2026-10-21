@@ -70,6 +70,7 @@ var sensitivePatterns = []string{
 	// 写入即可让任意命令在之后自动执行：shell 启动文件、git 钩子与配置（core.hooksPath、core.fsmonitor 等）
 	"**/.git/hooks/**",
 	"**/.git/config",
+	"**/.git/modules/**/config", // 子模块的 git 配置
 	"~/.gitconfig",
 	"~/.zlogin",
 	"~/.zshrc",

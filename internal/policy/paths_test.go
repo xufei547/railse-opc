@@ -65,6 +65,7 @@ func TestIsSensitive(t *testing.T) {
 		"/dev/nvme0n1", "/dev/mmcblk0",
 		// 写入能设置 core.hooksPath、core.fsmonitor
 		"/home/u/proj/.git/config", "/home/u/proj/.Git/CONFIG",
+		"/home/u/proj/.git/modules/sub/config", "/home/u/proj/.git/modules/a/modules/b/config",
 	}
 	no := []string{
 		"/home/u/proj/src/a.go", "/home/u/proj/README.md", "/home/u/proj/.envrc.example",
