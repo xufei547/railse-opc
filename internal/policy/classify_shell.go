@@ -35,14 +35,19 @@ func classifySegment(seg segment, cwd string, ctx Context) Risk {
 	argv, flags := commandWords(seg)
 	risk := RiskUnknown // 没有命令、只有重定向时也要看重定向与输入
 	if len(argv) > 0 {
-		risk = classifyArgv(argv, cwd, ctx)
+		risk = classifyArgv(argv, flags, cwd, ctx)
+		args, argFlags := withoutMessages(argv[1:], flags[1:])
 		// 参数无法静态解析时，不论是否命中命令表，至少为 unknown
-		if hasUnresolvable(argv[1:], flags[1:], ctx) {
+		if hasUnresolvable(args, argFlags, ctx) {
 			risk = maxRisk(risk, RiskUnknown)
 		}
-		if touchesSensitiveWords(argv[1:], flags[1:], cwd, ctx) {
+		if touchesSensitiveWords(args, argFlags, cwd, ctx) {
 			risk = maxRisk(risk, RiskDestructive)
 		}
+	}
+	// 命令前的 VAR=value（含 env 之后的）设置了能注入代码的环境变量
+	if assignsInjectedEnv(seg.argv[:len(seg.argv)-len(argv)]) {
+		risk = maxRisk(risk, RiskUnknown)
 	}
 	if hasUnresolvable(seg.inputs, seg.inputFlags, ctx) {
 		risk = maxRisk(risk, RiskUnknown)
@@ -51,11 +56,18 @@ func classifySegment(seg segment, cwd string, ctx Context) Risk {
 	if touchesSensitiveWords(seg.inputs, seg.inputFlags, cwd, ctx) {
 		risk = maxRisk(risk, RiskDestructive)
 	}
+	// bash 的 /dev/tcp、/dev/udp：读是联网，写是往外发
+	if onNetDevice(seg.inputs, seg.inputFlags, cwd, ctx) {
+		risk = maxRisk(risk, RiskNetwork)
+	}
+	if onNetDevice(seg.redirects, seg.redirectFlags, cwd, ctx) {
+		risk = maxRisk(risk, RiskOutward)
+	}
 	if seg.subshell {
 		risk = maxRisk(risk, RiskUnknown)
 	}
 	// 输出重定向按目标路径定级，/dev/null 这类无害伪设备不算写
-	risk = maxRisk(risk, pathsRisk(redirectPaths(seg.redirects), cwd, ctx))
+	risk = maxRisk(risk, pathsRiskWords(redirectPaths(seg.redirects), seg.redirectFlags, cwd, ctx))
 	if hasSQLDrop(seg.text) {
 		risk = maxRisk(risk, RiskDestructive)
 	}
@@ -81,102 +93,36 @@ func commandWords(seg segment) ([]string, []wordFlags) {
 	return argv, seg.argvFlags[len(seg.argv)-len(argv):]
 }
 
-// classifyArgv 按命令表给单条命令定级。shell 由 shellRisk 处理，-c 的命令串递归分析。
+// classifyArgv 按命令表给单条命令定级。shell 由 shellRisk 处理；有全局选项表的命令先剥掉子命令前的全局选项。
 // 参数的可解析性与敏感路径由 classifySegment 检查。
-func classifyArgv(argv []string, cwd string, ctx Context) Risk {
+func classifyArgv(argv []string, flags []wordFlags, cwd string, ctx Context) Risk {
 	name := filepath.Base(argv[0])
 	if isShell(name) {
-		return shellRisk(argv, cwd, ctx)
+		return shellRisk(name, argv, flags, cwd, ctx)
 	}
+	floor, dirRisk := RiskRead, RiskRead
+	if spec, ok := leadingOptions[name]; ok {
+		argv, flags, floor, dirRisk = stripLeading(argv, flags, spec, cwd, ctx)
+	}
+	risk := RiskUnknown
 	for _, p := range commandTable {
 		if !p.matches(name, argv) {
 			continue
 		}
-		r := p.risk
+		risk = p.risk
 		if p.interp {
-			file, ok := scriptOperand(argv)
-			if !ok {
-				return RiskUnknown
-			}
-			r = maxRisk(r, pathsRisk([]string{file}, cwd, ctx))
+			risk = interpRisk(name, argv, flags, cwd, ctx)
 		}
 		if p.paths {
-			r = maxRisk(r, pathsRisk(argv[1:], cwd, ctx))
+			risk = maxRisk(risk, pathsRiskWords(argv[1:], flags[1:], cwd, ctx))
 		}
-		return r
+		break
 	}
-	return RiskUnknown
-}
-
-// shellRisk 给 sh、bash 这类 shell 的调用定级。选项里有 -c 或含 c 的单横线选项簇（-lc、-xc、-ec）时，
-// 其后第一个非选项参数是命令串，递归分析；含 s 的选项簇或没有非选项参数时从 stdin 读命令，为 unknown；
-// 否则第一个非选项参数是脚本路径，取项目内改动与脚本路径定级的较大值。
-// 选项簇里每个 o、O（set -o、shopt -O）吃掉后面一个参数，如 bash -euo pipefail -c '…'；
-// --rcfile、--init-file 也吃掉后面一个参数。
-func shellRisk(argv []string, cwd string, ctx Context) Risk {
-	command, stdin := false, false
-	i := 1
-	for ; i < len(argv); i++ {
-		a := argv[i]
-		if a == "--" || a == "-" {
-			i++
-			break
-		}
-		if len(a) < 2 || (a[0] != '-' && a[0] != '+') {
-			break
-		}
-		if strings.HasPrefix(a, "--") {
-			if a == "--rcfile" || a == "--init-file" {
-				i++
-			}
-			continue
-		}
-		if a[0] == '-' {
-			command = command || strings.ContainsRune(a, 'c')
-			stdin = stdin || strings.ContainsRune(a, 's')
-		}
-		i += strings.Count(a, "o") + strings.Count(a, "O")
+	// 在别的目录执行（git -C 等）：会写的命令按目录定级；只读命令只看目录是否无法解析或敏感
+	if risk > RiskRead || dirRisk == RiskUnknown || dirRisk == RiskDestructive {
+		risk = maxRisk(risk, dirRisk)
 	}
-	switch {
-	case i >= len(argv), stdin && !command:
-		return RiskUnknown
-	case command:
-		return classifyShell(argv[i], cwd, ctx)
-	default:
-		return maxRisk(RiskWriteInProject, pathsRisk(argv[i:i+1], cwd, ctx))
-	}
-}
-
-// inlineCodeChars 是解释器单横线选项簇里表示内联或预加载代码的字符，取各解释器的并集，宁可多判 unknown：
-// python -c，node -e、-p、-r，ruby -e、-r，perl -e、-E，php -r。
-const inlineCodeChars = "ceprE"
-
-// scriptOperand 找出解释器要运行的文件：选项之后的第一个参数，-- 之后的第一个参数也算。
-// 遇到内联代码选项（含 inlineCodeChars 的单横线选项簇、--eval、--print）、- 或没有文件时返回 false。
-func scriptOperand(argv []string) (string, bool) {
-	for i := 1; i < len(argv); i++ {
-		a := argv[i]
-		switch {
-		case a == "-":
-			return "", false
-		case a == "--":
-			if i+1 < len(argv) {
-				return argv[i+1], true
-			}
-			return "", false
-		case strings.HasPrefix(a, "--"):
-			if name, _, _ := strings.Cut(a, "="); name == "--eval" || name == "--print" {
-				return "", false
-			}
-		case strings.HasPrefix(a, "-"):
-			if strings.ContainsAny(a[1:], inlineCodeChars) {
-				return "", false
-			}
-		default:
-			return a, true
-		}
-	}
-	return "", false
+	return maxRisk(risk, floor)
 }
 
 // nextCwd 返回这一段执行之后的工作目录：cd、pushd 到可解析的目录时返回新目录，其余命令原样返回。
@@ -253,14 +199,6 @@ func isEnvAssignment(s string) bool {
 	return true
 }
 
-func isShell(name string) bool {
-	switch name {
-	case "sh", "bash", "zsh", "dash", "fish":
-		return true
-	}
-	return false
-}
-
 // wordUnresolvable 判断一个参数值能否在不读环境的前提下解析成路径，f 是扫描器给这个词记的标志。
 // 以下情况无法解析：引号外的 glob；展开开头的 $HOME、${HOME} 后仍有引号外的 $；
 // 以引号外的 ~ 开头却不是 ~ 或 ~/…（如 ~bob）；家目录未知时以 ~ 或 $HOME 开头。
@@ -295,10 +233,44 @@ func flagAt(flags []wordFlags, i int) wordFlags {
 	return wordFlags{}
 }
 
-// touchesSensitive 判断参数里是否有敏感路径，读敏感文件和写一样按 destructive。
+// withoutMessages 去掉含空白的参数及其标志：这样的参数是提交说明之类的消息，不当路径检查。
+func withoutMessages(args []string, flags []wordFlags) ([]string, []wordFlags) {
+	var outArgs []string
+	var outFlags []wordFlags
+	for i, a := range args {
+		if strings.ContainsAny(a, " \t\n") {
+			continue
+		}
+		outArgs = append(outArgs, a)
+		outFlags = append(outFlags, flagAt(flags, i))
+	}
+	return outArgs, outFlags
+}
+
+// pathsRiskWords 同 pathsRisk，按扫描器的标志判断可解析性：引号里的 glob 元字符与 $ 是字面量。
+func pathsRiskWords(paths []string, flags []wordFlags, cwd string, ctx Context) Risk {
+	return pathsRiskFunc(paths, cwd, ctx, func(i int, p string) bool { return wordUnresolvable(p, flagAt(flags, i), ctx) })
+}
+
+// onNetDevice 判断重定向目标里是否有 bash 的网络伪设备 /dev/tcp/…、/dev/udp/…。
+func onNetDevice(targets []string, flags []wordFlags, cwd string, ctx Context) bool {
+	for i, t := range targets {
+		if wordUnresolvable(t, flagAt(flags, i), ctx) {
+			continue
+		}
+		abs := resolvePath(t, cwd, ctx.HomeDir)
+		if strings.HasPrefix(abs, "/dev/tcp/") || strings.HasPrefix(abs, "/dev/udp/") {
+			return true
+		}
+	}
+	return false
+}
+
+// touchesSensitive 判断参数里是否有敏感路径，读敏感文件和写一样按 destructive。含空白的参数是消息，不检查。
 // 供没有引号信息的调用方使用，所有标志按零值处理。
 func touchesSensitive(args []string, cwd string, ctx Context) bool {
-	return touchesSensitiveWords(args, nil, cwd, ctx)
+	args, flags := withoutMessages(args, nil)
+	return touchesSensitiveWords(args, flags, cwd, ctx)
 }
 
 // touchesSensitiveWords 同 touchesSensitive，flags 与 args 一一对应。--name=value 形式的选项按 value 判断；

@@ -23,6 +23,21 @@ bash -c 'echo $HOME'	read
 bash -e -c 'ls'	read
 # 重定向到无害的伪设备不算写
 ls 2>/dev/null	read
+# awk 程序不调 system、getline 且不重定向，make 不带命令行变量，按只读
+awk '{print $1}' f	read
+make test	read
+# 子命令前的全局选项先剥掉；只读命令换个项目内目录执行仍是只读
+git -C sub status	read
+# 普通的环境变量前缀不影响定级
+FOO=1 npm test	read
+env FOO=1 ls	read
+# @{0} 不是花括号展开
+git show stash@{0}	read
+# 选项名只是前缀相同的不算
+rg --pretty foo	read
+ruff check --fixable E .	read
+git -P log	read
+export NODE_ENV=production	read
 # 项目内改动
 mkdir -p build	write_in_project
 touch src/new.go	write_in_project
@@ -39,6 +54,20 @@ time go build ./...	write_in_project
 nohup python app.py	write_in_project
 # 重定向目标总是路径，- 开头的也不是选项
 echo x > -foo	write_in_project
+# 含空白的参数是消息，不当路径检查
+git commit -m "see .ssh/config notes"	write_in_project
+git commit -m "fix $bug"	write_in_project
+# 只改项目内配置的普通 git config
+git config user.name x	write_in_project
+# 写文件的选项
+sort -o out.txt in.txt	write_in_project
+# 不带强制的 branch -d、新建分支的 checkout -b
+git branch -d x	write_in_project
+git checkout -b feat	write_in_project
+ruff check --fix .	write_in_project
+# 引号里的 glob 元字符是字面量：路径分析与重定向目标都按扫描器标志判断
+sed -i 's/[a-z]/x/' f.txt	write_in_project
+echo x > 'out*.txt'	write_in_project
 # 无法判断
 foobar --flag	unknown
 echo $(date)	unknown
@@ -51,7 +80,6 @@ ls *.go	unknown
 # 参数或输入重定向里有变量，不读环境就无法解析
 cat $FILE	unknown
 wc -l < $INPUT	unknown
-git commit -m "fix $bug"	unknown
 # shell 与解释器从 stdin 读命令或执行内联代码
 echo 'rm -rf ~' | sh	unknown
 python	unknown
@@ -65,6 +93,43 @@ deno eval 'console.log(1)'	unknown
 cd $D && ls	unknown
 cd - && ls	unknown
 pushd /tmp && popd && ls	unknown
+# awk 调外部命令、make 的命令行变量
+awk '{ system("id") }' f	unknown
+make test 'X=$(shell id)'	unknown
+# 从 /dev 下的文件读脚本；选项参数不当成文件
+sh /dev/stdin	unknown
+python -W ignore -c 'import os'	unknown
+# 配置与环境注入
+git -c core.fsmonitor=id status	unknown
+GIT_EXTERNAL_DIFF=id git diff	unknown
+NODE_OPTIONS=--require=x npm test	unknown
+# 会执行其他命令的选项与子命令
+npm exec -- id	unknown
+fd -x rm	unknown
+rg --pre id foo	unknown
+# 不带命令的 env 打印全部环境变量
+env	unknown
+# checkout 后面是分支还是路径分不清
+git checkout src/a.go	unknown
+# 分不清是分支还是路径
+git checkout main	unknown
+# 不认识的全局选项、改变 git 执行程序位置的选项
+git --foo status	unknown
+git --exec-path=/tmp status	unknown
+git -C $D status	unknown
+# 同类的配置与环境注入
+GIT_CONFIG_COUNT=1 git status	unknown
+export PATH="$PATH:/x"	unknown
+# 从文件加载 awk 程序；预加载代码；不运行文件的子命令
+awk -f x.awk data	unknown
+perl -Mstrict x.pl	unknown
+node -r dotenv/config app.js	unknown
+deno repl	unknown
+bun exec ls	unknown
+pnpm exec x	unknown
+yarn exec x	unknown
+php -r 'x'	unknown
+sh /proc/self/fd/0	unknown
 # 项目外改动
 cp a.txt /tmp/a.txt	write_outside
 echo x > ~/notes.txt	write_outside
@@ -74,6 +139,11 @@ bash /tmp/x.sh	write_outside
 cd /tmp && touch a	write_outside
 sed -i.bak 's/a/b/' /etc/hosts	write_outside
 sed -Ei 's/a/b/' /etc/hosts	write_outside
+# BSD sed 的 -I
+sed -I '' 's/a/b/' /etc/hosts	write_outside
+# 全局选项里的目录在项目外
+npm --prefix /tmp run build	write_outside
+git --work-tree=/tmp commit -m x	write_outside
 # 联网
 curl https://example.com	network
 npm install	network
@@ -83,6 +153,11 @@ git pull	network
 brew install jq	network
 gh pr view 12	network
 aws s3 ls	network
+python -m pip install x	network
+git remote update	network
+# 从 /dev/tcp 读
+cat < /dev/tcp/h/80	network
+deno run https://x/y.ts	network
 # 对外
 git push origin main	outward
 git add . && git commit -m x && git push	outward
@@ -93,6 +168,17 @@ aws s3 cp a.txt s3://bucket/	outward
 vercel deploy	outward
 scp a.txt host:/tmp/	outward
 bash -c "git push"	outward
+# 子命令前的全局选项剥掉后再匹配
+pnpm --filter x publish	outward
+cargo +nightly publish	outward
+yarn npm publish	outward
+# curl 的短选项簇
+curl -XPOST https://x.y	outward
+curl -sd a=b https://x.y	outward
+curl --json '{}' https://x	outward
+git lfs push origin main	outward
+# 写 /dev/tcp 是往外发
+echo x > /dev/tcp/h/80	outward
 # 不可逆
 rm -rf node_modules	destructive
 git push --force origin main	destructive
@@ -124,3 +210,24 @@ rm -vrf ~	destructive
 git push origin +main	destructive
 git push -fu origin main	destructive
 git push --force-with-lease=main origin main	destructive
+# shell 带参数的长选项
+zsh --emulate sh -c 'rm -rf ~'	destructive
+# 全局选项之后的强推
+git -C . push --force origin main	destructive
+git --no-pager push -f origin main	destructive
+# 让 git 执行任意命令的配置
+git config core.hooksPath /tmp/h	destructive
+# 标志簇
+chmod -Rf 000 .	destructive
+git branch -d -f x	destructive
+# 丢弃工作区改动
+git checkout -f main	destructive
+git switch --discard-changes main	destructive
+# ${HOME} 展开后是敏感路径
+cat ${HOME}/.ssh/id_rsa	destructive
+# 删除远端分支与镜像推送
+git push origin :main	destructive
+git push --mirror origin	destructive
+# 能执行命令的 git 配置；fish 的 --init-command
+git config include.path /tmp/x	destructive
+fish -C 'rm -rf ~' -c ls	destructive

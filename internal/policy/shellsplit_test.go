@@ -214,6 +214,16 @@ func TestParseSegmentWordFlags(t *testing.T) {
 		{`ls ~/*.go`, "argv", 1, wordFlags{glob: true, tilde: true}},
 		{`echo $'$X'`, "argv", 1, wordFlags{}},
 		{`echo a{b,c}`, "argv", 1, wordFlags{glob: true}},
+		// { 只有在配对的 } 之间有引号外的 , 或 .. 时才是花括号展开
+		{`cat ${HOME}/x`, "argv", 1, wordFlags{expand: true}},
+		{`git show stash@{0}`, "argv", 2, wordFlags{}},
+		{`echo {a,b}`, "argv", 1, wordFlags{glob: true}},
+		{`echo x{1..3}`, "argv", 1, wordFlags{glob: true}},
+		{`echo {0}`, "argv", 1, wordFlags{}},
+		{`echo {"a,b"}`, "argv", 1, wordFlags{}},
+		{`echo {a,"b c"}`, "argv", 1, wordFlags{glob: true}},
+		{`echo {a,b`, "argv", 1, wordFlags{}},
+		{`echo \{a,b}`, "argv", 1, wordFlags{}},
 		{`echo "x"[ab]`, "argv", 1, wordFlags{glob: true}},
 	}
 	for _, c := range cases {

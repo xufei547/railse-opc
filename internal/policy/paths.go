@@ -242,17 +242,23 @@ func pathOperand(arg string) (string, bool) {
 // 跳过其余 - 开头的选项、& 开头的描述符、空串和无害的伪设备。
 // 全部跳过时返回 RiskRead，调用方自行与基础等级取最大值。
 func pathsRisk(paths []string, cwd string, ctx Context) Risk {
+	return pathsRiskFunc(paths, cwd, ctx, func(_ int, p string) bool { return unresolvable(p, ctx.HomeDir) })
+}
+
+// pathsRiskFunc 同 pathsRisk，由 unres 判断第 i 个参数取出的路径能否解析。
+// shell 分类器用它按引号信息判断，引号里的 glob 元字符与 $ 是字面量。
+func pathsRiskFunc(paths []string, cwd string, ctx Context, unres func(i int, p string) bool) Risk {
 	root := ctx.ProjectRoot
 	if root == "" {
 		root = cwd
 	}
 	risk := RiskRead
-	for _, arg := range paths {
+	for i, arg := range paths {
 		p, ok := pathOperand(arg)
 		if !ok {
 			continue
 		}
-		if unresolvable(p, ctx.HomeDir) {
+		if unres(i, p) {
 			risk = maxRisk(risk, RiskUnknown)
 			continue
 		}

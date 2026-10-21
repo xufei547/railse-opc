@@ -16,7 +16,7 @@ type segment struct {
 
 // wordFlags 记录一个词在去引号之前由 shell 解释的部分，用来判断去引号后的文本能否按字面解析。
 type wordFlags struct {
-	glob   bool // 含不在任何引号里、也没被反斜杠转义的 * ? [ {
+	glob   bool // 含不在任何引号里、也没被反斜杠转义的 * ? [，或开始花括号展开的 {（见 braceExpands）
 	expand bool // 含没被转义、也不在单引号（含 $'…'）里的 $
 	tilde  bool // 以不加引号、没被转义的 ~ 开头
 }
@@ -109,6 +109,7 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 		inWord   bool
 		quoted   bool      // 当前词是否有任何部分加了引号或被转义
 		flags    wordFlags // 当前词的标志
+		dollar   = -2      // 最近一个引号外、未转义的 $ 的下标，用来认出 ${…}
 		toks     []token
 		subshell bool
 		depth    int  // 当前段里未加引号的 $(、<(、>( 尚未闭合的括号层数
@@ -300,10 +301,11 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 			toks = append(toks, token{kind: k})
 		default:
 			switch {
-			case strings.ContainsRune("*?[{", c):
+			case strings.ContainsRune("*?[", c), c == '{' && dollar != i-1 && braceExpands(runes, i):
 				flags.glob = true
 			case c == '$':
 				flags.expand = true
+				dollar = i
 			case c == '~' && !inWord:
 				flags.tilde = true
 			}
@@ -318,6 +320,41 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 	}
 	endSeg()
 	return segs, opaque, false
+}
+
+// braceExpands 判断 runes[i] 处引号外的 { 是否开始花括号展开：同一个词里有与之配对的 }，
+// 且其间有引号外的 , 或 ..。引号里的内容整段跳过，反斜杠转义的字符不算。
+// 于是 ${HOME}（由调用方排除）、stash@{0}、{0} 都是字面量，{a,b}、x{1..3} 是展开。
+func braceExpands(runes []rune, i int) bool {
+	depth, sep := 0, false
+	for j := i; j < len(runes); j++ {
+		switch c := runes[j]; c {
+		case '\\':
+			j++
+		case '\'', '"':
+			for j++; j < len(runes) && runes[j] != c; j++ {
+				if c == '"' && runes[j] == '\\' {
+					j++
+				}
+			}
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return sep
+			}
+		case ',':
+			sep = true
+		case '.':
+			if j+1 < len(runes) && runes[j+1] == '.' {
+				sep = true
+			}
+		case ' ', '\t', '\n', ';', '&', '|', '<', '>', '(', ')':
+			return false
+		}
+	}
+	return false
 }
 
 // resolveTokens 把一段的词与重定向符号整理成 segment：每个重定向符号吃掉紧随其后的一个词。
