@@ -55,3 +55,18 @@ func TestFindProjectRootSkipsHome(t *testing.T) {
 		t.Errorf("家目录下的仓库 = %q, 想要 %q", got, want)
 	}
 }
+
+func TestFindProjectRootSkipsHomeUnresolvedCwd(t *testing.T) {
+	base := shortTempDir(t)
+	t.Setenv("HOME", base)
+	os.MkdirAll(filepath.Join(base, ".git"), 0o755)
+	if got := FindProjectRoot(filepath.Join(base, "gone")); got != "" {
+		t.Errorf("cwd 不存在时也不应把家目录当项目根，得到 %q", got)
+	}
+}
+
+func TestTooBroadRoot(t *testing.T) {
+	if !tooBroad("/") {
+		t.Error(`tooBroad("/") 应为真`)
+	}
+}
