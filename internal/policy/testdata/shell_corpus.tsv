@@ -252,3 +252,32 @@ git push --mirror origin	destructive
 # 能执行命令的 git 配置；fish 的 --init-command
 git config include.path /tmp/x	destructive
 fish -C 'rm -rf ~' -c ls	destructive
+# 改家目录、配置目录与构建工具的环境变量按注入处理
+HOME=/tmp/x git status	unknown
+XDG_CONFIG_HOME=/tmp/x git status	unknown
+GOFLAGS=-toolexec=x go test ./...	unknown
+CC=/tmp/evil make	unknown
+# curl、wget 的输出文件：项目内不抬级，项目外 outward，敏感路径 destructive
+curl -o /etc/hosts https://x.y	outward
+curl https://x.y -o ~/.ssh/authorized_keys	destructive
+curl -o out.json https://x.y	network
+curl --output /tmp/x https://x.y	outward
+curl --output=/tmp/x https://x.y	outward
+curl -sSLo /tmp/x https://x.y	outward
+curl -sSL -o/tmp/x https://x.y	outward
+curl -o - https://x.y	network
+curl -o /dev/null https://x.y	network
+curl -H -o https://x.y	network
+curl -O https://x.y/a.txt	network
+curl -sLO https://x.y/.env	destructive
+cd /tmp && curl -O https://x.y/a.txt	outward
+wget -O /etc/hosts https://x.y	outward
+wget -qO out.html https://x.y	network
+wget --output-document=/tmp/x https://x.y	outward
+wget --output-document /tmp/x https://x.y	outward
+wget --output-d=/tmp/x https://x.y	outward
+# git 的 --output 把结果写进文件，按路径定级
+git log --output=/etc/hosts	write_outside
+git diff --output /tmp/x	write_outside
+git log --output=notes.txt	write_in_project
+git -C sub diff --output=/dev/null	read

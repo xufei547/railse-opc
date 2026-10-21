@@ -30,13 +30,21 @@ type compiledRule struct {
 	re *regexp.Regexp
 }
 
-// NewEngine 校验规则集并预编译正则。
+// NewEngine 校验规则集并预编译正则。规则里的指针字段深拷贝，调用方之后改动规则集不影响引擎。
 func NewEngine(rs RuleSet) (*Engine, error) {
 	if err := rs.Validate(); err != nil {
 		return nil, err
 	}
 	e := &Engine{}
 	for _, r := range rs.Rules {
+		if r.Enabled != nil {
+			v := *r.Enabled
+			r.Enabled = &v
+		}
+		if r.Match.Risk != nil {
+			v := *r.Match.Risk
+			r.Match.Risk = &v
+		}
 		cr := compiledRule{Rule: r}
 		if r.Match.CommandRegex != "" {
 			cr.re = regexp.MustCompile(r.Match.CommandRegex) // Validate 已保证可编译
@@ -46,7 +54,7 @@ func NewEngine(rs RuleSet) (*Engine, error) {
 	return e, nil
 }
 
-// SetPaused 打开总开关后一切请求都 ask。
+// SetPaused 打开总开关后，除命中用户 deny 的请求外一切都 ask。
 func (e *Engine) SetPaused(p bool) { e.paused.Store(p) }
 
 func (e *Engine) Paused() bool { return e.paused.Load() }
@@ -54,9 +62,6 @@ func (e *Engine) Paused() bool { return e.paused.Load() }
 // Evaluate 先定级，再按范围、条件、底线和优先级选出一条规则；没有则 ask。
 func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 	risk := Classify(p, ctx)
-	if e.paused.Load() {
-		return Decision{Action: ActionAsk, Risk: risk, Reason: "自动审批已暂停"}
-	}
 	var best *compiledRule
 	for i := range e.rules {
 		r := &e.rules[i]
@@ -69,6 +74,10 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 		if best == nil || betterRule(r, best) {
 			best = r
 		}
+	}
+	// 暂停只停自动决定，命中的用户 deny 仍然生效；它压过一切，命中时必是 best。
+	if e.paused.Load() && (best == nil || !best.userDeny()) {
+		return Decision{Action: ActionAsk, Risk: risk, Reason: "自动审批已暂停"}
 	}
 	if best != nil {
 		return Decision{Action: best.Action, Risk: risk, RuleID: best.ID, Reason: "命中规则 " + best.ID}
@@ -119,11 +128,12 @@ func scopeMatches(s Scope, ctx Context) bool {
 		if ctx.ProjectRoot == "" {
 			return false
 		}
-		pat := expandHome(s.Project, ctx.HomeDir)
-		if pat == ctx.ProjectRoot {
+		pat := filepath.Clean(expandHome(s.Project, ctx.HomeDir))
+		root := filepath.Clean(ctx.ProjectRoot)
+		if pat == root {
 			return true
 		}
-		ok, _ := doublestar.Match(pat, ctx.ProjectRoot)
+		ok, _ := doublestar.Match(pat, root)
 		return ok
 	case s.Machine != "":
 		return s.Machine == ctx.MachineID
@@ -140,18 +150,29 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 	if m.Risk != nil && *m.Risk != risk {
 		return false
 	}
-	// allow 规则要求每一段都命中；deny 与 ask 是收紧，任一段命中即可。
+	cwd := p.Cwd
+	if cwd == "" {
+		cwd = ctx.ProjectRoot
+	}
+	// allow 规则要求每一段都命中；deny 与 ask 是收紧，任一段命中即可，且同时按归一化的命令比较。
 	anySeg := r.Action != ActionAllow
 	if m.CommandPrefix != "" {
 		if p.Type != PayloadShell || !segmentsMatch(p.Command, anySeg, func(_ string, seg segment) bool {
-			return segmentHasPrefix(seg, m.CommandPrefix)
+			if segmentHasPrefix(seg, m.CommandPrefix) {
+				return true
+			}
+			return anySeg && wordsHavePrefix(normalizedArgv(seg, cwd, ctx), m.CommandPrefix)
 		}) {
 			return false
 		}
 	}
 	if r.re != nil {
-		if p.Type != PayloadShell || !segmentsMatch(p.Command, anySeg, func(text string, _ segment) bool {
-			return r.re.MatchString(text)
+		if p.Type != PayloadShell || !segmentsMatch(p.Command, anySeg, func(text string, seg segment) bool {
+			if r.re.MatchString(text) {
+				return true
+			}
+			norm := normalizedArgv(seg, cwd, ctx)
+			return anySeg && len(norm) > 0 && r.re.MatchString(strings.Join(norm, " "))
 		}) {
 			return false
 		}
@@ -160,12 +181,9 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 		if p.Type != PayloadFileWrite {
 			return false
 		}
-		cwd := p.Cwd
-		if cwd == "" {
-			cwd = ctx.ProjectRoot
-		}
-		abs := resolvePath(p.Path, cwd, ctx.HomeDir)
-		if ok, _ := doublestar.Match(expandHome(m.PathGlob, ctx.HomeDir), abs); !ok {
+		// 与敏感路径表一样按 foldPath 折叠大小写，近似 APFS 不区分大小写
+		abs := foldPath(resolvePath(p.Path, cwd, ctx.HomeDir))
+		if ok, _ := doublestar.Match(foldPath(expandHome(m.PathGlob, ctx.HomeDir)), abs); !ok {
 			return false
 		}
 	}
@@ -212,19 +230,42 @@ func segmentsMatch(command string, anySeg bool, pred func(text string, seg segme
 
 // segmentHasPrefix 判断剥掉包装后的 argv 是否以 prefix 开头，按词边界比较。
 func segmentHasPrefix(seg segment, prefix string) bool {
-	joined := strings.Join(stripWrappers(seg.argv), " ")
+	return wordsHavePrefix(stripWrappers(seg.argv), prefix)
+}
+
+func wordsHavePrefix(words []string, prefix string) bool {
+	joined := strings.Join(words, " ")
 	return joined == prefix || strings.HasPrefix(joined, prefix+" ")
 }
 
+// normalizedArgv 返回 deny 与 ask 规则额外比较的归一化命令：剥掉包装，argv[0] 取 basename，
+// 有全局选项表的命令（git、npm 等）再剥掉子命令前的全局选项。没有命令时返回 nil。
+func normalizedArgv(seg segment, cwd string, ctx Context) []string {
+	argv, flags := commandWords(seg)
+	if len(argv) == 0 {
+		return nil
+	}
+	name := filepath.Base(argv[0])
+	if spec, ok := leadingOptions[name]; ok {
+		argv, _, _, _ = stripLeading(argv, flags, spec, cwd, ctx)
+	}
+	return append([]string{name}, argv[1:]...)
+}
+
 // segmentAllowable 判断一段能否被 allow 规则按前缀或正则放行：不含无法静态分析的写法，
-// 命令前没有注入型环境变量，输出与输入重定向只指向无害伪设备。
+// 命令前没有注入型环境变量，命令的词里没有引号外的 glob 或 $ 展开，输出与输入重定向只指向无害伪设备。
 func segmentAllowable(seg segment) bool {
 	if seg.subshell {
 		return false
 	}
-	argv := stripWrappers(seg.argv)
+	argv, flags := commandWords(seg)
 	if assignsInjectedEnv(seg.argv[:len(seg.argv)-len(argv)]) {
 		return false
+	}
+	for _, f := range flags {
+		if f.glob || f.expand {
+			return false
+		}
 	}
 	return harmlessTargets(seg.redirects, seg.redirectFlags) && harmlessTargets(seg.inputs, seg.inputFlags)
 }

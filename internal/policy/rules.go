@@ -261,6 +261,10 @@ func (m Match) validateLearned() error {
 		if m.Domain == "" {
 			return fmt.Errorf("learned 的 network 规则必须带 domain")
 		}
+		// 按 hostMatches 的归一化检查：不能只锚到顶级域
+		if d := normalizeHost(m.Domain); !strings.Contains(d, ".") || strings.HasPrefix(d, ".") {
+			return fmt.Errorf("learned 的 network 规则的 domain 至少要有两级且不能以点开头，得到 %q", m.Domain)
+		}
 	default:
 		return fmt.Errorf("learned 规则必须指定 payload")
 	}

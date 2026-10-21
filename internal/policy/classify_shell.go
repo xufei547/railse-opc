@@ -121,6 +121,9 @@ func classifyArgv(argv []string, flags []wordFlags, cwd string, ctx Context) Ris
 	if f, ok := unknownIf[name]; ok && f(argv[1:]) {
 		risk = maxRisk(risk, RiskUnknown)
 	}
+	if spec, ok := outputOptions[name]; ok {
+		risk = maxRisk(risk, outputRisk(argv, flags, spec, cwd, ctx))
+	}
 	// 在别的目录执行（git -C 等）：会写的命令按目录定级；只读命令只看目录是否无法解析或敏感
 	if risk > RiskRead || dirRisk == RiskUnknown || dirRisk == RiskDestructive {
 		risk = maxRisk(risk, dirRisk)

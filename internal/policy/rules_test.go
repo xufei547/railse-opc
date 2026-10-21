@@ -167,6 +167,9 @@ func TestValidateLearnedShape(t *testing.T) {
 		{"mcp 缺 mcp_tool", "{payload: mcp, mcp_server: github, risk: network}", "mcp_tool"},
 		{"mcp 缺 mcp_server", "{payload: mcp, mcp_tool: get_issue, risk: network}", "mcp_server"},
 		{"network 缺 domain", "{payload: network, risk: network}", "domain"},
+		{"domain 只有顶级域", "{payload: network, domain: com, risk: network}", "domain"},
+		{"domain 以点开头", "{payload: network, domain: .example.com, risk: network}", "domain"},
+		{"domain 顶级域带尾点", "{payload: network, domain: \"com.\", risk: network}", "domain"},
 	}
 	for _, c := range bad {
 		_, err := ParseRuleSet([]byte(rule(c.match)))
@@ -184,6 +187,7 @@ func TestValidateLearnedShape(t *testing.T) {
 		"{payload: file_write, path_glob: \"~/proj/**\", risk: write_in_project}",
 		"{payload: mcp, mcp_server: github, mcp_tool: get_issue, risk: network}",
 		"{payload: network, domain: example.com, risk: network}",
+		"{payload: network, domain: api.Example.com., risk: network}",
 	}
 	for _, m := range good {
 		if _, err := ParseRuleSet([]byte(rule(m))); err != nil {

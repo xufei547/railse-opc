@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"net/url"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -424,6 +426,137 @@ func stripLeading(argv []string, flags []wordFlags, spec leadSpec, cwd string, c
 	return outArgv, outFlags, floor, dirRisk
 }
 
+// ---- 输出到文件的选项 ----
+
+// outputOpt 是把输出写进文件的长选项：full 是全名，min 是接受的最短缩写（getopt 风格），不接受缩写时与 full 相同。
+type outputOpt struct{ full, min string }
+
+// outputSpec 描述命令把结果写进文件的选项。fetch 为 true 的是下载工具：写到项目内不抬级，
+// 写到项目外或无法解析的路径按 outward，敏感路径按 destructive；否则按普通写入的路径定级。
+type outputSpec struct {
+	short      string // 带文件参数的短选项字符
+	shortArg   string // 其余带参数的短选项字符：选项簇里遇到就停，参数不再当选项看
+	long       []outputOpt
+	remoteName string   // 按远端文件名写进当前目录的短选项字符
+	remoteLong []string // 同上的长选项
+	fetch      bool
+}
+
+var outputOptions = map[string]outputSpec{
+	"curl": {
+		short: "o", shortArg: "AbcCdDeEFHKmPQrtTuUwxXyYz",
+		long:       []outputOpt{{"--output", "--output"}},
+		remoteName: "O", remoteLong: []string{"--remote-name"},
+		fetch: true,
+	},
+	"wget": {
+		short: "O", shortArg: "aeoiBtTwQPlARDIXU",
+		long:  []outputOpt{{"--output-document", "--output-d"}},
+		fetch: true,
+	},
+	"git": {long: []outputOpt{{"--output", "--output"}}},
+}
+
+// outputTargets 找出命令写入的文件及其标志：输出选项的值；按远端文件名下载时取各 URL 路径的最后一段，
+// 它落在当前目录。flags 与 argv 一一对应。
+func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string, []wordFlags) {
+	var targets []string
+	var tflags []wordFlags
+	add := func(t string, f wordFlags) {
+		targets = append(targets, t)
+		tflags = append(tflags, f)
+	}
+	remote := false
+	for i := 1; i < len(argv); i++ {
+		a, f := argv[i], flagAt(flags, i)
+		switch {
+		case strings.HasPrefix(a, "--"):
+			name, val, hasVal := strings.Cut(a, "=")
+			if slices.Contains(spec.remoteLong, name) {
+				remote = true
+				continue
+			}
+			for _, o := range spec.long {
+				if len(name) < len(o.min) || !strings.HasPrefix(o.full, name) {
+					continue
+				}
+				if hasVal {
+					add(val, f)
+				} else if i+1 < len(argv) {
+					add(argv[i+1], flagAt(flags, i+1))
+					i++
+				}
+				break
+			}
+		case len(a) > 1 && a[0] == '-':
+			for j := 1; j < len(a); j++ {
+				c := a[j]
+				switch {
+				case strings.IndexByte(spec.remoteName, c) >= 0:
+					remote = true
+					continue
+				case strings.IndexByte(spec.short, c) >= 0:
+					if j+1 < len(a) {
+						add(a[j+1:], f)
+					} else if i+1 < len(argv) {
+						add(argv[i+1], flagAt(flags, i+1))
+						i++
+					}
+				case strings.IndexByte(spec.shortArg, c) >= 0:
+					if j+1 == len(a) {
+						i++ // 参数是下一个词
+					}
+				default:
+					continue
+				}
+				break
+			}
+		}
+	}
+	if remote {
+		for _, a := range argv[1:] {
+			if !strings.Contains(a, "://") {
+				continue
+			}
+			u, err := url.Parse(a)
+			if err != nil {
+				add("", wordFlags{}) // 解析不了的 URL：文件名未知，按无法解析处理
+				continue
+			}
+			if base := path.Base(u.Path); base != "/" && base != "." {
+				add(base, wordFlags{})
+			}
+		}
+	}
+	return targets, tflags
+}
+
+// outputRisk 给命令写入的文件定级，见 outputSpec。没有输出文件时返回 RiskRead。
+func outputRisk(argv []string, flags []wordFlags, spec outputSpec, cwd string, ctx Context) Risk {
+	targets, tflags := outputTargets(argv, flags, spec)
+	risk := RiskRead
+	for i, t := range targets {
+		if t == "-" {
+			continue // 标准输出
+		}
+		r := RiskUnknown
+		if t != "" && !wordUnresolvable(t, tflags[i], ctx) {
+			r = resolvedPathRisk(t, cwd, ctx)
+		}
+		if spec.fetch {
+			switch r {
+			case RiskDestructive:
+			case RiskWriteOutside, RiskUnknown:
+				r = RiskOutward
+			default:
+				r = RiskRead // 项目内与无害伪设备：保持下载本身的等级
+			}
+		}
+		risk = maxRisk(risk, r)
+	}
+	return risk
+}
+
 // ---- 按参数抬到 unknown 的兜底 ----
 
 // unknownIf 是命中命令表之后再看的兜底：判断为真时结果至少为 unknown，只抬不降。
@@ -527,11 +660,15 @@ var injectEnv = []string{
 	// 同类
 	"GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXEC_PATH", "GIT_WORK_TREE", "PYTHONHOME",
 	"PERL5LIB", "RUBYLIB", "NODE_PATH", "ZDOTDIR", "SHELLOPTS", "BASHOPTS", "PS4",
+	// 改家目录与配置目录，等于换一套配置文件
+	"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "GIT_SEQUENCE_EDITOR", "GIT_TEMPLATE_DIR",
+	// 构建工具与远端端点
+	"GOFLAGS", "CC", "CXX", "MAKEFLAGS", "DOCKER_HOST", "KUBECONFIG",
 }
 
-// injectEnvPrefixes 是同类变量的前缀：GIT_CONFIG_COUNT、GIT_CONFIG_KEY_n 等同于 git -c，
-// BASH_FUNC_ 导出函数，npm_config_ 改 npm 配置。
-var injectEnvPrefixes = []string{"GIT_CONFIG", "BASH_FUNC_", "npm_config_", "NPM_CONFIG_"}
+// injectEnvPrefixes 是同类变量的前缀：GIT_CONFIG_COUNT、GIT_CONFIG_KEY_n、GIT_CONFIG_GLOBAL 等同于 git -c 或换配置文件，
+// GIT_TRACE* 把跟踪输出写到任意路径，BASH_FUNC_ 导出函数，npm_config_ 改 npm 配置。
+var injectEnvPrefixes = []string{"GIT_CONFIG", "GIT_TRACE", "BASH_FUNC_", "npm_config_", "NPM_CONFIG_"}
 
 func injectsEnv(name string) bool {
 	return slices.Contains(injectEnv, name) || hasAnyPrefix(name, injectEnvPrefixes)

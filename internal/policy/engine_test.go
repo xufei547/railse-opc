@@ -195,6 +195,16 @@ func TestEvaluatePaused(t *testing.T) {
 	if d.Action != ActionAsk || d.Risk != RiskRead || d.RuleID != "" {
 		t.Fatalf("暂停时一切都 ask, 得到 %+v", d)
 	}
+	// 暂停不会把用户的 deny 变成 ask
+	for _, ctx := range []Context{otherCtx, projCtx} {
+		if d := e.Evaluate(shell("npm run build"), ctx); d.Action != ActionDeny || d.RuleID != "global-deny-npm-run" {
+			t.Errorf("%s: 暂停时用户 deny 仍应生效, 得到 %+v", ctx.ProjectRoot, d)
+		}
+	}
+	e.SetPaused(false)
+	if d := e.Evaluate(shell("git status"), projCtx); d.Action != ActionAllow {
+		t.Errorf("恢复后应放行, 得到 %+v", d)
+	}
 }
 
 func TestEvaluateConcurrentPause(t *testing.T) {
@@ -299,6 +309,15 @@ rules:
 		{"git log $(rm -rf ~)", ActionAsk, ""},
 		{"git log > ~/.bashrc", ActionAsk, ""},
 		{"PAGER='sh -c x' git log", ActionAsk, ""},
+		{"git push origin main ${HOME:+--force}", ActionAsk, ""},
+		{`git push origin main "${HOME:+--force}"`, ActionAsk, ""},
+		{"git push origin main ${X:---force}", ActionAsk, ""},
+		{"git push origin main *", ActionAsk, ""},
+		{"git push origin main {a,b}", ActionAsk, ""},
+		{"git log $X", ActionAsk, ""},
+		{"git log '$X' '*'", ActionAllow, "log-regex"},
+		{"HOME=/home/u/proj/.x git push origin main", ActionAsk, ""},
+		{"/tmp/evil/git push origin main", ActionAsk, ""},
 	}
 	for _, c := range cases {
 		d := e.Evaluate(shell(c.cmd), projCtx)
@@ -329,10 +348,15 @@ rules:
     scope: global
     match: {payload: network, domain: evil.com}
     action: deny
-  - id: learned-net
+  - id: learned-evil
     source: learned
     scope: {project: "~/proj"}
-    match: {payload: network, domain: com, risk: network}
+    match: {payload: network, domain: evil.com, risk: network}
+    action: allow
+  - id: learned-good
+    source: learned
+    scope: global
+    match: {payload: network, domain: good.com, risk: network}
     action: allow
 `
 	de := mustEngine(t, domainRules)
@@ -341,7 +365,7 @@ rules:
 			t.Errorf("%s: 应被 domain deny 拦下, 得到 %s/%q", u, d.Action, d.RuleID)
 		}
 	}
-	if d := de.Evaluate(Payload{Type: PayloadNetwork, URL: "https://good.com/"}, projCtx); d.Action != ActionAllow || d.RuleID != "learned-net" {
+	if d := de.Evaluate(Payload{Type: PayloadNetwork, URL: "https://good.com/"}, projCtx); d.Action != ActionAllow || d.RuleID != "learned-good" {
 		t.Errorf("good.com 应由 learned 放行, 得到 %s/%q", d.Action, d.RuleID)
 	}
 
@@ -391,6 +415,219 @@ rules:
 	} {
 		if d := ae.Evaluate(shell(c.cmd), c.ctx); d.Action != c.want || d.RuleID != c.rule {
 			t.Errorf("%q@%s: 得到 %s/%q, 想要 %s/%q", c.cmd, c.ctx.ProjectRoot, d.Action, d.RuleID, c.want, c.rule)
+		}
+	}
+}
+
+func TestEvaluateRestrictiveNormalized(t *testing.T) {
+	// deny 与 ask 规则同时按归一化的命令匹配：argv[0] 取 basename、剥掉包装和子命令前的全局选项。
+	const rules = `
+version: 1
+rules:
+  - id: builtin-readonly
+    source: builtin
+    scope: global
+    match: {risk: read}
+    action: allow
+  - id: builtin-write-in-project
+    source: builtin
+    scope: global
+    match: {risk: write_in_project}
+    action: allow
+  - id: deny-commit
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: "git commit"}
+    action: deny
+  - id: deny-npm-run
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: "npm run"}
+    action: deny
+  - id: deny-curl
+    source: user
+    scope: global
+    match: {payload: shell, command_regex: "^curl "}
+    action: deny
+  - id: ask-log
+    source: user
+    scope: {project: "~/proj"}
+    match: {payload: shell, command_prefix: "git log"}
+    action: ask
+`
+	e := mustEngine(t, rules)
+	cases := []struct {
+		cmd  string
+		want Action
+		rule string
+	}{
+		{"/usr/bin/git commit -m x", ActionDeny, "deny-commit"},
+		{"git --no-pager commit -m x", ActionDeny, "deny-commit"},
+		{"git -C sub commit -m x", ActionDeny, "deny-commit"},
+		{"./node_modules/.bin/npm run build", ActionDeny, "deny-npm-run"},
+		{"'curl' https://x.y", ActionDeny, "deny-curl"},
+		{`c\url https://x.y`, ActionDeny, "deny-curl"},
+		{"FOO=1 curl https://x.y", ActionDeny, "deny-curl"},
+		{"curl\thttps://x.y", ActionDeny, "deny-curl"},
+		{"/usr/bin/curl https://x.y", ActionDeny, "deny-curl"},
+		{"git --no-pager log", ActionAsk, "ask-log"},
+		{"/usr/bin/git log; true", ActionAsk, "ask-log"},
+		{"git status", ActionAllow, "builtin-readonly"},
+	}
+	for _, c := range cases {
+		d := e.Evaluate(shell(c.cmd), projCtx)
+		if d.Action != c.want || d.RuleID != c.rule {
+			t.Errorf("%q 得到 %s/%q (%s), 想要 %s/%q", c.cmd, d.Action, d.RuleID, d.Reason, c.want, c.rule)
+		}
+	}
+}
+
+func TestEvaluatePathGlobFoldsCase(t *testing.T) {
+	const rules = `
+version: 1
+rules:
+  - id: builtin-write-in-project
+    source: builtin
+    scope: global
+    match: {risk: write_in_project}
+    action: allow
+  - id: deny-secrets
+    source: user
+    scope: global
+    match: {payload: file_write, path_glob: "~/proj/secrets/**"}
+    action: deny
+  - id: allow-tmp
+    source: user
+    scope: global
+    match: {payload: file_write, path_glob: "/Tmp/**"}
+    action: allow
+`
+	e := mustEngine(t, rules)
+	cases := []struct {
+		path string
+		want Action
+		rule string
+	}{
+		{"/home/u/proj/secrets/a", ActionDeny, "deny-secrets"},
+		{"/home/u/proj/SECRETS/a", ActionDeny, "deny-secrets"},
+		{"/home/u/proj/Secrets/sub/b", ActionDeny, "deny-secrets"},
+		{"/home/u/proj/src/a", ActionAllow, "builtin-write-in-project"},
+		{"/tmp/x", ActionAllow, "allow-tmp"},
+	}
+	for _, c := range cases {
+		d := e.Evaluate(Payload{Type: PayloadFileWrite, Path: c.path}, projCtx)
+		if d.Action != c.want || d.RuleID != c.rule {
+			t.Errorf("%s 得到 %s/%q, 想要 %s/%q", c.path, d.Action, d.RuleID, c.want, c.rule)
+		}
+	}
+}
+
+func TestEvaluateScopeCleansPaths(t *testing.T) {
+	e := mustEngine(t, engineRules)
+	for _, root := range []string{"/home/u/proj/", "/home/u/proj/.", "/home/u//proj"} {
+		ctx := Context{ProjectRoot: root, HomeDir: "/home/u", MachineID: "m1"}
+		if d := e.Evaluate(shell("git push origin main"), ctx); d.Action != ActionAllow || d.RuleID != "user-push-proj" {
+			t.Errorf("ProjectRoot %q 应匹配 ~/proj, 得到 %s/%q", root, d.Action, d.RuleID)
+		}
+	}
+	slash := mustEngine(t, "version: 1\nrules:\n  - id: p\n    source: user\n    scope: {project: \"~/proj/\"}\n    match: {payload: shell, command_prefix: \"git push origin\"}\n    action: allow\n")
+	if d := slash.Evaluate(shell("git push origin main"), projCtx); d.Action != ActionAllow || d.RuleID != "p" {
+		t.Errorf("规则范围带尾斜杠也应匹配, 得到 %s/%q", d.Action, d.RuleID)
+	}
+}
+
+func TestNewEngineCopiesPointers(t *testing.T) {
+	rs, err := ParseRuleSet([]byte(engineRules))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := NewEngine(rs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 改动调用方手里的规则集不得影响引擎
+	for i := range rs.Rules {
+		r := &rs.Rules[i]
+		if r.Enabled != nil {
+			*r.Enabled = true // 打开 disabled-deny-ls
+		}
+		if r.Match.Risk != nil {
+			*r.Match.Risk = RiskDestructive
+		}
+	}
+	if d := e.Evaluate(shell("ls -la"), projCtx); d.Action != ActionAllow || d.RuleID != "builtin-readonly" {
+		t.Errorf("引擎应持有规则副本, 得到 %s/%q", d.Action, d.RuleID)
+	}
+}
+
+func TestEvaluateOrdering(t *testing.T) {
+	m1 := projCtx // MachineID m1
+	cases := []struct {
+		name, rules string
+		want        Action
+		rule        string
+	}{
+		{"非 user 规则 project 压 machine", `
+version: 1
+rules:
+  - id: machine-deny
+    source: builtin
+    scope: {machine: m1}
+    match: {payload: shell, command_prefix: cat}
+    action: deny
+  - id: project-allow
+    source: learned
+    scope: {project: "~/proj"}
+    match: {payload: shell, command_prefix: cat, risk: read}
+    action: allow
+`, ActionAllow, "project-allow"},
+		{"非 user 规则 machine 压 global", `
+version: 1
+rules:
+  - id: global-allow
+    source: learned
+    scope: global
+    match: {payload: shell, command_prefix: cat, risk: read}
+    action: allow
+  - id: machine-ask
+    source: builtin
+    scope: {machine: m1}
+    match: {payload: shell, command_prefix: cat}
+    action: ask
+`, ActionAsk, "machine-ask"},
+		{"同范围 allow 压 ask", `
+version: 1
+rules:
+  - id: ask-cat
+    source: builtin
+    scope: global
+    match: {payload: shell, command_prefix: cat}
+    action: ask
+  - id: allow-cat
+    source: builtin
+    scope: global
+    match: {payload: shell, command_prefix: cat}
+    action: allow
+`, ActionAllow, "allow-cat"},
+		{"非 user 的 deny 输给更具体的 allow", `
+version: 1
+rules:
+  - id: global-deny
+    source: builtin
+    scope: global
+    match: {payload: shell, command_prefix: cat}
+    action: deny
+  - id: machine-allow
+    source: builtin
+    scope: {machine: m1}
+    match: {payload: shell, command_prefix: cat}
+    action: allow
+`, ActionAllow, "machine-allow"},
+	}
+	for _, c := range cases {
+		d := mustEngine(t, c.rules).Evaluate(shell("cat a.txt"), m1)
+		if d.Action != c.want || d.RuleID != c.rule {
+			t.Errorf("%s: 得到 %s/%q, 想要 %s/%q", c.name, d.Action, d.RuleID, c.want, c.rule)
 		}
 	}
 }
