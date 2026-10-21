@@ -1,0 +1,106 @@
+package policy
+
+import (
+	"strings"
+	"testing"
+)
+
+const validRulesYAML = `
+version: 1
+rules:
+  - id: builtin-readonly
+    source: builtin
+    scope: global
+    match: {risk: read}
+    action: allow
+  - id: user-push-railse
+    source: user
+    scope: {project: "~/Projects/railse-opc"}
+    match: {payload: shell, command_prefix: "git push origin"}
+    action: allow
+  - id: learned-0042
+    source: learned
+    scope: {project: "~/Projects/blog"}
+    match: {payload: shell, command_prefix: "npm run", risk: write_in_project}
+    action: allow
+    created_from: "6f1c"
+  - id: machine-deny-curl
+    source: user
+    scope: {machine: m1}
+    match: {payload: shell, command_regex: "^curl .*"}
+    action: deny
+    enabled: false
+`
+
+func TestParseRuleSetValid(t *testing.T) {
+	rs, err := ParseRuleSet([]byte(validRulesYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rs.Version != 1 || len(rs.Rules) != 4 {
+		t.Fatalf("version=%d rules=%d", rs.Version, len(rs.Rules))
+	}
+	r0 := rs.Rules[0]
+	if !r0.Scope.IsGlobal() || r0.Match.Risk == nil || *r0.Match.Risk != RiskRead || !r0.IsEnabled() {
+		t.Errorf("第 1 条解析错误: %+v", r0)
+	}
+	r1 := rs.Rules[1]
+	if r1.Scope.Project != "~/Projects/railse-opc" || r1.Match.CommandPrefix != "git push origin" || r1.Scope.specificity() != 3 {
+		t.Errorf("第 2 条解析错误: %+v", r1)
+	}
+	r3 := rs.Rules[3]
+	if r3.Scope.Machine != "m1" || r3.IsEnabled() || r3.Action != ActionDeny || r3.Scope.specificity() != 2 {
+		t.Errorf("第 4 条解析错误: %+v", r3)
+	}
+}
+
+func TestRuleSetMarshalRoundTrip(t *testing.T) {
+	rs, err := ParseRuleSet([]byte(validRulesYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := rs.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "scope: global") {
+		t.Errorf("全局范围应序列化为字符串 global, 得到:\n%s", out)
+	}
+	back, err := ParseRuleSet(out)
+	if err != nil {
+		t.Fatalf("重新解析失败: %v\n%s", err, out)
+	}
+	if len(back.Rules) != 4 || back.Rules[1].Scope.Project != "~/Projects/railse-opc" {
+		t.Errorf("往返后不一致: %+v", back.Rules)
+	}
+}
+
+func TestParseRuleSetInvalid(t *testing.T) {
+	cases := []struct {
+		name, yaml, wantErr string
+	}{
+		{"版本错误", "version: 2\nrules: []\n", "version"},
+		{"缺 id", "version: 1\nrules:\n  - source: user\n    scope: global\n    match: {risk: read}\n    action: allow\n", "缺少 id"},
+		{"id 重复", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {risk: read}\n    action: allow\n  - id: a\n    source: user\n    scope: global\n    match: {risk: read}\n    action: allow\n", "重复"},
+		{"source 错误", "version: 1\nrules:\n  - id: a\n    source: robot\n    scope: global\n    match: {risk: read}\n    action: allow\n", "source"},
+		{"action 错误", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {risk: read}\n    action: maybe\n", "action"},
+		{"match 为空", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {}\n    action: allow\n", "match"},
+		{"正则无效", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {command_regex: \"(\"}\n    action: allow\n", "command_regex"},
+		{"scope 字符串非 global", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: everywhere\n    match: {risk: read}\n    action: allow\n", "global"},
+		{"scope 同时两项", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: {machine: m1, project: p}\n    match: {risk: read}\n    action: allow\n", "同时"},
+		{"builtin 放行 outward", "version: 1\nrules:\n  - id: a\n    source: builtin\n    scope: global\n    match: {risk: outward}\n    action: allow\n", "user"},
+		{"learned 放行 destructive", "version: 1\nrules:\n  - id: a\n    source: learned\n    scope: global\n    match: {risk: destructive}\n    action: allow\n", "user"},
+		{"learned 放行无 risk", "version: 1\nrules:\n  - id: a\n    source: learned\n    scope: global\n    match: {command_prefix: ls}\n    action: allow\n", "risk"},
+		{"未知风险名", "version: 1\nrules:\n  - id: a\n    source: user\n    scope: global\n    match: {risk: scary}\n    action: allow\n", "风险等级"},
+	}
+	for _, c := range cases {
+		_, err := ParseRuleSet([]byte(c.yaml))
+		if err == nil {
+			t.Errorf("%s: 应报错", c.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: 错误 %q 应包含 %q", c.name, err, c.wantErr)
+		}
+	}
+}
