@@ -206,6 +206,8 @@ Claude Code 的 Notification 钩子映射为 `question`，Stop 钩子映射为 `
 2. **用户规则与学来的规则。** 范围越具体越优先：project 压 machine，machine 压 global。同一范围内 deny 压 allow，allow 压 ask。
 3. **默认值。** 无规则命中时按风险等级：`read` 和 `write_in_project` 放行，其余 ask。
 
+放行 `destructive` 还必须在规则里显式写 `risk: destructive`，仅 `source: user` 不够。用户的 deny 规则优先于一切，且复合命令中任一段命中即生效；allow 规则要求每一段都命中，且遇到无法分析的段、注入型环境变量或指向非空设备的重定向时不命中。
+
 ### 4.3 规则格式
 
 匹配条件为结构化字段，不是 DSL。YAML 导入导出，内置一个默认规则包。

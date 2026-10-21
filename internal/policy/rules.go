@@ -226,9 +226,43 @@ func (r Rule) validate() error {
 		if r.Match.Risk != nil && *r.Match.Risk >= RiskOutward {
 			return fmt.Errorf("只有 user 来源的规则才能放行 %s", *r.Match.Risk)
 		}
-		if r.Source == SourceLearned && r.Match.Risk == nil {
-			return fmt.Errorf("learned 规则必须带 risk")
+		if r.Source == SourceLearned {
+			return r.Match.validateLearned()
 		}
+	}
+	return nil
+}
+
+// validateLearned 检查 learned 放行规则的形状：risk 只能是 read、write_in_project 或 network，
+// 并且必须带与 payload 对应的锚点，不能只凭风险等级放行一整类请求。
+func (m Match) validateLearned() error {
+	if m.Risk == nil {
+		return fmt.Errorf("learned 规则必须带 risk")
+	}
+	switch *m.Risk {
+	case RiskRead, RiskWriteInProject, RiskNetwork:
+	default:
+		return fmt.Errorf("learned 规则的 risk 只能是 read、write_in_project 或 network，得到 %s", *m.Risk)
+	}
+	switch m.Payload {
+	case PayloadShell:
+		if m.CommandPrefix == "" {
+			return fmt.Errorf("learned 的 shell 规则必须带 command_prefix")
+		}
+	case PayloadFileWrite:
+		if m.PathGlob == "" {
+			return fmt.Errorf("learned 的 file_write 规则必须带 path_glob")
+		}
+	case PayloadMCP:
+		if m.MCPServer == "" || m.MCPTool == "" {
+			return fmt.Errorf("learned 的 mcp 规则必须同时带 mcp_server 和 mcp_tool")
+		}
+	case PayloadNetwork:
+		if m.Domain == "" {
+			return fmt.Errorf("learned 的 network 规则必须带 domain")
+		}
+	default:
+		return fmt.Errorf("learned 规则必须指定 payload")
 	}
 	return nil
 }

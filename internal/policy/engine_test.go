@@ -95,7 +95,7 @@ func TestEvaluateBasics(t *testing.T) {
 		{"对外需要 user 规则且范围匹配", shell("git push origin main"), projCtx, ActionAllow, "user-push-proj"},
 		{"对外范围不匹配则 ask", shell("git push origin main"), otherCtx, ActionAsk, ""},
 		{"复合命令前缀要每段都匹配", shell("git push origin main && rm -rf x"), projCtx, ActionAsk, ""},
-		{"项目范围压全局", shell("npm run build"), projCtx, ActionAllow, "proj-allow-npm-run"},
+		{"用户 deny 压项目范围 allow", shell("npm run build"), projCtx, ActionDeny, "global-deny-npm-run"},
 		{"全局 deny 在其他项目生效", shell("npm run build"), otherCtx, ActionDeny, "global-deny-npm-run"},
 		{"禁用的规则不生效", shell("ls -la"), projCtx, ActionAllow, "builtin-readonly"},
 		{"机器范围不匹配", shell("curl https://x.y"), projCtx, ActionAsk, ""},
@@ -152,8 +152,8 @@ func TestEvaluateFloorWithoutRiskConstraint(t *testing.T) {
 		{"builtin 不得放行 destructive", "version: 1\nrules:\n  - id: b\n    source: builtin\n    scope: global\n    match: {payload: shell}\n    action: allow\n", "rm -rf x", ActionAsk, ""},
 		{"builtin 不得放行 outward", "version: 1\nrules:\n  - id: b\n    source: builtin\n    scope: global\n    match: {payload: shell}\n    action: allow\n", "git push origin main", ActionAsk, ""},
 		{"builtin 放行只读", "version: 1\nrules:\n  - id: b\n    source: builtin\n    scope: global\n    match: {payload: shell}\n    action: allow\n", "ls", ActionAllow, "b"},
-		{"learned 放行只读", "version: 1\nrules:\n  - id: b\n    source: learned\n    scope: global\n    match: {payload: shell, risk: read}\n    action: allow\n", "ls", ActionAllow, "b"},
-		{"learned 不得放行敏感文件读取", "version: 1\nrules:\n  - id: b\n    source: learned\n    scope: global\n    match: {payload: shell, risk: read}\n    action: allow\n", "cat .env", ActionAsk, ""},
+		{"learned 放行只读", "version: 1\nrules:\n  - id: b\n    source: learned\n    scope: global\n    match: {payload: shell, command_prefix: cat, risk: read}\n    action: allow\n", "cat README.md", ActionAllow, "b"},
+		{"learned 不得放行敏感文件读取", "version: 1\nrules:\n  - id: b\n    source: learned\n    scope: global\n    match: {payload: shell, command_prefix: cat, risk: read}\n    action: allow\n", "cat .env", ActionAsk, ""},
 	}
 	for _, c := range cases {
 		e := mustEngine(t, c.rules)
@@ -224,6 +224,199 @@ func TestEvaluateConcurrentPause(t *testing.T) {
 	wg.Wait()
 }
 
+func TestEvaluateDestructiveNeedsExplicitRisk(t *testing.T) {
+	const implicit = `
+version: 1
+rules:
+  - id: push
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: "git push origin"}
+    action: allow
+`
+	const explicit = `
+version: 1
+rules:
+  - id: push-force
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: "git push origin", risk: destructive}
+    action: allow
+`
+	cases := []struct {
+		name, rules, cmd string
+		want             Action
+		rule             string
+		risk             Risk
+	}{
+		{"user 规则放行 outward", implicit, "git push origin main", ActionAllow, "push", RiskOutward},
+		{"未写 risk 不放行 destructive", implicit, "git push origin main --force", ActionAsk, "", RiskDestructive},
+		{"显式 risk: destructive 放行强推", explicit, "git push origin main --force", ActionAllow, "push-force", RiskDestructive},
+		{"risk: destructive 不覆盖 outward", explicit, "git push origin main", ActionAsk, "", RiskOutward},
+	}
+	for _, c := range cases {
+		d := mustEngine(t, c.rules).Evaluate(shell(c.cmd), projCtx)
+		if d.Action != c.want || d.RuleID != c.rule || d.Risk != c.risk {
+			t.Errorf("%s: %q 得到 %s/%q/%s, 想要 %s/%q/%s", c.name, c.cmd, d.Action, d.RuleID, d.Risk, c.want, c.rule, c.risk)
+		}
+	}
+}
+
+func TestEvaluateAllowSegmentSafety(t *testing.T) {
+	// allow 规则遇到注入型环境变量、指向非空设备的重定向或无法分析的段时不命中；正则按段匹配。
+	const rules = `
+version: 1
+rules:
+  - id: push
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: "git push origin"}
+    action: allow
+  - id: status
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: "git status"}
+    action: allow
+  - id: log-regex
+    source: user
+    scope: global
+    match: {payload: shell, command_regex: "^git log"}
+    action: allow
+`
+	e := mustEngine(t, rules)
+	cases := []struct {
+		cmd  string
+		want Action
+		rule string
+	}{
+		{"GIT_SSH_COMMAND=x git push origin main", ActionAsk, ""},
+		{"git push origin main > ~/.bashrc", ActionAsk, ""},
+		{"git push origin main", ActionAllow, "push"},
+		{"git status 2>/dev/null", ActionAllow, "status"},
+		{"git log --oneline", ActionAllow, "log-regex"},
+		{"git log; git log -1", ActionAllow, "log-regex"},
+		{"git log; rm -rf ~", ActionAsk, ""},
+		{"git log $(rm -rf ~)", ActionAsk, ""},
+		{"git log > ~/.bashrc", ActionAsk, ""},
+		{"PAGER='sh -c x' git log", ActionAsk, ""},
+	}
+	for _, c := range cases {
+		d := e.Evaluate(shell(c.cmd), projCtx)
+		if d.Action != c.want || d.RuleID != c.rule {
+			t.Errorf("%q 得到 %s/%q (%s), 想要 %s/%q", c.cmd, d.Action, d.RuleID, d.Reason, c.want, c.rule)
+		}
+	}
+	// 正则不再对整条原文匹配
+	re := &mustEngine(t, "version: 1\nrules:\n  - id: u\n    source: user\n    scope: global\n    match: {payload: shell, command_regex: \"^git status\"}\n    action: allow\n").rules[0]
+	if matchRequest(re, shell("git status; rm -rf ~"), RiskDestructive, projCtx) {
+		t.Error("正则 ^git status 不应匹配 git status; rm -rf ~")
+	}
+}
+
+func TestEvaluateUserDenyPrecedence(t *testing.T) {
+	e := mustEngine(t, engineRules)
+	for _, ctx := range []Context{projCtx, otherCtx} {
+		if d := e.Evaluate(shell("npm run build; true"), ctx); d.Action != ActionDeny || d.RuleID != "global-deny-npm-run" {
+			t.Errorf("%s: deny 前缀任一段命中即生效, 得到 %s/%q", ctx.ProjectRoot, d.Action, d.RuleID)
+		}
+	}
+
+	const domainRules = `
+version: 1
+rules:
+  - id: user-deny-evil
+    source: user
+    scope: global
+    match: {payload: network, domain: evil.com}
+    action: deny
+  - id: learned-net
+    source: learned
+    scope: {project: "~/proj"}
+    match: {payload: network, domain: com, risk: network}
+    action: allow
+`
+	de := mustEngine(t, domainRules)
+	for _, u := range []string{"https://evil.com/", "https://EVIL.com/", "https://evil.com./", "https://API.Evil.Com./x"} {
+		if d := de.Evaluate(Payload{Type: PayloadNetwork, URL: u}, projCtx); d.Action != ActionDeny || d.RuleID != "user-deny-evil" {
+			t.Errorf("%s: 应被 domain deny 拦下, 得到 %s/%q", u, d.Action, d.RuleID)
+		}
+	}
+	if d := de.Evaluate(Payload{Type: PayloadNetwork, URL: "https://good.com/"}, projCtx); d.Action != ActionAllow || d.RuleID != "learned-net" {
+		t.Errorf("good.com 应由 learned 放行, 得到 %s/%q", d.Action, d.RuleID)
+	}
+
+	const scopeRules = `
+version: 1
+rules:
+  - id: user-deny-curl
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: curl}
+    action: deny
+  - id: learned-curl
+    source: learned
+    scope: {project: "~/proj"}
+    match: {payload: shell, command_prefix: curl, risk: network}
+    action: allow
+`
+	if d := mustEngine(t, scopeRules).Evaluate(shell("curl https://x.y"), projCtx); d.Action != ActionDeny || d.RuleID != "user-deny-curl" {
+		t.Errorf("全局用户 deny 应压项目范围 learned allow, 得到 %s/%q", d.Action, d.RuleID)
+	}
+
+	// 用户 deny 之外仍按范围具体度排序；ask 规则与 deny 一样任一段命中即生效。
+	const askRules = `
+version: 1
+rules:
+  - id: builtin-readonly
+    source: builtin
+    scope: global
+    match: {risk: read}
+    action: allow
+  - id: proj-ask-cat
+    source: user
+    scope: {project: "~/proj"}
+    match: {payload: shell, command_prefix: cat}
+    action: ask
+`
+	ae := mustEngine(t, askRules)
+	for _, c := range []struct {
+		cmd  string
+		ctx  Context
+		want Action
+		rule string
+	}{
+		{"cat a", projCtx, ActionAsk, "proj-ask-cat"},
+		{"cat a; true", projCtx, ActionAsk, "proj-ask-cat"},
+		{"cat a", otherCtx, ActionAllow, "builtin-readonly"},
+	} {
+		if d := ae.Evaluate(shell(c.cmd), c.ctx); d.Action != c.want || d.RuleID != c.rule {
+			t.Errorf("%q@%s: 得到 %s/%q, 想要 %s/%q", c.cmd, c.ctx.ProjectRoot, d.Action, d.RuleID, c.want, c.rule)
+		}
+	}
+}
+
+func TestHostMatches(t *testing.T) {
+	cases := []struct {
+		url, domain string
+		want        bool
+	}{
+		{"https://example.com/", "example.com", true},
+		{"https://api.example.com/v1", "example.com", true},
+		{"https://API.EXAMPLE.COM/", "example.com", true},
+		{"https://example.com./", "example.com", true},
+		{"https://example.com:8443/", "Example.COM.", true},
+		{"https://notexample.com/", "example.com", false},
+		{"https://example.com.evil.net/", "example.com", false},
+		{"https://example.com@evil.net/", "example.com", false},
+		{"example.com/x", "example.com", false},
+	}
+	for _, c := range cases {
+		if got := hostMatches(c.url, c.domain); got != c.want {
+			t.Errorf("hostMatches(%q, %q) = %v", c.url, c.domain, got)
+		}
+	}
+}
+
 func TestEverySegmentHasPrefix(t *testing.T) {
 	cases := []struct {
 		cmd, prefix string
@@ -239,6 +432,16 @@ func TestEverySegmentHasPrefix(t *testing.T) {
 		{"git status $(date)", "git status", false},
 		{"git status; echo $(x)", "git status", false},
 		{"git status 'literal $(x)'", "git status", true},
+		{"GIT_SSH_COMMAND=x git push origin main", "git push origin", false},
+		{"env PATH=/tmp/x git status", "git status", false},
+		{"git status > out.txt", "git status", false},
+		{"git status > ~/.bashrc", "git status", false},
+		{"git status < in.txt", "git status", false},
+		{"git status > /dev/fd/$X", "git status", false},
+		{"git status > /dev/fd/../../tmp/x", "git status", false},
+		{"git status 2>/dev/null", "git status", true},
+		{"git status &>/dev/null < /dev/null", "git status", true},
+		{"git status 2>&1 | git status", "git status", true},
 	}
 	for _, c := range cases {
 		if got := everySegmentHasPrefix(c.cmd, c.prefix); got != c.want {

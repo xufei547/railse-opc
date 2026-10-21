@@ -150,3 +150,49 @@ func TestValidateRejectsBothScopeFields(t *testing.T) {
 		t.Fatalf("同时设置 machine 和 project 应报错, 得到 %v", err)
 	}
 }
+
+func TestValidateLearnedShape(t *testing.T) {
+	rule := func(match string) string {
+		return "version: 1\nrules:\n  - id: a\n    source: learned\n    scope: global\n    match: " + match + "\n    action: allow\n"
+	}
+	bad := []struct {
+		name, match, wantErr string
+	}{
+		{"risk unknown", "{payload: shell, command_prefix: ls, risk: unknown}", "risk"},
+		{"risk write_outside", "{payload: file_write, path_glob: \"/tmp/**\", risk: write_outside}", "risk"},
+		{"缺 payload", "{command_prefix: ls, risk: read}", "payload"},
+		{"shell 缺 command_prefix", "{payload: shell, risk: read}", "command_prefix"},
+		{"shell 只有正则", "{payload: shell, command_regex: \"^ls\", risk: read}", "command_prefix"},
+		{"file_write 缺 path_glob", "{payload: file_write, risk: write_in_project}", "path_glob"},
+		{"mcp 缺 mcp_tool", "{payload: mcp, mcp_server: github, risk: network}", "mcp_tool"},
+		{"mcp 缺 mcp_server", "{payload: mcp, mcp_tool: get_issue, risk: network}", "mcp_server"},
+		{"network 缺 domain", "{payload: network, risk: network}", "domain"},
+	}
+	for _, c := range bad {
+		_, err := ParseRuleSet([]byte(rule(c.match)))
+		if err == nil {
+			t.Errorf("%s: 应报错", c.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: 错误 %q 应包含 %q", c.name, err, c.wantErr)
+		}
+	}
+	good := []string{
+		"{payload: shell, command_prefix: \"npm run\", risk: write_in_project}",
+		"{payload: shell, command_prefix: cat, risk: read}",
+		"{payload: file_write, path_glob: \"~/proj/**\", risk: write_in_project}",
+		"{payload: mcp, mcp_server: github, mcp_tool: get_issue, risk: network}",
+		"{payload: network, domain: example.com, risk: network}",
+	}
+	for _, m := range good {
+		if _, err := ParseRuleSet([]byte(rule(m))); err != nil {
+			t.Errorf("%s: 不应报错: %v", m, err)
+		}
+	}
+	// 形状要求只针对 learned 的 allow 规则
+	deny := "version: 1\nrules:\n  - id: a\n    source: learned\n    scope: global\n    match: {payload: shell}\n    action: deny\n"
+	if _, err := ParseRuleSet([]byte(deny)); err != nil {
+		t.Errorf("learned deny 不受形状限制: %v", err)
+	}
+}

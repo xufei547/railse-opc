@@ -2,6 +2,7 @@ package policy
 
 import (
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -50,7 +51,7 @@ func (e *Engine) SetPaused(p bool) { e.paused.Store(p) }
 
 func (e *Engine) Paused() bool { return e.paused.Load() }
 
-// Evaluate 先定级，再按范围、条件、优先级和底线选出一条规则；没有则 ask。
+// Evaluate 先定级，再按范围、条件、底线和优先级选出一条规则；没有则 ask。
 func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 	risk := Classify(p, ctx)
 	if e.paused.Load() {
@@ -62,8 +63,8 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 		if !r.IsEnabled() || !scopeMatches(r.Scope, ctx) || !matchRequest(r, p, risk, ctx) {
 			continue
 		}
-		if r.Action == ActionAllow && risk >= RiskOutward && r.Source != SourceUser {
-			continue // 底线：只有手写规则能放行对外与不可逆操作
+		if r.Action == ActionAllow && !mayAllow(r, risk) {
+			continue
 		}
 		if best == nil || betterRule(r, best) {
 			best = r
@@ -73,6 +74,18 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 		return Decision{Action: best.Action, Risk: risk, RuleID: best.ID, Reason: "命中规则 " + best.ID}
 	}
 	return Decision{Action: ActionAsk, Risk: risk, Reason: "无规则命中，按 " + risk.String() + " 默认询问"}
+}
+
+// mayAllow 是底线：outward 只有 user 规则能放行；destructive 还要求规则显式写 risk: destructive。
+func mayAllow(r *compiledRule, risk Risk) bool {
+	switch {
+	case risk >= RiskDestructive:
+		return r.Source == SourceUser && r.Match.Risk != nil && *r.Match.Risk == RiskDestructive
+	case risk >= RiskOutward:
+		return r.Source == SourceUser
+	default:
+		return true
+	}
 }
 
 func actionRank(a Action) int {
@@ -86,14 +99,19 @@ func actionRank(a Action) int {
 	}
 }
 
-// betterRule 判断 a 是否比 b 更优先：范围更具体，其次 deny > allow > ask。
+// betterRule 判断 a 是否比 b 更优先：用户的 deny 压一切；其余按范围更具体，其次 deny > allow > ask。
 func betterRule(a, b *compiledRule) bool {
+	if ua, ub := a.userDeny(), b.userDeny(); ua != ub {
+		return ua
+	}
 	sa, sb := a.Scope.specificity(), b.Scope.specificity()
 	if sa != sb {
 		return sa > sb
 	}
 	return actionRank(a.Action) > actionRank(b.Action)
 }
+
+func (r *compiledRule) userDeny() bool { return r.Source == SourceUser && r.Action == ActionDeny }
 
 func scopeMatches(s Scope, ctx Context) bool {
 	switch {
@@ -122,11 +140,21 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 	if m.Risk != nil && *m.Risk != risk {
 		return false
 	}
-	if m.CommandPrefix != "" && !(p.Type == PayloadShell && everySegmentHasPrefix(p.Command, m.CommandPrefix)) {
-		return false
+	// allow 规则要求每一段都命中；deny 与 ask 是收紧，任一段命中即可。
+	anySeg := r.Action != ActionAllow
+	if m.CommandPrefix != "" {
+		if p.Type != PayloadShell || !segmentsMatch(p.Command, anySeg, func(_ string, seg segment) bool {
+			return segmentHasPrefix(seg, m.CommandPrefix)
+		}) {
+			return false
+		}
 	}
-	if r.re != nil && !(p.Type == PayloadShell && r.re.MatchString(p.Command)) {
-		return false
+	if r.re != nil {
+		if p.Type != PayloadShell || !segmentsMatch(p.Command, anySeg, func(text string, _ segment) bool {
+			return r.re.MatchString(text)
+		}) {
+			return false
+		}
 	}
 	if m.PathGlob != "" {
 		if p.Type != PayloadFileWrite {
@@ -153,33 +181,78 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 	return true
 }
 
-// everySegmentHasPrefix 要求复合命令的每一段（剥掉包装后）都以 prefix 开头，按词边界比较。
-// 任何一段含无法静态分析的写法（命令替换、进程替换、heredoc、未闭合引号等）都不算匹配；
-// 这类命令 splitSegments 先返回整条，它的 subshell 为 true，于是整条命令都不匹配。
+// everySegmentHasPrefix 要求复合命令的每一段（剥掉包装后）都以 prefix 开头，按词边界比较，
+// 且每一段都能放行（见 segmentAllowable）。
 func everySegmentHasPrefix(command, prefix string) bool {
+	return segmentsMatch(command, false, func(_ string, seg segment) bool { return segmentHasPrefix(seg, prefix) })
+}
+
+// segmentsMatch 按 splitSegments 拆出的各段匹配，pred 收到段的原文与解析结果。
+// anySeg 为 true 时任一段命中即可；否则每一段都要命中，且每一段都能放行。
+// 无法静态分析的命令 splitSegments 先返回整条，它的 subshell 为 true，于是按每段匹配时整条都不命中。
+func segmentsMatch(command string, anySeg bool, pred func(text string, seg segment) bool) bool {
 	segs := splitSegments(command)
 	if len(segs) == 0 {
 		return false
 	}
 	for _, s := range segs {
 		seg := parseSegment(s)
-		if seg.subshell {
+		if anySeg {
+			if pred(s, seg) {
+				return true
+			}
+			continue
+		}
+		if !segmentAllowable(seg) || !pred(s, seg) {
 			return false
 		}
-		joined := strings.Join(stripWrappers(seg.argv), " ")
-		if joined != prefix && !strings.HasPrefix(joined, prefix+" ") {
+	}
+	return !anySeg
+}
+
+// segmentHasPrefix 判断剥掉包装后的 argv 是否以 prefix 开头，按词边界比较。
+func segmentHasPrefix(seg segment, prefix string) bool {
+	joined := strings.Join(stripWrappers(seg.argv), " ")
+	return joined == prefix || strings.HasPrefix(joined, prefix+" ")
+}
+
+// segmentAllowable 判断一段能否被 allow 规则按前缀或正则放行：不含无法静态分析的写法，
+// 命令前没有注入型环境变量，输出与输入重定向只指向无害伪设备。
+func segmentAllowable(seg segment) bool {
+	if seg.subshell {
+		return false
+	}
+	argv := stripWrappers(seg.argv)
+	if assignsInjectedEnv(seg.argv[:len(seg.argv)-len(argv)]) {
+		return false
+	}
+	return harmlessTargets(seg.redirects, seg.redirectFlags) && harmlessTargets(seg.inputs, seg.inputFlags)
+}
+
+// harmlessTargets 判断重定向目标是否都是无害伪设备：不含引号外的 glob、$ 与 ~ 的字面绝对路径，清理后命中 harmlessDevice。
+func harmlessTargets(targets []string, flags []wordFlags) bool {
+	for i, t := range targets {
+		f := flagAt(flags, i)
+		if f.glob || f.expand || f.tilde || !filepath.IsAbs(t) || !harmlessDevice(filepath.Clean(t)) {
 			return false
 		}
 	}
 	return true
 }
 
-// hostMatches 判断 URL 的主机名等于 domain 或是它的子域。
+// hostMatches 判断 URL 的主机名等于 domain 或是它的子域。两边都转小写并去掉末尾一个点。
 func hostMatches(rawURL, domain string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Hostname() == "" {
 		return false
 	}
-	host := u.Hostname()
+	host, domain := normalizeHost(u.Hostname()), normalizeHost(domain)
+	if domain == "" {
+		return false
+	}
 	return host == domain || strings.HasSuffix(host, "."+domain)
+}
+
+func normalizeHost(h string) string {
+	return strings.TrimSuffix(strings.ToLower(h), ".")
 }
