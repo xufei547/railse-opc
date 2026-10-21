@@ -143,11 +143,13 @@ func TestWatchdogStopsAfterAnswer(t *testing.T) {
 	if err != nil || resp.Decision != "allow" {
 		t.Fatalf("守护进程响应正常时应拿到答复: %+v, %v", resp, err)
 	}
+	// 答复到达时可能有一次探测已发出、假守护进程还没来得及计数，先等它落定再取基数
+	time.Sleep(150 * time.Millisecond)
 	n := probes.Load()
 	if n < 3 {
 		t.Fatalf("等答复期间应探测过多次, 得到 %d", n)
 	}
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond) // 看门狗若还在跑，这段时间会再探测约 6 次
 	if got := probes.Load(); got != n {
 		t.Fatalf("收到答复后看门狗应退出, 探测次数从 %d 涨到 %d", n, got)
 	}
