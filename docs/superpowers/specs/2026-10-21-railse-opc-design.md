@@ -43,6 +43,7 @@ Railse OPC 是给“用 AI agent 经营一人公司的人”用的公司层驾�
 | 技术栈 | 守护进程 Go 单二进制；网页 TypeScript，Vite 加 React |
 | 拓扑 | 一个 hub 跑在作者的云服务器上，各机器的守护进程向外连，手机只连 hub |
 | 作者现有环境 | Claude Code、Codex CLI、Gemini CLI 写代码；Claude Code 换 prompt、GPT-6、n8n 做内容运营；一台 Mac 加一台云服务器；手动开终端 |
+| Gemini CLI 最低版本 | 0.65.0。更早的版本在用户确认之后才触发 `BeforeTool`，钩子无法在审批前拦截（2026-10-21 实验）；`railse doctor` 对低于 0.65.0 的版本报警 |
 
 ## 1. 架构与组件
 
