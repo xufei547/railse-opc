@@ -112,7 +112,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 	// 只在 Listen 成功后才登记 Close：失败时 socket 文件可能属于已在运行的守护进程。
 	defer srv.Close()
 	if err := srv.LoadState(); err != nil {
-		logger.Printf("读状态文件: %v", err)
+		logger.Printf("恢复暂停状态失败，已按暂停启动（railse agent resume 可恢复）: %v", err)
 	}
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)

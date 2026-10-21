@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -186,5 +187,82 @@ func TestEventMessageIsRedacted(t *testing.T) {
 	entries := readAudit(t, env.cfg.AuditPath)
 	if len(entries) != 2 || entries[0].Message != "Gemini CLI requires execution: export GITHUB_TOKEN=<redacted> && npm publish" {
 		t.Fatalf("审计: %+v", entries)
+	}
+}
+
+func TestLoadStateFailsClosed(t *testing.T) {
+	// 空文件（截断后崩溃留下的样子）、坏 JSON、读不了（是目录）都按暂停启动并报错
+	for name, setup := range map[string]func(path string){
+		"empty":   func(p string) { os.WriteFile(p, nil, 0o600) },
+		"garbage": func(p string) { os.WriteFile(p, []byte(`{"paused":`), 0o600) },
+		"dir":     func(p string) { os.Mkdir(p, 0o700) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := startServer(t, LocalDecider{}, nil)
+			setup(env.cfg.StatePath)
+			if err := env.srv.LoadState(); err == nil {
+				t.Fatal("状态文件损坏时 LoadState 应返回错误")
+			}
+			if !env.srv.rules.Paused() {
+				t.Fatal("状态文件损坏时应按暂停启动")
+			}
+		})
+	}
+	env := startServer(t, LocalDecider{}, nil)
+	if err := env.srv.LoadState(); err != nil || env.srv.rules.Paused() {
+		t.Fatalf("没有状态文件时应正常按未暂停启动: err=%v paused=%v", err, env.srv.rules.Paused())
+	}
+}
+
+func TestPauseWritesStateAtomically(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	os.WriteFile(env.cfg.StatePath, []byte(`{"paused":false}`), 0o600)
+	before, err := os.Stat(env.cfg.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply proto.ControlReply
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, control("pause")), &reply)
+	if !reply.OK {
+		t.Fatalf("pause: %+v", reply)
+	}
+	after, err := os.Stat(env.cfg.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 先写临时文件再 rename：state.json 换成了新文件，而不是在原文件上截断重写
+	if os.SameFile(before, after) {
+		t.Fatal("state.json 应经临时文件 rename 替换，不能截断原文件再写")
+	}
+	ents, _ := os.ReadDir(env.cfg.Dir)
+	for _, e := range ents {
+		switch e.Name() {
+		case "agent.sock", "rules.yaml", "audit.jsonl", "state.json":
+		default:
+			t.Errorf("配置目录里不应留下临时文件: %s", e.Name())
+		}
+	}
+}
+
+func TestPauseResumePersistFailure(t *testing.T) {
+	env := startServer(t, LocalDecider{}, func(c *Config) { c.StatePath = filepath.Join(c.Dir, "missing", "state.json") })
+	var reply proto.ControlReply
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, control("pause")), &reply)
+	if reply.OK || !strings.Contains(reply.Error, "已暂停") || !strings.Contains(reply.Error, "未能持久化") {
+		t.Fatalf("pause 落盘失败应回复 OK:false 并说明已暂停但未持久化: %+v", reply)
+	}
+	if !env.srv.rules.Paused() {
+		t.Fatal("落盘失败时内存里仍应已暂停")
+	}
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, control("resume")), &reply)
+	if reply.OK || !strings.Contains(reply.Error, "已恢复") || !strings.Contains(reply.Error, "未能持久化") {
+		t.Fatalf("resume 落盘失败应回复 OK:false 并说明已恢复但未持久化: %+v", reply)
+	}
+	if env.srv.rules.Paused() {
+		t.Fatal("resume 后内存里应已恢复")
+	}
+	entries := readAudit(t, env.cfg.AuditPath)
+	if len(entries) != 2 || entries[0].Kind != "control" || entries[0].Message != "pause" || entries[1].Message != "resume" {
+		t.Fatalf("落盘失败也应照常写审计: %+v", entries)
 	}
 }

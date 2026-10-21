@@ -319,11 +319,29 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 		ok.Status = &proto.Status{Paused: s.rules.Paused(), Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String()}
 		return ok
 	case "pause", "resume":
-		s.rules.SetPaused(c.Op == "pause")
-		if err := saveState(s.cfg.StatePath, state{Paused: s.rules.Paused()}); err != nil {
-			return proto.ControlReply{V: proto.Version, OK: false, Error: "写状态文件: " + err.Error()}
+		// 顺序保证过渡期间运行中的守护进程总处在更保守的一边：暂停先改内存立即生效再落盘，
+		// 恢复先落盘再改内存。落盘失败也照样切换并写审计，只是回复 OK:false 说明重启后不会保留。
+		pause := c.Op == "pause"
+		var err error
+		if pause {
+			s.rules.SetPaused(true)
+			err = saveState(s.cfg.StatePath, state{Paused: true})
+		} else {
+			err = saveState(s.cfg.StatePath, state{Paused: false})
+			s.rules.SetPaused(false)
 		}
-		s.writeAudit(AuditEntry{TS: time.Now(), Kind: "control", State: "recorded", Message: c.Op})
+		entry := AuditEntry{TS: time.Now(), Kind: "control", State: "recorded", Message: c.Op}
+		if err != nil {
+			done := "已恢复"
+			if pause {
+				done = "已暂停"
+			}
+			entry.Reason = done + "，但未能持久化: " + err.Error()
+			s.log.Printf("写状态文件: %v", err)
+			s.writeAudit(entry)
+			return proto.ControlReply{V: proto.Version, OK: false, Error: entry.Reason}
+		}
+		s.writeAudit(entry)
 		return ok
 	case "reload":
 		if err := s.rules.Reload(); err != nil {
@@ -336,12 +354,10 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 	}
 }
 
-// LoadState 从 state.json 恢复暂停状态，启动时调用。
+// LoadState 从 state.json 恢复暂停状态，启动时调用。状态文件读不了或损坏时按暂停启动并返回错误，
+// 调用方记日志即可，不必退出。
 func (s *Server) LoadState() error {
 	st, err := loadState(s.cfg.StatePath)
-	if err != nil {
-		return err
-	}
 	s.rules.SetPaused(st.Paused)
-	return nil
+	return err
 }
