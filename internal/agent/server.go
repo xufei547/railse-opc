@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -19,6 +20,9 @@ import (
 
 // maxSocketPath 是 socket 路径的字节上限。macOS 的 sun_path 只有 104 字节，留些余量。
 const maxSocketPath = 100
+
+// errHookGone 是钩子连接断开时取消请求 ctx 的原因，用来和守护进程关停区分开。
+var errHookGone = errors.New("钩子连接已断开")
 
 // Server 监听 Unix socket，一次连接处理一条消息。
 type Server struct {
@@ -105,12 +109,20 @@ func (s *Server) Serve(ctx context.Context) error {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			// Decider 或引擎 panic 只丢掉这一条：handleConn 的 defer 已关连接，钩子读到 EOF 交回终端。
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.Printf("处理连接时 panic: %v\n%s", r, debug.Stack())
+				}
+			}()
 			s.handleConn(ctx, conn)
 		}()
 	}
 }
 
-// Close 关闭监听，取消进行中的请求，等 Serve 返回后删除 socket 文件。
+// Close 关闭监听，取消进行中的请求，等 Serve 返回。
+// socket 文件由 ln.Close 删除（net.Listen 建的 Unix 监听关闭时会 unlink）；这里不再删一次，
+// 因为等 Serve 的期间新守护进程可能已在同一路径监听，再删就删掉了它的 socket。
 func (s *Server) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -130,14 +142,16 @@ func (s *Server) Close() error {
 	if done != nil {
 		<-done
 	}
-	os.Remove(s.cfg.SocketPath)
 	return nil
 }
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// 关停时不必等满读超时：ctx 取消就让正在进行的读立即返回。
+	stopRead := context.AfterFunc(ctx, func() { conn.SetReadDeadline(time.Now()) })
 	line, err := proto.ReadLine(bufio.NewReader(conn))
+	stopRead()
 	if err != nil {
 		s.log.Printf("读请求: %v", err)
 		return
@@ -156,14 +170,15 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 		// 钩子不会再发数据；读到 EOF 或错误就表示它消失了。答复后连接关闭，这个 goroutine 随之退出。
-		cctx, cancel := context.WithCancel(ctx)
+		// 关停导致的取消由父 ctx 传下来，原因不是 errHookGone，waitDecision 据此区分。
+		cctx, cancel := context.WithCancelCause(ctx)
 		go func() {
 			var b [1]byte
 			conn.Read(b[:])
-			cancel()
+			cancel(errHookGone)
 		}()
 		resp := s.handlePermission(cctx, req)
-		cancel()
+		cancel(nil)
 		if resp.Decision != "" { // 钩子已消失时 resp 为空，不写回
 			proto.WriteLine(conn, resp)
 		}
@@ -244,10 +259,14 @@ func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request,
 	out, err := s.decider.Decide(dctx, *pr)
 	resp := proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String()}
 	switch {
-	case err != nil && ctx.Err() != nil:
+	case err != nil && errors.Is(context.Cause(ctx), errHookGone):
 		entry.State, entry.DecidedBy, entry.Reason = "cancelled", "terminal", "钩子进程在决定前退出"
 		s.writeAudit(entry)
 		return proto.Response{} // 对方已不在，不写回
+	case err != nil && ctx.Err() != nil:
+		// 守护进程正在停止，钩子还在等：明确交回终端。
+		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "shutdown", "守护进程正在停止，交回终端处理"
+		resp.Decision, resp.Reason = "passthrough", entry.Reason
 	case err != nil && errors.Is(dctx.Err(), context.DeadlineExceeded):
 		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "expired", "timeout", "等待过期，交回终端处理"
 		resp.Decision, resp.Reason = "passthrough", entry.Reason

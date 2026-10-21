@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"os"
@@ -264,4 +265,165 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("等待超时")
+}
+
+// stubbornDecider 不理会 ctx，等 release 才返回，用来把旧实例的 Close 卡在等挂起请求的阶段。
+type stubbornDecider struct{ release chan struct{} }
+
+func (d stubbornDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, error) {
+	<-d.release
+	return Outcome{}, ctx.Err()
+}
+
+func TestOldCloseKeepsNewInstanceSocket(t *testing.T) {
+	d := stubbornDecider{release: make(chan struct{})}
+	env := startServer(t, d, nil)
+	conn, err := net.Dial("unix", env.cfg.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	proto.WriteLine(conn, permission(env.repo, "curl https://x.y"))
+	waitFor(t, func() bool { return env.srv.pending.Count() == 1 })
+	closed := make(chan struct{})
+	go func() { env.srv.Close(); close(closed) }()
+	// 旧实例关掉监听后路径就空出来了，但 Close 还在等挂起的请求。
+	waitFor(t, func() bool { _, err := os.Stat(env.cfg.SocketPath); return os.IsNotExist(err) })
+	rules, err := LoadRules(env.cfg.RulesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := OpenAudit(filepath.Join(env.cfg.Dir, "b.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvB := New(env.cfg, rules, audit, LocalDecider{}, log.New(os.Stderr, "b ", 0))
+	if err := srvB.Listen(); err != nil {
+		t.Fatalf("新实例应能接管空出来的路径: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go srvB.Serve(ctx)
+	t.Cleanup(func() { cancel(); srvB.Close(); audit.Close() })
+	close(d.release)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("旧实例的 Close 没返回")
+	}
+	if _, err := os.Stat(env.cfg.SocketPath); err != nil {
+		t.Fatalf("旧实例的 Close 删掉了新实例的 socket: %v", err)
+	}
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(env.repo, "git status")), &resp)
+	if resp.Decision != "allow" {
+		t.Fatalf("新实例应能处理请求: %+v", resp)
+	}
+}
+
+func TestShutdownRepliesPassthrough(t *testing.T) {
+	d := &blockingDecider{release: make(chan struct{})}
+	env := startServer(t, d, nil)
+	conn, err := net.Dial("unix", env.cfg.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	proto.WriteLine(conn, permission(env.repo, "curl https://x.y"))
+	waitFor(t, func() bool { return env.srv.pending.Count() == 1 })
+	env.cancel()
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	line, err := proto.ReadLine(bufio.NewReader(conn))
+	if err != nil {
+		t.Fatalf("守护进程关停时应写回答复: %v", err)
+	}
+	var resp proto.Response
+	json.Unmarshal(line, &resp)
+	if resp.Decision != "passthrough" || !strings.Contains(resp.Reason, "停止") {
+		t.Fatalf("关停时应交回终端: %+v", resp)
+	}
+	entries := readAudit(t, env.cfg.AuditPath)
+	if len(entries) != 1 || entries[0].State != "passthrough" || entries[0].DecidedBy != "shutdown" {
+		t.Fatalf("审计应记 passthrough/shutdown: %+v", entries)
+	}
+}
+
+func TestShutdownDoesNotWaitForIdleConn(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	idle, err := net.Dial("unix", env.cfg.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idle.Close()
+	// 连接按顺序接受：这条有了答复，说明空闲连接已经在处理中。
+	roundTrip(t, env.cfg.SocketPath, permission(env.repo, "git status"))
+	start := time.Now()
+	env.cancel()
+	env.srv.Close()
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("关停不应等空闲连接的读超时: 用时 %v", d)
+	}
+}
+
+type panicDecider struct{}
+
+func (panicDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, error) {
+	panic("决定来源崩溃")
+}
+
+func TestDeciderPanicDoesNotStopServer(t *testing.T) {
+	env := startServer(t, panicDecider{}, nil)
+	conn, err := net.Dial("unix", env.cfg.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	proto.WriteLine(conn, permission(env.repo, "curl https://x.y"))
+	if line, err := proto.ReadLine(bufio.NewReader(conn)); err == nil {
+		t.Fatalf("panic 后应直接关连接: %s", line)
+	}
+	waitFor(t, func() bool { return env.srv.pending.Count() == 0 })
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(env.repo, "git status")), &resp)
+	if resp.Decision != "allow" {
+		t.Fatalf("panic 之后服务应正常: %+v", resp)
+	}
+}
+
+// fixedDecider 立即返回固定的结论或错误。
+type fixedDecider struct {
+	out Outcome
+	err error
+}
+
+func (d fixedDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, error) {
+	return d.out, d.err
+}
+
+func TestDeciderBadOutcomeIsPassthrough(t *testing.T) {
+	for _, action := range []string{"", "maybe"} {
+		env := startServer(t, fixedDecider{out: Outcome{Action: action, DecidedBy: "user"}}, nil)
+		var resp proto.Response
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(env.repo, "curl https://x.y")), &resp)
+		if resp.Decision != "passthrough" {
+			t.Fatalf("Action=%q 应写回 passthrough: %+v", action, resp)
+		}
+		entries := readAudit(t, env.cfg.AuditPath)
+		if len(entries) != 1 || entries[0].Action != "passthrough" || entries[0].State != "passthrough" {
+			t.Fatalf("Action=%q 审计: %+v", action, entries)
+		}
+	}
+}
+
+func TestDeciderErrorIsPassthrough(t *testing.T) {
+	env := startServer(t, fixedDecider{err: errors.New("hub 断线")}, nil)
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(env.repo, "curl https://x.y")), &resp)
+	if resp.Decision != "passthrough" || !strings.Contains(resp.Reason, "出错") {
+		t.Fatalf("Decider 出错应交回终端: %+v", resp)
+	}
+	entries := readAudit(t, env.cfg.AuditPath)
+	if len(entries) != 1 || entries[0].State != "passthrough" || entries[0].DecidedBy != "error" {
+		t.Fatalf("审计应记 passthrough/error: %+v", entries)
+	}
 }

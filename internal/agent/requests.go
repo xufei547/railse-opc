@@ -28,7 +28,9 @@ type PendingRequest struct {
 	Deadline time.Time
 }
 
-// Decider 在引擎答 ask 之后给出最终结论。ctx 取消表示钩子已消失，到期表示过期。
+// Decider 在引擎答 ask 之后给出最终结论。ctx 取消表示钩子已消失或守护进程正在停止，到期表示过期。
+// 契约：实现必须尊重 ctx，取消或到期时及时返回（返回 ctx 的错误即可）；服务端不另起 goroutine 兜底，
+// 不理会 ctx 的实现会让这条请求一直挂着，关停时也会卡住 Close。
 type Decider interface {
 	Decide(ctx context.Context, pr PendingRequest) (Outcome, error)
 }
