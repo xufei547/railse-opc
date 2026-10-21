@@ -39,6 +39,11 @@ func OpenAudit(path string) (*Audit, error) {
 	if err != nil {
 		return nil, err
 	}
+	// O_CREATE 的 0600 只对新建文件生效，已有文件要在打开后收紧。
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return nil, err
+	}
 	return &Audit{f: f}, nil
 }
 

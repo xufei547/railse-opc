@@ -42,3 +42,10 @@ func TestDefaultConfigHonorsEnv(t *testing.T) {
 		t.Fatalf("RAILSE_HOME 未生效: %+v, %v", c, err)
 	}
 }
+
+func TestConfigInHomeDirFallback(t *testing.T) {
+	t.Setenv("HOME", "")
+	if c := ConfigIn(shortTempDir(t)); c.HomeDir == "" {
+		t.Fatalf("$HOME 为空时 HomeDir 不应为空: %+v", c)
+	}
+}

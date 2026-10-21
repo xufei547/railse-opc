@@ -79,3 +79,22 @@ func bytesSplit(b []byte) [][]byte {
 	}
 	return append(out, b[start:])
 }
+
+func TestOpenAuditTightensExistingPerm(t *testing.T) {
+	path := filepath.Join(shortTempDir(t), "audit.jsonl")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := OpenAudit(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	st, err := os.Stat(path)
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("已有审计文件权限 = %v, %v", st.Mode().Perm(), err)
+	}
+}

@@ -34,3 +34,24 @@ func TestFindProjectRoot(t *testing.T) {
 		t.Errorf("CleanCwd = %q", got)
 	}
 }
+
+func TestFindProjectRootSkipsHome(t *testing.T) {
+	base := shortTempDir(t)
+	t.Setenv("HOME", base)
+	os.MkdirAll(filepath.Join(base, ".git"), 0o755)
+	os.MkdirAll(filepath.Join(base, "sub"), 0o755)
+	repo := filepath.Join(base, "repo")
+	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
+	os.MkdirAll(filepath.Join(repo, "src"), 0o755)
+
+	if got := FindProjectRoot(filepath.Join(base, "sub")); got != "" {
+		t.Errorf("家目录含 .git 时不应成为项目根，得到 %q", got)
+	}
+	if got := FindProjectRoot(base); got != "" {
+		t.Errorf("cwd 就是家目录时不应成为项目根，得到 %q", got)
+	}
+	want, _ := filepath.EvalSymlinks(repo)
+	if got := FindProjectRoot(filepath.Join(repo, "src")); got != want {
+		t.Errorf("家目录下的仓库 = %q, 想要 %q", got, want)
+	}
+}

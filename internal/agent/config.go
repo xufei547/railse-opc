@@ -5,6 +5,7 @@ package agent
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"time"
 )
@@ -25,9 +26,21 @@ type Config struct {
 // deadline 比各 CLI 的 24 小时钩子超时短 10 秒，见设计文档 3.2。
 const deadline = 86390 * time.Second
 
+// userHome 取家目录：先看 $HOME，出错或为空时回退到系统用户数据库。
+// 家目录为空会让 ~/ 开头的敏感路径规则全部失效，所以要尽量拿到。
+func userHome() string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	if u, err := user.Current(); err == nil {
+		return u.HomeDir
+	}
+	return ""
+}
+
 // ConfigIn 按给定目录推出全部路径。
 func ConfigIn(dir string) Config {
-	home, _ := os.UserHomeDir()
+	home := userHome()
 	host, _ := os.Hostname()
 	if host == "" {
 		host = "local"
