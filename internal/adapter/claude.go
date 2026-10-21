@@ -65,7 +65,7 @@ func (claude) Render(d Decision) Output {
 	case "allow":
 		return Output{Stdout: permissionJSON("allow", ""), ExitCode: 0}
 	case "deny":
-		return Output{Stdout: permissionJSON("deny", "Railse："+d.Reason), ExitCode: 0}
+		return Output{Stdout: permissionJSON("deny", denyMessage(d.Reason)), ExitCode: 0}
 	default:
 		return passthrough()
 	}

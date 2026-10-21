@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/railse/railse-opc/internal/policy"
 	"github.com/railse/railse-opc/internal/proto"
@@ -91,9 +92,21 @@ func permissionJSON(behavior, message string) []byte {
 	return b
 }
 
+// denyMessage 是拒绝时给 agent 看的理由，带 Railse 前缀；理由为空时用固定文案。
+func denyMessage(reason string) string {
+	if reason == "" {
+		return "Railse：已拒绝"
+	}
+	return "Railse：" + reason
+}
+
+// clip 把 s 截到不超过 n 字节，并退到字符边界，不切开多字节字符。
 func clip(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n]
 }

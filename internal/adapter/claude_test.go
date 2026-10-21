@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/railse/railse-opc/internal/policy"
 )
@@ -169,5 +170,35 @@ func TestClaudeToolInputTypeCollision(t *testing.T) {
 	}
 	if in.Payload.Type != PayloadOther || in.Payload.Tool != "Task" {
 		t.Fatalf("未知工具载荷错误: %+v", in.Payload)
+	}
+}
+
+func TestClaudeClipKeepsUTF8(t *testing.T) {
+	a, _ := Get("claude")
+	content := strings.Repeat("x", 4095) + strings.Repeat("中", 10)
+	in, err := a.Parse([]byte(`{"session_id":"s","cwd":"/p","hook_event_name":"PermissionRequest","tool_name":"Write","tool_input":{"file_path":"a","content":"` + content + `"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := in.Payload.DiffPreview
+	if !utf8.ValidString(p) || len(p) > 4096 || len(p) <= 4096-utf8.UTFMax {
+		t.Errorf("预览应退到字符边界: 合法=%v 长度=%d", utf8.ValidString(p), len(p))
+	}
+
+	msg := strings.Repeat("已完成重构", 50) // 750 字节
+	in, err = a.Parse([]byte(`{"session_id":"s","cwd":"/p","hook_event_name":"Stop","last_assistant_message":"` + msg + `"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.Kind != KindDone || !utf8.ValidString(in.Message) || len(in.Message) > 500 || len(in.Message) <= 500-utf8.UTFMax {
+		t.Fatalf("Stop 消息应退到字符边界: Kind=%s 合法=%v 长度=%d", in.Kind, utf8.ValidString(in.Message), len(in.Message))
+	}
+}
+
+func TestClaudeRenderDenyEmptyReason(t *testing.T) {
+	a, _ := Get("claude")
+	want := `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Railse：已拒绝"}}}`
+	if out := a.Render(Decision{Action: "deny"}); string(out.Stdout) != want || out.ExitCode != 0 {
+		t.Fatalf("空理由的拒绝 = %q/%d, 想要 %q/0", out.Stdout, out.ExitCode, want)
 	}
 }
