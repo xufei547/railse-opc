@@ -14,7 +14,8 @@ const usage = `用法: railse <子命令> [参数]
 
 子命令:
   version   打印版本
-  policy    策略引擎工具（eval、check）`
+  policy    策略引擎工具（eval、check）
+  hook      各 CLI 钩子调用的翻译器（claude、codex、codex-notify、gemini）`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -32,6 +33,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "policy":
 		return runPolicy(args[1:], stdout, stderr)
+	case "hook":
+		return runHook(args[1:], stdinReader, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "未知子命令 %q\n\n%s\n", args[0], usage)
 		return 2
