@@ -59,6 +59,31 @@ func TestPolicyEvalOtherTypes(t *testing.T) {
 	}
 }
 
+func TestPolicyEvalUsageErrors(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.yaml")
+	// --type 在读规则文件之前校验：规则文件不存在时照样是用法错误
+	var out, errOut bytes.Buffer
+	if code := run([]string{"policy", "eval", "--type", "bogus", "--rules", missing, "--cwd", dir, "x"}, &out, &errOut); code != 2 {
+		t.Fatalf("未知类型应先于读规则文件报用法错误, 退出码 %d, stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "bogus") {
+		t.Fatalf("stderr 应指出未知类型, 得到 %q", errOut.String())
+	}
+	// mcp 参数必须是 服务/工具
+	for _, arg := range []string{"github", "github/", "/get_issue"} {
+		out.Reset()
+		errOut.Reset()
+		if code := run([]string{"policy", "eval", "--type", "mcp", "--cwd", dir, arg}, &out, &errOut); code != 2 || out.Len() != 0 {
+			t.Fatalf("mcp 参数 %q 应是用法错误, 退出码 %d, stdout=%q", arg, code, out.String())
+		}
+	}
+	out.Reset()
+	if code := run([]string{"policy", "eval", "--type", "mcp", "--cwd", dir, "github/get_issue"}, &out, &errOut); code != 0 || !strings.HasPrefix(out.String(), "ask\tnetwork\t") {
+		t.Fatalf("mcp: code=%d stdout=%q", code, out.String())
+	}
+}
+
 func TestPolicyCheck(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.yaml")
@@ -76,6 +101,11 @@ func TestPolicyCheck(t *testing.T) {
 	out.Reset()
 	if code := run([]string{"policy", "check", bad}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "version") {
 		t.Fatalf("bad: code=%d stderr=%q", code, errOut.String())
+	}
+	// 读不到文件同样以 无效: 开头
+	errOut.Reset()
+	if code := run([]string{"policy", "check", filepath.Join(dir, "missing.yaml")}, &out, &errOut); code != 1 || !strings.HasPrefix(errOut.String(), "无效: ") {
+		t.Fatalf("missing: code=%d stderr=%q", code, errOut.String())
 	}
 	if code := run([]string{"policy", "check"}, &out, &errOut); code != 2 {
 		t.Fatalf("缺参数应退出码 2, 得到 %d", code)

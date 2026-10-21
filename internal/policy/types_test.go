@@ -47,6 +47,56 @@ func TestRiskTextRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRiskNeverZeroByAccident Risk 的零值是 RiskRead：空载荷、未知类型与缺字段的载荷必须明确定级为 unknown，
+// 不能因为没赋值而落成 read；引擎给出的 Decision.Risk 就是同一请求的 Classify 结果。
+func TestRiskNeverZeroByAccident(t *testing.T) {
+	if Risk(0) != RiskRead {
+		t.Fatalf("零值应是 RiskRead, 得到 %s", Risk(0))
+	}
+	ctx := Context{ProjectRoot: "/home/u/proj", HomeDir: "/home/u"}
+	for _, p := range []Payload{
+		{},
+		{Type: "bogus"},
+		{Type: PayloadShell},
+		{Type: PayloadShell, Command: "   "},
+		{Type: PayloadShell, Command: ";"},
+		{Type: PayloadShell, Command: "# 只有注释"},
+		{Type: PayloadFileWrite},
+	} {
+		for _, c := range []Context{ctx, {}} {
+			if got := Classify(p, c); got != RiskUnknown {
+				t.Errorf("Classify(%+v, %+v) = %s, 想要 unknown", p, c, got)
+			}
+		}
+	}
+
+	e, err := NewEngine(DefaultRuleSet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs := []Payload{
+		{},
+		{Type: "bogus"},
+		{Type: PayloadShell, Command: "git status", Cwd: "/home/u/proj"},
+		{Type: PayloadShell, Command: "touch a", Cwd: "/home/u/proj"},
+		{Type: PayloadShell, Command: "git push origin main"},
+		{Type: PayloadShell, Command: "rm -rf ~"},
+		{Type: PayloadFileWrite, Path: "/etc/hosts"},
+		{Type: PayloadMCP, Server: "s", Tool: "t"},
+		{Type: PayloadNetwork, URL: "https://example.com"},
+	}
+	for _, paused := range []bool{false, true} {
+		e.SetPaused(paused)
+		for _, p := range reqs {
+			for _, c := range []Context{ctx, {}} {
+				if d, want := e.Evaluate(p, c), Classify(p, c); d.Risk != want {
+					t.Errorf("paused=%v Evaluate(%+v).Risk = %s, Classify = %s", paused, p, d.Risk, want)
+				}
+			}
+		}
+	}
+}
+
 func TestMaxRisk(t *testing.T) {
 	if got := maxRisk(RiskRead, RiskNetwork); got != RiskNetwork {
 		t.Fatalf("maxRisk = %s", got)

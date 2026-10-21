@@ -28,6 +28,8 @@ var sensitivePatterns = []string{
 	"**/id_ecdsa*",
 	"**/id_dsa*",
 	"**/.claude/settings*.json",
+	"**/*.tfstate", // terraform 状态与备份里有明文的资源密钥
+	"**/*.tfstate.*",
 	// 家目录规则的 **/ 版本：兜住 /System/Volumes/Data/Users/… 等别名和他人的家目录
 	"**/.ssh/**",
 	"**/.aws/**",
@@ -35,6 +37,7 @@ var sensitivePatterns = []string{
 	"**/.kube/**",
 	"**/.config/gh/**",
 	"**/.config/gcloud/**",
+	"**/.config/git/**", // git 的 XDG 配置目录：config、credentials、全局钩子
 	"**/.azure/**",
 	"**/.docker/config.json",
 	"**/.netrc",
@@ -53,6 +56,7 @@ var sensitivePatterns = []string{
 	"~/.kube/**",
 	"~/.config/gh/**",
 	"~/.config/gcloud/**",
+	"~/.config/git/**",
 	"~/.azure/**",
 	"~/.docker/config.json",
 	"~/.git-credentials",

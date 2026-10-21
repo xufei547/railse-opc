@@ -66,10 +66,17 @@ func TestIsSensitive(t *testing.T) {
 		// 写入能设置 core.hooksPath、core.fsmonitor
 		"/home/u/proj/.git/config", "/home/u/proj/.Git/CONFIG",
 		"/home/u/proj/.git/modules/sub/config", "/home/u/proj/.git/modules/a/modules/b/config",
+		// git 的 XDG 配置与凭据；terraform 状态里有明文的资源密钥
+		"/home/u/.config/git/config", "/home/u/.config/git/credentials", "/home/u/.config/git/hooks/pre-commit",
+		"/System/Volumes/Data/Users/u/.config/git/config",
+		"/home/u/proj/terraform.tfstate", "/home/u/proj/infra/terraform.tfstate.backup",
+		"/home/u/proj/infra/x.tfstate.1700000000.backup", "/home/u/proj/TERRAFORM.TFSTATE",
 	}
 	no := []string{
 		"/home/u/proj/src/a.go", "/home/u/proj/README.md", "/home/u/proj/.envrc.example",
 		"/home/u/proj/src/env.go", "/home/u/.sshx/config",
+		"/home/u/.config/gitx/config", "/home/u/.config/github-copilot/x.json", "/home/u/proj/tfstate.go",
+		"/home/u/proj/docs/tfstate.md",
 	}
 	for _, p := range yes {
 		if !isSensitive(p, "/home/u") {

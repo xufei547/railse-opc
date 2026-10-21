@@ -492,3 +492,8 @@ gh api repos/me/x	network
 gh api --jq .name repos/me/x	network
 gh api -H 'Accept: application/json' repos/me/x	network
 gh api --paginate repos/me/x/issues	network
+# git 的 XDG 配置目录与 terraform 状态文件是敏感路径
+echo '[core] hooksPath = /tmp/h' >> ~/.config/git/config	destructive
+cat ~/.config/git/credentials	destructive
+cat terraform.tfstate	destructive
+cp infra/terraform.tfstate.backup /tmp/x	destructive

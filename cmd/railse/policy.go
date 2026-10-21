@@ -45,6 +45,25 @@ func runPolicyEval(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, policyUsage)
 		return 2
 	}
+	// 用法错误先于读任何文件报出
+	p := policy.Payload{Type: policy.PayloadType(*payloadType)}
+	switch p.Type {
+	case policy.PayloadShell:
+		p.Command = fs.Arg(0)
+	case policy.PayloadFileWrite:
+		p.Path = fs.Arg(0)
+	case policy.PayloadNetwork:
+		p.URL = fs.Arg(0)
+	case policy.PayloadMCP:
+		var ok bool
+		if p.Server, p.Tool, ok = strings.Cut(fs.Arg(0), "/"); !ok || p.Server == "" || p.Tool == "" {
+			fmt.Fprintf(stderr, "mcp 的参数应为 服务/工具，得到 %q\n\n%s\n", fs.Arg(0), policyUsage)
+			return 2
+		}
+	default:
+		fmt.Fprintf(stderr, "未知类型 %q\n\n%s\n", *payloadType, policyUsage)
+		return 2
+	}
 	absCwd, err := filepath.Abs(*cwd)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -77,20 +96,7 @@ func runPolicyEval(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	p := policy.Payload{Type: policy.PayloadType(*payloadType), Cwd: absCwd}
-	switch p.Type {
-	case policy.PayloadShell:
-		p.Command = fs.Arg(0)
-	case policy.PayloadFileWrite:
-		p.Path = fs.Arg(0)
-	case policy.PayloadNetwork:
-		p.URL = fs.Arg(0)
-	case policy.PayloadMCP:
-		p.Server, p.Tool, _ = strings.Cut(fs.Arg(0), "/")
-	default:
-		fmt.Fprintf(stderr, "未知类型 %q\n", *payloadType)
-		return 2
-	}
+	p.Cwd = absCwd
 	d := eng.Evaluate(p, policy.Context{ProjectRoot: absProject, HomeDir: home, MachineID: "local"})
 	fmt.Fprintf(stdout, "%s\t%s\t%s\n", d.Action, d.Risk, d.Reason)
 	return 0
@@ -103,7 +109,7 @@ func runPolicyCheck(args []string, stdout, stderr io.Writer) int {
 	}
 	data, err := os.ReadFile(args[0])
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, "无效:", err)
 		return 1
 	}
 	rs, err := policy.ParseRuleSet(data)

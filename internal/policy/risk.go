@@ -3,6 +3,9 @@ package policy
 import "fmt"
 
 // Risk 是请求的风险等级，数值越大越危险，复合命令取最高档。
+//
+// 注意：零值是 RiskRead，也就是最宽松的一档。调用方不能让 Risk 留着没赋值（结构体字段、提前 return 的变量），
+// 否则无法判断的请求会悄悄按只读放行；定级一律经 Classify，它对空载荷与未知类型返回 RiskUnknown。
 type Risk int
 
 const (
