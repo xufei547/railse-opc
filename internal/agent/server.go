@@ -47,17 +47,23 @@ func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Lo
 	return &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now()}
 }
 
-// Listen 建 socket。上次崩溃留下的无人监听的 socket 文件会被替换；已有守护进程在监听时报错。
+// Listen 建 socket。上次崩溃留下的无人监听的 socket 文件会被替换；已有守护进程在监听时报错；
+// 路径上是普通文件、符号链接等非 socket 时不删，报错。
 func (s *Server) Listen() error {
 	if n := len(s.cfg.SocketPath); n > maxSocketPath {
 		return fmt.Errorf("socket 路径太长（%d 字节，上限 %d）: %s", n, maxSocketPath, s.cfg.SocketPath)
 	}
-	if _, err := os.Stat(s.cfg.SocketPath); err == nil {
+	if st, err := os.Lstat(s.cfg.SocketPath); err == nil {
+		if st.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("%s 已存在且不是 socket（%v），不删除，请确认后手动移走", s.cfg.SocketPath, st.Mode().Type())
+		}
 		if c, err := net.DialTimeout("unix", s.cfg.SocketPath, 500*time.Millisecond); err == nil {
 			c.Close()
 			return fmt.Errorf("已有守护进程在 %s 监听", s.cfg.SocketPath)
 		}
-		os.Remove(s.cfg.SocketPath)
+		if err := os.Remove(s.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("删除陈旧 socket: %w", err)
+		}
 	}
 	ln, err := net.Listen("unix", s.cfg.SocketPath)
 	if err != nil {

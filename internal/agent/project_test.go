@@ -70,3 +70,25 @@ func TestTooBroadRoot(t *testing.T) {
 		t.Error(`tooBroad("/") 应为真`)
 	}
 }
+
+func TestFindProjectRootSkipsHomeAncestors(t *testing.T) {
+	// /Users/.git 这类家目录的祖先比家目录还宽，同样不能当项目根
+	base := shortTempDir(t)
+	home := filepath.Join(base, "u")
+	os.MkdirAll(filepath.Join(home, "sub"), 0o755)
+	os.MkdirAll(filepath.Join(base, ".git"), 0o755)
+	t.Setenv("HOME", home)
+	if got := FindProjectRoot(filepath.Join(home, "sub")); got != "" {
+		t.Errorf("家目录的祖先含 .git 时不应成为项目根，得到 %q", got)
+	}
+	if got := FindProjectRoot(filepath.Join(base, "gone", "x")); got != "" {
+		t.Errorf("cwd 不存在时也不应把家目录的祖先当项目根，得到 %q", got)
+	}
+	repo := filepath.Join(home, "repo")
+	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
+	os.MkdirAll(filepath.Join(repo, "src"), 0o755)
+	want, _ := filepath.EvalSymlinks(repo)
+	if got := FindProjectRoot(filepath.Join(repo, "src")); got != want {
+		t.Errorf("家目录下的仓库 = %q, 想要 %q", got, want)
+	}
+}

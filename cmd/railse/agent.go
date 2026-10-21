@@ -91,6 +91,10 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 		return err
 	}
 	defer logFile.Close()
+	// O_CREATE 的 0600 只对新建文件生效，已有日志文件在这里收紧。
+	if err := logFile.Chmod(0o600); err != nil {
+		return fmt.Errorf("收紧日志文件权限: %w", err)
+	}
 	var w io.Writer = logFile
 	if foreground {
 		w = io.MultiWriter(logFile, stderr)

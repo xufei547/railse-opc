@@ -34,8 +34,8 @@ func FindProjectRoot(cwd string) string {
 	}
 }
 
-// tooBroad 报告 dir 是否为家目录或根目录。用 git 管 dotfiles 的人家目录里有 .git，
-// 把它当项目根会让“项目内可写”放行改写整个家目录，所以按项目外处理（fail closed）。
+// tooBroad 报告 dir 是否为根目录、家目录或家目录的祖先（如 /Users）。用 git 管 dotfiles 的人家目录里有 .git，
+// 把它当项目根会让“项目内可写”放行改写整个家目录，所以按项目外处理（fail closed）；祖先比家目录还宽，同理。
 // 按文件身份比较而不是比字符串：cwd 不存在时 dir 是未解析写法，macOS 的 firmlink
 // （如 /System/Volumes/Data/Users/x）也不被 EvalSymlinks 解析，字符串比较都会漏。
 func tooBroad(dir string) bool {
@@ -50,8 +50,16 @@ func tooBroad(dir string) bool {
 		return true
 	}
 	if home := userHome(); home != "" {
-		if h, err := os.Stat(home); err == nil && os.SameFile(st, h) {
-			return true
+		// 家目录本身及其每一级祖先，原写法与解析链接后的写法都比，任一身份相同即太宽。
+		for _, h := range []string{filepath.Clean(home), CleanCwd(home)} {
+			for p := h; ; p = filepath.Dir(p) {
+				if ps, err := os.Stat(p); err == nil && os.SameFile(st, ps) {
+					return true
+				}
+				if filepath.Dir(p) == p {
+					break
+				}
+			}
 		}
 	}
 	return false

@@ -123,3 +123,33 @@ func TestAgentRefusesEmptyHomeDir(t *testing.T) {
 		t.Fatal("家目录为空时不应创建 socket")
 	}
 }
+
+func TestAgentLogIsPrivate(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(dir)
+	cfgDir := filepath.Join(dir, "h")
+	os.MkdirAll(cfgDir, 0o700)
+	logPath := filepath.Join(cfgDir, "agent.log")
+	os.WriteFile(logPath, nil, 0o644)
+	os.Chmod(logPath, 0o644) // 不受 umask 影响，确保起点是 0644
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runAgentServe(ctx, agent.ConfigIn(cfgDir), false, os.Stderr) }()
+	sock := filepath.Join(cfgDir, "agent.sock")
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("socket 未出现")
+		}
+	}
+	st, err := os.Stat(logPath)
+	cancel()
+	if serr := <-done; serr != nil {
+		t.Fatalf("serve 退出出错: %v", serr)
+	}
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("已有的 agent.log 应收紧为 0600: %v %v", st.Mode().Perm(), err)
+	}
+}

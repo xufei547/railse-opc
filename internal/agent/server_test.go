@@ -245,14 +245,42 @@ func TestStaleSocketIsReplaced(t *testing.T) {
 	dir := shortTempDir(t)
 	cfg := ConfigIn(filepath.Join(dir, "h"))
 	cfg.EnsureDirs()
-	os.WriteFile(cfg.SocketPath, nil, 0o600) // 假装上次崩溃留下的文件
+	// 上次崩溃留下的真 socket 文件：监听已关但文件还在，没人在听
+	old, err := net.Listen("unix", cfg.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.(*net.UnixListener).SetUnlinkOnClose(false)
+	old.Close()
+	if st, err := os.Lstat(cfg.SocketPath); err != nil || st.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("前置条件：应留下一个 socket 文件: %v %v", st, err)
+	}
 	rules, _ := LoadRules(cfg.RulesPath)
 	audit, _ := OpenAudit(cfg.AuditPath)
+	defer audit.Close()
 	srv := New(cfg, rules, audit, LocalDecider{}, log.New(os.Stderr, "", 0))
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("应替换过期 socket 文件: %v", err)
 	}
 	srv.Close()
+}
+
+func TestListenRefusesNonSocketFile(t *testing.T) {
+	dir := shortTempDir(t)
+	cfg := ConfigIn(filepath.Join(dir, "h"))
+	cfg.EnsureDirs()
+	os.WriteFile(cfg.SocketPath, []byte("not a socket"), 0o600)
+	rules, _ := LoadRules(cfg.RulesPath)
+	audit, _ := OpenAudit(cfg.AuditPath)
+	defer audit.Close()
+	srv := New(cfg, rules, audit, LocalDecider{}, log.New(os.Stderr, "", 0))
+	if err := srv.Listen(); err == nil {
+		srv.Close()
+		t.Fatal("socket 路径上是普通文件时应报错，不能当陈旧 socket 删掉")
+	}
+	if b, err := os.ReadFile(cfg.SocketPath); err != nil || string(b) != "not a socket" {
+		t.Fatalf("普通文件应原样保留: %q %v", b, err)
+	}
 }
 
 func waitFor(t *testing.T, cond func() bool) {
