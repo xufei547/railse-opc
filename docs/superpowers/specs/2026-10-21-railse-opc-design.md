@@ -334,7 +334,7 @@ CI：GitHub Actions，Go 测试带 `-race`、golangci-lint、网页构建、交�
 | Codex `PermissionRequest` 钩子的输入输出 schema | 适配器依赖 | 退回 `approval_policy` 加 notify 只展示，Codex 的自动审批第二期补 | 部分成立（0.145.0）：schema 已录制，输出与 Claude 同形，但只在交互会话触发（`codex exec` 强制 never），且挂起约 9 分钟后会被模型在代码模式里主动放弃并重发。 |
 | Gemini `BeforeTool` 能否表达 allow，还是只能 block/继续 | 决定 Gemini 适配器能否自动放行 | 只实现 deny 与 ask，allow 交给 Gemini 自身的审批模式 | 不成立，采用替代方案：0.28.0 在确认后才触发，0.65.0 在确认前触发但 allow 不跳过原生框；yolo 下钩子超时或崩溃会放行。 |
 | 三个 CLI 的 `question`/`done` 事件是否都有 | 3.3 的覆盖范围 | 没有的 CLI 第一版只有 permission | done 三家都有（`Stop`、`Stop`/notify、`AfterAgent`）；question 只有 Claude（`Notification` 的 `permission_prompt`/`idle_prompt`）和 Gemini（`Notification` 的 `ToolPermission`），Codex 没有。 |
-| iOS 上 PWA 的 Web Push 在作者手机上可用 | 推送是核心路径 | 第一版先加一个 Bark 渠道 | 未验证，不在本次实验范围。 |
+| iOS 上 PWA 的 Web Push 在作者手机上可用 | 推送是核心路径 | 第一版先加一个 Bark 渠道 | 部分成立（iOS 26.3，详见 `2026-10-21-ios-webpush-findings.md`）：主屏幕 PWA 在前台、后台都能收到，延迟 1.4 至 2.5 秒，点通知能打开指定页面；完全关闭、锁屏、数小时后订阅是否有效未验证，暂不加 Bark，留到 PWA 真机联调补测。 |
 
 ## 附录：参考
 
