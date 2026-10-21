@@ -74,7 +74,8 @@ func hookPlan(cli, bin string) map[string][]hookGroup {
 }
 
 // isOurs 判断一个钩子条目组是不是 Railse 写的：任一条目的 name 以 railse- 开头，
-// 或命令是“<程序> hook …”且程序是本次的 bin，或程序文件名是 railse（换过安装路径时留下的旧条目）。
+// 或命令是“<程序> hook …”且程序是本次的 bin，
+// 或命令恰好是“<程序> hook claude|codex|gemini”且程序文件名是 railse（换过安装路径时留下的旧条目）。
 func isOurs(group map[string]any, bin string) bool {
 	hooks, _ := group["hooks"].([]any)
 	for _, h := range hooks {
@@ -84,21 +85,51 @@ func isOurs(group map[string]any, bin string) bool {
 		if strings.HasPrefix(name, "railse-") || strings.HasPrefix(cmd, shellQuote(bin)+" hook ") {
 			return true
 		}
-		if i := strings.LastIndex(cmd, " hook "); i > 0 {
-			prog := cmd[:i]
-			if len(prog) >= 2 && prog[0] == '\'' && prog[len(prog)-1] == '\'' {
-				prog = strings.ReplaceAll(prog[1:len(prog)-1], `'\''`, "'")
-			}
-			if filepath.Base(prog) == "railse" {
-				return true
-			}
+		if prog, ok := hookCommandProgram(cmd); ok && filepath.Base(prog) == "railse" {
+			return true
 		}
 	}
 	return false
 }
 
+// hookCommandProgram 认出 hookPlan 写过的命令形状“<一个词> hook claude|codex|gemini”，返回去掉引号的程序路径。
+// “一个词”是不含空白的裸词，或 shellQuote 产生的单引号词（内部单引号按 shellQuote 的写法转义）。其他形状一律不认。
+func hookCommandProgram(cmd string) (string, bool) {
+	var prog, rest string
+	if strings.HasPrefix(cmd, "'") {
+		var b strings.Builder
+		i := 1
+		for {
+			j := strings.IndexByte(cmd[i:], '\'')
+			if j < 0 {
+				return "", false
+			}
+			b.WriteString(cmd[i : i+j])
+			i += j + 1
+			if !strings.HasPrefix(cmd[i:], `\''`) {
+				break
+			}
+			b.WriteByte('\'')
+			i += 3
+		}
+		prog, rest = b.String(), cmd[i:]
+	} else {
+		i := strings.IndexAny(cmd, " \t\r\n")
+		if i <= 0 {
+			return "", false
+		}
+		prog, rest = cmd[:i], cmd[i:]
+	}
+	switch rest {
+	case " hook claude", " hook codex", " hook gemini":
+		return prog, true
+	}
+	return "", false
+}
+
 // mergeHooks 把我们的条目并进现有配置：删旧的 Railse 条目，保留别人的，追加新的。
-// 现有内容不是合法 JSON、顶层或 hooks 不是对象、某个事件不是数组时都视为损坏，返回错误不覆盖。
+// 现有内容不是合法 JSON、顶层或 hooks 不是对象、本次要写的事件不是数组时都视为损坏，返回错误不覆盖；
+// hooks 里其他非数组的值（如 Gemini 的开关项）原样保留。
 func mergeHooks(existing []byte, bin string, entries map[string][]hookGroup) ([]byte, error) {
 	doc := map[string]any{}
 	if len(bytes.TrimSpace(existing)) > 0 {
@@ -125,11 +156,18 @@ func mergeHooks(existing []byte, bin string, entries map[string][]hookGroup) ([]
 		}
 		hooks = h
 	}
+	for ev := range entries {
+		if raw, ok := hooks[ev]; ok {
+			if _, ok := raw.([]any); !ok {
+				return nil, fmt.Errorf(`现有配置的 "hooks.%s" 不是数组，不覆盖`, ev)
+			}
+		}
+	}
 	// 先从所有事件里删掉我们旧的条目组
 	for ev, raw := range hooks {
 		groups, ok := raw.([]any)
 		if !ok {
-			return nil, fmt.Errorf(`现有配置的 "hooks.%s" 不是数组，不覆盖`, ev)
+			continue // 不是事件数组（我们不写的键），原样保留
 		}
 		kept := []any{}
 		for _, g := range groups {

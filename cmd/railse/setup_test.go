@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -204,6 +205,7 @@ func TestSetupHooksReplacesOldBinAndQuotesSpaces(t *testing.T) {
 			t.Fatalf("%s 应只剩一组（旧路径的条目要被替换）, 得到 %d: %+v", ev, n, hooks[ev])
 		}
 	}
+	needUnixShell(t)
 	cmd := hooks["PermissionRequest"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"].(string)
 	got, err := exec.Command("sh", "-c", cmd).Output()
 	if err != nil || string(got) != "hook claude\n" {
@@ -248,13 +250,16 @@ func TestSetupHooksRejectsBadArgs(t *testing.T) {
 
 func TestSetupHooksWritesThroughSymlink(t *testing.T) {
 	// 配置是符号链接（如 dotfiles）时写到链接指向的文件，链接本身保留
+	if runtime.GOOS == "windows" {
+		t.Skip("符号链接用例只在 Unix 上跑")
+	}
 	project := t.TempDir()
 	real := filepath.Join(t.TempDir(), "claude-settings.json")
 	os.WriteFile(real, []byte(`{"permissions":{}}`), 0o644)
 	link := filepath.Join(project, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(link), 0o755)
 	if err := os.Symlink(real, link); err != nil {
-		t.Fatal(err)
+		t.Skipf("无法创建符号链接: %v", err)
 	}
 	var out, errOut bytes.Buffer
 	if code := run([]string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
@@ -265,6 +270,79 @@ func TestSetupHooksWritesThroughSymlink(t *testing.T) {
 	}
 	if _, ok := readJSON(t, real)["hooks"].(map[string]any)["PermissionRequest"]; !ok {
 		t.Fatal("链接指向的文件应写入钩子")
+	}
+}
+
+func TestSetupHooksRecognizesOnlyRailseHookCommands(t *testing.T) {
+	// 只有形如“<一个词> hook claude|codex|gemini”且程序文件名是 railse 的旧条目才算我们的
+	others := []string{
+		"/opt/railse-old hook claude",
+		"git -C /x/railse hook run x",
+		"/my/tool --dir=/x/railse hook claude",
+	}
+	ours := []string{
+		"/old/place/railse hook claude",
+		`'/a b/railse' hook gemini`,
+	}
+	var groups []string
+	for _, c := range append(append([]string{}, others...), ours...) {
+		b, _ := json.Marshal(c)
+		groups = append(groups, `{"hooks":[{"type":"command","command":`+string(b)+`}]}`)
+	}
+	project := t.TempDir()
+	path := filepath.Join(project, ".claude", "settings.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(`{"hooks":{"PermissionRequest":[`+strings.Join(groups, ",")+`]}}`), 0o644)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
+		t.Fatal(errOut.String())
+	}
+	got := map[string]bool{}
+	for _, g := range readJSON(t, path)["hooks"].(map[string]any)["PermissionRequest"].([]any) {
+		got[g.(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"].(string)] = true
+	}
+	for _, c := range others {
+		if !got[c] {
+			t.Errorf("别人的钩子 %q 应保留", c)
+		}
+	}
+	for _, c := range ours {
+		if got[c] {
+			t.Errorf("旧的 Railse 钩子 %q 应被替换", c)
+		}
+	}
+	if !got["/opt/railse hook claude"] || len(got) != len(others)+1 {
+		t.Errorf("应只剩别人的 %d 组加本次一组, 得到 %v", len(others), got)
+	}
+}
+
+func TestSetupHooksKeepsNonArrayValuesWeDoNotTouch(t *testing.T) {
+	// 只有本次要写的事件必须是数组；hooks 里其他非数组的值原样保留
+	project := t.TempDir()
+	path := filepath.Join(project, ".claude", "settings.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(`{"hooks":{"enabled":true,"PreToolUse":"x"}}`), 0o644)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut.String())
+	}
+	hooks := readJSON(t, path)["hooks"].(map[string]any)
+	if hooks["enabled"] != true || hooks["PreToolUse"] != "x" {
+		t.Fatalf("enabled 与 PreToolUse 应原样保留: %+v", hooks)
+	}
+	if _, ok := hooks["PermissionRequest"]; !ok {
+		t.Fatal("应写入 PermissionRequest")
+	}
+}
+
+// needUnixShell 在找不到 sh 或非 Unix 时跳过依赖 shell 与 shebang 的断言。
+func needUnixShell(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("需要 Unix 环境")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("找不到 sh")
 	}
 }
 
