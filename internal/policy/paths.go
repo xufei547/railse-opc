@@ -248,10 +248,6 @@ func pathsRisk(paths []string, cwd string, ctx Context) Risk {
 // pathsRiskFunc 同 pathsRisk，由 unres 判断第 i 个参数取出的路径能否解析。
 // shell 分类器用它按引号信息判断，引号里的 glob 元字符与 $ 是字面量。
 func pathsRiskFunc(paths []string, cwd string, ctx Context, unres func(i int, p string) bool) Risk {
-	root := ctx.ProjectRoot
-	if root == "" {
-		root = cwd
-	}
 	risk := RiskRead
 	for i, arg := range paths {
 		p, ok := pathOperand(arg)
@@ -262,18 +258,37 @@ func pathsRiskFunc(paths []string, cwd string, ctx Context, unres func(i int, p 
 			risk = maxRisk(risk, RiskUnknown)
 			continue
 		}
-		abs := resolvePath(p, cwd, ctx.HomeDir)
-		if harmlessDevice(abs) {
-			continue
-		}
-		switch {
-		case isSensitive(abs, ctx.HomeDir):
-			risk = maxRisk(risk, RiskDestructive)
-		case isWithin(abs, root):
-			risk = maxRisk(risk, RiskWriteInProject)
-		default:
-			risk = maxRisk(risk, RiskWriteOutside)
-		}
+		risk = maxRisk(risk, resolvedPathRisk(p, cwd, ctx))
 	}
 	return risk
+}
+
+// literalPathRisk 给一个字面路径定级，不做选项与描述符跳过：- 或 & 开头也是路径本身。
+// 空串或无法解析的 unknown，无害的伪设备 read，其余同 pathsRisk。
+// file_write 载荷的路径不经 shell，用它而不是 pathsRisk。
+func literalPathRisk(p string, cwd string, ctx Context) Risk {
+	if p == "" || unresolvable(p, ctx.HomeDir) {
+		return RiskUnknown
+	}
+	return resolvedPathRisk(p, cwd, ctx)
+}
+
+// resolvedPathRisk 给一个已确认可解析的路径定级：无害的伪设备 read，敏感路径 destructive，
+// 项目内 write_in_project，其余 write_outside。项目根未知时以 cwd 为根。
+func resolvedPathRisk(p, cwd string, ctx Context) Risk {
+	root := ctx.ProjectRoot
+	if root == "" {
+		root = cwd
+	}
+	abs := resolvePath(p, cwd, ctx.HomeDir)
+	switch {
+	case harmlessDevice(abs):
+		return RiskRead
+	case isSensitive(abs, ctx.HomeDir):
+		return RiskDestructive
+	case isWithin(abs, root):
+		return RiskWriteInProject
+	default:
+		return RiskWriteOutside
+	}
 }

@@ -13,7 +13,7 @@ func Classify(p Payload, ctx Context) Risk {
 		if p.Path == "" {
 			return RiskUnknown
 		}
-		return maxRisk(RiskWriteInProject, pathsRisk([]string{p.Path}, cwd, ctx))
+		return maxRisk(RiskWriteInProject, literalPathRisk(p.Path, cwd, ctx))
 	case PayloadMCP, PayloadNetwork:
 		return RiskNetwork
 	default:
