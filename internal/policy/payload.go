@@ -36,7 +36,9 @@ type Payload struct {
 
 // Context 是评估一条请求时的环境，由调用方提供，本包不读环境。
 type Context struct {
-	ProjectRoot string // 项目根目录绝对路径，未知时为空
+	// ProjectRoot 是项目根目录的绝对路径。适配器必须传 git 仓库根（不在仓库里时传会话的工作区根），
+	// 不能留空：为空时引擎 fail closed，认为没有任何改动在项目内，写入一律按 write_outside 询问。
+	ProjectRoot string
 	HomeDir     string // 用户家目录绝对路径
 	MachineID   string // 本机 id，用于 machine 范围的规则
 }

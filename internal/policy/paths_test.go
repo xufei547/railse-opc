@@ -145,10 +145,21 @@ func TestPathsRisk(t *testing.T) {
 			t.Errorf("pathsRisk(%q) = %s, 想要 %s", c.paths, got, c.want)
 		}
 	}
-	// 项目根未知时以 cwd 为根
+	// 项目根未知时没有路径在项目内：写入一律按项目外，敏感路径与无法解析的照旧
 	noRoot := Context{HomeDir: "/home/u"}
-	if got := pathsRisk([]string{"a"}, "/home/u/other", noRoot); got != RiskWriteInProject {
-		t.Errorf("无 ProjectRoot 时应以 cwd 为根, 得到 %s", got)
+	for _, c := range []struct {
+		path string
+		want Risk
+	}{
+		{"a", RiskWriteOutside},
+		{"/home/u/other/a", RiskWriteOutside},
+		{".env", RiskDestructive},
+		{"$X/a", RiskUnknown},
+		{"/dev/null", RiskRead},
+	} {
+		if got := pathsRisk([]string{c.path}, "/home/u/other", noRoot); got != c.want {
+			t.Errorf("无 ProjectRoot 时 pathsRisk(%q) = %s, 想要 %s", c.path, got, c.want)
+		}
 	}
 	// 家目录未知时 ~ 与 $HOME 开头的路径无法解析
 	noHome := Context{HomeDir: ""}
@@ -183,10 +194,10 @@ func TestLiteralPathRisk(t *testing.T) {
 			t.Errorf("literalPathRisk(%q) = %s, 想要 %s", c.path, got, c.want)
 		}
 	}
-	// 项目根未知时以 cwd 为根
+	// 项目根未知时没有路径在项目内
 	noRoot := Context{HomeDir: "/home/u"}
-	if got := literalPathRisk("a", "/home/u/other", noRoot); got != RiskWriteInProject {
-		t.Errorf("无 ProjectRoot 时应以 cwd 为根, 得到 %s", got)
+	if got := literalPathRisk("a", "/home/u/other", noRoot); got != RiskWriteOutside {
+		t.Errorf("无 ProjectRoot 时 literalPathRisk(a) = %s, 想要 write_outside", got)
 	}
 	// 家目录未知时 ~ 开头的路径无法解析
 	noHome := Context{HomeDir: ""}

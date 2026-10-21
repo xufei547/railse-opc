@@ -207,7 +207,8 @@ func buildCommandTable() []cmdPattern {
 		{name: "gh", sub: "issue", any: []string{"create", "close", "comment", "edit", "delete", "reopen"}, risk: RiskOutward},
 		{name: "gh", sub: "release", risk: RiskOutward},
 		{name: "gh", sub: "repo", any: []string{"create", "delete", "edit", "fork", "rename", "archive"}, risk: RiskOutward},
-		{name: "gh", sub: "api", any: []string{"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"}, risk: RiskOutward},
+		// 指定方法或带字段、请求体的 gh api 是写：-XDELETE、-ffield=val 这类选项簇与 --method=DELETE、--field=val 同样算
+		{name: "gh", sub: "api", flagChars: "XfF", anyPrefix: []string{"--method", "--field", "--raw-field", "--input"}, risk: RiskOutward},
 		{name: "npm", sub: "publish", risk: RiskOutward},
 		{name: "pnpm", sub: "publish", risk: RiskOutward},
 		{name: "yarn", sub: "publish", risk: RiskOutward},

@@ -104,7 +104,7 @@ func TestProposeRuleRefusesNonLearnableRisk(t *testing.T) {
 }
 
 func TestProposeRuleNeedsProjectForShellAndFile(t *testing.T) {
-	// 没有项目根时 Classify 以 cwd 为根，学出来的 global 规则会放行 cwd 下的任意改动：命令与文件规则不学
+	// 没有项目根时文件与命令规则没有可限定的项目范围，学出来的 global 规则会放行任何项目里的同类请求：不学
 	noProj := Context{HomeDir: "/home/u"}
 	for _, p := range []Payload{
 		{Type: PayloadShell, Command: "git status", Cwd: "/home/u"},
@@ -356,4 +356,57 @@ func TestProposeRuleRootFileIsExact(t *testing.T) {
 		t.Fatalf("项目根本身应取精确路径: %+v, %v", r.Match, err)
 	}
 	assertLearnedAllows(t, r, p, learnCtx)
+}
+
+func TestProposeRuleApproveReadSubcommandMutationStaysAsk(t *testing.T) {
+	// 按子命令分发的 CLI 真正的动作在第三个词：批准一条查询不等于批准同一组子命令下的改动或取凭据
+	cases := []struct{ learn, other string }{
+		{"aws ec2 describe-instances", "aws ec2 terminate-instances --instance-ids i-1"},
+		{"aws ec2 describe-instances", "aws ec2 run-instances --image-id ami-1"},
+		{"gh auth status", "gh auth token"},
+		{"gh api repos/me/x", "gh api repos/me/prod"},
+		{"kubectl get pods", "kubectl get secrets -A -o yaml"},
+		{"gcloud compute instances list", "gcloud compute ssh vm --command id"},
+		{"docker pull alpine", "docker pull evil.example/x"},
+		{"brew info jq", "brew install evil/tap/x"},
+		{"terraform show", "terraform state pull"},
+		{"helm list", "helm get values prod"},
+		{"cargo build --release", "cargo build --release --target-dir /tmp/x"},
+	}
+	for _, c := range cases {
+		p := shell(c.learn)
+		r, err := ProposeRule(p, learnCtx, "id")
+		if err != nil {
+			t.Errorf("%q: %v", c.learn, err)
+			continue
+		}
+		if want := "^" + regexp.QuoteMeta(c.learn) + "$"; r.Match.CommandRegex != want || r.Match.CommandPrefix != c.learn {
+			t.Errorf("%q 应学整条命令: %+v", c.learn, r.Match)
+		}
+		assertLearnedAllows(t, r, p, learnCtx)
+		e, err := NewEngine(RuleSet{Version: 1, Rules: []Rule{r}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := e.Evaluate(shell(c.other), learnCtx); d.Action != ActionAsk {
+			t.Errorf("从 %q 学来的规则不应放行 %q: %+v", c.learn, c.other, d)
+		}
+	}
+}
+
+func TestLearnsWholeCommandDispatchCLIs(t *testing.T) {
+	for _, name := range []string{
+		"aws", "gcloud", "az", "gh", "kubectl", "helm", "docker", "brew", "cargo", "terraform", "pulumi",
+		"flyctl", "fly", "vercel", "wrangler", "firebase", "heroku", "railway",
+	} {
+		if !learnsWholeCommand(name) {
+			t.Errorf("%s 按子命令分发，学来的规则应取整条命令", name)
+		}
+	}
+	// 其余命令仍取前两个词
+	for _, name := range []string{"npm", "go", "git", "make", "ls"} {
+		if learnsWholeCommand(name) {
+			t.Errorf("%s 不应取整条命令", name)
+		}
+	}
 }

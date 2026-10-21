@@ -276,19 +276,16 @@ func literalPathRisk(p string, cwd string, ctx Context) Risk {
 }
 
 // resolvedPathRisk 给一个已确认可解析的路径定级：无害的伪设备 read，敏感路径 destructive，
-// 项目内 write_in_project，其余 write_outside。项目根未知时以 cwd 为根。
+// 项目内 write_in_project，其余 write_outside。项目根未知时 fail closed：没有路径在项目内
+// （不以 cwd 代替，否则 cd 或在家目录下执行就能把任意路径变成项目内）。
 func resolvedPathRisk(p, cwd string, ctx Context) Risk {
-	root := ctx.ProjectRoot
-	if root == "" {
-		root = cwd
-	}
 	abs := resolvePath(p, cwd, ctx.HomeDir)
 	switch {
 	case harmlessDevice(abs):
 		return RiskRead
 	case isSensitive(abs, ctx.HomeDir):
 		return RiskDestructive
-	case isWithin(abs, root):
+	case isWithin(abs, ctx.ProjectRoot):
 		return RiskWriteInProject
 	default:
 		return RiskWriteOutside

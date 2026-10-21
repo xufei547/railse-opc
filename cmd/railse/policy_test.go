@@ -17,6 +17,12 @@ func TestPolicyEvalDefaultRules(t *testing.T) {
 	if !strings.HasPrefix(out.String(), "allow\tread\t") {
 		t.Fatalf("stdout = %q", out.String())
 	}
+	// 不给 --project 时项目根取 cwd 的绝对路径：引擎对空项目根 fail closed，CLI 不能留空
+	out.Reset()
+	code = run([]string{"policy", "eval", "--cwd", t.TempDir(), "touch a"}, &out, &errOut)
+	if code != 0 || !strings.HasPrefix(out.String(), "allow\twrite_in_project\t") {
+		t.Fatalf("code=%d stdout=%q", code, out.String())
+	}
 	out.Reset()
 	code = run([]string{"policy", "eval", "--cwd", t.TempDir(), "git push origin main"}, &out, &errOut)
 	if code != 0 || !strings.HasPrefix(out.String(), "ask\toutward\t") {

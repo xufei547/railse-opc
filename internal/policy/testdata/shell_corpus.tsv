@@ -477,3 +477,18 @@ npm dist-tag rm pkg beta	unknown
 npm access public pkg	unknown
 yarn npm login	unknown
 npm run login	write_in_project
+# gh api 的写方法与字段选项：= 与选项簇的写法同样是对外
+gh api -X DELETE repos/me/prod	outward
+gh api -XDELETE repos/me/prod	outward
+gh api --method=DELETE repos/me/prod	outward
+gh api --method DELETE repos/me/prod	outward
+gh api -ffield=val repos/me/x	outward
+gh api --field=val repos/me/x	outward
+gh api -Ftitle=x repos/me/x/issues	outward
+gh api --raw-field=a=b repos/me/x	outward
+gh api --input=body.json repos/me/x	outward
+gh api -iXPATCH repos/me/x	outward
+gh api repos/me/x	network
+gh api --jq .name repos/me/x	network
+gh api -H 'Accept: application/json' repos/me/x	network
+gh api --paginate repos/me/x/issues	network

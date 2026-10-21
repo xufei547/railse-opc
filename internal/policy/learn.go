@@ -15,7 +15,7 @@ import (
 var ErrCannotLearn = errors.New("只有只读、项目内改动和联网操作能记住为自动放行规则，其余请手写规则")
 
 // ProposeRule 从一条用户已批准的请求生成 learned 规则草案：action 为 allow，risk 固定为请求当前的风险等级，
-// 范围为当前项目。没有项目根时 Classify 以 cwd 为根，学出来的 global 规则会放行 cwd 下的任意改动，
+// 范围为当前项目。没有项目根时文件与命令规则没有可限定的项目范围，学出来的 global 规则会放行任何项目里的同类请求，
 // 所以 shell 与 file_write 报错，mcp 与 network 学成 global。
 // 风险等级不是 read、write_in_project 或 network 时返回 ErrCannotLearn；outward 与 destructive 最先判断，
 // 命令同时含通配或命令替换时也返回 ErrCannotLearn。
@@ -140,8 +140,15 @@ var remoteCommands = []string{
 	"ping", "dig", "nslookup", "host", "traceroute",
 }
 
+// dispatchCommands 是按子命令分发的云、集群、包管理与部署 CLI：真正的动作常在第三个词（aws ec2 terminate-instances、
+// gh auth token、kubectl get secrets），前两个词一样的命令风险等级相同、效果却天差地别。
+var dispatchCommands = []string{
+	"aws", "gcloud", "az", "gh", "kubectl", "helm", "docker", "brew", "cargo", "terraform", "pulumi",
+	"flyctl", "fly", "vercel", "wrangler", "firebase", "heroku", "railway",
+}
+
 // wholeCommandNames 是学来的规则取整条命令并用锚定正则限定的命令：命令表里做路径分析（paths: true）的命令、
-// pathOperandCommands 与 remoteCommands。
+// pathOperandCommands、remoteCommands 与 dispatchCommands。
 var wholeCommandNames = func() map[string]bool {
 	m := map[string]bool{}
 	for _, row := range commandTable {
@@ -149,7 +156,7 @@ var wholeCommandNames = func() map[string]bool {
 			m[row.name] = true
 		}
 	}
-	for _, n := range slices.Concat(pathOperandCommands, remoteCommands) {
+	for _, n := range slices.Concat(pathOperandCommands, remoteCommands, dispatchCommands) {
 		m[n] = true
 	}
 	return m
