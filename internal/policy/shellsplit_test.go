@@ -121,6 +121,24 @@ func TestParseSegmentRedirects(t *testing.T) {
 		{`cmd >&2`, []string{"cmd"}, nil, nil, false},
 		{`cat < ~/.ssh/id_rsa`, []string{"cat"}, nil, []string{"~/.ssh/id_rsa"}, false},
 		{`echo "2">f`, []string{"echo", "2"}, []string{"f"}, nil, false},
+		// zsh 的覆盖写：! 与 | 一样是操作符的一部分，不是目标或参数
+		{`echo x >! /out/f`, []string{"echo", "x"}, []string{"/out/f"}, nil, false},
+		{`echo x >!/out/f`, []string{"echo", "x"}, []string{"/out/f"}, nil, false},
+		{`echo x >>! /out/f`, []string{"echo", "x"}, []string{"/out/f"}, nil, false},
+		{`echo x >>!/out/f`, []string{"echo", "x"}, []string{"/out/f"}, nil, false},
+		{`echo x >>| /out/f`, []string{"echo", "x"}, []string{"/out/f"}, nil, false},
+		{`cmd &>! /out/f`, []string{"cmd"}, []string{"/out/f"}, nil, false},
+		{`cmd &>!/out/f`, []string{"cmd"}, []string{"/out/f"}, nil, false},
+		{`cmd &>>! /out/f`, []string{"cmd"}, []string{"/out/f"}, nil, false},
+		{`cmd &>| /out/f`, []string{"cmd"}, []string{"/out/f"}, nil, false},
+		{`cmd >&! /out/f`, []string{"cmd"}, []string{"/out/f"}, nil, false},
+		{`cmd >&| /out/f`, []string{"cmd"}, []string{"/out/f"}, nil, false},
+		{`cmd 2>! /out/f`, []string{"cmd"}, []string{"/out/f"}, nil, false},
+		{`cat <! /in/f`, []string{"cat"}, nil, []string{"/in/f"}, false},
+		{`cat <!/in/f`, []string{"cat"}, nil, []string{"/in/f"}, false},
+		// 分隔开的 ! 是普通的词
+		{`echo x > !f`, []string{"echo", "x"}, []string{"!f"}, nil, false},
+		{`cat <<< !x`, []string{"cat"}, nil, nil, false},
 	}
 	for _, c := range cases {
 		got := parseSegment(c.in)
@@ -158,6 +176,14 @@ func TestParseSegmentFailClosed(t *testing.T) {
 		{`echo $'a\tb'`, nil},
 		{`ls ; git push --force ; echo $(date)`, nil},
 		{`(cd x && make)`, nil},
+		// 认不出的重定向变体：! 紧跟在完整的操作符之后
+		{`echo x >!! /out/f`, nil},
+		{`echo x >!!/out/f`, nil},
+		{`echo x >|! /out/f`, nil},
+		{`echo x >>!! /out/f`, nil},
+		{`cmd &>!! /out/f`, nil},
+		{`cmd >&!! /out/f`, nil},
+		{`cmd >>& /out/f`, nil},
 	}
 	for _, c := range cases {
 		got := parseSegment(c.in)

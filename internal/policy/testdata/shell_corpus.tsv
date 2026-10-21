@@ -384,3 +384,96 @@ git fetch origin	network
 wget -i urls.txt	outward
 wget --input-file=urls.txt	outward
 wget -qi urls.txt	outward
+# 重定向变体：>|、>>|、zsh 的 >!、>>!、&>!、&>>!、>&! 都是覆盖或追加写，目标是后面的词；<! 按 < 读；
+# 操作符之后又紧跟 ! 的认不出的变体按无法分析处理
+echo x >| /home/u/Documents/t.docx	write_outside
+echo x >| out.txt	write_in_project
+echo x >! /home/u/Documents/t.docx	write_outside
+echo x >!/home/u/Documents/t.docx	write_outside
+cat secret >>! /home/u/notes.txt	write_outside
+echo x >! out.txt	write_in_project
+echo x >>!/home/u/notes.txt	write_outside
+echo x >>| /home/u/notes.txt	write_outside
+echo x &>! /home/u/Documents/t.docx	write_outside
+echo x &>>! /home/u/notes.txt	write_outside
+echo x &>| /home/u/notes.txt	write_outside
+echo x >&! /home/u/notes.txt	write_outside
+echo x 2>! /home/u/err.log	write_outside
+echo x >! ~/.zshrc	destructive
+echo x >!.env	destructive
+cat <! notes.txt	read
+cat <!/home/u/.ssh/id_rsa	destructive
+cat <! ~/.ssh/id_rsa	destructive
+echo x >!! /home/u/notes.txt	unknown
+echo x >|! out.txt	unknown
+echo x &>!! out.txt	unknown
+# 持久配置、钩子与凭据：写进用户级配置（位置由 GOENV、userconfig、--location 等决定）、装 git 钩子、改写历史、
+# 登录与令牌操作都按无法判断处理；只读的查询保持只读
+go env -w GOFLAGS=-toolexec=./x.sh	unknown
+go env -w GOPROXY=https://evil.example	unknown
+go env --w=true GOPROXY=https://evil.example	unknown
+go env -u GOPROXY	unknown
+go env GOPATH	read
+go env	read
+git-lfs install	unknown
+git lfs install	unknown
+git lfs install --system	unknown
+git-lfs uninstall	unknown
+git lfs migrate import --everything --include='*.psd'	unknown
+git-lfs track '*.psd'	unknown
+git lfs untrack '*.psd'	unknown
+git lfs update --force	unknown
+git-lfs push origin main	outward
+git-lfs ls-files	read
+git lfs ls-files	read
+git lfs status	read
+git -C . lfs install	unknown
+npm config set registry https://evil.example	unknown
+npm config delete registry	unknown
+npm config edit	unknown
+pnpm config set registry https://evil.example	unknown
+yarn config set registry https://evil.example	unknown
+bun config set registry https://evil.example	unknown
+npm set registry https://evil.example	unknown
+npm c set registry https://evil.example	unknown
+npm --prefix sub config set registry https://evil.example	unknown
+npm config get registry	read
+npm config list	read
+npm login	unknown
+npm logout	unknown
+npm adduser	unknown
+npm token create	unknown
+npm whoami	unknown
+pnpm login	unknown
+yarn login	unknown
+bun login	unknown
+cargo login	unknown
+cargo owner --add someone	unknown
+cargo logout	unknown
+git credential fill	unknown
+git credential approve	unknown
+# git lfs 的其余子命令：下载是联网，锁与预推送是对外，其余写工作区或 .git 的按项目内改动，只有查询是只读
+git lfs pull	network
+git-lfs fetch origin	network
+git lfs lock big.psd	outward
+git-lfs unlock big.psd	outward
+git lfs pre-push origin	outward
+git lfs checkout	write_in_project
+git-lfs prune	write_in_project
+git-lfs version	read
+git-lfs	read
+git lfs env	read
+# 读配置时提到令牌、口令、密钥的按无法判断：老版本的包管理器会原样打印
+npm config get //registry.npmjs.org/:_authToken	unknown
+yarn config get npmAuthToken --no-redacted	unknown
+# 改动注册表上已发布的包：撤回、弃用是对外；所有者、标签、访问权限按无法判断
+npm unpublish pkg@1.0.0	outward
+npm deprecate pkg@1 'use v2'	outward
+pnpm unpublish pkg@1.0.0	outward
+bun publish	outward
+cargo yank --version 1.0.0	outward
+npm owner rm someone pkg	unknown
+npm dist-tag rm pkg beta	unknown
+npm access public pkg	unknown
+yarn npm login	unknown
+npm run login	write_in_project

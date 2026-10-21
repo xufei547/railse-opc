@@ -690,7 +690,7 @@ var pmSubcommandAliases = map[string]string{
 	"run-script": "run", "rum": "run", "urn": "run",
 	"i": "install", "in": "install", "ins": "install", "inst": "install", "insta": "install", "instal": "install",
 	"isnt": "install", "isnta": "install", "isntal": "install", "isntall": "install", "add": "install",
-	"t": "test", "tst": "test",
+	"t": "test", "tst": "test", "c": "config",
 	"un": "uninstall", "unlink": "uninstall", "remove": "uninstall", "rm": "uninstall", "r": "uninstall",
 }
 

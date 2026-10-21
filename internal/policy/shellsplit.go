@@ -7,11 +7,11 @@ type segment struct {
 	text          string      // 原文
 	argv          []string    // 分词并去引号后的参数，不含重定向
 	argvFlags     []wordFlags // 与 argv 一一对应
-	redirects     []string    // 输出重定向的目标：>、>>、>|、&>、&>>、N>，以及目标不是 fd 的 >&
+	redirects     []string    // 输出重定向的目标：>、>>、>|、&>、&>>、N>、zsh 的覆盖写（>!、>>!、&>! 等），以及目标不是 fd 的 >&
 	redirectFlags []wordFlags // 与 redirects 一一对应
-	inputs        []string    // 输入重定向的来源：<、N<，以及来源不是 fd 的 <&
+	inputs        []string    // 输入重定向的来源：<、<!、N<，以及来源不是 fd 的 <&
 	inputFlags    []wordFlags // 与 inputs 一一对应
-	subshell      bool        // 含无法静态分析的写法：命令替换、进程替换、裸括号、heredoc、带转义的 $'…'、未闭合引号、缺目标的重定向
+	subshell      bool        // 含无法静态分析的写法：命令替换、进程替换、裸括号、heredoc、带转义的 $'…'、未闭合引号、缺目标或认不出的重定向
 }
 
 // wordFlags 记录一个词在去引号之前由 shell 解释的部分，用来判断去引号后的文本能否按字面解析。
@@ -62,9 +62,9 @@ type tokKind int
 
 const (
 	tokWord       tokKind = iota // 普通词
-	tokOut                       // >、>>、>|、&>、&>>：下一个词是写入目标
+	tokOut                       // >、>>、&>、&>> 及其覆盖写形式（后缀 | 或 zsh 的 !），zsh 的 >&|、>&!：下一个词是写入目标
 	tokOutDup                    // >&：下一个词是数字或 - 时为 fd 复制，否则是写入目标
-	tokIn                        // <：下一个词是读取来源
+	tokIn                        // < 与 <!：下一个词是读取来源
 	tokInDup                     // <&：下一个词是数字或 - 时为 fd 复制，否则是读取来源
 	tokHereString                // <<<：下一个词是字符串内容，不记录
 )
@@ -90,8 +90,9 @@ const (
 )
 
 // scanShell 按 bash 词法把命令走一遍：拆段、分词、去引号、识别重定向和无法静态分析的写法。
+// 重定向操作符同时认 zsh 的写法（见 clobber）：用户的 shell 可能是 zsh。
 // 任何一段标了 subshell，opaque 就为 true，由调用方对整条命令 fail closed。触发条件：引号外的 $(、反引号、
-// <(、>(，裸括号，含反斜杠的 $'…'，未闭合的引号，缺目标的重定向，以及 heredoc。
+// <(、>(，裸括号，含反斜杠的 $'…'，未闭合的引号，缺目标的重定向，认不出的重定向变体，以及 heredoc。
 // 除 heredoc 外扫描会继续，尽力拆段分词。命令替换与进程替换内部的引号和分隔符不跟踪嵌套，
 // 只用括号深度让 $(date)、<(ls) 这类词保持完整。
 // heredoc（<< 而不是 <<<）的正文不是 shell 语法，遇到就停止扫描，并返回 heredoc=true。
@@ -125,6 +126,22 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 	}
 	// failClosed 把当前段标为无法分析；endSeg 会据此把整条命令标为 opaque。
 	failClosed := func() { subshell = true }
+	// clobber 吃掉 runes[i] 处输出操作符之后的覆盖写后缀，返回操作符最后一个字符的下标：
+	// | 是 bash 与 zsh 的 >|，! 是 zsh 的 >!、>>!、&>!、&>>!、>&!。zsh 下 echo x >! /a 写的是 /a；
+	// 不吃掉的话 ! 会成为目标（或目标的开头），真正的路径被当成普通参数。
+	clobber := func(i int) int {
+		if at(i+1) == '|' || at(i+1) == '!' {
+			return i + 1
+		}
+		return i
+	}
+	// strayBang 在 runes[i] 处结束的完整重定向操作符之后又紧跟 ! 时（>!!、>|!、<!! 等）按无法分析处理：
+	// 认不出的变体不能让 ! 绑成目标或参数。
+	strayBang := func(i int) {
+		if at(i+1) == '!' {
+			failClosed()
+		}
+	}
 	word := func(r rune) {
 		cur.WriteRune(r)
 		inWord = true
@@ -236,12 +253,14 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 			endSeg()
 			significant = false
 		case c == '&' && at(i+1) == '>':
-			// &> 与 &>>
+			// &> 与 &>>，以及覆盖写的 &>|、&>>|、&>!、&>>!
 			flushWord()
 			i++
 			if at(i+1) == '>' {
 				i++
 			}
+			i = clobber(i)
+			strayBang(i)
 			toks = append(toks, token{kind: tokOut})
 		case c == '&':
 			endSeg() // 后台符
@@ -288,15 +307,28 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 				k = tokInDup
 				i++
 			case c == '<':
+				// <!：按 < 处理，! 不算来源的一部分；不论 ! 归操作符还是归文件名，都只是读
 				k = tokIn
+				if at(i+1) == '!' {
+					i++
+				}
 			case at(i+1) == '&':
 				k = tokOutDup
 				i++
-			case at(i+1) == '>' || at(i+1) == '|':
-				k = tokOut
-				i++
+				// zsh 的 >&| 与 >&!：标准输出与标准错误覆盖写进后面的文件，后面的词总是文件
+				if j := clobber(i); j != i {
+					k, i = tokOut, j
+				}
 			default:
+				// > 与 >>，以及覆盖写的 >|、>>|、>!、>>!
 				k = tokOut
+				if at(i+1) == '>' {
+					i++
+				}
+				i = clobber(i)
+			}
+			if k != tokHereString {
+				strayBang(i)
 			}
 			toks = append(toks, token{kind: k})
 		default:

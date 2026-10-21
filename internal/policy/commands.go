@@ -1,6 +1,9 @@
 package policy
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // cmdPattern 是命令表的一行。按表中顺序匹配，第一条命中生效，所以危险的排前面。
 // any、anyPrefix、longAbbrev、flagChars、contains、when 设了任意一个时，至少要满足其中之一才命中。
@@ -91,6 +94,60 @@ var cloudMutations = []string{
 	"install", "upgrade", "set", "rollout", "scale", "exec", "put-object", "cp", "sync", "rm", "mb", "rb",
 }
 
+// argIs 返回一个 when 判断：argv[1:] 的第 i 个词是 words 之一。i 为 0 时看子命令，git lfs 这类两级的看 1。
+func argIs(i int, words ...string) func(args []string) bool {
+	return func(args []string) bool { return i < len(args) && slices.Contains(words, args[i]) }
+}
+
+// lfsOutward、lfsNetwork、lfsUnknown、lfsReadOnly 是 git-lfs（与 git lfs）的子命令分组。
+// 上传、预推送钩子与服务端的锁是对外；下载是联网；装卸钩子（--system、--global 写到仓库之外）、
+// 改写历史（migrate）、改 .gitattributes 按无法判断；只有查询是只读，其余写工作区或 .git 的按项目内改动。
+var (
+	lfsOutward  = []string{"push", "pre-push", "lock", "unlock"}
+	lfsNetwork  = []string{"pull", "fetch", "clone", "smudge", "filter-process"}
+	lfsUnknown  = []string{"install", "uninstall", "migrate", "track", "untrack", "update"}
+	lfsReadOnly = []string{"ls-files", "status", "env", "version", "--version", "fsck", "pointer", "locks", "ext", "help", "--help"}
+)
+
+// pmConfigWrites 是 JS 包管理器 config 之后会改配置的动作；pmConfigReads 是只读的查询。
+var (
+	pmConfigWrites = []string{"set", "delete", "del", "rm", "unset", "edit", "fix"}
+	pmConfigReads  = []string{"get", "list", "ls"}
+)
+
+// pmUserCommands 是 JS 包管理器里改用户级配置（set 是 config set 的别名）、登录与令牌，
+// 以及改包的所有者、标签与访问权限的子命令：都不是项目内改动，按无法判断处理。
+var pmUserCommands = []string{
+	"set", "login", "logout", "adduser", "add-user", "token", "whoami",
+	"owner", "author", "dist-tag", "dist-tags", "tag", "access", "team", "org", "hook", "profile",
+}
+
+// pmRegistryOutward 是改动注册表上已发布的包的子命令：撤回与弃用对所有用户可见。
+var pmRegistryOutward = []string{"unpublish", "deprecate"}
+
+// configSecretWords 出现在包管理器 config 的参数里时，读到的可能是令牌、口令或私钥：
+// 新版 npm 会打码，老版本与 yarn 的 --no-redacted 会原样打印。比较时不区分大小写。
+var configSecretWords = []string{"auth", "token", "password", "secret", "redact", "key", "cert"}
+
+// mentionsSecret 判断参数里是否提到 configSecretWords 中的词。
+func mentionsSecret(args []string) bool {
+	for _, a := range args {
+		a = strings.ToLower(a)
+		for _, w := range configSecretWords {
+			if strings.Contains(a, w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// gitCredential 判断 git 的子命令是不是 credential 或 credential-store、credential-osxkeychain 这类凭据助手：
+// fill、get 打印保存的口令与令牌，approve、store、erase 改动凭据存储。
+func gitCredential(args []string) bool {
+	return len(args) > 0 && (args[0] == "credential" || strings.HasPrefix(args[0], "credential-"))
+}
+
 // testScripts 是 JS 包管理器 run 之后按只读处理的测试与检查脚本名。
 var testScripts = []string{"test", "lint", "typecheck", "check", "test:unit", "test:e2e", "format:check", "lint:check"}
 
@@ -101,7 +158,7 @@ var readOnlyCommands = []string{
 	"dirname", "realpath", "readlink", "md5", "shasum", "sha256sum", "base64", "hexdump", "xxd", "strings",
 	"column", "tr", "seq", "expr", "bc", "echo", "printf", "cd", "export", "alias", "set", "unset", "read",
 	"exit", "sed", "find", "pytest", "jest", "vitest", "mocha", "rspec", "phpunit", "eslint",
-	"golangci-lint", "mypy", "git-lfs",
+	"golangci-lint", "mypy",
 }
 
 var commandTable = buildCommandTable()
@@ -155,9 +212,14 @@ func buildCommandTable() []cmdPattern {
 		{name: "pnpm", sub: "publish", risk: RiskOutward},
 		{name: "yarn", sub: "publish", risk: RiskOutward},
 		{name: "yarn", sub: "npm", any: []string{"publish"}, risk: RiskOutward},
-		{name: "git-lfs", sub: "push", risk: RiskOutward},
-		{name: "git", sub: "lfs", any: []string{"push"}, risk: RiskOutward},
+		{name: "bun", sub: "publish", risk: RiskOutward},
+		{name: "npm", when: argIs(0, pmRegistryOutward...), risk: RiskOutward},
+		{name: "pnpm", when: argIs(0, pmRegistryOutward...), risk: RiskOutward},
+		{name: "yarn", when: argIs(0, pmRegistryOutward...), risk: RiskOutward},
+		{name: "git-lfs", any: lfsOutward, risk: RiskOutward},
+		{name: "git", sub: "lfs", any: lfsOutward, risk: RiskOutward},
 		{name: "cargo", sub: "publish", risk: RiskOutward},
+		{name: "cargo", sub: "yank", risk: RiskOutward},
 		{name: "gem", sub: "push", risk: RiskOutward},
 		{name: "twine", sub: "upload", risk: RiskOutward},
 		{name: "poetry", sub: "publish", risk: RiskOutward},
@@ -234,6 +296,8 @@ func buildCommandTable() []cmdPattern {
 		{name: "git", sub: "ls-remote", risk: RiskNetwork},
 		{name: "git", sub: "submodule", any: []string{"update", "add"}, risk: RiskNetwork},
 		{name: "git", sub: "remote", any: []string{"update", "prune", "show"}, risk: RiskNetwork},
+		{name: "git-lfs", any: lfsNetwork, risk: RiskNetwork},
+		{name: "git", sub: "lfs", any: lfsNetwork, risk: RiskNetwork},
 		{name: "docker", sub: "pull", risk: RiskNetwork},
 		{name: "docker", sub: "build", risk: RiskNetwork},
 		{name: "docker", sub: "login", risk: RiskNetwork},
@@ -276,6 +340,22 @@ func buildCommandTable() []cmdPattern {
 		{name: "docker", sub: "run", risk: RiskUnknown},
 		{name: "docker", sub: "compose", risk: RiskUnknown},
 		{name: "docker-compose", risk: RiskUnknown},
+		// 写用户级配置、登录与令牌、读写保存的凭据：写到哪由 GOENV、npm 的 userconfig 与 --location 等决定，
+		// 不是项目内改动。go env -w 持久化 GOFLAGS=-toolexec 这类注入，与命令前设置注入型环境变量同级；-u 同样改写配置文件
+		{name: "go", sub: "env", any: []string{"-w", "--w", "-u", "--u"}, anyPrefix: []string{"-w=", "--w=", "-u=", "--u="}, risk: RiskUnknown},
+		{name: "npm", sub: "config", any: pmConfigWrites, when: mentionsSecret, risk: RiskUnknown},
+		{name: "pnpm", sub: "config", any: pmConfigWrites, when: mentionsSecret, risk: RiskUnknown},
+		{name: "yarn", sub: "config", any: pmConfigWrites, when: mentionsSecret, risk: RiskUnknown},
+		{name: "bun", sub: "config", any: pmConfigWrites, when: mentionsSecret, risk: RiskUnknown},
+		{name: "npm", when: argIs(0, pmUserCommands...), risk: RiskUnknown},
+		{name: "pnpm", when: argIs(0, pmUserCommands...), risk: RiskUnknown},
+		{name: "yarn", when: argIs(0, pmUserCommands...), risk: RiskUnknown},
+		{name: "bun", when: argIs(0, pmUserCommands...), risk: RiskUnknown},
+		{name: "yarn", sub: "npm", any: []string{"login", "logout", "whoami"}, risk: RiskUnknown},
+		{name: "cargo", when: argIs(0, "login", "logout", "owner"), risk: RiskUnknown},
+		{name: "git", when: gitCredential, risk: RiskUnknown},
+		{name: "git-lfs", any: lfsUnknown, risk: RiskUnknown},
+		{name: "git", sub: "lfs", any: lfsUnknown, risk: RiskUnknown},
 		// ---- 项目内改动，带路径分析 ----
 		{name: "mkdir", risk: RiskWriteInProject, paths: true},
 		{name: "touch", risk: RiskWriteInProject, paths: true},
@@ -315,7 +395,11 @@ func buildCommandTable() []cmdPattern {
 		{name: "git", sub: "version", risk: RiskRead},
 		{name: "git", sub: "help", risk: RiskRead},
 		{name: "git", any: []string{"--version"}, risk: RiskRead},
+		{name: "git", sub: "lfs", when: argIs(1, lfsReadOnly...), risk: RiskRead},
 		{name: "git", risk: RiskWriteInProject},
+		{name: "git-lfs", bare: true, risk: RiskRead},
+		{name: "git-lfs", when: argIs(0, lfsReadOnly...), risk: RiskRead},
+		{name: "git-lfs", risk: RiskWriteInProject},
 		// ---- go ----
 		{name: "go", sub: "test", risk: RiskRead},
 		{name: "go", sub: "vet", risk: RiskRead},
@@ -328,17 +412,20 @@ func buildCommandTable() []cmdPattern {
 		{name: "npm", sub: "test", risk: RiskRead},
 		{name: "npm", sub: "run", any: testScripts, risk: RiskRead},
 		{name: "npm", sub: "ls", risk: RiskRead},
+		{name: "npm", sub: "config", any: pmConfigReads, risk: RiskRead},
 		{name: "npm", any: []string{"--version", "-v"}, risk: RiskRead},
 		{name: "npm", risk: RiskWriteInProject},
 		{name: "pnpm", sub: "test", risk: RiskRead},
 		{name: "pnpm", sub: "run", any: testScripts, risk: RiskRead},
 		{name: "pnpm", sub: "lint", risk: RiskRead},
 		{name: "pnpm", sub: "typecheck", risk: RiskRead},
+		{name: "pnpm", sub: "config", any: pmConfigReads, risk: RiskRead},
 		{name: "pnpm", risk: RiskWriteInProject},
 		{name: "yarn", sub: "test", risk: RiskRead},
 		{name: "yarn", sub: "run", any: testScripts, risk: RiskRead},
 		{name: "yarn", sub: "lint", risk: RiskRead},
 		{name: "yarn", sub: "typecheck", risk: RiskRead},
+		{name: "yarn", sub: "config", any: pmConfigReads, risk: RiskRead},
 		{name: "yarn", risk: RiskWriteInProject},
 		{name: "bun", sub: "test", risk: RiskRead},
 		{name: "bun", sub: "run", any: testScripts, risk: RiskRead},
