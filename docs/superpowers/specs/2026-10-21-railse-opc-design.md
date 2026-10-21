@@ -79,9 +79,12 @@ Railse OPC 是给“用 AI agent 经营一人公司的人”用的公司层驾�
   internal/policy/     # 纯引擎：分类器、规则匹配，无 IO
   internal/adapter/    # claude、codex、gemini、webhook 翻译
   internal/agent/      # 守护进程
+  internal/hookclient/ # 钩子侧客户端
   internal/hub/        # 服务端、存储、推送
-  internal/proto/      # 守护进程与 hub 共用的消息类型
+  internal/proto/      # 钩子与守护进程、守护进程与 hub 共用的一行 JSON 协议
+  internal/redact/     # 凭据脱敏
   web/                 # Vite + React PWA
+  scripts/             # 冒烟脚本
   docs/
 ```
 
