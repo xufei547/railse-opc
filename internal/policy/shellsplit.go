@@ -4,11 +4,21 @@ import "strings"
 
 // segment 是一条 shell 命令里由 &&、||、|、|&、;、&、换行分隔出的一段。
 type segment struct {
-	text      string   // 原文
-	argv      []string // 分词并去引号后的参数，不含重定向
-	redirects []string // 输出重定向的目标：>、>>、>|、&>、&>>、N>，以及目标不是 fd 的 >&
-	inputs    []string // 输入重定向的来源：<、N<，以及来源不是 fd 的 <&
-	subshell  bool     // 含无法静态分析的写法：命令替换、进程替换、裸括号、heredoc、带转义的 $'…'、未闭合引号、缺目标的重定向
+	text          string      // 原文
+	argv          []string    // 分词并去引号后的参数，不含重定向
+	argvFlags     []wordFlags // 与 argv 一一对应
+	redirects     []string    // 输出重定向的目标：>、>>、>|、&>、&>>、N>，以及目标不是 fd 的 >&
+	redirectFlags []wordFlags // 与 redirects 一一对应
+	inputs        []string    // 输入重定向的来源：<、N<，以及来源不是 fd 的 <&
+	inputFlags    []wordFlags // 与 inputs 一一对应
+	subshell      bool        // 含无法静态分析的写法：命令替换、进程替换、裸括号、heredoc、带转义的 $'…'、未闭合引号、缺目标的重定向
+}
+
+// wordFlags 记录一个词在去引号之前由 shell 解释的部分，用来判断去引号后的文本能否按字面解析。
+type wordFlags struct {
+	glob   bool // 含不在任何引号里、也没被反斜杠转义的 * ? [ {
+	expand bool // 含没被转义、也不在单引号（含 $'…'）里的 $
+	tilde  bool // 以不加引号、没被转义的 ~ 开头
 }
 
 // splitSegments 按 bash 语义在引号之外拆段，返回每段去掉首尾空白与续行的原文（不含注释），丢掉空段。
@@ -60,8 +70,9 @@ const (
 )
 
 type token struct {
-	kind tokKind
-	text string // 仅 tokWord 有
+	kind  tokKind
+	text  string    // 仅 tokWord 有
+	flags wordFlags // 仅 tokWord 有
 }
 
 // scanned 是扫描器切出的一段：原文区间加解析结果（text 由调用方填）。
@@ -96,7 +107,8 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 		quote    = quoteNone
 		cur      strings.Builder
 		inWord   bool
-		quoted   bool // 当前词是否有任何部分加了引号或被转义
+		quoted   bool      // 当前词是否有任何部分加了引号或被转义
+		flags    wordFlags // 当前词的标志
 		toks     []token
 		subshell bool
 		depth    int  // 当前段里未加引号的 $(、<(、>( 尚未闭合的括号层数
@@ -118,11 +130,12 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 	}
 	flushWord := func() {
 		if inWord {
-			toks = append(toks, token{kind: tokWord, text: cur.String()})
+			toks = append(toks, token{kind: tokWord, text: cur.String(), flags: flags})
 		}
 		cur.Reset()
 		inWord = false
 		quoted = false
+		flags = wordFlags{}
 	}
 	endSeg := func() {
 		flushWord()
@@ -164,6 +177,9 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 				if quote == quoteDouble && (c == '`' || (c == '$' && at(i+1) == '(')) {
 					failClosed()
 				}
+				if quote == quoteDouble && c == '$' {
+					flags.expand = true
+				}
 				cur.WriteRune(c)
 			}
 			mark(from, i+1)
@@ -200,6 +216,7 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 			failClosed()
 		case c == '$' && at(i+1) == '(':
 			failClosed()
+			flags.expand = true
 			word(c)
 			word('(')
 			i++
@@ -251,6 +268,7 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 			if inWord && !quoted && isDigits(cur.String()) {
 				cur.Reset()
 				inWord = false
+				flags = wordFlags{}
 			} else {
 				flushWord()
 			}
@@ -281,6 +299,14 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 			}
 			toks = append(toks, token{kind: k})
 		default:
+			switch {
+			case strings.ContainsRune("*?[{", c):
+				flags.glob = true
+			case c == '$':
+				flags.expand = true
+			case c == '~' && !inWord:
+				flags.tilde = true
+			}
 			word(c)
 		}
 		if significant {
@@ -301,19 +327,22 @@ func resolveTokens(toks []token, subshell bool) segment {
 		t := toks[i]
 		if t.kind == tokWord {
 			seg.argv = append(seg.argv, t.text)
+			seg.argvFlags = append(seg.argvFlags, t.flags)
 			continue
 		}
 		if i+1 >= len(toks) || toks[i+1].kind != tokWord {
 			seg.subshell = true // 重定向缺目标
 			continue
 		}
-		target := toks[i+1].text
+		target := toks[i+1]
 		i++
 		switch {
-		case t.kind == tokOut, t.kind == tokOutDup && !isFD(target):
-			seg.redirects = append(seg.redirects, target)
-		case t.kind == tokIn, t.kind == tokInDup && !isFD(target):
-			seg.inputs = append(seg.inputs, target)
+		case t.kind == tokOut, t.kind == tokOutDup && !isFD(target.text):
+			seg.redirects = append(seg.redirects, target.text)
+			seg.redirectFlags = append(seg.redirectFlags, target.flags)
+		case t.kind == tokIn, t.kind == tokInDup && !isFD(target.text):
+			seg.inputs = append(seg.inputs, target.text)
+			seg.inputFlags = append(seg.inputFlags, target.flags)
 		}
 	}
 	return seg

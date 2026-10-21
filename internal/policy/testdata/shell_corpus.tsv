@@ -9,11 +9,20 @@ npm test	read
 npm run lint	read
 pytest -q	read
 sed 's/a/b/' file.txt	read
+find . -name '*.go'	read
 echo hello	read
 cd src	read
 sh -c 'ls'	read
 FOO=1 go test ./...	read
 env FOO=1 npm test	read
+# 引号里的 glob 元字符与 $ 是字面量，不影响解析
+grep -rn 'foo.*bar' src	read
+awk '{print $1}' file	read
+echo '$HOME'	read
+bash -c 'echo $HOME'	read
+bash -e -c 'ls'	read
+# 重定向到无害的伪设备不算写
+ls 2>/dev/null	read
 # 项目内改动
 mkdir -p build	write_in_project
 touch src/new.go	write_in_project
@@ -28,22 +37,43 @@ rm build/out.bin	write_in_project
 cp a.txt b.txt	write_in_project
 time go build ./...	write_in_project
 nohup python app.py	write_in_project
+# 重定向目标总是路径，- 开头的也不是选项
+echo x > -foo	write_in_project
 # 无法判断
 foobar --flag	unknown
 echo $(date)	unknown
 xargs rm	unknown
 find . -name '*.log' -delete	unknown
 docker run -it ubuntu	unknown
-# 去引号后 *.go 是 glob，引擎不展开 glob，无法判断它会匹配到哪些路径
-find . -name '*.go'	unknown
+# 引号外的 glob 由 shell 展开，引擎不展开 glob，无法判断它会匹配到哪些路径
+find . -name *.go	unknown
+ls *.go	unknown
 # 参数或输入重定向里有变量，不读环境就无法解析
 cat $FILE	unknown
 wc -l < $INPUT	unknown
+git commit -m "fix $bug"	unknown
+# shell 与解释器从 stdin 读命令或执行内联代码
+echo 'rm -rf ~' | sh	unknown
+python	unknown
+python -c 'import os'	unknown
+node -e 'x'	unknown
+echo 'rm -rf ~' | bash -s	unknown
+perl -lne 'print' f	unknown
+node -p '1+1'	unknown
+deno eval 'console.log(1)'	unknown
+# cd 到无法静态确定的目录（变量、cd -、popd），后面各段至少 unknown
+cd $D && ls	unknown
+cd - && ls	unknown
+pushd /tmp && popd && ls	unknown
 # 项目外改动
 cp a.txt /tmp/a.txt	write_outside
 echo x > ~/notes.txt	write_outside
 git config --global user.name x	write_outside
 mkdir /opt/app	write_outside
+bash /tmp/x.sh	write_outside
+cd /tmp && touch a	write_outside
+sed -i.bak 's/a/b/' /etc/hosts	write_outside
+sed -Ei 's/a/b/' /etc/hosts	write_outside
 # 联网
 curl https://example.com	network
 npm install	network
@@ -76,6 +106,21 @@ psql -c "DROP TABLE users"	destructive
 kubectl delete pod x	destructive
 docker system prune -f	destructive
 git checkout -- src/a.go	destructive
+git checkout .	destructive
 # 输入重定向与 --name=value 选项里的敏感路径
 cat < ~/.ssh/id_rsa	destructive
 sort --output=~/.ssh/x a.txt	destructive
+# 只有重定向、没有命令时照样看重定向目标
+> ~/.ssh/authorized_keys	destructive
+# shell 的 -c 选项簇
+bash -lc 'rm -rf ~'	destructive
+sh -xc 'git push --force'	destructive
+bash -euo pipefail -c 'rm -rf ~'	destructive
+# cd 之后的相对路径按新目录解析
+cd ~ && echo x >> .zshrc	destructive
+# 标志簇与 + refspec
+rm -rfv build	destructive
+rm -vrf ~	destructive
+git push origin +main	destructive
+git push -fu origin main	destructive
+git push --force-with-lease=main origin main	destructive

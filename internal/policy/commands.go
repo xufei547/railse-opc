@@ -1,13 +1,19 @@
 package policy
 
+import "strings"
+
 // cmdPattern 是命令表的一行。按表中顺序匹配，第一条命中生效，所以危险的排前面。
+// any、anyPrefix、flagChars 设了任意一个时，argv[1:] 里至少有一个参数满足其中之一才命中。
 type cmdPattern struct {
-	name  string   // argv[0] 的 basename
-	sub   string   // 可选：要求 argv[1] 等于它
-	any   []string // 可选：argv[1:] 里出现任一即命中
-	bare  bool     // 可选：只在没有任何参数时命中
-	risk  Risk
-	paths bool // 命中后对 argv[1:] 做路径分析，取较大值
+	name      string   // argv[0] 的 basename
+	sub       string   // 可选：要求 argv[1] 等于它
+	any       []string // 可选：参数等于其中之一
+	anyPrefix []string // 可选：参数以其中之一开头
+	flagChars string   // 可选：单横线参数（不含 -- 开头的）含其中任一字符，如 -rfv 含 r
+	bare      bool     // 可选：只在没有任何参数时命中
+	risk      Risk
+	paths     bool // 命中后对 argv[1:] 做路径分析，取较大值
+	interp    bool // 解释器：内联代码或从 stdin 读时为 unknown，运行文件时与文件路径的定级取大
 }
 
 func (p cmdPattern) matches(name string, argv []string) bool {
@@ -20,20 +26,30 @@ func (p cmdPattern) matches(name string, argv []string) bool {
 	if p.sub != "" && (len(argv) < 2 || argv[1] != p.sub) {
 		return false
 	}
-	if len(p.any) > 0 {
-		found := false
-		for _, a := range argv[1:] {
-			for _, want := range p.any {
-				if a == want {
-					found = true
-				}
-			}
-		}
-		if !found {
-			return false
+	if len(p.any) == 0 && len(p.anyPrefix) == 0 && p.flagChars == "" {
+		return true
+	}
+	for _, a := range argv[1:] {
+		if p.hits(a) {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+// hits 判断单个参数是否满足 any、anyPrefix、flagChars 中的任一条件。
+func (p cmdPattern) hits(a string) bool {
+	for _, want := range p.any {
+		if a == want {
+			return true
+		}
+	}
+	for _, pre := range p.anyPrefix {
+		if strings.HasPrefix(a, pre) {
+			return true
+		}
+	}
+	return p.flagChars != "" && len(a) > 1 && a[0] == '-' && a[1] != '-' && strings.ContainsAny(a[1:], p.flagChars)
 }
 
 // cloudMutations 是云和集群 CLI 里会改变远端状态的子命令词。
@@ -61,12 +77,13 @@ func buildCommandTable() []cmdPattern {
 	t := []cmdPattern{
 		// ---- 不可逆 ----
 		{name: "sudo", risk: RiskDestructive},
-		{name: "rm", any: []string{"-r", "-rf", "-fr", "-R", "-Rf", "-fR", "-rF", "--recursive"}, risk: RiskDestructive},
+		{name: "rm", flagChars: "rR", any: []string{"--recursive"}, risk: RiskDestructive},
 		{name: "git", sub: "reset", any: []string{"--hard"}, risk: RiskDestructive},
-		{name: "git", sub: "push", any: []string{"-f", "--force", "--force-with-lease", "-d", "--delete"}, risk: RiskDestructive},
+		// + 开头的 refspec 是强推；--force 前缀兜住 --force-with-lease=<ref> 与 --force-if-includes
+		{name: "git", sub: "push", flagChars: "f", any: []string{"--force", "--force-with-lease", "-d", "--delete"}, anyPrefix: []string{"+", "--force"}, risk: RiskDestructive},
 		{name: "git", sub: "clean", risk: RiskDestructive},
 		{name: "git", sub: "branch", any: []string{"-D"}, risk: RiskDestructive},
-		{name: "git", sub: "checkout", any: []string{"--"}, risk: RiskDestructive},
+		{name: "git", sub: "checkout", any: []string{"--", "."}, risk: RiskDestructive},
 		{name: "git", sub: "restore", risk: RiskDestructive},
 		{name: "git", sub: "stash", any: []string{"drop", "clear"}, risk: RiskDestructive},
 		{name: "docker", sub: "system", any: []string{"prune"}, risk: RiskDestructive},
@@ -209,7 +226,8 @@ func buildCommandTable() []cmdPattern {
 		{name: "patch", risk: RiskWriteInProject, paths: true},
 		{name: "unzip", risk: RiskWriteInProject, paths: true},
 		{name: "tar", risk: RiskWriteInProject, paths: true},
-		{name: "sed", any: []string{"-i", "--in-place"}, risk: RiskWriteInProject, paths: true},
+		// -i.bak 带后缀；flagChars 兜住 -Ei 这类选项簇
+		{name: "sed", anyPrefix: []string{"-i", "--in-place"}, flagChars: "i", risk: RiskWriteInProject, paths: true},
 		// ---- git：只读子命令在前，其余项目内改动 ----
 		{name: "git", sub: "stash", any: []string{"list", "show"}, risk: RiskRead},
 		{name: "git", sub: "remote", any: []string{"add", "remove", "rm", "set-url", "rename"}, risk: RiskWriteInProject},
@@ -257,7 +275,7 @@ func buildCommandTable() []cmdPattern {
 		{name: "yarn", risk: RiskWriteInProject},
 		{name: "bun", sub: "test", risk: RiskRead},
 		{name: "bun", sub: "run", any: testScripts, risk: RiskRead},
-		{name: "bun", risk: RiskWriteInProject},
+		{name: "bun", risk: RiskWriteInProject, interp: true},
 		// ---- 其他构建与检查工具 ----
 		{name: "cargo", any: []string{"test", "check", "clippy", "--version"}, risk: RiskRead},
 		{name: "cargo", risk: RiskWriteInProject},
@@ -278,22 +296,21 @@ func buildCommandTable() []cmdPattern {
 		{name: "gofmt", risk: RiskRead},
 		{name: "biome", sub: "check", risk: RiskRead},
 		{name: "biome", risk: RiskWriteInProject},
-		// ---- 解释器：跑项目脚本算项目内改动 ----
+		// ---- 解释器：跑文件算项目内改动并看文件路径，内联代码与 stdin 无法判断 ----
 		{name: "python", sub: "-m", any: []string{"pytest", "unittest"}, risk: RiskRead},
 		{name: "python3", sub: "-m", any: []string{"pytest", "unittest"}, risk: RiskRead},
 		{name: "python", any: []string{"--version", "-V"}, risk: RiskRead},
 		{name: "python3", any: []string{"--version", "-V"}, risk: RiskRead},
 		{name: "node", any: []string{"--version", "-v"}, risk: RiskRead},
-		{name: "python", risk: RiskWriteInProject},
-		{name: "python3", risk: RiskWriteInProject},
-		{name: "node", risk: RiskWriteInProject},
-		{name: "deno", risk: RiskWriteInProject},
-		{name: "ruby", risk: RiskWriteInProject},
-		{name: "php", risk: RiskWriteInProject},
-		{name: "perl", risk: RiskWriteInProject},
-		{name: "sh", risk: RiskWriteInProject},
-		{name: "bash", risk: RiskWriteInProject},
-		{name: "zsh", risk: RiskWriteInProject},
+		{name: "deno", sub: "eval", risk: RiskUnknown},
+		{name: "python", risk: RiskWriteInProject, interp: true},
+		{name: "python3", risk: RiskWriteInProject, interp: true},
+		{name: "node", risk: RiskWriteInProject, interp: true},
+		{name: "deno", risk: RiskWriteInProject, interp: true},
+		{name: "ruby", risk: RiskWriteInProject, interp: true},
+		{name: "php", risk: RiskWriteInProject, interp: true},
+		{name: "perl", risk: RiskWriteInProject, interp: true},
+		// sh、bash、zsh、dash、fish 由 shellRisk 处理，不进命令表
 	}
 	for _, name := range readOnlyCommands {
 		t = append(t, cmdPattern{name: name, risk: RiskRead})

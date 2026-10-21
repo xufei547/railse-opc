@@ -189,3 +189,68 @@ func TestParseSegmentComments(t *testing.T) {
 		}
 	}
 }
+
+// TestParseSegmentWordFlags 逐词记录引号外、未转义的 glob 元字符、$ 展开与词首 ~。
+func TestParseSegmentWordFlags(t *testing.T) {
+	cases := []struct {
+		in    string
+		where string // argv、redirect 或 input
+		i     int
+		want  wordFlags
+	}{
+		{`grep 'foo.*'`, "argv", 1, wordFlags{}},
+		{`grep foo.*`, "argv", 1, wordFlags{glob: true}},
+		{`echo "$X"`, "argv", 1, wordFlags{expand: true}},
+		{`echo '$X'`, "argv", 1, wordFlags{}},
+		{`echo \$X`, "argv", 1, wordFlags{}},
+		{`ls ~/x`, "argv", 1, wordFlags{tilde: true}},
+		{`ls '~/x'`, "argv", 1, wordFlags{}},
+		{`echo x > "$F"`, "redirect", 0, wordFlags{expand: true}},
+		{`cat < $F`, "input", 0, wordFlags{expand: true}},
+		{`ls a\*b`, "argv", 1, wordFlags{}},
+		{`ls "a*b"`, "argv", 1, wordFlags{}},
+		{`ls x~`, "argv", 1, wordFlags{}},
+		{`ls ""~`, "argv", 1, wordFlags{}},
+		{`ls ~/*.go`, "argv", 1, wordFlags{glob: true, tilde: true}},
+		{`echo $'$X'`, "argv", 1, wordFlags{}},
+		{`echo a{b,c}`, "argv", 1, wordFlags{glob: true}},
+		{`echo "x"[ab]`, "argv", 1, wordFlags{glob: true}},
+	}
+	for _, c := range cases {
+		seg := parseSegment(c.in)
+		var flags []wordFlags
+		switch c.where {
+		case "argv":
+			flags = seg.argvFlags
+		case "redirect":
+			flags = seg.redirectFlags
+		case "input":
+			flags = seg.inputFlags
+		}
+		if c.i >= len(flags) {
+			t.Errorf("parseSegment(%q) 的 %s 标志只有 %d 个", c.in, c.where, len(flags))
+			continue
+		}
+		if flags[c.i] != c.want {
+			t.Errorf("parseSegment(%q) %s[%d] 标志 = %+v, 想要 %+v", c.in, c.where, c.i, flags[c.i], c.want)
+		}
+	}
+}
+
+// TestParseSegmentFlagsParallel 标志切片与 argv、redirects、inputs 一一对应。
+func TestParseSegmentFlagsParallel(t *testing.T) {
+	for _, in := range []string{
+		`FOO=1 env A=$B ls *.go > "$OUT" 2>/dev/null < ~/in`,
+		`cmd 2>&1 >&2 <&3`,
+		`echo $(date) > x`,
+		`cat <<< "$X" < f`,
+		``,
+	} {
+		seg := parseSegment(in)
+		if len(seg.argvFlags) != len(seg.argv) || len(seg.redirectFlags) != len(seg.redirects) || len(seg.inputFlags) != len(seg.inputs) {
+			t.Errorf("parseSegment(%q) 标志长度 %d/%d/%d 与 %d/%d/%d 不一致", in,
+				len(seg.argvFlags), len(seg.redirectFlags), len(seg.inputFlags),
+				len(seg.argv), len(seg.redirects), len(seg.inputs))
+		}
+	}
+}
