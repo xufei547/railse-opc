@@ -482,6 +482,61 @@ rules:
 	}
 }
 
+func TestEvaluateRestrictiveSeesThroughShell(t *testing.T) {
+	// deny 与 ask 规则看穿 sh -c 这类包装；allow 规则不看穿。
+	const rules = `
+version: 1
+rules:
+  - id: builtin-write-in-project
+    source: builtin
+    scope: global
+    match: {risk: write_in_project}
+    action: allow
+  - id: deny-commit
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: "git commit"}
+    action: deny
+  - id: deny-curl
+    source: user
+    scope: global
+    match: {payload: shell, command_regex: "^curl "}
+    action: deny
+  - id: ask-npm-run
+    source: user
+    scope: {project: "~/proj"}
+    match: {payload: shell, command_prefix: "npm run"}
+    action: ask
+  - id: push
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: "git push origin"}
+    action: allow
+`
+	e := mustEngine(t, rules)
+	cases := []struct {
+		cmd  string
+		want Action
+		rule string
+	}{
+		{"sh -c 'git commit -m x'", ActionDeny, "deny-commit"},
+		{`bash -lc "cd x && git commit -m y"`, ActionDeny, "deny-commit"},
+		{`bash -c "sh -c 'git commit -m z'"`, ActionDeny, "deny-commit"},
+		{"zsh -c 'true; /usr/bin/git --no-pager commit'", ActionDeny, "deny-commit"},
+		{"fish -c 'git commit -m x'", ActionDeny, "deny-commit"},
+		{"env FOO=1 sh -c 'curl https://x.y'", ActionDeny, "deny-curl"},
+		{"sh -c 'npm run build'", ActionAsk, "ask-npm-run"},
+		{"sh -c 'git push origin main'", ActionAsk, ""},
+		{"git push origin main", ActionAllow, "push"},
+	}
+	for _, c := range cases {
+		d := e.Evaluate(shell(c.cmd), projCtx)
+		if d.Action != c.want || d.RuleID != c.rule {
+			t.Errorf("%q 得到 %s/%q (%s), 想要 %s/%q", c.cmd, d.Action, d.RuleID, d.Reason, c.want, c.rule)
+		}
+	}
+}
+
 func TestEvaluatePathGlobFoldsCase(t *testing.T) {
 	const rules = `
 version: 1

@@ -3,6 +3,7 @@ package policy
 import (
 	"net/url"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -141,40 +142,71 @@ func isShell(name string) bool {
 // -C、--init-command 的命令串也分析；带 -s、只有 -c 没有命令串，或没有操作数时从 stdin 读命令，为 unknown；
 // 否则第一个操作数是脚本，按 runFileRisk 定级。有不认识的选项时为 unknown。
 func shellRisk(name string, argv []string, flags []wordFlags, cwd string, ctx Context) Risk {
-	opts, rest, ok := parseOpts(argv[1:], shellOptions[name])
+	call, ok := parseShellCall(name, argv)
 	if !ok {
 		return RiskUnknown
 	}
-	rest++ // 换成 argv 的下标
 	risk := RiskRead
-	command, hasCommand, cmdFlag, stdin := "", false, false, false
+	for _, c := range call.init {
+		risk = maxRisk(risk, classifyShell(c, cwd, ctx))
+	}
+	switch {
+	case call.hasCommand:
+		return maxRisk(risk, classifyShell(call.command, cwd, ctx))
+	case call.cmdFlag, call.stdin, call.rest >= len(argv):
+		return RiskUnknown
+	default:
+		return maxRisk(risk, runFileRisk(argv[call.rest], flagAt(flags, call.rest), cwd, ctx))
+	}
+}
+
+// shellCall 是解析后的 shell 调用。
+type shellCall struct {
+	init       []string // fish 的 -C、--init-command 命令串，先于主命令执行
+	command    string   // -c 的命令串
+	hasCommand bool
+	cmdFlag    bool // 有 -c 但没有命令串
+	stdin      bool // -s：从 stdin 读命令
+	rest       int  // 第一个操作数在 argv 中的下标
+}
+
+// inline 返回调用里要执行的全部命令串。
+func (c shellCall) inline() []string {
+	out := append([]string(nil), c.init...)
+	if c.hasCommand {
+		out = append(out, c.command)
+	}
+	return out
+}
+
+// parseShellCall 按 shellOptions 解析 shell 的命令行：-c（含 -lc、-xc 这类选项簇）之后第一个操作数是命令串，
+// fish 的 -c、--command 直接带命令串。有不认识的选项时 ok 为 false。
+func parseShellCall(name string, argv []string) (shellCall, bool) {
+	opts, rest, ok := parseOpts(argv[1:], shellOptions[name])
+	if !ok {
+		return shellCall{}, false
+	}
+	call := shellCall{rest: rest + 1} // 换成 argv 的下标
 	for _, o := range opts {
 		switch o.name {
 		case "-c", "--command":
 			if o.hasArg {
-				command, hasCommand = o.arg, true
+				call.command, call.hasCommand = o.arg, true
 			} else {
-				cmdFlag = true
+				call.cmdFlag = true
 			}
 		case "-C", "--init-command":
 			if o.hasArg {
-				risk = maxRisk(risk, classifyShell(o.arg, cwd, ctx))
+				call.init = append(call.init, o.arg)
 			}
 		case "-s":
-			stdin = true
+			call.stdin = true
 		}
 	}
-	if cmdFlag && rest < len(argv) {
-		command, hasCommand = argv[rest], true
+	if call.cmdFlag && call.rest < len(argv) {
+		call.command, call.hasCommand = argv[call.rest], true
 	}
-	switch {
-	case hasCommand:
-		return maxRisk(risk, classifyShell(command, cwd, ctx))
-	case cmdFlag, stdin, rest >= len(argv):
-		return RiskUnknown
-	default:
-		return maxRisk(risk, runFileRisk(argv[rest], flagAt(flags, rest), cwd, ctx))
-	}
+	return call, true
 }
 
 // ---- 解释器 ----
@@ -434,34 +466,55 @@ type outputOpt struct{ full, min string }
 // outputSpec 描述命令把结果写进文件的选项。fetch 为 true 的是下载工具：写到项目内不抬级，
 // 写到项目外或无法解析的路径按 outward，敏感路径按 destructive；否则按普通写入的路径定级。
 type outputSpec struct {
-	short      string // 带文件参数的短选项字符
-	shortArg   string // 其余带参数的短选项字符：选项簇里遇到就停，参数不再当选项看
-	long       []outputOpt
-	remoteName string   // 按远端文件名写进当前目录的短选项字符
-	remoteLong []string // 同上的长选项
+	short      string      // 参数是写入的文件或目录的短选项字符
+	long       []outputOpt // 同上的长选项
+	dirLong    []outputOpt // 输出目录（curl --output-dir）：目录本身定级，其余相对的输出文件也按落在它下面定级
+	taint      string      // 从文件读入更多选项的短选项字符（curl -K）：输出位置无法分析
+	taintLong  []outputOpt // 同上的长选项
+	shortArg   string      // 其余带参数的短选项字符：选项簇里遇到就停，参数不再当选项看
+	remoteName string      // 按远端文件名写进当前目录的短选项字符
+	remoteLong []string    // 同上的长选项
 	fetch      bool
 }
 
 var outputOptions = map[string]outputSpec{
 	"curl": {
-		short: "o", shortArg: "AbcCdDeEFHKmPQrtTuUwxXyYz",
-		long:       []outputOpt{{"--output", "--output"}},
+		short:      "oDc",
+		long:       []outputOpt{{"--output", "--output"}, {"--dump-header", "--dump-header"}, {"--cookie-jar", "--cookie-jar"}},
+		dirLong:    []outputOpt{{"--output-dir", "--output-dir"}},
+		taint:      "K",
+		taintLong:  []outputOpt{{"--config", "--config"}},
+		shortArg:   "AbCdeEFHmPQrtTuUwxXyYz",
 		remoteName: "O", remoteLong: []string{"--remote-name"},
 		fetch: true,
 	},
+	// wget 接受 getopt 风格的长选项缩写，min 取不与别的选项混淆的最短前缀
 	"wget": {
-		short: "O", shortArg: "aeoiBtTwQPlARDIXU",
-		long:  []outputOpt{{"--output-document", "--output-d"}},
-		fetch: true,
+		short: "OoaP",
+		long: []outputOpt{{"--output-document", "--output-d"}, {"--output-file", "--output-f"},
+			{"--append-output", "--ap"}, {"--directory-prefix", "--di"}},
+		shortArg: "eiBtTwQlARDIXU",
+		fetch:    true,
 	},
 	"git": {long: []outputOpt{{"--output", "--output"}}},
 }
 
+// matchesLong 判断 --name（不含 =value）是否为 opts 里某个长选项或其可接受的缩写。
+func matchesLong(opts []outputOpt, name string) bool {
+	for _, o := range opts {
+		if len(name) >= len(o.min) && strings.HasPrefix(o.full, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // outputTargets 找出命令写入的文件及其标志：输出选项的值；按远端文件名下载时取各 URL 路径的最后一段，
-// 它落在当前目录。flags 与 argv 一一对应。
+// 它落在当前目录；有输出目录时，相对的输出文件再按落在目录下各算一次。taint 类选项记一个空目标，按无法解析处理。
+// flags 与 argv 一一对应。
 func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string, []wordFlags) {
-	var targets []string
-	var tflags []wordFlags
+	var targets, dirs []string
+	var tflags, dflags []wordFlags
 	add := func(t string, f wordFlags) {
 		targets = append(targets, t)
 		tflags = append(tflags, f)
@@ -476,17 +529,25 @@ func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string,
 				remote = true
 				continue
 			}
-			for _, o := range spec.long {
-				if len(name) < len(o.min) || !strings.HasPrefix(o.full, name) {
+			file, dir, taint := matchesLong(spec.long, name), matchesLong(spec.dirLong, name), matchesLong(spec.taintLong, name)
+			if !file && !dir && !taint {
+				continue
+			}
+			if !hasVal {
+				if i+1 >= len(argv) {
 					continue
 				}
-				if hasVal {
-					add(val, f)
-				} else if i+1 < len(argv) {
-					add(argv[i+1], flagAt(flags, i+1))
-					i++
-				}
-				break
+				i++
+				val, f = argv[i], flagAt(flags, i)
+			}
+			switch {
+			case taint:
+				add("", wordFlags{})
+			case dir:
+				dirs = append(dirs, val)
+				dflags = append(dflags, f)
+			default:
+				add(val, f)
 			}
 		case len(a) > 1 && a[0] == '-':
 			for j := 1; j < len(a); j++ {
@@ -495,6 +556,11 @@ func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string,
 				case strings.IndexByte(spec.remoteName, c) >= 0:
 					remote = true
 					continue
+				case strings.IndexByte(spec.taint, c) >= 0:
+					add("", wordFlags{})
+					if j+1 == len(a) {
+						i++ // 配置文件是下一个词
+					}
 				case strings.IndexByte(spec.short, c) >= 0:
 					if j+1 < len(a) {
 						add(a[j+1:], f)
@@ -525,6 +591,17 @@ func outputTargets(argv []string, flags []wordFlags, spec outputSpec) ([]string,
 			}
 			if base := path.Base(u.Path); base != "/" && base != "." {
 				add(base, wordFlags{})
+			}
+		}
+	}
+	// 输出目录本身定级；相对的输出文件按落在目录下再算一次，取较大值
+	n := len(targets)
+	for k, d := range dirs {
+		add(d, dflags[k])
+		for t := 0; t < n; t++ {
+			if p := targets[t]; p != "" && p != "-" && !filepath.IsAbs(p) && !strings.HasPrefix(p, "~") {
+				f, g := dflags[k], tflags[t]
+				add(filepath.Join(d, p), wordFlags{glob: f.glob || g.glob, expand: f.expand || g.expand, tilde: f.tilde})
 			}
 		}
 	}

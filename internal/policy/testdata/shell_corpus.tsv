@@ -281,3 +281,22 @@ git log --output=/etc/hosts	write_outside
 git diff --output /tmp/x	write_outside
 git log --output=notes.txt	write_in_project
 git -C sub diff --output=/dev/null	read
+# curl、wget 其他写文件的选项与目录：同 -o 的路径定级；curl -K 从配置文件读选项，无法分析
+curl -c /tmp/jar https://x.y	outward
+curl -sc /tmp/jar https://x.y	outward
+curl --cookie-jar=/tmp/jar https://x.y	outward
+curl -D /tmp/h https://x.y	outward
+curl --dump-header h.txt https://x.y	network
+curl -b cookies.txt https://x.y	network
+curl --output-dir /tmp -O https://x.y/a	outward
+curl --output-dir sub -o a.txt https://x.y	network
+curl --output-dir /home/u -o .bashrc https://x.y	destructive
+curl -K cfg https://x.y	outward
+curl --config=cfg https://x.y	outward
+wget -P /usr/local/bin https://x.y/f	outward
+wget -P downloads https://x.y/f	network
+wget --directory-prefix=/opt https://x.y/f	outward
+wget -o /tmp/log https://x.y	outward
+wget -a log.txt https://x.y	network
+wget --output-file=/tmp/l https://x.y	outward
+wget --append-output /tmp/l https://x.y	outward

@@ -314,3 +314,30 @@ func hasSQLDrop(text string) bool {
 	}
 	return false
 }
+
+// effectiveSegments 返回命令的各段（同 splitSegments 加 parseSegment）；某段是 shell 带内联命令串的调用
+// （sh -c、bash -lc、fish -C 等，判断与 shellRisk 相同）时，在它后面递归附上命令串拆出的各段。
+// 供 deny 与 ask 规则匹配用：它们要看穿 shell 包装。命令串严格短于外层，递归必然结束。
+func effectiveSegments(command string) []segment {
+	var out []segment
+	for _, s := range splitSegments(command) {
+		seg := parseSegment(s)
+		out = append(out, seg)
+		argv := stripWrappers(seg.argv)
+		if len(argv) == 0 {
+			continue
+		}
+		name := filepath.Base(argv[0])
+		if !isShell(name) {
+			continue
+		}
+		call, ok := parseShellCall(name, argv)
+		if !ok {
+			continue
+		}
+		for _, inner := range call.inline() {
+			out = append(out, effectiveSegments(inner)...)
+		}
+	}
+	return out
+}

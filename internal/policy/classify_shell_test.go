@@ -80,3 +80,27 @@ func TestInjectsEnvNames(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveSegments(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want []string
+	}{
+		{"ls; sh -c 'a; b'", []string{"ls", "sh -c 'a; b'", "a", "b"}},
+		{`bash -lc "sh -c 'git commit'"`, []string{`bash -lc "sh -c 'git commit'"`, "sh -c 'git commit'", "git commit"}},
+		{"FOO=1 /bin/zsh -c 'x | y'", []string{"FOO=1 /bin/zsh -c 'x | y'", "x", "y"}},
+		{"fish -C 'a' -c 'b'", []string{"fish -C 'a' -c 'b'", "a", "b"}},
+		{"sh script.sh", []string{"sh script.sh"}},
+		{"sh -c", []string{"sh -c"}},
+		{"echo sh -c 'x'", []string{"echo sh -c 'x'"}},
+	}
+	for _, c := range cases {
+		var got []string
+		for _, seg := range effectiveSegments(c.cmd) {
+			got = append(got, seg.text)
+		}
+		if strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("effectiveSegments(%q) = %q, 想要 %q", c.cmd, got, c.want)
+		}
+	}
+}

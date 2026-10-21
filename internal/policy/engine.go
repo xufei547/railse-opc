@@ -157,7 +157,7 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 	// allow 规则要求每一段都命中；deny 与 ask 是收紧，任一段命中即可，且同时按归一化的命令比较。
 	anySeg := r.Action != ActionAllow
 	if m.CommandPrefix != "" {
-		if p.Type != PayloadShell || !segmentsMatch(p.Command, anySeg, func(_ string, seg segment) bool {
+		if p.Type != PayloadShell || !segmentsMatch(p.Command, anySeg, func(seg segment) bool {
 			if segmentHasPrefix(seg, m.CommandPrefix) {
 				return true
 			}
@@ -167,8 +167,8 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 		}
 	}
 	if r.re != nil {
-		if p.Type != PayloadShell || !segmentsMatch(p.Command, anySeg, func(text string, seg segment) bool {
-			if r.re.MatchString(text) {
+		if p.Type != PayloadShell || !segmentsMatch(p.Command, anySeg, func(seg segment) bool {
+			if r.re.MatchString(seg.text) {
 				return true
 			}
 			norm := normalizedArgv(seg, cwd, ctx)
@@ -202,30 +202,33 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 // everySegmentHasPrefix 要求复合命令的每一段（剥掉包装后）都以 prefix 开头，按词边界比较，
 // 且每一段都能放行（见 segmentAllowable）。
 func everySegmentHasPrefix(command, prefix string) bool {
-	return segmentsMatch(command, false, func(_ string, seg segment) bool { return segmentHasPrefix(seg, prefix) })
+	return segmentsMatch(command, false, func(seg segment) bool { return segmentHasPrefix(seg, prefix) })
 }
 
-// segmentsMatch 按 splitSegments 拆出的各段匹配，pred 收到段的原文与解析结果。
-// anySeg 为 true 时任一段命中即可；否则每一段都要命中，且每一段都能放行。
+// segmentsMatch 按段匹配，pred 收到解析后的段（seg.text 是原文）。
+// anySeg 为 true 时按 effectiveSegments 取段，看穿 sh -c 这类包装，任一段命中即可；
+// 否则按 splitSegments 取段，不看穿包装，每一段都要命中且都能放行。
 // 无法静态分析的命令 splitSegments 先返回整条，它的 subshell 为 true，于是按每段匹配时整条都不命中。
-func segmentsMatch(command string, anySeg bool, pred func(text string, seg segment) bool) bool {
+func segmentsMatch(command string, anySeg bool, pred func(seg segment) bool) bool {
+	if anySeg {
+		for _, seg := range effectiveSegments(command) {
+			if pred(seg) {
+				return true
+			}
+		}
+		return false
+	}
 	segs := splitSegments(command)
 	if len(segs) == 0 {
 		return false
 	}
 	for _, s := range segs {
 		seg := parseSegment(s)
-		if anySeg {
-			if pred(s, seg) {
-				return true
-			}
-			continue
-		}
-		if !segmentAllowable(seg) || !pred(s, seg) {
+		if !segmentAllowable(seg) || !pred(seg) {
 			return false
 		}
 	}
-	return !anySeg
+	return true
 }
 
 // segmentHasPrefix 判断剥掉包装后的 argv 是否以 prefix 开头，按词边界比较。
