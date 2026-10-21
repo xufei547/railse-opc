@@ -12,6 +12,8 @@ func TestResolvePath(t *testing.T) {
 		{"/tmp/x", "/tmp/x"},
 		{"~/.ssh/config", "/home/u/.ssh/config"},
 		{"~", "/home/u"},
+		{"$HOME/x", "/home/u/x"},
+		{"${HOME}/x", "/home/u/x"},
 	}
 	for _, c := range cases {
 		if got := resolvePath(c.in, "/home/u/proj", "/home/u"); got != c.want {
@@ -44,8 +46,16 @@ func TestIsSensitive(t *testing.T) {
 		"/home/u/proj/.env", "/home/u/proj/.env.local", "/home/u/proj/certs/server.pem",
 		"/home/u/.ssh/config", "/home/u/.aws/credentials", "/home/u/.claude/settings.json",
 		"/home/u/proj/.claude/settings.local.json", "/home/u/.codex/config.toml", "/home/u/.npmrc",
+		"/home/u/.AWS/credentials", "/home/u/proj/.ENV",
+		"/home/u/.git-credentials", "/home/u/.config/gcloud/credentials.db", "/home/u/.claude.json",
+		"/home/u/.claude/.credentials.json", "/home/u/.codex/auth.json", "/home/u/.gemini/oauth_creds.json",
+		"/home/u/.zshrc", "/home/u/proj/.pgpass", "/home/u/proj/.envrc", "/home/u/proj/.npmrc",
+		"/home/u/proj/keys/id_ecdsa", "/home/u/proj/cert.p12", "/dev/disk0", "/dev/sda1",
 	}
-	no := []string{"/home/u/proj/src/a.go", "/home/u/proj/README.md", "/home/u/proj/.envrc.example"}
+	no := []string{
+		"/home/u/proj/src/a.go", "/home/u/proj/README.md", "/home/u/proj/.envrc.example",
+		"/home/u/proj/src/env.go", "/home/u/projects/.ssh/x",
+	}
 	for _, p := range yes {
 		if !isSensitive(p, "/home/u") {
 			t.Errorf("%s 应是敏感路径", p)
@@ -55,6 +65,16 @@ func TestIsSensitive(t *testing.T) {
 		if isSensitive(p, "/home/u") {
 			t.Errorf("%s 不应是敏感路径", p)
 		}
+	}
+	// 家目录含 glob 元字符时，~ 开头的规则按家目录内的相对路径匹配，不受影响
+	weird := "/home/u[1]"
+	for _, p := range []string{"/home/u[1]/.ssh/id_rsa", "/home/u[1]/.ssh/config"} {
+		if !isSensitive(p, weird) {
+			t.Errorf("家目录 %s 下 %s 应是敏感路径", weird, p)
+		}
+	}
+	if isSensitive("/home/other/.ssh/config", weird) {
+		t.Errorf("家目录 %s 时 /home/other/.ssh/config 不应是敏感路径", weird)
 	}
 }
 
@@ -72,6 +92,13 @@ func TestPathsRisk(t *testing.T) {
 		{[]string{"/dev/null"}, RiskRead},
 		{[]string{"&1"}, RiskRead},
 		{nil, RiskRead},
+		{[]string{"/dev/stdout"}, RiskRead},
+		{[]string{"/dev/fd/1"}, RiskRead},
+		{[]string{"/dev/disk0"}, RiskDestructive},
+		{[]string{"/dev/random"}, RiskWriteOutside},
+		{[]string{"$DIR/x"}, RiskUnknown},
+		{[]string{"~bob/x"}, RiskUnknown},
+		{[]string{".ENV"}, RiskDestructive},
 	}
 	for _, c := range cases {
 		if got := pathsRisk(c.paths, "/home/u/proj", pathCtx); got != c.want {
@@ -82,5 +109,12 @@ func TestPathsRisk(t *testing.T) {
 	noRoot := Context{HomeDir: "/home/u"}
 	if got := pathsRisk([]string{"a"}, "/home/u/other", noRoot); got != RiskWriteInProject {
 		t.Errorf("无 ProjectRoot 时应以 cwd 为根, 得到 %s", got)
+	}
+	// 家目录未知时 ~ 与 $HOME 开头的路径无法解析
+	noHome := Context{HomeDir: ""}
+	for _, p := range []string{"~/x", "$HOME/x"} {
+		if got := pathsRisk([]string{p}, "/home/u/proj", noHome); got != RiskUnknown {
+			t.Errorf("无 HomeDir 时 pathsRisk(%q) = %s, 想要 unknown", p, got)
+		}
 	}
 }
