@@ -427,3 +427,67 @@ func TestDeciderErrorIsPassthrough(t *testing.T) {
 		t.Fatalf("审计应记 passthrough/error: %+v", entries)
 	}
 }
+
+// symlinkedProject 在临时目录里建 real/proj（带 .git）和指向 real 的 link，返回 link 写法的项目路径与真实路径。
+// shortTempDir 在 macOS 上位于 /var/folders，本身也经过 /var -> /private/var 的链接。
+func symlinkedProject(t *testing.T, base string) (linkProj, realProj string) {
+	t.Helper()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(real, "proj", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(base, "link")); err != nil {
+		t.Skipf("无法创建符号链接: %v", err)
+	}
+	realProj, err := filepath.EvalSymlinks(filepath.Join(real, "proj"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(base, "link", "proj"), realProj
+}
+
+const builtinWriteInProject = "  - id: builtin-write-in-project\n    source: builtin\n    scope: global\n    match: {risk: write_in_project}\n    action: allow\n"
+
+func TestProjectScopeRuleMatchesThroughSymlink(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	linkProj, realProj := symlinkedProject(t, filepath.Dir(env.repo))
+	rules := "version: 1\nrules:\n" + builtinWriteInProject +
+		"  - id: deny-rm-proj\n    source: user\n    scope: {project: \"" + linkProj + "\"}\n    match: {payload: shell, command_prefix: rm}\n    action: deny\n"
+	os.WriteFile(env.cfg.RulesPath, []byte(rules), 0o600)
+	if err := env.srv.rules.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(realProj, "rm notes.txt")), &resp)
+	if resp.Decision != "deny" || resp.RuleID != "deny-rm-proj" {
+		t.Fatalf("scope.project 写成符号链接时也应命中真实路径的项目: %+v", resp)
+	}
+}
+
+func TestDenyPathGlobMatchesThroughSymlink(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	linkProj, realProj := symlinkedProject(t, filepath.Dir(env.repo))
+	rules := "version: 1\nrules:\n" + builtinWriteInProject +
+		"  - id: deny-secret\n    source: user\n    scope: global\n    match: {payload: file_write, path_glob: \"" + linkProj + "/secret/**\"}\n    action: deny\n"
+	os.WriteFile(env.cfg.RulesPath, []byte(rules), 0o600)
+	if err := env.srv.rules.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string) proto.Response {
+		req := proto.Request{V: proto.Version, Kind: "permission",
+			Session:  proto.Session{Tool: "claude", CLISessionID: "s1", Cwd: realProj},
+			ToolName: "Write", Payload: policy.Payload{Type: policy.PayloadFileWrite, Path: path, Cwd: realProj}, DeadlineSeconds: 60}
+		var resp proto.Response
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, req), &resp)
+		return resp
+	}
+	// 真实路径与链接写法都要命中：deny 是收紧，改写后不能漏掉原来能命中的写法
+	for _, p := range []string{filepath.Join(realProj, "secret", "a.txt"), "secret/a.txt", filepath.Join(linkProj, "secret", "a.txt")} {
+		if resp := write(p); resp.Decision != "deny" || resp.RuleID != "deny-secret" {
+			t.Fatalf("写 %s 应命中 deny-secret: %+v", p, resp)
+		}
+	}
+	if resp := write(filepath.Join(realProj, "ok.txt")); resp.Decision != "allow" {
+		t.Fatalf("规则之外的项目内写入应放行: %+v", resp)
+	}
+}

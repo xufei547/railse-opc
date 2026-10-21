@@ -96,7 +96,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 		w = io.MultiWriter(logFile, stderr)
 	}
 	logger := log.New(w, "railse-agent ", log.LstdFlags)
-	rules, err := agent.LoadRules(cfg.RulesPath)
+	rules, err := agent.LoadRulesWithLogger(cfg.RulesPath, logger)
 	if err != nil {
 		return err
 	}

@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -17,7 +18,9 @@ const rulesHeader = `# Railse OPC 本机规则文件。守护进程启动和 rel
 // Rules 持有当前引擎，并发安全。
 type Rules struct {
 	path     string
-	reloadMu sync.Mutex // 串行化 Reload，先读到的旧文件不会覆盖后读到的新文件
+	home     string      // 规范化规则路径时展开 ~ 用
+	log      *log.Logger // 规则路径被改写时记一条；nil 时不记
+	reloadMu sync.Mutex  // 串行化 Reload，先读到的旧文件不会覆盖后读到的新文件
 	mu       sync.RWMutex
 	engine   *policy.Engine
 	count    int
@@ -26,6 +29,11 @@ type Rules struct {
 
 // LoadRules 读规则文件；文件不存在时先写出内置规则包，已存在时收紧为 0600。
 func LoadRules(path string) (*Rules, error) {
+	return LoadRulesWithLogger(path, nil)
+}
+
+// LoadRulesWithLogger 同 LoadRules；之后每次加载时规则里的路径被按真实路径改写，都往 logger 记一条。
+func LoadRulesWithLogger(path string, logger *log.Logger) (*Rules, error) {
 	if err := writeDefaultRules(path); err != nil {
 		return nil, err
 	}
@@ -33,7 +41,7 @@ func LoadRules(path string) (*Rules, error) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return nil, fmt.Errorf("收紧规则文件权限: %w", err)
 	}
-	r := &Rules{path: path}
+	r := &Rules{path: path, home: userHome(), log: logger}
 	if err := r.Reload(); err != nil {
 		return nil, err
 	}
@@ -66,6 +74,7 @@ func writeDefaultRules(path string) error {
 }
 
 // Reload 重新读文件；解析或校验失败时保留旧引擎并返回错误。
+// 规则里写成符号链接形式的项目路径与 deny、ask 的路径模式会按真实路径改写，见 normalizeRulePaths。
 func (r *Rules) Reload() error {
 	r.reloadMu.Lock()
 	defer r.reloadMu.Unlock()
@@ -77,6 +86,7 @@ func (r *Rules) Reload() error {
 	if err != nil {
 		return fmt.Errorf("规则文件 %s: %w", r.path, err)
 	}
+	normalizeRulePaths(&rs, r.home, r.logf)
 	eng, err := policy.NewEngine(rs)
 	if err != nil {
 		return fmt.Errorf("规则文件 %s: %w", r.path, err)
@@ -87,6 +97,12 @@ func (r *Rules) Reload() error {
 	r.engine, r.count = eng, len(rs.Rules)
 	r.mu.Unlock()
 	return nil
+}
+
+func (r *Rules) logf(format string, args ...any) {
+	if r.log != nil {
+		r.log.Printf(format, args...)
+	}
 }
 
 // Engine 返回当前引擎。

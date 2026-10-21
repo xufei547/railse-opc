@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,5 +143,88 @@ func TestLoadRulesTightensExistingFileMode(t *testing.T) {
 	}
 	if st.Mode().Perm() != 0o600 || r.Count() != 1 {
 		t.Fatalf("已有规则文件应收紧为 0600 并正常加载: mode=%v Count=%d", st.Mode().Perm(), r.Count())
+	}
+}
+
+func TestNormalizeRulePaths(t *testing.T) {
+	base := shortTempDir(t)
+	real := filepath.Join(base, "real")
+	os.MkdirAll(filepath.Join(real, "proj"), 0o755)
+	if err := os.Symlink(real, filepath.Join(base, "link")); err != nil {
+		t.Skipf("无法创建符号链接: %v", err)
+	}
+	realResolved, _ := filepath.EvalSymlinks(real)
+	link := filepath.Join(base, "link")
+	comma := filepath.Join(base, "a,b")
+	os.Symlink(real, comma)
+	risk := policy.RiskWriteInProject
+	rule := func(id string, action policy.Action, project, glob string) policy.Rule {
+		r := policy.Rule{ID: id, Source: policy.SourceUser, Scope: policy.Scope{Project: project}, Action: action, Match: policy.Match{PathGlob: glob}}
+		if glob == "" {
+			r.Match = policy.Match{Risk: &risk}
+		}
+		return r
+	}
+	rs := policy.RuleSet{Version: 1, Rules: []policy.Rule{
+		rule("link-scope", policy.ActionDeny, link+"/proj", ""),
+		rule("link-scope-glob", policy.ActionAllow, link+"/*", ""),
+		rule("link-scope-missing", policy.ActionAsk, link+"/later/proj", ""),
+		rule("home-scope", policy.ActionDeny, "~/link/proj", ""),
+		rule("real-scope", policy.ActionDeny, realResolved+"/proj", ""),
+		rule("relative-scope", policy.ActionDeny, "**/proj", ""),
+		rule("missing-scope", policy.ActionDeny, "/nonexistent-railse/x/**", ""),
+		rule("deny-glob", policy.ActionDeny, "", link+"/proj/**/*.env"),
+		rule("ask-glob", policy.ActionAsk, "", link+"/proj/secret.txt"),
+		rule("allow-glob", policy.ActionAllow, "", link+"/proj/**"),
+		rule("relative-glob", policy.ActionDeny, "", "**/.env"),
+		rule("comma-glob", policy.ActionDeny, "", comma+"/proj/**"),
+	}}
+	var logs []string
+	normalizeRulePaths(&rs, base, func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	want := map[string][2]string{
+		"link-scope":         {realResolved + "/proj", ""},
+		"link-scope-glob":    {realResolved + "/*", ""},
+		"link-scope-missing": {realResolved + "/later/proj", ""},
+		"home-scope":         {realResolved + "/proj", ""},
+		"real-scope":         {realResolved + "/proj", ""},
+		"relative-scope":     {"**/proj", ""},
+		"missing-scope":      {"/nonexistent-railse/x/**", ""},
+		"deny-glob":          {"", "{" + link + "/proj," + realResolved + "/proj}/**/*.env"},
+		"ask-glob":           {"", "{" + link + "/proj/secret.txt," + realResolved + "/proj/secret.txt}"},
+		"allow-glob":         {"", link + "/proj/**"},
+		"relative-glob":      {"", "**/.env"},
+		"comma-glob":         {"", comma + "/proj/**"}, // 含逗号无法写成 {a,b}，保持原样并记日志
+	}
+	for _, r := range rs.Rules {
+		w := want[r.ID]
+		if r.Scope.Project != w[0] || r.Match.PathGlob != w[1] {
+			t.Errorf("%s: project=%q glob=%q, 想要 %q %q", r.ID, r.Scope.Project, r.Match.PathGlob, w[0], w[1])
+		}
+	}
+	// link-scope、link-scope-glob、link-scope-missing、home-scope、deny-glob、ask-glob 被改写，各记一条，
+	// comma-glob 放弃改写也记一条；已是真实路径、相对模式、不存在的路径和 allow 的 path_glob 都不动也不记
+	if len(logs) != 7 {
+		t.Errorf("应记 7 条日志, 得到 %d: %q", len(logs), logs)
+	}
+	if _, err := policy.NewEngine(rs); err != nil {
+		t.Fatalf("改写后的规则应仍能建引擎: %v", err)
+	}
+}
+
+func TestReloadLogsRewrittenRulePaths(t *testing.T) {
+	base := shortTempDir(t)
+	real := filepath.Join(base, "real")
+	os.MkdirAll(real, 0o755)
+	if err := os.Symlink(real, filepath.Join(base, "link")); err != nil {
+		t.Skipf("无法创建符号链接: %v", err)
+	}
+	path := filepath.Join(base, "rules.yaml")
+	os.WriteFile(path, []byte("version: 1\nrules:\n  - id: deny-rm\n    source: user\n    scope: {project: \""+filepath.Join(base, "link")+"\"}\n    match: {payload: shell, command_prefix: rm}\n    action: deny\n"), 0o600)
+	var buf strings.Builder
+	if _, err := LoadRulesWithLogger(path, log.New(&buf, "", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "deny-rm") || !strings.Contains(buf.String(), "scope.project") {
+		t.Fatalf("改写规则路径应记日志: %q", buf.String())
 	}
 }
