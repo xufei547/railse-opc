@@ -1,6 +1,11 @@
 package policy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/bmatcuk/doublestar/v4"
+)
 
 var pathCtx = Context{ProjectRoot: "/home/u/proj", HomeDir: "/home/u"}
 
@@ -51,10 +56,17 @@ func TestIsSensitive(t *testing.T) {
 		"/home/u/.claude/.credentials.json", "/home/u/.codex/auth.json", "/home/u/.gemini/oauth_creds.json",
 		"/home/u/.zshrc", "/home/u/proj/.pgpass", "/home/u/proj/.envrc", "/home/u/proj/.npmrc",
 		"/home/u/proj/keys/id_ecdsa", "/home/u/proj/cert.p12", "/dev/disk0", "/dev/sda1",
+		// U+017F ſ 与 s 大小写等价，APFS 上是同一个文件
+		"/home/u/.ſsh/config", "/home/u/.awſ/credentials",
+		// 别名与他人家目录由 **/ 规则兜住
+		"/System/Volumes/Data/Users/u/.aws/credentials", "/home/u/projects/.ssh/x",
+		"/home/u/proj/.git/hooks/pre-commit", "/home/u/.gitconfig", "/home/u/.zprofile", "/home/u/.bashrc",
+		"/home/u/proj/.vault-token", "/home/u/proj/k.pfx", "/home/u/proj/keys/id_dsa",
+		"/dev/nvme0n1", "/dev/mmcblk0",
 	}
 	no := []string{
 		"/home/u/proj/src/a.go", "/home/u/proj/README.md", "/home/u/proj/.envrc.example",
-		"/home/u/proj/src/env.go", "/home/u/projects/.ssh/x",
+		"/home/u/proj/src/env.go", "/home/u/.sshx/config",
 	}
 	for _, p := range yes {
 		if !isSensitive(p, "/home/u") {
@@ -66,15 +78,27 @@ func TestIsSensitive(t *testing.T) {
 			t.Errorf("%s 不应是敏感路径", p)
 		}
 	}
-	// 家目录含 glob 元字符时，~ 开头的规则按家目录内的相对路径匹配，不受影响
+	// 家目录含 glob 元字符时，~ 开头的规则按家目录内的相对路径匹配，[1] 不会被当成字符类
 	weird := "/home/u[1]"
-	for _, p := range []string{"/home/u[1]/.ssh/id_rsa", "/home/u[1]/.ssh/config"} {
+	for _, p := range []string{
+		"/home/u[1]/.ssh/id_rsa", "/home/u[1]/.ssh/config", "/home/u[1]/.zshrc", "/home/other/.ssh/config",
+	} {
 		if !isSensitive(p, weird) {
-			t.Errorf("家目录 %s 下 %s 应是敏感路径", weird, p)
+			t.Errorf("家目录 %s 时 %s 应是敏感路径", weird, p)
 		}
 	}
-	if isSensitive("/home/other/.ssh/config", weird) {
-		t.Errorf("家目录 %s 时 /home/other/.ssh/config 不应是敏感路径", weird)
+	for _, p := range []string{"/home/other/sshd/config", "/home/u1/notes.txt", "/home/u1/.zshrc"} {
+		if isSensitive(p, weird) {
+			t.Errorf("家目录 %s 时 %s 不应是敏感路径", weird, p)
+		}
+	}
+}
+
+func TestSensitivePatternsValid(t *testing.T) {
+	for _, p := range sensitivePatterns {
+		if !doublestar.ValidatePattern(strings.TrimPrefix(p, "~/")) {
+			t.Errorf("敏感路径模式 %q 不合法", p)
+		}
 	}
 }
 
@@ -99,6 +123,19 @@ func TestPathsRisk(t *testing.T) {
 		{[]string{"$DIR/x"}, RiskUnknown},
 		{[]string{"~bob/x"}, RiskUnknown},
 		{[]string{".ENV"}, RiskDestructive},
+		{[]string{".env*"}, RiskUnknown},
+		{[]string{".en?"}, RiskUnknown},
+		{[]string{"~/.aw?/credentials"}, RiskUnknown},
+		{[]string{"--output=/home/u/.ssh/authorized_keys"}, RiskDestructive},
+		{[]string{"--target-directory=/home/u/.ssh"}, RiskDestructive},
+		{[]string{"-p"}, RiskRead},
+		{[]string{"/dev/disk/by-id/x"}, RiskDestructive},
+		{[]string{"/dev/mapper/root"}, RiskDestructive},
+		{[]string{"/dev/mem"}, RiskDestructive},
+		{[]string{"$HOME"}, RiskWriteOutside},
+		{[]string{"/dev/stdin"}, RiskRead},
+		{[]string{"/dev/stderr"}, RiskRead},
+		{[]string{"/dev/tty"}, RiskRead},
 	}
 	for _, c := range cases {
 		if got := pathsRisk(c.paths, "/home/u/proj", pathCtx); got != c.want {
