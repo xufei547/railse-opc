@@ -92,6 +92,19 @@ func permissionJSON(behavior, message string) []byte {
 	return b
 }
 
+// renderPermission 把决定渲染成 Claude 与 Codex 共用的 PermissionRequest 输出：
+// allow、deny 写 JSON，其余为 passthrough。
+func renderPermission(d Decision) Output {
+	switch d.Action {
+	case "allow":
+		return Output{Stdout: permissionJSON("allow", ""), ExitCode: 0}
+	case "deny":
+		return Output{Stdout: permissionJSON("deny", denyMessage(d.Reason)), ExitCode: 0}
+	default:
+		return passthrough()
+	}
+}
+
 // denyMessage 是拒绝时给 agent 看的理由，带 Railse 前缀；理由为空时用固定文案。
 func denyMessage(reason string) string {
 	if reason == "" {

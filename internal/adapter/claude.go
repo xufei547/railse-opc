@@ -60,13 +60,4 @@ func (claude) Parse(stdin []byte) (Input, error) {
 	return in, nil
 }
 
-func (claude) Render(d Decision) Output {
-	switch d.Action {
-	case "allow":
-		return Output{Stdout: permissionJSON("allow", ""), ExitCode: 0}
-	case "deny":
-		return Output{Stdout: permissionJSON("deny", denyMessage(d.Reason)), ExitCode: 0}
-	default:
-		return passthrough()
-	}
-}
+func (claude) Render(d Decision) Output { return renderPermission(d) }
