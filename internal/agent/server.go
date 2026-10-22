@@ -264,11 +264,13 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	if cwd == "" {
 		cwd = req.Session.Cwd
 	}
+	// 只解析一次：两次之间符号链接改了指向时，上报的 cwd 与引擎用的就不一致了
+	clean := CleanCwd(cwd)
 	reported := p
 	if cwd != "" {
-		reported.Cwd = CleanCwd(cwd)
+		reported.Cwd = clean
 	}
-	cwd = CleanCwd(cwd)
+	cwd = clean
 	p.Cwd = cwd
 	// 相对路径（含空 cwd 清理后的 "."）会按守护进程自己的工作目录解析，不能拿来找项目根。
 	var root string
