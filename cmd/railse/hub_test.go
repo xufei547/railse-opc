@@ -81,6 +81,7 @@ type testHub struct {
 	srv  *hub.Server
 	st   *store.Store
 	http *httptest.Server
+	logs *lockedBuf // hub 的日志
 }
 
 // startTestHub 起一个进程内 hub，供 enroll 与端到端测试用。hub 的日志只在测试失败时打印。
@@ -104,7 +105,7 @@ func startTestHub(t *testing.T) *testHub {
 			t.Logf("hub 日志:\n%s", logs.String())
 		}
 	})
-	return &testHub{srv: srv, st: st, http: hs}
+	return &testHub{srv: srv, st: st, http: hs, logs: logs}
 }
 
 func freeAddr(t *testing.T) string {

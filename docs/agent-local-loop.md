@@ -81,3 +81,7 @@ railse setup hooks --project <目录> [--claude] [--codex] [--gemini] [--bin 路
 ## 冒烟
 
 `scripts/smoke-claude.sh` 在临时目录里起守护进程、装 Claude 钩子，再让 `claude -p` 执行一条 `touch`，最后打印审计。需要本机 Claude Code 已登录，会消耗模型额度，不进 CI。
+
+## 接入 hub 后
+
+有 `~/.railse/machine.json` 时，引擎定不了的请求不再直接交回终端，而是送到 hub 等手机决定；规则以 hub 为准，本机 `rules.yaml` 只是缓存。总开关的生效值是本机与 hub 两者取或：`railse agent pause`/`resume` 只改本机这一侧，不会被 hub 覆盖，也不同步到 hub，`railse agent status` 显示暂停来自 `local`、`hub` 还是 `local+hub`。连不上 hub 时最多等 30 秒就交回终端（审计 `expired`、`decided_by: hub_unreachable`）；Gemini 的请求永远不进 hub。接入后本机审计的 `decided_by` 还会出现 `user`（手机上的决定）、`hub_unreachable`、`gemini`；手机上的备注记在 `note` 字段，钩子与模型只看到“已在手机上批准/拒绝”这类固定文案。接入步骤、行为变化与 API 见 `docs/hub.md`。
