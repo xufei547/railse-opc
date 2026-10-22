@@ -339,7 +339,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validName(body.Name) {
-		writeErr(w, http.StatusBadRequest, "name 必须是合法 UTF-8，且不能含控制字符、bidi 控制字符或零宽字符")
+		writeErr(w, http.StatusBadRequest, "name 必须是合法 UTF-8，且不能含控制字符或不可见的格式字符")
 		return
 	}
 	secret := store.RandomToken()
@@ -360,19 +360,16 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 }
 
 // validName 报告名字（机器名、webhook 标题）能否安全显示：合法 UTF-8，不含控制字符（C0、DEL、C1），
-// 不含 bidi 覆盖与隔离字符（U+202A–U+202E、U+2066–U+2069）和零宽字符（U+200B–U+200F、U+FEFF）——
-// 它们能让名字在网页、终端里显示成另一个样子。
+// 也不含格式字符（unicode.Cf：bidi 覆盖与隔离、LRM/RLM、U+061C、零宽空格、U+2060–U+2064、软连字符、U+180E、BOM 等）——
+// 它们不可见，却能让名字在网页、终端里显示成另一个样子。
+// 取舍：放行 U+200C、U+200D（ZWNJ、ZWJ），组合 emoji（👨‍👩‍👧）与波斯语、印地语等文字的正确拼写需要它们，
+// 单独出现也只影响字形连写，不改变显示顺序。代价是 Cf 里的 emoji 标签字符（U+E0020–U+E007F）被拒，英格兰等地区旗帜用不了。
 func validName(s string) bool {
 	if !utf8.ValidString(s) {
 		return false
 	}
 	for _, c := range s {
-		switch {
-		case unicode.IsControl(c),
-			c >= 0x202a && c <= 0x202e,
-			c >= 0x2066 && c <= 0x2069,
-			c >= 0x200b && c <= 0x200f,
-			c == 0xfeff:
+		if unicode.IsControl(c) || (unicode.Is(unicode.Cf, c) && c != 0x200c && c != 0x200d) {
 			return false
 		}
 	}

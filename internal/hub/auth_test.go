@@ -451,13 +451,14 @@ func TestEnrollRejectsBadInput(t *testing.T) {
 }
 
 // 接入审计的 detail 是合法 JSON，名字里的引号、反斜杠、非 ASCII（含 %q 会转成 \U 的不可打印字符）原样往返。
+// \U000F0000 是私用区字符（Co）：不可打印，但不是 validName 拒绝的控制或格式字符。
 func TestEnrollAuditDetail(t *testing.T) {
 	h := newTestHub(t)
 	tok, err := h.st.CreateEnrollToken(10 * time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := "mac \"pro\" \\ 工作站 \u2028 \U000E0001"
+	name := "mac \"pro\" \\ 工作站 \u2028 \U000F0000"
 	resp := postJSON(t, h.http.URL+"/api/enroll", map[string]string{"token": tok, "name": name}, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("enroll = %d", resp.StatusCode)
@@ -733,13 +734,15 @@ func TestEnrollRejectsBadName(t *testing.T) {
 	}
 }
 
-// validName（机器名与 webhook 标题共用）拒绝非法 UTF-8、C0、DEL、C1 控制字符、bidi 覆盖与隔离字符、零宽字符，
-// 其余可显示的字符（含中文、emoji、普通空格）照常接受。
+// validName（机器名与 webhook 标题共用）拒绝非法 UTF-8、C0、DEL、C1 控制字符和 unicode.Cf 格式字符（ZWNJ、ZWJ 除外），
+// 其余可显示的字符（含中文、emoji 与 ZWJ 组合、带 ZWNJ 的波斯语、不换行空格）照常接受。
 func TestValidName(t *testing.T) {
 	bad := map[string]string{
 		"C0": "mac\x01", "制表符": "mac\tpro", "换行": "a\nb", "DEL": "mac\x7f", "C1 NEL": "a\u0085b", "C1 CSI": "mac\u009b31m",
 		"LRE": "a\u202ab", "RLO": "批准\u202egnp.exe", "PDF": "a\u202cb", "LRI": "a\u2066b", "PDI": "a\u2069b",
-		"零宽空格": "ma\u200bc", "ZWNJ": "a\u200cb", "ZWJ": "a\u200db", "LRM": "a\u200eb", "RLM": "a\u200fb", "BOM": "\ufeffmac",
+		"零宽空格": "ma\u200bc", "LRM": "a\u200eb", "RLM": "a\u200fb", "BOM": "\ufeffmac",
+		"ALM": "a\u061cb", "WJ": "a\u2060b", "不可见加号": "a\u2064b", "软连字符": "pay\u00adpal", "蒙古文元音分隔": "a\u180eb",
+		"已废弃格式字符": "a\u206ab", "emoji 标签": "a\U000e0067b",
 		"非法 UTF-8": "mac\xff",
 	}
 	for name, s := range bad {
@@ -747,7 +750,8 @@ func TestValidName(t *testing.T) {
 			t.Errorf("%s（%q）应拒绝", name, s)
 		}
 	}
-	for _, s := range []string{"工作站 mac", "MacBook-Pro.local", "发布周报 🚀", "a\u00a0b", "a\u200ab", "a\u2065b", "a\u206ab"} {
+	for _, s := range []string{"工作站 mac", "MacBook-Pro.local", "发布周报 🚀", "a\u00a0b", "a\u200ab", "a\u2065b",
+		"👨\u200d👩\u200d👧", "می\u200cخواهم", "क्\u200dष"} {
 		if !validName(s) {
 			t.Errorf("%q 应接受", s)
 		}

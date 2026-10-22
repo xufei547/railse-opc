@@ -551,7 +551,8 @@ func TestWebhookCallbackSuccessDuringShutdown(t *testing.T) {
 	}
 }
 
-// 决定与过期竞争：只有先结束请求的一方回调，来源只收到一次。
+// 决定与过期先后发生：只有先结束请求的一方回调，来源只收到一次。这里是顺序执行，不是真并发：守护的是
+// 状态迁移用条件 UPDATE（WHERE state = 'pending'）只会成功一次，所以回调也只发起一次。
 func TestWebhookDecideExpireOnlyOneCallback(t *testing.T) {
 	h, _, tok := webhookHub(t)
 	target := newCBTarget(t, func(int) int { return http.StatusOK })
@@ -650,5 +651,96 @@ func TestWebhookRequestIsolatedFromMachines(t *testing.T) {
 	}
 	if rows, _ := ruleRows(t, h.st); len(rows) != 2 {
 		t.Fatalf("不应学规则: %+v", rows)
+	}
+}
+
+// 关停时前面的 HTTP 收尾（一个不理会取消的慢请求）把共用截止时间耗尽：取消回调后仍给 callbackStopGrace 收尾，
+// Run 返回时回调已退出、令牌已清、审计标 aborted；总关停不超过 shutdownTimeout + callbackStopGrace。
+func TestWebhookCallbackGraceAfterSlowShutdown(t *testing.T) {
+	old := shutdownTimeout
+	shutdownTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { shutdownTimeout = old })
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := DefaultConfig(dir)
+	cfg.Listen = "127.0.0.1:0"
+	var logs syncBuf
+	srv, err := New(cfg, st, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.callbackRetryWait = time.Hour
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	srv.mux.HandleFunc("GET /test/slow", func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-release // 不理会取消：hs.Shutdown 只能等到截止再强制断开
+	})
+	target := newCBTarget(t, func(int) int { return http.StatusInternalServerError })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	const prefix = "hub 监听 "
+	waitFor(t, "Run 开始监听", func() bool { return strings.Contains(logs.String(), prefix) })
+	line := logs.String()
+	addr := strings.TrimSpace(strings.SplitN(line[strings.Index(line, prefix)+len(prefix):], "\n", 2)[0])
+
+	cb := mustJSON(t, map[string]string{"url": target.URL + "/cb", "token": "cbtok"})
+	insertReq(t, st, store.Request{ID: "w1", MachineID: "webhook", Kind: "webhook", State: "pending", Title: "t", Callback: string(cb)})
+	if _, err := srv.Decide(DecideInput{RequestID: "w1", Action: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "第一次回调（之后进入一小时的重试等待）", func() bool { return len(target.got()) == 1 })
+	clientDone := make(chan struct{})
+	go func() {
+		defer close(clientDone)
+		if resp, err := http.Get("http://" + addr + "/test/slow"); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	defer func() {
+		close(release)
+		<-clientDone
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("慢请求没有进到处理器")
+	}
+
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run 返回 %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("取消后 Run 未返回")
+	}
+	el := time.Since(start)
+	if n := srv.callbacks.count(); n != 0 {
+		t.Fatalf("Run 返回时回调应都已退出: %d", n)
+	}
+	if r := getReq(t, st, "w1"); strings.Contains(r.Callback, "cbtok") {
+		t.Fatalf("Run 返回时令牌应已清: %q", r.Callback)
+	}
+	if ds := callbackAudits(t, st, "w1"); len(ds) != 1 || ds[0]["aborted"] != true {
+		t.Fatalf("中止的回调审计 = %+v", ds)
+	}
+	if !strings.Contains(logs.String(), "强制断开") || el < shutdownTimeout {
+		t.Fatalf("前面的 HTTP 收尾应耗尽截止时间（用时 %s）: %q", el, logs.String())
+	}
+	if el > shutdownTimeout+callbackStopGrace+2*time.Second {
+		t.Fatalf("总关停应不超过 shutdownTimeout + callbackStopGrace: 用时 %s", el)
 	}
 }

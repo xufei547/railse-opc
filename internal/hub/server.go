@@ -212,8 +212,9 @@ func (s *Server) routes() {
 func (s *Server) Handler() http.Handler { return s.mux }
 
 // Run 监听直到 ctx 取消。请求的 context 派生自 ctx，取消时长连接与在途请求都能看到。
-// 关停的各步共用一个截止时间（shutdownTimeout，总关停不超过它）：先等在途请求，超时就强制断开；再等 WebSocket handler
+// 关停的各步共用一个截止时间（shutdownTimeout）：先等在途请求，超时就强制断开；再等 WebSocket handler
 // （/ws/agent、/ws/client）全部退出；然后停下过期扫描；最后取消在跑的 webhook 回调并等它们退出（见 stopCallbacks）。
+// 截止时间被前面的步骤耗尽时，回调仍有 callbackStopGrace 的收尾宽限，总关停不超过 shutdownTimeout + callbackStopGrace。
 // 正常关停时 Run 返回后不再有 handler 或回调碰存储，调用方可以关库。
 func (s *Server) Run(ctx context.Context) error {
 	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
@@ -271,9 +272,14 @@ func (s *Server) shutdownHTTP(ctx context.Context, hs *http.Server) {
 	}
 }
 
-const (
-	idleTimeout     = 120 * time.Second
-	shutdownTimeout = 3 * time.Second
+const idleTimeout = 120 * time.Second
+
+// shutdownTimeout 是关停的共用截止时间（见 Run）。callbackStopGrace 是截止已到时，取消回调后仍给它们收尾
+// （callbackAborted：清令牌、写审计）的最小宽限：前面的 HTTP、WebSocket 收尾可能已把截止时间耗尽。
+// 总关停不超过 shutdownTimeout + callbackStopGrace。两者是变量只为测试能缩短。
+var (
+	shutdownTimeout   = 3 * time.Second
+	callbackStopGrace = time.Second
 )
 
 // bodyReadTimeout 是读 JSON 请求体的截止。是变量只为测试能缩短它。

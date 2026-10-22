@@ -86,7 +86,7 @@ func (b webhookBody) validate() string {
 	case utf8.RuneCountInString(b.Title) > maxWebhookTitle:
 		return fmt.Sprintf("title 至多 %d 个字符", maxWebhookTitle)
 	case !validName(b.Title):
-		return "title 不能含控制字符、bidi 控制字符或零宽字符"
+		return "title 不能含控制字符或不可见的格式字符"
 	case utf8.RuneCountInString(b.Description) > maxWebhookDesc:
 		return fmt.Sprintf("description 至多 %d 个字符", maxWebhookDesc)
 	case len(b.CallbackURL) > maxCallbackURL:
@@ -284,13 +284,21 @@ func (s *Server) postCallback(ctx context.Context, cb webhookCallback, body []by
 }
 
 // stopCallbacks 不再接纳新的回调，取消在跑的（重试等待与在途请求立即结束），等它们退出，至多等到 ctx 结束
-// （Run 传入关停截止时间，与 HTTP、WebSocket 的等待共用）。重复调用无害。
+// （Run 传入关停截止时间，与 HTTP、WebSocket 的等待共用）。ctx 已结束时（截止时间被前面的步骤耗尽）再给 callbackStopGrace：
+// 被取消的回调要在 callbackAborted 里清掉令牌、写审计，Run 返回后调用方就关库了。所以这一步至多比 ctx 多等 callbackStopGrace。
+// 重复调用无害。
 func (s *Server) stopCallbacks(ctx context.Context) {
 	idle := s.callbacks.shutdown()
 	s.cbCancel()
 	select {
 	case <-idle:
 	case <-ctx.Done():
-		s.log.Printf("hub 关停超时，仍有 %d 个 webhook 回调未退出", s.callbacks.count())
+		timer := time.NewTimer(callbackStopGrace)
+		defer timer.Stop()
+		select {
+		case <-idle:
+		case <-timer.C:
+			s.log.Printf("hub 关停超时，仍有 %d 个 webhook 回调未退出", s.callbacks.count())
+		}
 	}
 }
