@@ -100,6 +100,7 @@ func enroll(t *testing.T, h *hubEnv) agent.MachineConfig {
 
 type clientEnv struct {
 	c       *agent.HubClient
+	srv     *agent.Server // 只组装未监听；要走钩子路径的测试在 before 里 SetDecider、Listen
 	cfg     agent.Config
 	rules   *agent.Rules
 	pending *agent.Pending
@@ -138,7 +139,7 @@ func newClient(t *testing.T, h *hubEnv, m agent.MachineConfig, before func(env c
 	// 这里顺带验证客户端调 SetHubPaused 时没有持着自己的锁（否则自锁挂死）。
 	srv.SetAuditSink(c)
 	ctx, cancel := context.WithCancel(context.Background())
-	env := clientEnv{c: c, cfg: cfg, rules: rules, pending: srv.Pending(), logs: logs, cancel: cancel, done: make(chan struct{})}
+	env := clientEnv{c: c, srv: srv, cfg: cfg, rules: rules, pending: srv.Pending(), logs: logs, cancel: cancel, done: make(chan struct{})}
 	if before != nil {
 		before(env)
 	}
