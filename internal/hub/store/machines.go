@@ -51,8 +51,10 @@ func HashToken(raw string) string {
 // CreateEnrollToken 生成一次性接入码。
 func (s *Store) CreateEnrollToken(ttl time.Duration) (string, error) {
 	raw := RandomToken()
-	_, err := s.db.Exec("INSERT INTO enroll_tokens(token_hash, expires_at) VALUES(?, ?)", HashToken(raw), fmtTime(time.Now().Add(ttl)))
-	return raw, err
+	if _, err := s.db.Exec("INSERT INTO enroll_tokens(token_hash, expires_at) VALUES(?, ?)", HashToken(raw), fmtTime(time.Now().Add(ttl))); err != nil {
+		return "", err
+	}
+	return raw, nil
 }
 
 // ConsumeEnrollToken 校验并作废接入码。一条带条件的 UPDATE 以受影响行数判定，并发消费只有一次成功。
@@ -61,7 +63,11 @@ func (s *Store) ConsumeEnrollToken(raw string) error {
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
 		return ErrInvalidToken
 	}
 	return nil
@@ -135,17 +141,19 @@ func (s *Store) RevokeMachine(id string) error {
 // CreateClientSession 新建登录会话 token。
 func (s *Store) CreateClientSession(ttl time.Duration) (string, error) {
 	raw := RandomToken()
-	_, err := s.db.Exec("INSERT INTO client_sessions(token_hash, created_at, expires_at) VALUES(?, ?, ?)", HashToken(raw), Now(), fmtTime(time.Now().Add(ttl)))
-	return raw, err
+	if _, err := s.db.Exec("INSERT INTO client_sessions(token_hash, created_at, expires_at) VALUES(?, ?, ?)", HashToken(raw), Now(), fmtTime(time.Now().Add(ttl))); err != nil {
+		return "", err
+	}
+	return raw, nil
 }
 
-// ValidateClientSession 判断 token 是否有效，顺手清理过期行。
+// ValidateClientSession 判断 token 是否有效（存在且未过期），顺手清理过期行。
 func (s *Store) ValidateClientSession(raw string) (bool, error) {
-	if _, err := s.db.Exec("DELETE FROM client_sessions WHERE expires_at <= ?", Now()); err != nil {
-		return false, err
-	}
+	now := Now()
+	// 清理尽力而为：失败不影响结果（下面的 SELECT 自己按 expires_at 判定），错误有意不返回，过期行留到下次再清。
+	_, _ = s.db.Exec("DELETE FROM client_sessions WHERE expires_at <= ?", now)
 	var n int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM client_sessions WHERE token_hash = ?", HashToken(raw)).Scan(&n); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM client_sessions WHERE token_hash = ? AND expires_at > ?", HashToken(raw), now).Scan(&n); err != nil {
 		return false, err
 	}
 	return n == 1, nil

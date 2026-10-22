@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS requests (
   risk          TEXT NOT NULL DEFAULT '',
   project_root  TEXT NOT NULL DEFAULT '',
   engine_reason TEXT NOT NULL DEFAULT '',
-  state         TEXT NOT NULL,            -- pending、auto_allowed、auto_denied、approved、denied、passthrough、expired、cancelled
+  state         TEXT NOT NULL,            -- pending、auto_allowed、auto_denied、approved、denied、passthrough、expired、cancelled、recorded（question、done）
   decided_by    TEXT NOT NULL DEFAULT '',
   decision_note TEXT NOT NULL DEFAULT '',
   rule_id       TEXT NOT NULL DEFAULT '',

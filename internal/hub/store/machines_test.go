@@ -23,7 +23,10 @@ func TestEnrollTokenLifecycle(t *testing.T) {
 	if err := s.ConsumeEnrollToken("nope"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("不存在的接入码: %v", err)
 	}
-	expired, _ := s.CreateEnrollToken(-time.Second)
+	expired, err := s.CreateEnrollToken(-time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := s.ConsumeEnrollToken(expired); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("过期的接入码: %v", err)
 	}
@@ -142,21 +145,62 @@ func TestClientSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := s.ValidateClientSession(tok); !ok {
-		t.Fatal("新会话应有效")
+	if ok, err := s.ValidateClientSession(tok); err != nil || !ok {
+		t.Fatalf("新会话应有效: %v, %v", ok, err)
 	}
-	if ok, _ := s.ValidateClientSession("nope"); ok {
-		t.Fatal("不存在的会话应无效")
+	if ok, err := s.ValidateClientSession("nope"); err != nil || ok {
+		t.Fatalf("不存在的会话应无效: %v, %v", ok, err)
 	}
-	old, _ := s.CreateClientSession(-time.Minute)
-	if ok, _ := s.ValidateClientSession(old); ok {
-		t.Fatal("过期会话应无效")
+	old, err := s.CreateClientSession(-time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.ValidateClientSession(old); err != nil || ok {
+		t.Fatalf("过期会话应无效: %v, %v", ok, err)
+	}
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM client_sessions WHERE token_hash = ?", HashToken(old)).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("过期会话行应已清理: %d, %v", n, err)
 	}
 	if err := s.DeleteClientSession(tok); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := s.ValidateClientSession(tok); ok {
-		t.Fatal("删除后应无效")
+	if ok, err := s.ValidateClientSession(tok); err != nil || ok {
+		t.Fatalf("删除后应无效: %v, %v", ok, err)
+	}
+}
+
+// 清理过期行失败（这里用触发器让 DELETE 报错）不影响校验：有效的仍有效，过期的仍无效。
+func TestValidateClientSessionIgnoresCleanupFailure(t *testing.T) {
+	s := openTemp(t)
+	good, err := s.CreateClientSession(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := s.CreateClientSession(-time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("CREATE TRIGGER no_delete BEFORE DELETE ON client_sessions BEGIN SELECT RAISE(ABORT, 'no delete'); END"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.ValidateClientSession(old); err != nil || ok {
+		t.Fatalf("过期会话应无效: %v, %v", ok, err)
+	}
+	if ok, err := s.ValidateClientSession(good); err != nil || !ok {
+		t.Fatalf("有效会话应有效: %v, %v", ok, err)
+	}
+}
+
+// 插入失败时不返回看似可用的凭据。
+func TestCreateCredentialFailureReturnsEmpty(t *testing.T) {
+	s := openTemp(t)
+	s.Close()
+	if tok, err := s.CreateEnrollToken(time.Minute); err == nil || tok != "" {
+		t.Fatalf("CreateEnrollToken = %q, %v，应为空串与错误", tok, err)
+	}
+	if tok, err := s.CreateClientSession(time.Hour); err == nil || tok != "" {
+		t.Fatalf("CreateClientSession = %q, %v，应为空串与错误", tok, err)
 	}
 }
 
