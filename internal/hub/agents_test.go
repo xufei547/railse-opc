@@ -3,12 +3,14 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 
 	"github.com/railse/railse-opc/internal/hub/store"
 	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/railse/railse-opc/internal/policy"
 )
 
 type agentClient struct {
@@ -74,6 +77,16 @@ func (c *agentClient) send(v any) {
 	if err != nil {
 		c.t.Fatalf("编码帧: %v", err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.conn.Write(ctx, websocket.MessageText, b); err != nil {
+		c.t.Fatalf("write: %v", err)
+	}
+}
+
+// sendRaw 原样发一个文本帧（可以不是合法 JSON）。
+func (c *agentClient) sendRaw(b []byte) {
+	c.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := c.conn.Write(ctx, websocket.MessageText, b); err != nil {
@@ -270,26 +283,37 @@ func TestAgentWSPingPong(t *testing.T) {
 	t.Fatal("不回 pong 也没被断开")
 }
 
+// 不发 hello：helloTimeout 后以 PolicyViolation 关闭，关闭帧真正发到对端；不登记。默认 5 秒，测试缩短。
 func TestAgentWSHelloTimeout(t *testing.T) {
-	h := newTestHubWith(t, func(c *Config) { c.PongTimeout = time.Second }, nil)
+	if h := newTestHub(t); h.srv.helloTimeout != 5*time.Second {
+		t.Fatalf("默认 helloTimeout = %s，应为 5s", h.srv.helloTimeout)
+	}
+	const wait = 300 * time.Millisecond
+	h := newTestHubWith(t, nil, func(s *Server) { s.helloTimeout = wait })
 	id, secret := enrollMachine(t, h, "mac")
+	start := time.Now()
 	c := dialRaw(t, h, secret)
 	// 不发 hello
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	if _, _, err := c.conn.Read(ctx); err == nil {
-		t.Fatal("不发 hello 应在 5 秒内被断开")
+	if code := c.expectClosed(5 * time.Second); code != websocket.StatusPolicyViolation {
+		t.Fatalf("不发 hello 应收到 PolicyViolation 关闭帧, 得到 %v", code)
+	}
+	if d := time.Since(start); d < wait {
+		t.Fatalf("应等满 helloTimeout 才关闭, 只等了 %s", d)
 	}
 	if h.srv.agents.connected(id) {
 		t.Fatal("没 hello 不应登记")
 	}
 }
 
-// 协议版本不一致：先回 Error 帧说明双方版本，再以 PolicyViolation 关闭；记审计，不登记、不刷新机器。
+// 协议版本不一致：先回 Error 帧说明双方版本，再以 PolicyViolation 关闭；不登记、不刷新机器。
+// 审计按（机器、守护进程版本、hub 版本）去重，一小时内只记一次；Error 帧与关闭照常。
 func TestAgentWSProtoMismatch(t *testing.T) {
-	h := newTestHub(t)
+	var clock atomic.Int64
+	clock.Store(time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC).UnixNano())
+	h := newTestHubWith(t, nil, func(s *Server) { s.agents.now = func() time.Time { return time.Unix(0, clock.Load()) } })
 	id, secret := enrollMachine(t, h, "mac")
-	for _, proto := range []int{0, wire.Proto + 1} {
+	reject := func(proto int) {
+		t.Helper()
 		c := dialAgent(t, h, secret, wire.Hello{Proto: proto, MachineID: id, AgentVersion: "9.9.9"})
 		kind, b := c.recv(5 * time.Second)
 		var e wire.Error
@@ -306,33 +330,136 @@ func TestAgentWSProtoMismatch(t *testing.T) {
 			t.Fatalf("proto %d: 不应登记", proto)
 		}
 	}
+	audits := func() []map[string]int {
+		t.Helper()
+		evs, err := h.st.ListAudit(0, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []map[string]int
+		for _, e := range evs {
+			if e.Action != "agent_proto_mismatch" {
+				continue
+			}
+			if e.Actor != "agent" || e.MachineID != id {
+				t.Fatalf("审计 actor/machine 不对: %+v", e)
+			}
+			var d map[string]int
+			if err := json.Unmarshal([]byte(e.Detail), &d); err != nil {
+				t.Fatalf("detail 不是 JSON: %q", e.Detail)
+			}
+			got = append(got, d)
+		}
+		return got
+	}
+	newer := map[string]int{"agent_proto": wire.Proto + 1, "hub_proto": wire.Proto}
+	older := map[string]int{"agent_proto": 0, "hub_proto": wire.Proto}
+	reject(0)
+	reject(wire.Proto + 1)
+	reject(wire.Proto + 1) // 同一对版本，一小时内不再记
+	reject(0)
+	if got, want := audits(), []map[string]int{newer, older}; fmt.Sprint(got) != fmt.Sprint(want) { // ListAudit 倒序
+		t.Fatalf("审计 detail = %v，应为 %v", got, want)
+	}
+	clock.Add(int64(59 * time.Minute))
+	reject(wire.Proto + 1)
+	if n := len(audits()); n != 2 {
+		t.Fatalf("不到一小时不应再记, 共 %d 条", n)
+	}
+	clock.Add(int64(2 * time.Minute))
+	reject(wire.Proto + 1)
+	if got, want := audits(), []map[string]int{newer, newer, older}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("满一小时后应再记一次: %v", got)
+	}
 	if m, _ := h.st.GetMachine(id); m.LastSeen != nil || m.AgentVersion != "" {
 		t.Fatalf("版本不一致不应刷新机器: %+v", m)
 	}
-	evs, err := h.st.ListAudit(0, "")
-	if err != nil {
+}
+
+// 去重表顺带清掉满一小时的记录，对端乱报版本也不会让表无限增长。
+func TestAgentHubProtoAuditPrunes(t *testing.T) {
+	h := newAgentHub(log.New(io.Discard, "", 0))
+	now := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	h.now = func() time.Time { return now }
+	for p := 2; p < 12; p++ {
+		if !h.shouldAuditProto("m1", p) {
+			t.Fatalf("proto %d 第一次应记", p)
+		}
+	}
+	if h.shouldAuditProto("m1", 2) || !h.shouldAuditProto("m2", 2) {
+		t.Fatal("同一机器同一版本不应重复记，不同机器各自记")
+	}
+	now = now.Add(time.Hour)
+	if !h.shouldAuditProto("m1", 2) {
+		t.Fatal("满一小时应再记")
+	}
+	if n := len(h.protoAudited); n != 1 {
+		t.Fatalf("过期记录应被清掉, 剩 %d 条", n)
+	}
+}
+
+// 吊销的机器握手回 401。
+func TestAgentWSRejectsRevokedMachine(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	if err := h.st.RevokeMachine(id); err != nil {
 		t.Fatal(err)
 	}
-	var got []map[string]int
-	for _, e := range evs {
-		if e.Action != "agent_proto_mismatch" {
-			continue
-		}
-		if e.Actor != "agent" || e.MachineID != id {
-			t.Fatalf("审计 actor/machine 不对: %+v", e)
-		}
-		var d map[string]int
-		if err := json.Unmarshal([]byte(e.Detail), &d); err != nil {
-			t.Fatalf("detail 不是 JSON: %q", e.Detail)
-		}
-		got = append(got, d)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, resp, err := websocket.Dial(ctx, agentURL(h), &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + secret}}})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("吊销的机器应 401: %v %v", err, resp)
 	}
-	want := []map[string]int{ // ListAudit 倒序
-		{"agent_proto": wire.Proto + 1, "hub_proto": wire.Proto},
-		{"agent_proto": 0, "hub_proto": wire.Proto},
+}
+
+// 解析不了的帧记日志（机器 id、种类、错误，不记内容），每条连接只逐条记前 badFrameLogMax 个，断开时汇总；连接不断。
+func TestAgentWSLogsBadFramesLimited(t *testing.T) {
+	var logs syncBuf
+	h := newTestHubWith(t, nil, func(s *Server) {
+		s.log = log.New(&logs, "", 0)
+		s.agents.log = s.log
+	})
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	c.recv(5 * time.Second) // welcome
+	const secretish = "SECRET-CONTENT-zz9"
+	bad := []string{
+		"nope " + secretish,
+		`{"x":"` + secretish + `"}`,
+		`{"t":"pending","request_id":5,"tool_name":"` + secretish + `"}`,
+		`{"t":"cancel","request_id":["` + secretish + `"]}`,
+		`{"t":"delivered","request_id":{}}`,
+		`{"t":"expired","request_id":1}`,
+		`{"t":"audit","entries":"` + secretish + `"}`,
 	}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("审计 detail = %v，应为 %v", got, want)
+	for _, f := range bad {
+		c.sendRaw([]byte(f))
+	}
+	lines := func() int { return strings.Count(logs.String(), "发来无法解析的帧") }
+	waitFor(t, "坏帧记日志", func() bool { return lines() >= badFrameLogMax })
+	if !h.srv.agents.connected(id) {
+		t.Fatal("坏帧不应断开连接")
+	}
+	if !h.srv.agents.send(id, wire.Paused{T: wire.TPaused, Paused: true}) {
+		t.Fatal("连接应仍可发帧")
+	}
+	if kind, _ := c.recv(5 * time.Second); kind != wire.TPaused {
+		t.Fatalf("连接应仍可用, 收到 %s", kind)
+	}
+	c.close()
+	waitFor(t, "断开时汇总", func() bool {
+		return strings.Contains(logs.String(), fmt.Sprintf("共 %d 个无法解析的帧", len(bad)))
+	})
+	out := logs.String()
+	if n := lines(); n != badFrameLogMax {
+		t.Fatalf("逐条日志应只有 %d 条, 得到 %d:\n%s", badFrameLogMax, n, out)
+	}
+	if !strings.Contains(out, id) || !strings.Contains(out, `"pending"`) {
+		t.Fatalf("日志应含机器 id 与帧种类:\n%s", out)
+	}
+	if strings.Contains(out, secretish) {
+		t.Fatalf("日志不应含帧内容:\n%s", out)
 	}
 }
 
@@ -401,15 +528,6 @@ func newFakeConn(id string, queue int) *agentConn {
 	return &agentConn{machine: store.Machine{ID: id, Name: "m-" + id}, out: make(chan []byte, queue), closed: make(chan struct{})}
 }
 
-func isClosed(c *agentConn) bool {
-	select {
-	case <-c.closed:
-		return true
-	default:
-		return false
-	}
-}
-
 // 同一机器再登记会关掉旧连接；旧连接退出时的注销不能删掉新连接。
 func TestAgentHubRegisterReplace(t *testing.T) {
 	h := newAgentHub(log.New(io.Discard, "", 0))
@@ -417,7 +535,7 @@ func TestAgentHubRegisterReplace(t *testing.T) {
 	h.register(a)
 	h.register(other)
 	h.register(b)
-	if !isClosed(a) || isClosed(b) || isClosed(other) {
+	if !a.isClosed() || b.isClosed() || other.isClosed() {
 		t.Fatal("登记新连接应只关掉同一机器的旧连接")
 	}
 	ids := h.connectedIDs()
@@ -433,14 +551,14 @@ func TestAgentHubRegisterReplace(t *testing.T) {
 		t.Fatal("帧应排进新连接")
 	}
 	h.unregister(b)
-	if h.connected("m1") || !isClosed(b) {
+	if h.connected("m1") || !b.isClosed() {
 		t.Fatal("注销后应未连接且已关闭")
 	}
 	if h.send("m1", wire.Ping{T: wire.TPing}) {
 		t.Fatal("未连接时 send 应返回 false")
 	}
 	h.closeAll()
-	if !isClosed(other) || h.connected("m2") || len(h.connectedIDs()) != 0 {
+	if !other.isClosed() || h.connected("m2") || len(h.connectedIDs()) != 0 {
 		t.Fatal("closeAll 应关掉并清空全部连接")
 	}
 }
@@ -464,7 +582,7 @@ func TestAgentHubSendFullQueue(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("队列满时 send 不应阻塞")
 	}
-	if !isClosed(c) {
+	if !c.isClosed() {
 		t.Fatal("队列满应断开连接")
 	}
 	if !strings.Contains(logs.String(), "发送队列已满") {
@@ -481,7 +599,116 @@ func TestAgentHubSendFullQueue(t *testing.T) {
 	if h.send("m2", wire.Error{T: wire.TError, Message: strings.Repeat("x", wire.MaxFrame)}) {
 		t.Fatal("超过 MaxFrame 的帧应返回 false")
 	}
-	if isClosed(d) || len(d.out) != 0 {
+	if d.isClosed() || len(d.out) != 0 {
 		t.Fatal("编码失败不应断开连接，也不应排进队列")
+	}
+}
+
+// hub 只能下发 welcome、decision、rules、paused、ping、pong、error；别的类型、t 与类型不符、指针一律拒绝并记日志。
+func TestAgentHubSendWhitelist(t *testing.T) {
+	var logs syncBuf
+	h := newAgentHub(log.New(&logs, "", 0))
+	c := newFakeConn("m1", 16)
+	h.register(c)
+	allowed := []any{
+		wire.Welcome{T: wire.TWelcome}, wire.Decision{T: wire.TDecision, RequestID: "r", Action: "allow"},
+		wire.Rules{T: wire.TRules}, wire.Paused{T: wire.TPaused}, wire.Ping{T: wire.TPing}, wire.Pong{T: wire.TPong},
+		wire.Error{T: wire.TError, Message: "x"},
+	}
+	for _, f := range allowed {
+		if !h.send("m1", f) {
+			t.Fatalf("%T 应允许下发", f)
+		}
+	}
+	denied := []any{
+		wire.PendingRequest{T: wire.TPending}, wire.Hello{T: wire.THello}, wire.Audit{T: wire.TAudit},
+		wire.Cancel{T: wire.TCancel}, wire.Expired{T: wire.TExpired}, wire.Delivered{T: wire.TDelivered},
+		wire.Decision{T: wire.TPending}, wire.Paused{}, &wire.Decision{T: wire.TDecision},
+		map[string]string{"t": wire.TDecision}, struct {
+			T   string `json:"t"`
+			Cmd string `json:"cmd"`
+		}{"exec", "rm -rf /"},
+	}
+	for _, f := range denied {
+		if h.send("m1", f) {
+			t.Fatalf("%T %+v 不应允许下发", f, f)
+		}
+	}
+	if len(c.out) != len(allowed) || c.isClosed() {
+		t.Fatalf("被拒的帧不应入队，也不应断开连接: 队列 %d", len(c.out))
+	}
+	if n := strings.Count(logs.String(), "拒绝下发"); n != len(denied) {
+		t.Fatalf("每个被拒的帧应记一条日志, 得到 %d:\n%s", n, logs.String())
+	}
+}
+
+// 连接已被要求断开（被替换、吊销、关停）后读到的帧不再分发，坏帧也不记；未断开时照常处理并更新 pong 时间。
+func TestHandleAgentFrameSkipsClosedConn(t *testing.T) {
+	var logs syncBuf
+	s := &Server{log: log.New(&logs, "", 0)}
+	c := newFakeConn("m1", 1)
+	pc := newPongClock()
+	bad := &badFrameLog{log: s.log, machineID: "m1"}
+	if !s.handleAgentFrame(c, []byte("nope"), pc, bad) || !strings.Contains(logs.String(), "无法解析的帧") {
+		t.Fatal("未断开的连接上坏帧应记日志并继续")
+	}
+	time.Sleep(time.Millisecond)
+	if !s.handleAgentFrame(c, []byte(`{"t":"pong"}`), pc, bad) || pc.last.Load() == 0 {
+		t.Fatal("pong 应更新时间")
+	}
+	c.close()
+	before := logs.String()
+	if s.handleAgentFrame(c, []byte("nope"), pc, bad) {
+		t.Fatal("已断开的连接应停止读循环")
+	}
+	if logs.String() != before || bad.n != 1 {
+		t.Fatal("已断开的连接上的帧不应再处理")
+	}
+}
+
+// fakeWelcomeSource 是可注入错误的 welcome 数据源。
+type fakeWelcomeSource struct {
+	paused     string
+	hasPaused  bool
+	settingErr error
+	rulesErr   error
+}
+
+func (f fakeWelcomeSource) RuleSet() (policy.RuleSet, int, error) {
+	return policy.RuleSet{Version: policy.RuleSetVersion}, 3, f.rulesErr
+}
+
+func (f fakeWelcomeSource) GetSetting(key string) (string, bool, error) {
+	if key != "paused" {
+		return "", false, fmt.Errorf("意外的设置 %s", key)
+	}
+	return f.paused, f.hasPaused, f.settingErr
+}
+
+// 暂停设置读失败或值损坏时 welcome 组装失败（握手以 InternalError 关闭，宁可不连也不当作未暂停）。
+func TestWelcomeFramePaused(t *testing.T) {
+	for name, c := range map[string]struct {
+		src    fakeWelcomeSource
+		paused bool
+		err    bool
+	}{
+		"没有设置":  {fakeWelcomeSource{}, false, false},
+		"暂停":    {fakeWelcomeSource{paused: "1", hasPaused: true}, true, false},
+		"未暂停":   {fakeWelcomeSource{paused: "0", hasPaused: true}, false, false},
+		"值损坏":   {fakeWelcomeSource{paused: "yes", hasPaused: true}, false, true},
+		"读设置失败": {fakeWelcomeSource{settingErr: errors.New("磁盘坏了")}, false, true},
+		"读规则失败": {fakeWelcomeSource{rulesErr: errors.New("磁盘坏了")}, false, true},
+	} {
+		b, err := welcomeFrame(c.src)
+		if c.err {
+			if err == nil {
+				t.Fatalf("%s: 应报错", name)
+			}
+			continue
+		}
+		var w wire.Welcome
+		if err != nil || wire.Unmarshal(b, &w) != nil || w.T != wire.TWelcome || w.RulesVersion != 3 || w.Paused != c.paused {
+			t.Fatalf("%s: welcome = %+v, %v", name, w, err)
+		}
 	}
 }

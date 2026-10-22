@@ -84,6 +84,8 @@ type Server struct {
 	// verify 与 verifyWait 是登录校验密码的函数与等名额的上限，测试可替换。
 	verify     func(encoded, pw string) bool
 	verifyWait time.Duration
+	// helloTimeout 是守护进程连上后发 hello 的期限，测试可缩短。
+	helloTimeout time.Duration
 }
 
 // New 组装 hub：校验配置，确保有内置规则，注册路由。
@@ -96,7 +98,7 @@ func New(cfg Config, st *store.Store, logger *log.Logger) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfg: cfg, store: st, log: logger, mux: http.NewServeMux(), limiter: newLimiter(), agents: newAgentHub(logger), clients: newClientHub(), start: time.Now(),
-		verify: VerifyPassword, verifyWait: loginVerifyWait}
+		verify: VerifyPassword, verifyWait: loginVerifyWait, helloTimeout: defaultHelloTimeout}
 	s.routes()
 	return s, nil
 }
