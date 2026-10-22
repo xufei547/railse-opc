@@ -26,12 +26,15 @@ railse hub run --listen 127.0.0.1:8787
 2. **先导入本机规则**（本地闭环时手写过 `~/.railse/rules.yaml` 的才需要）。首次连上 hub 时，hub 的规则会整套覆盖本机 `rules.yaml`，其中手写的规则（例如禁止改 `migrations/**` 的 deny）随之失效。导入是整套替换 hub 的规则，第一次接入时 hub 里只有两条内置规则，直接导入本机文件即可（多台机器各有手写规则时先合并成一份）：
 
    ```bash
-   read -s PW; printf '{"password":"%s"}' "$PW" | curl -sf -c ck.txt -H 'Content-Type: application/json' --data-binary @- https://hub.example.com/api/login; unset PW
-   curl -sf -b ck.txt -H 'Content-Type: application/yaml' --data-binary @"$HOME/.railse/rules.yaml" https://hub.example.com/api/rules/import
-   rm ck.txt   # 里面是登录会话
+   CK=$(mktemp)   # 0600 的临时文件，放登录会话 cookie，别人读不到
+   read -s PW; printf '{"password":"%s"}' "$PW" | curl -sf -c "$CK" -H 'Content-Type: application/json' --data-binary @- https://hub.example.com/api/login; unset PW
+   curl -sf -b "$CK" -H 'Content-Type: application/yaml' --data-binary @"$HOME/.railse/rules.yaml" https://hub.example.com/api/rules/import
+   rm -f "$CK"
    ```
 
    （密码里有 `"` 或 `\` 时要按 JSON 转义；有 jq 时可用 `jq -n --arg p "$PW" '{password:$p}'` 生成请求体。）
+
+   **限定机器的规则要先改写。** 本地闭环时本机的机器 id 是主机名，接入后换成 hub 分配的 id（第 3 步 enroll 输出里的“机器 id”）。本机规则里写着 `scope: {machine: <主机名>}` 的，导入前要把它改成这个 id，否则接入后不再命中（用户 deny 会失效）。这种情况先做第 3 步拿到 id，改写后导入，再做第 4 步。
 
    忘了也不会丢：守护进程第一次用 hub 规则覆盖不是 hub 下发的 `rules.yaml` 之前，先把它原样备份为同目录的 `rules.local-<UTC 时间>.yaml`（0600），`agent.log` 记一条“已备份为 …”，之后把备份文件按上面的方法导入即可。只备份这一次，之后的 `rules.yaml` 都是 hub 的缓存。
 3. 机器上：`railse agent enroll --hub https://hub.example.com --token <接入码> [--name 名字] [--force]`。名字默认主机名。`--hub` 只收 `http://`、`https://`，不能带 `user:pass`、`?` 查询或 `#` 片段；接入请求不跟随重定向；`http://` 且不是本机地址时警告明文传输密钥。本机已有不是 hub 下发的 `rules.yaml` 时，成功后提示“首次连上 hub 时本机 rules.yaml 会被 hub 规则覆盖（会自动备份），如有手写规则请先导入”。

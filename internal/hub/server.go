@@ -104,8 +104,11 @@ type Server struct {
 	pauseMu sync.Mutex
 	// beforeSettle 非空时在“记住”学完规则之后、改请求状态之前调用（测试用它制造请求先被别处结束的竞态）。
 	beforeSettle func(store.Request)
-	// ws 记在跑的 WebSocket handler（/ws/agent、/ws/client）：http.Server.Shutdown 不管已劫持的连接，Run 靠它等这些 handler 退出。
+	// ws 记在跑的 WebSocket handler（/ws/agent、/ws/client）：关停开始后不再接纳新的（trackWS 回 503）。
 	ws tracker
+	// reqs 记 Run 里在跑的全部 HTTP 处理（普通请求与 WebSocket handler，见 countRequests）：http.Server.Shutdown 不管已劫持的连接，
+	// 超时后的 Close 也只关连接、不停下还在跑的处理，Run 靠它判断是否全部退出。开着却没有处理在跑的连接不算。
+	reqs tracker
 	// beforeWSExit 非空时在 WebSocket handler 退出前调用（测试用它让退出变慢）。
 	beforeWSExit func()
 	// clientRechecks 计 /ws/client 复核登录会话的次数（测试观测用）。
@@ -224,8 +227,8 @@ func (s *Server) Handler() http.Handler { return s.mux }
 // （见 stopCallbacks）。截止时间被前面的步骤耗尽时，回调仍有 callbackStopGrace 的收尾宽限，总关停不超过
 // shutdownTimeout + callbackStopGrace。返回 nil 时 WebSocket 处理与回调都已退出，调用方可以关库；没能开始监听时立即返回
 // 满足 errors.Is(err, ErrListen) 的错误（什么都没开始跑，也可以关库）；服务自己出错结束时返回那个错误；
-// 有没等到退出的（含 HTTP 收尾超时被强制断开的普通请求：断开连接不会停下它们的处理），收尾完照样返回，
-// 错误满足 errors.Is(err, ErrShutdownTimeout)。
+// 有没等到退出的（含 HTTP 收尾超时被强制断开的普通请求：断开连接不会停下它们的处理；开着却没有处理在跑的连接不算），
+// 收尾完照样返回，错误满足 errors.Is(err, ErrShutdownTimeout)。
 func (s *Server) Run(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
@@ -240,7 +243,7 @@ func (s *Server) serve(parent context.Context, ln net.Listener) error {
 	// 不取消的话 /ws/client 的 handler 一直挂着，关停等不到它们退出。
 	ctx, cancelRun := context.WithCancel(parent)
 	defer cancelRun()
-	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
+	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.countRequests(s.mux), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
 	s.log.Printf("hub 监听 %s", ln.Addr())
 	// 过期扫描随 Run 结束：Run 返回前等它退出，调用方随后关库也不会撞上它
@@ -278,30 +281,43 @@ func (s *Server) serve(parent context.Context, ln net.Listener) error {
 	return runErr
 }
 
-// shutdownHTTP 停止接纳新的 WebSocket handler、断开守护进程，等在途请求到 ctx 结束（超时就强制断开），
-// 再在同一截止前等 WebSocket handler 全部退出。在途请求没处理完（被强制断开的连接上处理仍在跑，可能碰存储），
-// 或截止前没等到 WebSocket handler 全部退出时返回 false。
+// countRequests 把每个 HTTP 处理记进 s.reqs；关停开始后到来的请求回 503。
+func (s *Server) countRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.reqs.enter() {
+			writeErr(w, http.StatusServiceUnavailable, "hub 正在关停")
+			return
+		}
+		defer s.reqs.leave()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// shutdownHTTP 停止接纳新的 WebSocket handler 与请求、断开守护进程，等在途请求到 ctx 结束（超时就强制断开），
+// 再在同一截止前等全部处理（普通请求与 WebSocket handler）退出。截止前没等到它们全部退出时返回 false：
+// 强制断开只关连接，被断开的连接上处理仍在跑，可能碰存储。开着却没有处理在跑的连接（浏览器的预连接、
+// 客户端多拨的连接）会让 Shutdown 等到截止，但不碰存储，不算没收尾干净。
 func (s *Server) shutdownHTTP(ctx context.Context, hs *http.Server) bool {
-	wsIdle := s.ws.shutdown() // 先停止接纳新的 WebSocket handler
+	s.ws.shutdown() // 先停止接纳新的 WebSocket handler；它们同时记在 reqs 里，下面一并等
+	reqsIdle := s.reqs.shutdown()
 	s.agents.closeAll()
-	clean := true
 	if err := hs.Shutdown(ctx); err != nil {
 		s.log.Printf("hub 关停超时，强制断开: %v", err)
 		hs.Close()
-		clean = false
 	}
-	// Shutdown 不管已劫持的 WebSocket 连接：它们的 handler 经 BaseContext 看到取消后自行退出，这里等到它们都退出
-	// 截止已到（HTTP 收尾耗尽了它）而 handler 也都已退出时，两个分支同时就绪：先看 handler，免得随机误报超时
+	// Shutdown 不管已劫持的 WebSocket 连接：它们的 handler 经 BaseContext 看到取消后自行退出，这里等到全部处理都退出。
+	// 截止已到（HTTP 收尾耗尽了它）而处理也都已退出时，两个分支同时就绪：先看处理，免得随机误报超时
 	select {
-	case <-wsIdle:
-		return clean
+	case <-reqsIdle:
+		return true
 	default:
 	}
 	select {
-	case <-wsIdle:
-		return clean
+	case <-reqsIdle:
+		return true
 	case <-ctx.Done():
-		s.log.Printf("hub 关停超时，仍有 %d 个 WebSocket 连接的处理未退出", s.ws.count())
+		ws := s.ws.count()
+		s.log.Printf("hub 关停超时，仍有 %d 个 WebSocket 连接的处理、%d 个请求的处理未退出", ws, max(s.reqs.count()-ws, 0))
 		return false
 	}
 }

@@ -594,3 +594,37 @@ func TestReportedPayloadUsesCleanedCwd(t *testing.T) {
 		}
 	}
 }
+
+// 终审复审：载荷与会话都没有 cwd 时，上报（交给 Decider）与审计保持空 cwd，不写 CleanCwd("") 得到的 "."。
+// 引擎照旧按清理后的 "." 评估（相对路径，不在任何项目内）。
+func TestReportedPayloadKeepsEmptyCwd(t *testing.T) {
+	d := &blockingDecider{release: make(chan struct{}), outcome: Outcome{Action: "deny", DecidedBy: "user"}}
+	env := startServer(t, d, nil)
+	os.WriteFile(env.cfg.RulesPath, []byte("version: 1\nrules: []\n"), 0o600)
+	if err := env.srv.rules.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	req := permission("", "git push origin main")
+	conn, err := net.Dial("unix", env.cfg.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	proto.WriteLine(conn, req)
+	waitFor(t, func() bool { return env.srv.pending.Count() == 1 })
+	if pr := env.srv.pending.List()[0]; pr.Redacted.Cwd != "" || pr.ProjectRoot != "" {
+		t.Fatalf("没有 cwd 时上报应保持空: cwd %q 项目根 %q", pr.Redacted.Cwd, pr.ProjectRoot)
+	}
+	d.release <- struct{}{}
+	var resp proto.Response
+	json.NewDecoder(conn).Decode(&resp)
+	if resp.Decision != "deny" {
+		t.Fatalf("应得到 deny: %+v", resp)
+	}
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		pb, _ := json.Marshal(e.Payload)
+		if e.Payload == nil || strings.Contains(string(pb), `"cwd"`) {
+			t.Fatalf("审计里的载荷不应带 cwd: %s", pb)
+		}
+	}
+}

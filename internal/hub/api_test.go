@@ -1432,6 +1432,57 @@ func TestRunReportsHTTPShutdownTimeout(t *testing.T) {
 	}
 }
 
+// 终审复审：M11 只把“还有处理在跑”算作没收尾干净。客户端（浏览器的预连接、HTTP 客户端多拨的连接）开着却没发请求的连接
+// 会让 hs.Shutdown 等到截止（net/http 对没发过请求的新连接要等 5 秒才当空闲），但没有处理在跑、不会碰存储，Run 应返回 nil。
+func TestRunIgnoresIdleNewConnections(t *testing.T) {
+	old := shutdownTimeout
+	shutdownTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { shutdownTimeout = old })
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := DefaultConfig(dir)
+	cfg.Listen = "127.0.0.1:0"
+	var logs syncBuf
+	srv, err := New(cfg, st, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	const prefix = "hub 监听 "
+	waitFor(t, "Run 开始监听", func() bool { return strings.Contains(logs.String(), prefix) })
+	line := logs.String()
+	addr := strings.TrimSpace(strings.SplitN(line[strings.Index(line, prefix)+len(prefix):], "\n", 2)[0])
+	conn, err := net.Dial("tcp", addr) // 只连不发请求
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// 一次完整的请求，确认服务在跑、上面的连接已被接受
+	if resp := doReq(t, "GET", "http://"+addr+"/api/status", nil, "", nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("没有处理在跑时 Run 应返回 nil，得到 %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("取消后 Run 未返回")
+	}
+}
+
 // 修复轮 1：WebSocket 处理没在关停时限内退出时，Run 仍尽力收尾（停过期扫描、停回调），之后返回 ErrShutdownTimeout，
 // 调用方据此不关库（那个处理还可能碰存储）。
 func TestRunReportsShutdownTimeout(t *testing.T) {
