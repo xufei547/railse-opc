@@ -51,11 +51,21 @@ func SaveMachine(path string, m MachineConfig) error {
 	return writeFileAtomic(path, append(b, '\n'))
 }
 
-// validate 只接受 http、https 且带主机名的 hub_url。错误信息不带 URL 原文（可能含 user:pass）与 Secret。
+// validate 只接受 http、https 且带主机名、不带 user:pass 的 hub_url（凭据只走 Authorization 头），
+// machine_id 与 secret 不能为空。错误信息不带 URL 原文与 Secret。
 func (m MachineConfig) validate() error {
 	u, err := url.Parse(m.HubURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return errors.New("hub_url 无效：应为 http:// 或 https:// 开头并带主机名")
+	}
+	if u.User != nil {
+		return errors.New("hub_url 不能带用户名或密码")
+	}
+	if m.MachineID == "" {
+		return errors.New("machine_id 为空")
+	}
+	if m.Secret == "" {
+		return errors.New("secret 为空")
 	}
 	return nil
 }

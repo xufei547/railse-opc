@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -66,13 +67,25 @@ func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Lo
 	return &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now()}
 }
 
-// SetAuditSink 设置审计转发目标；nil 表示只写本地。可在 Serve 运行中随时调用。
+// SetAuditSink 设置审计转发目标；nil（包括装着 nil 指针的接口值）表示只写本地。可在 Serve 运行中随时调用。
 func (s *Server) SetAuditSink(sink AuditSink) {
-	if sink == nil {
+	if isNil(sink) {
 		s.sink.Store(nil)
 		return
 	}
 	s.sink.Store(&sinkBox{sink: sink})
+}
+
+// isNil 判断接口值本身为 nil，或装着 nil 的指针、map、切片、函数、通道。
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch rv := reflect.ValueOf(v); rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface, reflect.UnsafePointer:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // Pending 返回未完成请求表，hub 客户端重连时枚举用。只能在 Listen 之前调用（不加锁）。
@@ -367,10 +380,7 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 	ok := proto.ControlReply{V: proto.Version, OK: true}
 	switch c.Op {
 	case "status":
-		s.pauseMu.Lock()
-		paused, local, hub := s.rules.Paused(), s.localPaused, s.hubPaused
-		s.pauseMu.Unlock()
-		ok.Status = &proto.Status{Paused: paused, LocalPaused: local, HubPaused: hub, Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String()}
+		ok.Status = s.status()
 		return ok
 	case "pause", "resume":
 		// 只改本机这一侧；hub 暂停时本机 resume 不会解除生效的暂停。
@@ -391,6 +401,8 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 			return proto.ControlReply{V: proto.Version, OK: false, Error: entry.Reason}
 		}
 		s.writeAudit(entry)
+		// 回复带上状态：hub 仍暂停时本机 resume 不会解除生效的暂停，CLI 据此提示。
+		ok.Status = s.status()
 		return ok
 	case "reload":
 		if err := s.rules.Reload(); err != nil {
@@ -403,9 +415,18 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 	}
 }
 
+// status 汇总当前状态；三个暂停字段在 pauseMu 内一次读出，彼此一致。
+func (s *Server) status() *proto.Status {
+	s.pauseMu.Lock()
+	paused, local, hub := s.rules.Paused(), s.localPaused, s.hubPaused
+	s.pauseMu.Unlock()
+	return &proto.Status{Paused: paused, LocalPaused: local, HubPaused: hub, Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String()}
+}
+
 // SetHubPaused 设置 hub 下发的总开关（hub 客户端收到 welcome、paused 帧时调用）。只改 hub 这一侧，
 // 本机的 pause/resume 不受影响，生效值取两者的或。值没变时什么都不做；变化时写 state.json
 // 和审计（kind control，decided_by hub）。落盘失败也照样切换并写审计，返回错误说明重启后不会保留。
+// 写审计会同步调用 AuditSink.Forward：调用方（hub 客户端）不得持着 Forward 需要的锁调用本方法，否则自锁。
 func (s *Server) SetHubPaused(p bool) error {
 	s.pauseMu.Lock()
 	if s.hubPaused == p {

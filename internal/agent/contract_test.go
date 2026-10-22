@@ -36,7 +36,10 @@ func (r *recordingSink) count() int {
 func TestPendingRequestCarriesContractFields(t *testing.T) {
 	d := &blockingDecider{release: make(chan struct{})}
 	env := startServer(t, d, nil)
-	conn, _ := net.Dial("unix", env.cfg.SocketPath)
+	conn, err := net.Dial("unix", env.cfg.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer conn.Close()
 	proto.WriteLine(conn, permission(env.repo, "curl -H 'Authorization: Bearer zzz' https://x.y"))
 	waitFor(t, func() bool { return env.srv.pending.Count() == 1 })
@@ -60,11 +63,26 @@ func TestAuditSinkReceivesEntries(t *testing.T) {
 	env.srv.SetAuditSink(sink)
 	roundTrip(t, env.cfg.SocketPath, permission(env.repo, "git status"))
 	roundTrip(t, env.cfg.SocketPath, event("done", "s1", "DONE"))
-	waitFor(t, func() bool { return sink.count() == 2 })
+	roundTrip(t, env.cfg.SocketPath, permission(env.repo, "curl -H 'Authorization: Bearer zzz' https://x.y"))
+	waitFor(t, func() bool { return sink.count() == 3 })
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
 	if sink.entries[0].State != "auto_allowed" || sink.entries[1].Kind != "done" {
 		t.Fatalf("转发内容: %+v", sink.entries)
+	}
+	if p := sink.entries[2].Payload; p == nil || strings.Contains(p.Command, "zzz") || !strings.Contains(p.Command, "<redacted>") {
+		t.Fatalf("转发的载荷应已脱敏: %+v", p)
+	}
+	// 转发的与本地写的是同一条：逐条编码后字节相同
+	b, _ := os.ReadFile(env.cfg.AuditPath)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != len(sink.entries) {
+		t.Fatalf("本地 %d 条，转发 %d 条", len(lines), len(sink.entries))
+	}
+	for i, e := range sink.entries {
+		if j, _ := json.Marshal(e); string(j) != lines[i] {
+			t.Fatalf("第 %d 条转发与本地审计不一致:\n转发 %s\n本地 %s", i, j, lines[i])
+		}
 	}
 }
 
@@ -144,6 +162,25 @@ func TestPendingListSortedCopy(t *testing.T) {
 	list[0].ID = "changed"
 	if again := p.List(); again[0].ID != "a" {
 		t.Fatal("List 应返回副本，改返回值不影响表")
+	}
+	// 同一时刻创建的按 ID 排，结果确定
+	q := newPending()
+	for _, id := range []string{"z", "m", "a"} {
+		q.Add(&PendingRequest{ID: id, Created: now})
+	}
+	if l := q.List(); l[0].ID != "a" || l[1].ID != "m" || l[2].ID != "z" {
+		t.Fatalf("Created 相同时应按 ID 排: %+v", l)
+	}
+	// MCP 参数（json.RawMessage）也是深拷贝
+	args := json.RawMessage(`{"k":"v"}`)
+	r := newPending()
+	r.Add(&PendingRequest{ID: "m", Req: proto.Request{Payload: policy.Payload{Type: policy.PayloadMCP, Args: args}}, Redacted: policy.Payload{Type: policy.PayloadMCP, Args: append(json.RawMessage(nil), args...)}})
+	got := r.List()
+	got[0].Req.Payload.Args[2] = 'X'
+	got[0].Redacted.Args[2] = 'X'
+	again := r.List()
+	if string(again[0].Req.Payload.Args) != `{"k":"v"}` || string(again[0].Redacted.Args) != `{"k":"v"}` {
+		t.Fatalf("改 List 返回的 Args 不应影响表: %s %s", again[0].Req.Payload.Args, again[0].Redacted.Args)
 	}
 }
 
@@ -383,10 +420,13 @@ func TestRulesReplaceBadSetKeepsEngineAndFile(t *testing.T) {
 	if len(ents) != 1 {
 		t.Fatalf("不应留下临时文件: %v", ents)
 	}
-	// 未暂停时替换后也保持未暂停
-	good, _ := policy.ParseRuleSet([]byte("version: 1\nrules: []\n"))
-	if err := r.Replace(good, 4); err != nil || r.Paused() || r.Engine().Paused() {
-		t.Fatalf("替换应保持未暂停: %v", err)
+	// 未暂停时替换后也保持未暂停：新规则立即按放行生效
+	good, _ := policy.ParseRuleSet([]byte("version: 1\nrules:\n  - id: builtin-readonly\n    source: builtin\n    scope: global\n    match: {risk: read}\n    action: allow\n"))
+	if err := r.Replace(good, 4); err != nil {
+		t.Fatal(err)
+	}
+	if d := r.Engine().Evaluate(policy.Payload{Type: policy.PayloadShell, Command: "ls", Cwd: "/p"}, policy.Context{ProjectRoot: "/p", HomeDir: "/h"}); d.Action != policy.ActionAllow || r.Engine().Paused() {
+		t.Fatalf("替换应保持未暂停并按新规则放行: %+v", d)
 	}
 }
 
@@ -435,7 +475,7 @@ func TestReloadResetsRulesVersion(t *testing.T) {
 func TestLoadMachineRejectsBadConfig(t *testing.T) {
 	const secret = "TOPSECRETVALUE"
 	path := filepath.Join(shortTempDir(t), "machine.json")
-	for _, u := range []string{"", "ftp://h", "127.0.0.1:8787", "http://", "http:///x", "ws://h:1", "://bad"} {
+	for _, u := range []string{"", "ftp://h", "127.0.0.1:8787", "http://", "http:///x", "ws://h:1", "://bad", "http://:8787", "http://user:pw@h:1", "https://user@h"} {
 		b, _ := json.Marshal(map[string]string{"hub_url": u, "machine_id": "m1", "secret": secret, "name": "mac"})
 		os.WriteFile(path, b, 0o600)
 		_, err := LoadMachine(path)
@@ -447,6 +487,17 @@ func TestLoadMachineRejectsBadConfig(t *testing.T) {
 		}
 		if err := SaveMachine(path, MachineConfig{HubURL: u, MachineID: "m1", Secret: secret}); err == nil || strings.Contains(err.Error(), secret) {
 			t.Fatalf("SaveMachine 应拒绝 hub_url %q 且错误不含密钥: %v", u, err)
+		}
+	}
+	// machine_id 与 secret 不能为空
+	for _, m := range []MachineConfig{{HubURL: "https://h", Secret: secret}, {HubURL: "https://h", MachineID: "m1"}} {
+		b, _ := json.Marshal(m)
+		os.WriteFile(path, b, 0o600)
+		if _, err := LoadMachine(path); err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("缺字段应被拒且错误不含密钥: %+v -> %v", m, err)
+		}
+		if err := SaveMachine(path, m); err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("SaveMachine 缺字段应被拒且错误不含密钥: %+v -> %v", m, err)
 		}
 	}
 	for _, raw := range []string{`{"hub_url":"https://h","secret":"` + secret, `{"hub_url":"https://h","secret":42}`, `[]`} {
@@ -490,5 +541,97 @@ func TestSaveMachineIsAtomic(t *testing.T) {
 		if strings.Contains(e.Name(), ".tmp-") {
 			t.Fatalf("失败后不应留下临时文件: %s", e.Name())
 		}
+	}
+}
+
+// 暂停是安全底线：暂停时 hub 推来一套能放行的规则，新引擎也必须保持暂停（ask），不能悄悄恢复自动放行。
+func TestRulesReplaceKeepsPause(t *testing.T) {
+	path := filepath.Join(shortTempDir(t), "rules.yaml")
+	r, _ := LoadRules(path)
+	rs, err := policy.ParseRuleSet([]byte("version: 1\nrules:\n  - id: builtin-readonly\n    source: builtin\n    scope: global\n    match: {risk: read}\n    action: allow\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ls := policy.Payload{Type: policy.PayloadShell, Command: "ls", Cwd: "/p"}
+	pctx := policy.Context{ProjectRoot: "/p", HomeDir: "/h"}
+
+	r.SetPaused(true)
+	if err := r.Replace(rs, 1); err != nil {
+		t.Fatal(err)
+	}
+	if d := r.Engine().Evaluate(ls, pctx); d.Action != policy.ActionAsk || !r.Engine().Paused() {
+		t.Fatalf("暂停时 Replace 后的引擎应仍暂停（ask）: %+v paused=%v", d, r.Engine().Paused())
+	}
+
+	r.SetPaused(false)
+	if err := r.Replace(rs, 2); err != nil {
+		t.Fatal(err)
+	}
+	if d := r.Engine().Evaluate(ls, pctx); d.Action != policy.ActionAllow || r.Engine().Paused() {
+		t.Fatalf("未暂停时 Replace 后应按新规则放行: %+v paused=%v", d, r.Engine().Paused())
+	}
+}
+
+// 装着 nil 指针的接口值视为清除，不能在请求路径上 panic。
+func TestAuditSinkTypedNilClears(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	sink := &recordingSink{}
+	env.srv.SetAuditSink(sink)
+	var none *recordingSink
+	env.srv.SetAuditSink(none)
+	var ack proto.EventAck
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, event("done", "s1", "x")), &ack)
+	if !ack.OK || sink.count() != 0 {
+		t.Fatalf("nil 指针的转发目标应视为清除: ack=%+v forwarded=%d", ack, sink.count())
+	}
+}
+
+// hub 暂停时本机 resume：回复仍 OK，并带上状态让 CLI 提示 hub 仍暂停。
+func TestResumeReplyCarriesHubPaused(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	if err := env.srv.SetHubPaused(true); err != nil {
+		t.Fatal(err)
+	}
+	var reply proto.ControlReply
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, control("resume")), &reply)
+	if !reply.OK || reply.Status == nil || !reply.Status.HubPaused || reply.Status.LocalPaused || !reply.Status.Paused {
+		t.Fatalf("resume 回复应 OK 并带 hub_paused: %+v %+v", reply, reply.Status)
+	}
+}
+
+// 并发交错本机 pause/resume 与 hub 开关：-race 下无竞争，结束后内存、引擎与 state.json 一致。
+func TestPauseSourcesConcurrentConsistency(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			op := "resume"
+			if i%3 == 0 {
+				op = "pause"
+			}
+			env.srv.handleControl(control(op))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			env.srv.SetHubPaused(i%2 == 0)
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		env.srv.handleControl(control("status"))
+	}
+	wg.Wait()
+	env.srv.pauseMu.Lock()
+	local, hub := env.srv.localPaused, env.srv.hubPaused
+	env.srv.pauseMu.Unlock()
+	st, err := loadState(env.cfg.StatePath)
+	if err != nil || st.Paused != local || st.HubPaused != hub {
+		t.Fatalf("state.json 与内存不一致: 文件 %+v 内存 local=%v hub=%v err=%v", st, local, hub, err)
+	}
+	if env.srv.rules.Paused() != (local || hub) || env.srv.rules.Engine().Paused() != (local || hub) {
+		t.Fatalf("引擎生效值应为两者取或: rules=%v engine=%v", env.srv.rules.Paused(), env.srv.rules.Engine().Paused())
 	}
 }

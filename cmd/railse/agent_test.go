@@ -164,9 +164,46 @@ func TestPausedLineShowsSource(t *testing.T) {
 		{proto.Status{Paused: true, LocalPaused: true}, "paused: true (local)"},
 		{proto.Status{Paused: true, HubPaused: true}, "paused: true (hub)"},
 		{proto.Status{Paused: true, LocalPaused: true, HubPaused: true}, "paused: true (local+hub)"},
+		{proto.Status{Paused: true}, "paused: true"}, // 旧版守护进程不报来源
 	} {
 		if got := pausedLine(&c.st); got != c.want {
 			t.Fatalf("%+v: got %q want %q", c.st, got, c.want)
 		}
+	}
+}
+
+func TestAgentResumeWarnsWhenHubPaused(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(dir)
+	cfgDir := filepath.Join(dir, "h")
+	os.MkdirAll(cfgDir, 0o700)
+	// 上次运行时 hub 暂停了总开关
+	os.WriteFile(filepath.Join(cfgDir, "state.json"), []byte(`{"paused":false,"hub_paused":true}`), 0o600)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runAgentServe(ctx, agent.ConfigIn(cfgDir), false, os.Stderr) }()
+	defer func() { cancel(); <-done }()
+	sock := filepath.Join(cfgDir, "agent.sock")
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("socket 未出现")
+		}
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"agent", "resume", "--dir", cfgDir}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "ok") || !strings.Contains(out.String(), "hub 仍暂停") {
+		t.Fatalf("hub 暂停时本机 resume 应成功并提示: %d %q %q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	run([]string{"agent", "status", "--dir", cfgDir}, &out, &errOut)
+	if !strings.Contains(out.String(), "paused: true (hub)\n") {
+		t.Fatalf("status: %q", out.String())
+	}
+	out.Reset()
+	run([]string{"agent", "pause", "--dir", cfgDir}, &out, &errOut)
+	if strings.TrimSpace(out.String()) != "ok" {
+		t.Fatalf("pause 只应打印 ok: %q", out.String())
 	}
 }

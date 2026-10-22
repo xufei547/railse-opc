@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -141,33 +140,6 @@ func (r *Rules) Version() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.version
-}
-
-// writeFileAtomic 先写同目录临时文件（0600）并 fsync，再 rename 覆盖目标；中途失败或崩溃
-// 不会留下截断的目标文件，失败时删掉临时文件。规则缓存、state.json、machine.json 共用。
-func writeFileAtomic(path string, data []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Chmod(0o600) // CreateTemp 已是 0600，这里再明确一次，不受 umask 影响
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(tmp, path)
-	}
-	if err != nil {
-		os.Remove(tmp)
-	}
-	return err
 }
 
 func (r *Rules) logf(format string, args ...any) {

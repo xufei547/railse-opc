@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"sort"
 	"sync"
 	"time"
@@ -78,16 +79,32 @@ func (p *Pending) Count() int {
 	return len(p.m)
 }
 
-// List 返回按创建时间排序的副本，重连时上报 hub 用。
+// List 返回按创建时间排序（相同时按 ID）的副本，重连时上报 hub 用。
+// MCP 参数（json.RawMessage）也复制一份，调用方改返回值不会影响表里正在等待的请求。
 func (p *Pending) List() []PendingRequest {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]PendingRequest, 0, len(p.m))
 	for _, pr := range p.m {
-		out = append(out, *pr)
+		c := *pr
+		c.Req.Payload.Args = cloneRaw(pr.Req.Payload.Args)
+		c.Redacted.Args = cloneRaw(pr.Redacted.Args)
+		out = append(out, c)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Created.Before(out[j].Created) })
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].Created.Equal(out[j].Created) {
+			return out[i].Created.Before(out[j].Created)
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
+}
+
+func cloneRaw(b json.RawMessage) json.RawMessage {
+	if b == nil {
+		return nil
+	}
+	return append(json.RawMessage(nil), b...)
 }
 
 // HasSession 判断某个 CLI 会话是否有未完成的审批，用于压掉随后的 question 事件。

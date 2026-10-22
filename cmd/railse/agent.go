@@ -64,11 +64,15 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "失败:", reply.Error)
 			return 1
 		}
-		if reply.Status != nil {
+		if args[0] == "status" && reply.Status != nil {
 			st := reply.Status
 			fmt.Fprintf(stdout, "%s\nrules: %d\npending: %d\nmachine: %s\nrules_path: %s\nuptime: %s\n", pausedLine(st), st.Rules, st.Pending, st.MachineID, st.RulesPath, st.Uptime)
-		} else {
-			fmt.Fprintln(stdout, "ok")
+			return 0
+		}
+		fmt.Fprintln(stdout, "ok")
+		// pause/resume 的回复带状态：本机已恢复但 hub 仍暂停时，自动审批仍未生效，要说清楚。
+		if args[0] == "resume" && reply.Status != nil && reply.Status.HubPaused {
+			fmt.Fprintln(stdout, "本机已恢复，hub 仍暂停：自动审批仍未生效，需在 hub 上恢复")
 		}
 		return 0
 	default:
