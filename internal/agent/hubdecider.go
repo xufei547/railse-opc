@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/railse/railse-opc/internal/hub/wire"
@@ -29,6 +30,27 @@ const (
 	ruleIDMax    = 256  // Decision.RuleID，与 hub 的短字段上限一致
 	noteMax      = 1000 // 用户备注，与 hub 的备注上限一致
 )
+
+// hubNoticeTimeout 是送达、取消、过期回执的写上限。它们只是通知（写不出去时重连对齐会补上），不值得让钩子按
+// hubWriteTimeout 多等。是变量只为测试能调。
+var hubNoticeTimeout = 2 * time.Second
+
+// reservedDecidedBy 是本机审计里另有含义的 decided_by（引擎规则 rule:…、暂停、钩子消失、hub 不可达等）。hub 送来的决定
+// 若带这些值（不区分大小写），一律记为 user：否则本机审计会把手机上的决定记成别的来源，hub_unreachable 还会让守护进程
+// 把真决定当作交回终端。
+var reservedDecidedBy = map[string]bool{
+	hubUnreachable: true, "gemini": true, "terminal": true, "timeout": true, "shutdown": true, "error": true, "paused": true,
+	"no_hub": true, "hub": true, "hub_error": true,
+}
+
+// hubDecidedBy 把 hub 送来的 decided_by 截到 decidedByMax 字符；为空或是本机保留值时记为 user。
+func hubDecidedBy(s string) string {
+	by := clipText(s, decidedByMax)
+	if l := strings.ToLower(by); by == "" || reservedDecidedBy[l] || strings.HasPrefix(l, "rule:") {
+		return "user"
+	}
+	return by
+}
 
 // HubDecider 把引擎答 ask 的请求经 HubClient 送到 hub，等人在手机上决定。它永不让 agent 卡住：Gemini 直接交回
 // 原生确认框；连不上 hub、hub 停用本机、送不出去、hub 没给出有效决定，或送出后断线超过 Grace，都交回终端
@@ -66,7 +88,9 @@ func (d *HubDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, er
 	}
 	ch := d.Client.Await(pr.ID)
 	defer d.Client.Forget(pr.ID)
-	if err := d.Client.SendPending(pr); err != nil && !errors.Is(err, ErrHubDisconnected) {
+	if err := d.Client.SendPending(pr); errors.Is(err, ErrHubDisconnected) {
+		d.logf("请求 %q 送往 hub 时断线，等重连（宽限 %s）: %v", pr.ID, d.Grace, err)
+	} else if err != nil {
 		d.logf("请求 %q 交回终端: %v", pr.ID, err)
 		return unreachable(reasonSendFailed, ""), nil
 	}
@@ -118,9 +142,9 @@ func (d *HubDecider) wait(ctx context.Context, id string, ch <-chan wire.Decisio
 	}
 }
 
-// settle 把 hub 的决定换成给钩子的结论，并在是真决定时报送达（报不出去只记日志）。只认 allow、deny：钩子拿固定文案，
-// 用户备注只进 Note。其余任何动作（含 hub 拒收这条请求时 HubClient 合成的 hub_error 决定、空串）一律交回终端，
-// hub 给的原因只进 Note。
+// settle 把 hub 的决定换成给钩子的结论，并在是真决定时报送达（最多等 hubNoticeTimeout，报不出去只记日志）。
+// 只认 allow、deny：钩子拿固定文案，用户备注只进 Note，DecidedBy 经 hubDecidedBy 过滤。其余任何动作（含 hub 拒收
+// 这条请求时 HubClient 合成的 hub_error 决定、空串）一律交回终端，hub 给的原因只进 Note。
 func (d *HubDecider) settle(id string, dec wire.Decision) Outcome {
 	var reason string
 	switch dec.Action {
@@ -133,28 +157,28 @@ func (d *HubDecider) settle(id string, dec wire.Decision) Outcome {
 			id, clipText(dec.Action, hubLogFieldMax), clipText(dec.DecidedBy, hubLogFieldMax))
 		return unreachable(reasonNoDecision, clipText(dec.Reason, hubErrorReasonMax))
 	}
-	by := clipText(dec.DecidedBy, decidedByMax)
-	if by == "" {
-		by = "user"
-	}
-	out := Outcome{Action: dec.Action, Reason: reason, RuleID: clipText(dec.RuleID, ruleIDMax), DecidedBy: by, Note: clipText(dec.Reason, noteMax)}
-	if err := d.Client.SendDelivered(id); err != nil {
+	out := Outcome{Action: dec.Action, Reason: reason, RuleID: clipText(dec.RuleID, ruleIDMax), DecidedBy: hubDecidedBy(dec.DecidedBy), Note: clipText(dec.Reason, noteMax)}
+	nctx, cancel := context.WithTimeout(context.Background(), hubNoticeTimeout)
+	defer cancel()
+	if err := d.Client.SendDelivered(nctx, id); err != nil {
 		d.logf("报告请求 %q 已送达失败: %v", id, err)
 	}
 	return out
 }
 
 // abandon 在 ctx 结束时告诉 hub：钩子消失发 cancel(terminal)，等待到期发 expired，其余（守护进程停止）发
-// cancel(shutdown)。断线时发不出去，只记日志：重连对齐会按 agent_restart 取消，随后本机终态审计覆盖。
+// cancel(shutdown)，最多等 hubNoticeTimeout。断线或写不出去时只记日志：重连对齐会按 agent_restart 取消，随后本机终态审计覆盖。
 func (d *HubDecider) abandon(ctx context.Context, id string) {
+	nctx, cancel := context.WithTimeout(context.Background(), hubNoticeTimeout)
+	defer cancel()
 	var err error
 	switch {
 	case errors.Is(context.Cause(ctx), errHookGone):
-		err = d.Client.SendCancel(id, "terminal")
+		err = d.Client.SendCancel(nctx, id, "terminal")
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		err = d.Client.SendExpired(id)
+		err = d.Client.SendExpired(nctx, id)
 	default:
-		err = d.Client.SendCancel(id, "shutdown")
+		err = d.Client.SendCancel(nctx, id, "shutdown")
 	}
 	if err != nil {
 		d.logf("告诉 hub 请求 %q 已结束失败: %v", id, err)

@@ -276,7 +276,7 @@ func TestHubClientPendingDecisionAndDelivered(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("没有收到决定")
 	}
-	if err := c.SendDelivered("r1"); err != nil {
+	if err := c.SendDelivered(context.Background(), "r1"); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, 5*time.Second, "hub 没有记录送达", func() bool {
@@ -300,10 +300,10 @@ func TestHubClientCancelAndExpired(t *testing.T) {
 		}
 	}
 	eventually(t, 5*time.Second, "hub 没有登记请求", func() bool { n, _ := h.st.CountPending(); return n == 2 })
-	if err := c.SendCancel("c1", "terminal"); err != nil {
+	if err := c.SendCancel(context.Background(), "c1", "terminal"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SendExpired("e1"); err != nil {
+	if err := c.SendExpired(context.Background(), "e1"); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, 5*time.Second, "hub 没有结束请求", func() bool {
@@ -519,7 +519,7 @@ func TestHubClientSendsWithoutConnection(t *testing.T) {
 	if err := c.SendPending(agent.PendingRequest{ID: "x"}); !errors.Is(err, agent.ErrHubDisconnected) {
 		t.Fatalf("未连接应报 ErrHubDisconnected: %v", err)
 	}
-	for _, err := range []error{c.SendCancel("x", "terminal"), c.SendExpired("x"), c.SendDelivered("x")} {
+	for _, err := range []error{c.SendCancel(context.Background(), "x", "terminal"), c.SendExpired(context.Background(), "x"), c.SendDelivered(context.Background(), "x")} {
 		if !errors.Is(err, agent.ErrHubDisconnected) {
 			t.Fatalf("未连接应报 ErrHubDisconnected: %v", err)
 		}

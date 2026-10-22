@@ -44,11 +44,12 @@ var (
 	hubProtoBackoff = 10 * time.Minute
 	// hubAuditInterval 是审计批量上报的周期（攒够 auditBatchMax 条时不等它）。
 	hubAuditInterval = time.Second
+	// hubWriteTimeout 是写出一帧的上限（含等写锁），见 writeRaw。写时读取，不复制进客户端。
+	hubWriteTimeout = 10 * time.Second
 )
 
 const (
 	hubHandshakeTimeout = 10 * time.Second // 拨号握手与等 welcome 的上限
-	hubWriteTimeout     = 10 * time.Second // 写出一帧的上限
 	hubErrorReasonMax   = 200              // hub 拒收某条请求时，转给等待者的文案字符上限
 	hubLogFieldMax      = 200              // 日志里来自 hub 的字段的字符上限
 
@@ -517,31 +518,34 @@ func writeFrame(ctx context.Context, conn *websocket.Conn, v any) error {
 	return writeRaw(ctx, conn, b)
 }
 
-// writeRaw 写一帧，最多等 hubWriteTimeout（超时时库会关闭连接，读循环随之结束）。
+// writeRaw 写一帧，最多等 hubWriteTimeout（ctx 更早结束时以 ctx 为准）。超时分两种：写帧中途超时，库会关闭连接，
+// 读循环随之结束；还在等写锁（另一帧正写着）时超时，库不关连接，连接仍会被当作连着——调用方必须自己关掉它
+// （sendRaw、审计上报循环都这么做；会话里的写失败直接结束会话，由 session 的 defer 关）。
 func writeRaw(ctx context.Context, conn *websocket.Conn, b []byte) error {
 	wctx, cancel := context.WithTimeout(ctx, hubWriteTimeout)
 	defer cancel()
 	return conn.Write(wctx, websocket.MessageText, b)
 }
 
-// send 编码并发出一帧。编码错误原样返回（不是连接问题）；未连接或写连接失败返回包着 ErrHubDisconnected 的错误
-// （写失败时 sendRaw 关掉这条连接，读循环随之结束，重连后 pending 会随对齐重发）。
-func (h *HubClient) send(v any) error {
+// send 编码并发出一帧，写的上限取 ctx 与 hubWriteTimeout 中较早的。编码错误原样返回（不是连接问题）；
+// 未连接或写连接失败返回包着 ErrHubDisconnected 的错误（写失败时 sendRaw 关掉这条连接，读循环随之结束，
+// 重连后 pending 会随对齐重发）。
+func (h *HubClient) send(ctx context.Context, v any) error {
 	b, err := wire.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return h.sendRaw(b)
+	return h.sendRaw(ctx, b)
 }
 
-func (h *HubClient) sendRaw(b []byte) error {
+func (h *HubClient) sendRaw(ctx context.Context, b []byte) error {
 	h.mu.Lock()
 	conn := h.conn
 	h.mu.Unlock()
 	if conn == nil {
 		return ErrHubDisconnected
 	}
-	if err := writeRaw(context.Background(), conn, b); err != nil {
+	if err := writeRaw(ctx, conn, b); err != nil {
 		// 写失败就关掉这条连接：等写锁超时时库不会自己关，连接还会被当作连着。关掉后读循环随之结束、状态变为断开，
 		// 调用方按 ErrHubDisconnected 等重连才成立。
 		conn.CloseNow()
@@ -569,22 +573,22 @@ func (h *HubClient) SendPending(pr PendingRequest) error {
 	if err != nil {
 		return fmt.Errorf("请求 %q 无法送往 hub: %w", pr.ID, err)
 	}
-	return h.sendRaw(b)
+	return h.sendRaw(context.Background(), b)
 }
 
-// SendCancel 告诉 hub 钩子已消失。
-func (h *HubClient) SendCancel(id, reason string) error {
-	return h.send(wire.Cancel{T: wire.TCancel, RequestID: id, Reason: reason})
+// SendCancel 告诉 hub 钩子已消失。写的上限取 ctx 与 hubWriteTimeout 中较早的（下同）。
+func (h *HubClient) SendCancel(ctx context.Context, id, reason string) error {
+	return h.send(ctx, wire.Cancel{T: wire.TCancel, RequestID: id, Reason: reason})
 }
 
 // SendExpired 告诉 hub 本机等待已过期。
-func (h *HubClient) SendExpired(id string) error {
-	return h.send(wire.Expired{T: wire.TExpired, RequestID: id})
+func (h *HubClient) SendExpired(ctx context.Context, id string) error {
+	return h.send(ctx, wire.Expired{T: wire.TExpired, RequestID: id})
 }
 
 // SendDelivered 告诉 hub 决定已交给钩子。
-func (h *HubClient) SendDelivered(id string) error {
-	return h.send(wire.Delivered{T: wire.TDelivered, RequestID: id})
+func (h *HubClient) SendDelivered(ctx context.Context, id string) error {
+	return h.send(ctx, wire.Delivered{T: wire.TDelivered, RequestID: id})
 }
 
 // Await 登记一个等待者；决定到达时从返回的通道读到（只投递第一个，重复的丢弃）。
@@ -725,8 +729,9 @@ func (h *HubClient) ackAudit(seq uint64) {
 	h.auditDropping = false
 }
 
-// auditLoop 每 auditInterval 或被 Forward 叫醒时把队列发空。写连接失败时结束（本次连接作废，条目留在队里，
-// 重连后补发）；ctx 结束时返回。
+// auditLoop 每 auditInterval 或被 Forward 叫醒时把队列发空。写连接失败时关掉连接并结束（本次连接作废，条目留在队里，
+// 重连后补发；等写锁超时库不会自己关连接，不关的话读循环还在、连接还当作连着，积压要等到下次断线才补发）；
+// ctx 结束时返回。
 func (h *HubClient) auditLoop(ctx context.Context, conn *websocket.Conn) {
 	t := time.NewTicker(h.auditInterval)
 	defer t.Stop()
@@ -739,7 +744,8 @@ func (h *HubClient) auditLoop(ctx context.Context, conn *websocket.Conn) {
 		}
 		if err := h.flushAudit(ctx, conn); err != nil {
 			if ctx.Err() == nil {
-				h.log.Printf("上报审计失败，留待重连后补发: %q", clipText(err.Error(), hubLogFieldMax))
+				h.log.Printf("上报审计失败，断开重连后补发: %q", clipText(err.Error(), hubLogFieldMax))
+				conn.CloseNow()
 			}
 			return
 		}
