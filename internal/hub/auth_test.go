@@ -824,3 +824,118 @@ func TestRunShutsDownOnCancel(t *testing.T) {
 		t.Fatal("取消后 Run 未返回")
 	}
 }
+
+func decodeBody(t *testing.T, resp *http.Response, v any) {
+	t.Helper()
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+}
+
+// limiter.undo 退还最近一次放行；没有记录的键什么也不做，退到空时删掉键。
+func TestLimiterUndo(t *testing.T) {
+	l := newLimiter()
+	now := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+	l.now = func() time.Time { return now }
+	for i := 0; i < 2; i++ {
+		if !l.allow("k", 2, time.Minute) {
+			t.Fatalf("第 %d 次应放行", i+1)
+		}
+	}
+	if l.allow("k", 2, time.Minute) {
+		t.Fatal("满额后应拒绝")
+	}
+	l.undo("k")
+	if !l.allow("k", 2, time.Minute) {
+		t.Fatal("退还一次后应再放行一次")
+	}
+	if l.allow("k", 2, time.Minute) {
+		t.Fatal("只退还了一次")
+	}
+	l.undo("nobody")
+	l.undo("k")
+	l.undo("k")
+	if _, ok := l.hits["k"]; ok {
+		t.Fatal("退到空时应删掉键")
+	}
+	if _, ok := l.hits["nobody"]; ok {
+		t.Fatal("没有记录的键不应新建")
+	}
+}
+
+// 等不到 argon2 名额回 503 的登录不占限速名额；真正校验过的登录照常计数。
+func TestLoginBusyDoesNotCountTowardRateLimit(t *testing.T) {
+	var inFlight atomic.Int32
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	h := newTestHubWith(t, nil, func(s *Server) {
+		s.verifyWait = 50 * time.Millisecond
+		s.verify = func(enc, pw string) bool {
+			inFlight.Add(1)
+			defer inFlight.Add(-1)
+			<-release
+			return VerifyPassword(enc, pw)
+		}
+	})
+	t.Cleanup(unblock) // 先于 hub 的清理运行，测试中途失败也不会卡在被阻塞的校验上
+	if err := h.srv.SetPassword("hunter22"); err != nil {
+		t.Fatal(err)
+	}
+	codes := make(chan int, 2)
+	for i := 0; i < 2; i++ {
+		go func() { codes <- loginCode(h.http.URL, "hunter22") }()
+	}
+	waitFor(t, "两个登录占满名额", func() bool { return inFlight.Load() == 2 })
+	// 已计 2 次；若 503 也计数，第 4 次（累计第 6 次）会是 429
+	for i := 0; i < 4; i++ {
+		if code := loginCode(h.http.URL, "hunter22"); code != http.StatusServiceUnavailable {
+			t.Fatalf("名额占满时第 %d 次应 503, 得到 %d", i+1, code)
+		}
+	}
+	unblock()
+	for i := 0; i < 2; i++ {
+		if code := <-codes; code != http.StatusNoContent {
+			t.Fatalf("被放行的登录应 204, 得到 %d", code)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if code := loginCode(h.http.URL, "wrong-pass"); code != http.StatusUnauthorized {
+			t.Fatalf("第 %d 次错密码应 401, 得到 %d", i+1, code)
+		}
+	}
+	if code := loginCode(h.http.URL, "wrong-pass"); code != http.StatusTooManyRequests {
+		t.Fatalf("真正校验的第 6 次应 429, 得到 %d", code)
+	}
+}
+
+// decodeJSON 返回后不留读截止：否则截止一到，net/http 的后台读超时会取消 r.Context()，
+// 之后还要干活的处理器被无故打断。有请求体时 net/http 读到 EOF 开后台读会自己清掉截止；
+// 空请求体时后台读在处理器开始前就已开着，只能由 decodeJSON 清。两种都测，处理器忽略解码错误继续干活。
+func TestDecodeJSONClearsReadDeadline(t *testing.T) {
+	old := bodyReadTimeout
+	bodyReadTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = old }) // 在 hub 关停之后才恢复
+	h := newTestHub(t)
+	h.srv.mux.HandleFunc("POST /test/after-body", func(w http.ResponseWriter, r *http.Request) {
+		var v map[string]string
+		_ = decodeJSON(w, r, 1<<10, &v)
+		select {
+		case <-r.Context().Done():
+			writeErr(w, http.StatusInternalServerError, "decodeJSON 之后 context 被取消")
+		case <-time.After(3 * bodyReadTimeout):
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	for name, body := range map[string]string{"有请求体": `{"a":"b"}`, "空请求体": ""} {
+		resp, err := http.Post(h.http.URL+"/test/after-body", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("%s: 请求失败（连接被断开？）: %v", name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("%s: decodeJSON 之后 context 不应因读截止被取消, 得到 %d", name, resp.StatusCode)
+		}
+	}
+}

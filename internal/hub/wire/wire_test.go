@@ -46,3 +46,24 @@ func TestKindErrors(t *testing.T) {
 		t.Fatal("缺 t 应报错")
 	}
 }
+
+// hello 带协议版本，编码为 proto 字段并能往返。
+func TestHelloProtoRoundTrip(t *testing.T) {
+	if Proto != 1 {
+		t.Fatalf("Proto = %d，应为 1", Proto)
+	}
+	b, err := Marshal(Hello{T: THello, Proto: Proto, MachineID: "m1", AgentVersion: "0.1.0", HomeDir: "/home/u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"proto":1`) {
+		t.Fatalf("hello 应带 proto 字段: %s", b)
+	}
+	var out Hello
+	if err := Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Proto != Proto || out.MachineID != "m1" || out.AgentVersion != "0.1.0" || out.HomeDir != "/home/u" {
+		t.Fatalf("往返不一致: %+v", out)
+	}
+}

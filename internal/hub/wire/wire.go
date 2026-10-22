@@ -14,6 +14,9 @@ import (
 // MaxFrame 是单帧最大字节数。
 const MaxFrame = 1 << 20
 
+// Proto 是帧协议版本。守护进程在 hello 里报自己的版本，与 hub 不一致时 hub 拒绝握手。改动帧格式时加一。
+const Proto = 1
+
 // 帧种类。
 const (
 	THello     = "hello"     // 守护进程 → hub，连接后的第一帧
@@ -48,6 +51,7 @@ type PendingSummary struct {
 // Hello 是守护进程连上后的第一帧。认证在 HTTP 头里，这里只报身份与状态。
 type Hello struct {
 	T            string           `json:"t"`
+	Proto        int              `json:"proto"`
 	MachineID    string           `json:"machine_id"`
 	AgentVersion string           `json:"agent_version"`
 	HomeDir      string           `json:"home_dir"`

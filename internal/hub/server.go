@@ -95,7 +95,7 @@ func New(cfg Config, st *store.Store, logger *log.Logger) (*Server, error) {
 	if _, err := st.EnsureDefaultRules(); err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, log: logger, mux: http.NewServeMux(), limiter: newLimiter(), agents: newAgentHub(), clients: newClientHub(), start: time.Now(),
+	s := &Server{cfg: cfg, store: st, log: logger, mux: http.NewServeMux(), limiter: newLimiter(), agents: newAgentHub(logger), clients: newClientHub(), start: time.Now(),
 		verify: VerifyPassword, verifyWait: loginVerifyWait}
 	s.routes()
 	return s, nil
@@ -161,16 +161,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 const (
 	idleTimeout     = 120 * time.Second
 	shutdownTimeout = 3 * time.Second
-	bodyReadTimeout = 10 * time.Second
 )
 
-// decodeJSON 把限长 limit 字节的请求体解码进 v，读请求体有 bodyReadTimeout 的截止（慢速发送占不住连接）。
+// bodyReadTimeout 是读 JSON 请求体的截止。是变量只为测试能缩短它。
+var bodyReadTimeout = 10 * time.Second
+
+// decodeJSON 把限长 limit 字节的请求体解码进 v，读请求体有 bodyReadTimeout 的截止（慢速发送占不住连接），
+// 返回前清掉截止：否则截止一到，net/http 的后台读超时会取消 r.Context()（空请求体时后台读在处理器开始前就开着）。
 // 超长、超时、不是合法 UTF-8（encoding/json 会把非法字节悄悄换成 U+FFFD，这里先拒）、不是 JSON 都返回错误。
 // 所有 JSON 请求体都经它读。
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) error {
 	// 不支持设截止的 ResponseWriter（如测试里的 ResponseRecorder）忽略错误，照常读
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout))
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	_ = rc.SetReadDeadline(time.Time{})
 	if err != nil {
 		return err
 	}
@@ -196,15 +201,7 @@ func (s *Server) internalErr(w http.ResponseWriter, what string, err error) {
 	writeErr(w, http.StatusInternalServerError, "内部错误")
 }
 
-// agentHub 与 clientHub 的完整实现见 Task 7、8。
-type agentHub struct{}
-
-func newAgentHub() *agentHub  { return &agentHub{} }
-func (h *agentHub) closeAll() {}
-func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
-	writeErr(w, http.StatusNotImplemented, "未实现")
-}
-
+// clientHub 的完整实现见 Task 8。
 type clientHub struct{}
 
 func newClientHub() *clientHub { return &clientHub{} }

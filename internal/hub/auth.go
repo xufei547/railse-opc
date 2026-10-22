@@ -152,6 +152,22 @@ func (l *limiter) allow(key string, max int, window time.Duration) bool {
 	return ok
 }
 
+// undo 退还 key 最近一次放行（这次请求没有真正尝试，如服务器忙回 503）。没有记录时什么也不做，退到空时删掉键。
+func (l *limiter) undo(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	h, ok := l.hits[key]
+	if !ok {
+		return
+	}
+	if len(h.times) <= 1 {
+		delete(l.hits, key)
+		return
+	}
+	h.times = h.times[:len(h.times)-1]
+	l.hits[key] = h
+}
+
 // sweep 删掉最后一次放行已滑出各自窗口的键，至多每 sweepEvery 跑一次。调用方持有锁。
 func (l *limiter) sweep(now time.Time) {
 	if now.Sub(l.lastSweep) < sweepEvery {
@@ -228,7 +244,8 @@ func (s *Server) sessionCookie(r *http.Request, value string, maxAge int) *http.
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.limiter.allow("login:"+clientIP(r, s.cfg.TrustedProxies), loginMax, loginWindow) {
+	key := "login:" + clientIP(r, s.cfg.TrustedProxies)
+	if !s.limiter.allow(key, loginMax, loginWindow) {
 		writeErr(w, http.StatusTooManyRequests, "尝试太频繁，一分钟后再试")
 		return
 	}
@@ -250,6 +267,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	ok, busy := s.verifyLogin(r.Context(), enc, body.Password)
 	if busy {
+		s.limiter.undo(key) // 没有真正校验密码，不占这个来源的尝试名额
 		writeErr(w, http.StatusServiceUnavailable, "服务器忙，请稍后再试")
 		return
 	}
@@ -353,16 +371,20 @@ func validName(s string) bool {
 	return true
 }
 
+// errNoBearer 表示请求没带 Bearer 机器密钥。
+var errNoBearer = errors.New("缺少 Bearer 密钥")
+
 // authMachine 从 Authorization: Bearer 取机器密钥。方案名大小写不敏感，值去首尾空白后不能为空。
+// 没带密钥返回 errNoBearer，密钥不对或已吊销返回 store.ErrNotFound，其余是存储错误。
 func (s *Server) authMachine(r *http.Request) (store.Machine, error) {
 	const scheme = "Bearer "
 	h := r.Header.Get("Authorization")
 	if len(h) < len(scheme) || !strings.EqualFold(h[:len(scheme)], scheme) {
-		return store.Machine{}, errors.New("缺少 Bearer 密钥")
+		return store.Machine{}, errNoBearer
 	}
 	secret := strings.TrimSpace(h[len(scheme):])
 	if secret == "" {
-		return store.Machine{}, errors.New("缺少 Bearer 密钥")
+		return store.Machine{}, errNoBearer
 	}
 	return s.store.AuthMachine(secret)
 }
