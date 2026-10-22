@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -96,6 +97,78 @@ type Server struct {
 	pauseMu sync.Mutex
 	// beforeSettle 非空时在“记住”学完规则之后、改请求状态之前调用（测试用它制造请求先被别处结束的竞态）。
 	beforeSettle func(store.Request)
+	// ws 记在跑的 WebSocket handler（/ws/agent、/ws/client）：http.Server.Shutdown 不管已劫持的连接，Run 靠它等这些 handler 退出。
+	ws wsTracker
+	// beforeWSExit 非空时在 WebSocket handler 退出前调用（测试用它让退出变慢）。
+	beforeWSExit func()
+	// clientRechecks 计 /ws/client 复核登录会话的次数（测试观测用）。
+	clientRechecks atomic.Int64
+}
+
+// wsTracker 计在跑的 WebSocket handler。shutdown 之后不再接纳新的 handler，并给出全部退出时关闭的通道。
+// 不用 sync.WaitGroup：关停超时后 hs.Close 不等 handler，已开始但还没登记的 handler 可能在 Wait 时才 Add。
+type wsTracker struct {
+	mu      sync.Mutex
+	n       int
+	closing bool
+	idle    chan struct{} // closing 之后 n 归零时关闭
+}
+
+// enter 登记一个 handler；已在关停时返回 false，调用方不该再处理这个连接。
+func (t *wsTracker) enter() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closing {
+		return false
+	}
+	t.n++
+	return true
+}
+
+func (t *wsTracker) leave() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.n--
+	if t.n == 0 && t.idle != nil {
+		close(t.idle)
+		t.idle = nil
+	}
+}
+
+// shutdown 不再接纳新的 handler，返回在跑的 handler 全部退出时关闭的通道。
+func (t *wsTracker) shutdown() <-chan struct{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closing = true
+	ch := make(chan struct{})
+	if t.n == 0 {
+		close(ch)
+	} else {
+		t.idle = ch
+	}
+	return ch
+}
+
+func (t *wsTracker) count() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.n
+}
+
+// trackWS 在 WebSocket handler 开头调用：关停中回 503 并返回 false；返回 true 时调用方须 defer s.untrackWS()。
+func (s *Server) trackWS(w http.ResponseWriter) bool {
+	if !s.ws.enter() {
+		writeErr(w, http.StatusServiceUnavailable, "hub 正在关停")
+		return false
+	}
+	return true
+}
+
+func (s *Server) untrackWS() {
+	if s.beforeWSExit != nil {
+		s.beforeWSExit()
+	}
+	s.ws.leave()
 }
 
 // New 组装 hub：校验配置，确保有内置规则，注册路由。
@@ -126,7 +199,8 @@ func (s *Server) routes() {
 func (s *Server) Handler() http.Handler { return s.mux }
 
 // Run 监听直到 ctx 取消。请求的 context 派生自 ctx，取消时长连接与在途请求都能看到；
-// 关停先等在途请求至多 shutdownTimeout，超时就强制断开。
+// 关停先等在途请求至多 shutdownTimeout，超时就强制断开；同一时限内还等 WebSocket handler（/ws/agent、/ws/client）全部退出，
+// 正常关停时 Run 返回后不再有 handler 碰存储，调用方可以关库。
 func (s *Server) Run(ctx context.Context) error {
 	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
@@ -152,10 +226,17 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
+		wsIdle := s.ws.shutdown() // 先停止接纳新的 WebSocket handler
 		s.agents.closeAll()
 		if err := hs.Shutdown(shutdownCtx); err != nil {
 			s.log.Printf("hub 关停超时，强制断开: %v", err)
 			hs.Close()
+		}
+		// Shutdown 不管已劫持的 WebSocket 连接：它们的 handler 经 BaseContext 看到取消后自行退出，这里等到它们都退出
+		select {
+		case <-wsIdle:
+		case <-shutdownCtx.Done():
+			s.log.Printf("hub 关停超时，仍有 %d 个 WebSocket 连接的处理未退出", s.ws.count())
 		}
 		return nil
 	case err := <-errCh:

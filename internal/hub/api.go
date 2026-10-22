@@ -73,7 +73,7 @@ type requestView struct {
 	Project     string `json:"project"`
 }
 
-// views 给请求配上机器名（每台机器只查一次；查不到时留空）与项目名。
+// views 给请求配上机器名（每台机器只查一次；查不到时留空，读库出错记日志）与项目名。
 func (s *Server) views(rs []store.Request) []requestView {
 	names := map[string]string{}
 	out := make([]requestView, 0, len(rs))
@@ -82,6 +82,8 @@ func (s *Server) views(rs []store.Request) []requestView {
 		if !ok {
 			if m, err := s.store.GetMachine(r.MachineID); err == nil {
 				name = m.Name
+			} else if !errors.Is(err, store.ErrNotFound) {
+				s.log.Printf("读机器 %s 的名字: %v", r.MachineID, err)
 			}
 			names[r.MachineID] = name
 		}
@@ -389,7 +391,11 @@ func (s *Server) handleMachines(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleMachineRevoke 吊销机器（密钥立即失效）并断开它的在线连接。握手进行中的连接由 handleAgentWS 登记后再核对一次吊销。
+// decidedByRevoked 是吊销机器时取消其待决请求记的 decided_by。
+const decidedByRevoked = "machine_revoked"
+
+// handleMachineRevoke 吊销机器（密钥立即失效）、断开它的在线连接，再取消它仍 pending 的请求。
+// 握手进行中的连接由 handleAgentWS 登记后再核对一次吊销。
 func (s *Server) handleMachineRevoke(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, err := s.store.GetMachine(id); err != nil {
@@ -406,7 +412,29 @@ func (s *Server) handleMachineRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	s.agents.disconnect(id)
 	s.audit(id, "user", "", "machine_revoked", nil)
+	s.cancelRevokedPending(id)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// cancelRevokedPending 把吊销机器仍 pending 的请求改为 cancelled、decided_by machine_revoked，逐条审计并广播 request_updated：
+// 它的守护进程已断开且连不回来，这些请求不会再有人等，不必挂到过期。
+func (s *Server) cancelRevokedPending(machineID string) {
+	pend, err := s.store.ListPendingForMachine(machineID)
+	if err != nil {
+		s.log.Printf("列吊销机器 %s 的待决请求: %v", machineID, err)
+		return
+	}
+	for _, r := range pend {
+		err := s.store.SetMachineRequestState(machineID, r.ID, "cancelled", decidedByRevoked, "机器已吊销", "")
+		if errors.Is(err, store.ErrNotPending) {
+			continue
+		}
+		if err != nil {
+			s.log.Printf("取消吊销机器 %s 的请求 %q: %v", machineID, r.ID, err)
+			continue
+		}
+		s.settled(machineID, "user", r.ID, "cancelled", decidedByRevoked)
+	}
 }
 
 // handleClientWS 把 clientHub 的广播（{"type","data"} 文本帧）推给网页。cookie 认证与 Origin 检查在握手之前
@@ -417,8 +445,12 @@ func (s *Server) handleMachineRevoke(w http.ResponseWriter, r *http.Request) {
 // 必须全量重新拉取（/api/inbox、/api/status、/api/rules 等），不能只靠推送增量维护状态。
 //
 // 网页不该发数据帧（发了就断开）。每 PingInterval 复核一次登录会话（登出、换密码、过期后断开）并 ping，
-// PongTimeout 内没有 pong 就断开。handler 返回前等这些都停下；返回之后不再碰存储（Run 关停后调用方会关库）。
+// PongTimeout 内没有 pong 就断开。handler 返回前等这些都停下，返回之后不再碰存储；Run 关停时等 handler 返回（见 wsTracker）。
 func (s *Server) handleClientWS(w http.ResponseWriter, r *http.Request) {
+	if !s.trackWS(w) {
+		return
+	}
+	defer s.untrackWS()
 	ck, err := r.Cookie(cookieName)
 	if err != nil { // requireClient 已查过，防御
 		writeErr(w, http.StatusUnauthorized, "请先登录")
@@ -473,6 +505,7 @@ func (s *Server) clientKeepalive(ctx context.Context, conn *websocket.Conn, toke
 			return
 		}
 		ok, err := s.store.ValidateClientSession(token)
+		s.clientRechecks.Add(1)
 		if err != nil {
 			s.log.Printf("复核网页连接的登录会话: %v", err)
 			conn.Close(websocket.StatusInternalError, "hub 内部错误")

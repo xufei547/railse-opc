@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -886,7 +890,7 @@ func TestClientWS(t *testing.T) {
 	}
 }
 
-// /ws/client 定时 ping 并复核登录会话：ping 照常时连接保持；换密码（会话全部作废）后断开。
+// /ws/client 定时复核登录会话并 ping：会话有效时复核多轮、照常收帧；换密码（会话全部作废）后断开。
 func TestClientWSRechecksSession(t *testing.T) {
 	h := newTestHubWith(t, func(c *Config) { c.PingInterval = 20 * time.Millisecond }, nil)
 	ck := loggedIn(t, h)
@@ -897,23 +901,361 @@ func TestClientWSRechecksSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.CloseNow()
-	// 隔一段发一帧，读的这段时间里有多轮 ping 与会话复核，会话有效时连接应一直在
-	go func() {
-		for range 5 {
-			time.Sleep(30 * time.Millisecond)
-			h.srv.clients.broadcast("status", map[string]bool{"paused": false})
+	frames, closed := readFrames(conn)
+	base := h.srv.clientRechecks.Load()
+	waitFor(t, "复核至少 3 轮", func() bool { return h.srv.clientRechecks.Load() >= base+3 })
+	h.srv.clients.broadcast("status", map[string]bool{"paused": false})
+	select {
+	case b := <-frames:
+		if !strings.Contains(string(b), `"type":"status"`) {
+			t.Fatalf("帧: %s", b)
 		}
-	}()
-	for i := range 5 {
-		if _, b, err := conn.Read(ctx); err != nil || !strings.Contains(string(b), `"type":"status"`) {
-			t.Fatalf("第 %d 帧：会话有效时应照常收到广播: %s %v", i, b, err)
-		}
+	case err := <-closed:
+		t.Fatalf("会话有效时连接不应断开: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("会话有效时应照常收到广播")
 	}
 	if err := h.srv.SetPassword("another22"); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = conn.Read(ctx)
-	if code := websocket.CloseStatus(err); code != websocket.StatusPolicyViolation {
-		t.Fatalf("会话作废后应以 PolicyViolation 断开: %v", err)
+	select {
+	case err := <-closed:
+		if code := websocket.CloseStatus(err); code != websocket.StatusPolicyViolation {
+			t.Fatalf("会话作废后应以 PolicyViolation 断开: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("会话作废后应断开")
+	}
+}
+
+// readFrames 在后台一直读 conn（顺带回 pong），数据帧送进 frames，读出错时把错误送进 closed 后退出。不调 t.Fatal。
+func readFrames(conn *websocket.Conn) (<-chan []byte, <-chan error) {
+	frames, closed := make(chan []byte, 16), make(chan error, 1)
+	go func() {
+		for {
+			_, b, err := conn.Read(context.Background())
+			if err != nil {
+				closed <- err
+				return
+			}
+			frames <- b
+		}
+	}()
+	return frames, closed
+}
+
+// 带同源 Origin 头的 /ws/client 握手照常建立并收到广播。
+func TestClientWSSameOrigin(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	hdr := http.Header{"Cookie": {ck.Name + "=" + ck.Value}, "Origin": {h.http.URL}}
+	conn, _, err := websocket.Dial(ctx, clientWSURL(h), &websocket.DialOptions{HTTPHeader: hdr})
+	if err != nil {
+		t.Fatalf("同源握手应成功: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	h.srv.clients.broadcast("request_new", map[string]string{"id": "x"})
+	if _, b, err := conn.Read(ctx); err != nil || !strings.Contains(string(b), `"type":"request_new"`) {
+		t.Fatalf("应收到广播: %s %v", b, err)
+	}
+}
+
+// 需要登录的路由（读与写）未登录或 cookie 无效时一律 401，且不生效。
+func TestAPIRoutesRequireLogin(t *testing.T) {
+	h := newTestHub(t)
+	m, err := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertReq(t, h.st, store.Request{ID: "r1", MachineID: m.ID, State: "pending"})
+	routes := []struct{ method, path, ct, body string }{
+		{"GET", "/api/status", "", ""},
+		{"POST", "/api/pause", "", ""},
+		{"POST", "/api/resume", "", ""},
+		{"GET", "/api/inbox", "", ""},
+		{"GET", "/api/requests", "", ""},
+		{"GET", "/api/requests/r1", "", ""},
+		{"POST", "/api/requests/r1/decide", "application/json", `{"action":"deny"}`},
+		{"GET", "/api/rules", "", ""},
+		{"PATCH", "/api/rules/builtin-readonly", "application/json", `{"enabled":false}`},
+		{"DELETE", "/api/rules/builtin-readonly", "", ""},
+		{"POST", "/api/rules/import", "application/yaml", "version: 1\nrules: []\n"},
+		{"GET", "/api/rules/export", "", ""},
+		{"GET", "/api/machines", "", ""},
+		{"DELETE", "/api/machines/" + m.ID, "", ""},
+		{"GET", "/ws/client", "", ""},
+	}
+	bogus := &http.Cookie{Name: cookieName, Value: "not-a-session"}
+	for _, rt := range routes {
+		for _, ck := range []*http.Cookie{nil, bogus} {
+			if resp := doReq(t, rt.method, h.http.URL+rt.path, []byte(rt.body), rt.ct, ck); resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("%s %s（cookie %v）应 401, 得到 %d", rt.method, rt.path, ck != nil, resp.StatusCode)
+			}
+		}
+	}
+	if r := getReq(t, h.st, "r1"); r.State != "pending" {
+		t.Fatalf("未登录的决定不应生效: %+v", r)
+	}
+	if mm, _ := h.st.GetMachine(m.ID); mm.Revoked {
+		t.Fatal("未登录不应吊销机器")
+	}
+	if rows, _ := ruleRows(t, h.st); len(rows) != 2 || !rows[0].Enabled {
+		t.Fatalf("未登录不应改规则: %+v", rows)
+	}
+	if v, ok, _ := h.st.GetSetting("paused"); ok && v != "0" {
+		t.Fatalf("未登录不应暂停: %q", v)
+	}
+}
+
+// “记住”的锚点（命令、路径、MCP 服务与工具、主机名）超过 4 KiB 时回 422：不入库、不下发、请求保持 pending。
+// 约 600 KB 的 heredoc 命令若学成规则，规则快照与 welcome 都会超过单帧上限，所有守护进程会连不上。
+func TestRememberTooLong(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	m, err := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newFakeConn(m.ID, 16)
+	h.srv.agents.register(c)
+	long := strings.Repeat("x", 4097)
+	payloads := []policy.Payload{
+		{Type: policy.PayloadShell, Command: "cat <<'EOF' > notes.txt\n" + strings.Repeat("x", 600<<10) + "\nEOF", Cwd: "/p"},
+		{Type: policy.PayloadShell, Command: "echo " + long, Cwd: "/p"},
+		{Type: policy.PayloadFileWrite, Path: "/p/" + long},
+		{Type: policy.PayloadMCP, Server: long, Tool: "t"},
+		{Type: policy.PayloadMCP, Server: "s", Tool: long},
+		{Type: policy.PayloadNetwork, URL: "https://" + strings.Repeat("a.", 2100) + "example.com/"},
+	}
+	version, _ := h.st.RulesVersion()
+	for i, p := range payloads {
+		for _, action := range []string{"deny", "allow"} {
+			id := fmt.Sprintf("big%d%s", i, action)
+			insertReq(t, h.st, store.Request{ID: id, MachineID: m.ID, State: "pending", Payload: p, ProjectRoot: "/p"})
+			resp := doReq(t, "POST", h.http.URL+"/api/requests/"+id+"/decide", decideBody(t, action, true, ""), "application/json", ck)
+			var body map[string]string
+			decodeBody(t, resp, &body)
+			if resp.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(body["error"], "太长") {
+				t.Fatalf("%d %s: 应 422 太长, 得到 %d %+v", i, action, resp.StatusCode, body)
+			}
+			if r := getReq(t, h.st, id); r.State != "pending" {
+				t.Fatalf("%d %s: 应保持 pending: %+v", i, action, r)
+			}
+		}
+	}
+	if v, _ := h.st.RulesVersion(); v != version {
+		t.Fatalf("不应入库: 版本 %d → %d", version, v)
+	}
+	if len(c.out) != 0 {
+		t.Fatalf("不应下发任何帧: %d", len(c.out))
+	}
+}
+
+// 规则集逼近单帧上限时，再记住一条（锚点虽不到 4 KiB）放不下也回 422，不入库：批准与拒绝都查。
+func TestRememberRefusedNearFrameLimit(t *testing.T) {
+	h := newTestHub(t)
+	m, err := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler := func(n int) policy.RuleSet {
+		rs := policy.RuleSet{Version: policy.RuleSetVersion}
+		for i := range n {
+			rs.Rules = append(rs.Rules, policy.Rule{ID: fmt.Sprintf("f%d", i), Source: policy.SourceUser, Action: policy.ActionDeny,
+				Match: policy.Match{CommandRegex: strings.Repeat(`\\`, 500)}})
+		}
+		return rs
+	}
+	// 二分出放得下的最多条数：再加一条填充规则（约 2 KB）就放不下，剩余空间小于下面约 4 KB 的新规则
+	lo, hi := 0, 2000
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if rulesFitFrame(filler(mid)) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if lo == 0 || lo == 2000 {
+		t.Fatalf("填充条数异常: %d", lo)
+	}
+	if _, err := h.st.ReplaceRules(filler(lo)); err != nil {
+		t.Fatal(err)
+	}
+	version, _ := h.st.RulesVersion()
+	for _, tc := range []struct{ id, cmd, action string }{
+		{"n1", "echo " + strings.Repeat("a", 4000), "deny"},
+		{"n2", "ls " + strings.Repeat("a", 4000), "allow"},
+	} {
+		p := policy.Payload{Type: policy.PayloadShell, Command: tc.cmd, Cwd: "/p"}
+		insertReq(t, h.st, store.Request{ID: tc.id, MachineID: m.ID, State: "pending", Payload: p, ProjectRoot: "/p"})
+		if _, err := h.srv.Decide(DecideInput{RequestID: tc.id, Action: tc.action, Remember: true}); !errors.Is(err, errLearn) {
+			t.Fatalf("%s: 放不下应 errLearn, 得到 %v", tc.action, err)
+		}
+		if r := getReq(t, h.st, tc.id); r.State != "pending" {
+			t.Fatalf("%s: 应保持 pending: %+v", tc.action, r)
+		}
+	}
+	if v, _ := h.st.RulesVersion(); v != version {
+		t.Fatalf("不应入库: 版本 %d → %d", version, v)
+	}
+}
+
+// 撤销刚学的规则时它已经不在（期间被别处删掉）：当作已删除，审计如实标出，不记“删除失败”的日志。
+func TestRememberRollbackRuleAlreadyGone(t *testing.T) {
+	var logs syncBuf
+	h := newTestHubWith(t, nil, func(s *Server) {
+		s.log = log.New(&logs, "", 0)
+		s.beforeSettle = func(r store.Request) {
+			rows, _ := s.store.ListRules()
+			if _, err := s.store.DeleteRule(rows[len(rows)-1].ID); err != nil {
+				t.Errorf("删规则: %v", err)
+			}
+			if err := s.store.SetRequestState(r.ID, "cancelled", "terminal", "", ""); err != nil {
+				t.Errorf("取消请求: %v", err)
+			}
+		}
+	})
+	m, err := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := policy.Payload{Type: policy.PayloadShell, Command: "npm run build", Cwd: "/p"}
+	insertReq(t, h.st, store.Request{ID: "r1", MachineID: m.ID, State: "pending", Payload: p, ProjectRoot: "/p"})
+	if _, err := h.srv.Decide(DecideInput{RequestID: "r1", Action: "allow", Remember: true}); !errors.Is(err, store.ErrNotPending) {
+		t.Fatalf("应 ErrNotPending: %v", err)
+	}
+	events, _ := h.st.ListAudit(0, "r1")
+	var detail map[string]any
+	for _, e := range events {
+		if e.Action == "rule_learn_rolled_back" {
+			json.Unmarshal([]byte(e.Detail), &detail)
+		}
+	}
+	if detail["deleted"] != true || detail["already_gone"] != true {
+		t.Fatalf("审计应如实标出规则已不在: %+v", detail)
+	}
+	if strings.Contains(logs.String(), "失败") {
+		t.Fatalf("不应记删除失败: %q", logs.String())
+	}
+}
+
+// 吊销机器时，它仍 pending 的请求改为 cancelled、decided_by machine_revoked，审计并广播；别的状态、别的机器的不动。
+func TestRevokeCancelsPending(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	other, _ := h.st.CreateMachine("o", store.RandomToken(), "/home/u")
+	insertReq(t, h.st, store.Request{ID: "p1", MachineID: m.ID, State: "pending"})
+	insertReq(t, h.st, store.Request{ID: "p2", MachineID: m.ID, State: "pending"})
+	insertReq(t, h.st, store.Request{ID: "a1", MachineID: m.ID, State: "approved", DecidedBy: "user"})
+	insertReq(t, h.st, store.Request{ID: "o1", MachineID: other.ID, State: "pending"})
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	if resp := doReq(t, "DELETE", h.http.URL+"/api/machines/"+m.ID, nil, "", ck); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke = %d", resp.StatusCode)
+	}
+	for _, id := range []string{"p1", "p2"} {
+		if r := getReq(t, h.st, id); r.State != "cancelled" || r.DecidedBy != "machine_revoked" || r.DecidedAt == nil {
+			t.Fatalf("%s 应被取消: %+v", id, r)
+		}
+		if acts := auditActions(t, h.st, id); countOf(acts, "cancelled") != 1 {
+			t.Fatalf("%s 应审计: %v", id, acts)
+		}
+	}
+	waitBroadcast(t, sub, "request_updated", "p1", nil)
+	waitBroadcast(t, sub, "request_updated", "p2", nil)
+	if r := getReq(t, h.st, "a1"); r.State != "approved" {
+		t.Fatalf("已决定的不应改: %+v", r)
+	}
+	if r := getReq(t, h.st, "o1"); r.State != "pending" {
+		t.Fatalf("别的机器的不应改: %+v", r)
+	}
+}
+
+// Run 关停时等 /ws/client 与 /ws/agent 的 handler 都退出后才返回（handler 退出前的钩子故意慢一些）。
+func TestRunWaitsForWebSocketHandlers(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := DefaultConfig(dir)
+	cfg.Listen = "127.0.0.1:0"
+	var logs syncBuf
+	srv, err := New(cfg, st, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exited atomic.Int32
+	srv.beforeWSExit = func() {
+		time.Sleep(200 * time.Millisecond)
+		exited.Add(1)
+	}
+	if err := srv.SetPassword("hunter22"); err != nil {
+		t.Fatal(err)
+	}
+	secret := store.RandomToken()
+	m, err := st.CreateMachine("m", secret, "/h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	const prefix = "hub 监听 "
+	waitFor(t, "Run 开始监听", func() bool { return strings.Contains(logs.String(), prefix) })
+	line := logs.String()
+	addr := strings.TrimSpace(strings.SplitN(line[strings.Index(line, prefix)+len(prefix):], "\n", 2)[0])
+	resp := postJSON(t, "http://"+addr+"/api/login", map[string]string{"password": "hunter22"}, nil)
+	var ck *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == cookieName {
+			ck = c
+		}
+	}
+	if ck == nil {
+		t.Fatalf("login = %d", resp.StatusCode)
+	}
+	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dcancel()
+	client, _, err := websocket.Dial(dctx, "ws://"+addr+"/ws/client", &websocket.DialOptions{HTTPHeader: http.Header{"Cookie": {ck.Name + "=" + ck.Value}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseNow()
+	readFrames(client)
+	agentConn, _, err := websocket.Dial(dctx, "ws://"+addr+"/ws/agent", &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + secret}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agentConn.CloseNow()
+	agentConn.SetReadLimit(wire.MaxFrame)
+	ac := &agentClient{conn: agentConn, t: t}
+	ac.send(wire.Hello{T: wire.THello, Proto: wire.Proto, MachineID: m.ID})
+	if kind, _ := ac.recv(5 * time.Second); kind != wire.TWelcome {
+		t.Fatalf("应先收到 welcome, 得到 %s", kind)
+	}
+	readFrames(agentConn) // 关停时要读到关闭帧并回应，关闭握手才能完成
+	waitFor(t, "两个 handler 在跑", func() bool { return srv.ws.count() == 2 })
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run 返回 %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("取消后 Run 未返回")
+	}
+	if n, live := exited.Load(), srv.ws.count(); n != 2 || live != 0 {
+		t.Fatalf("Run 返回时 handler 应都已退出: 已退出 %d, 仍在跑 %d", n, live)
 	}
 }

@@ -272,6 +272,10 @@ func (h *agentHub) shouldAuditProto(machineID string, agentProto int) bool {
 // handleAgentWS 是守护进程的入口：Bearer 机器密钥认证 → 升级 → 读 hello 并校验 → 刷新机器 → 登记 →
 // 发 welcome → onAgentHello → 读循环分发；写 goroutine 负责发帧、ping 与 pong 超时。
 func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
+	if !s.trackWS(w) {
+		return
+	}
+	defer s.untrackWS()
 	machine, err := s.authMachine(r)
 	if err != nil {
 		// 守护进程把 401 当作密钥永久失效，存储出错只能回 500

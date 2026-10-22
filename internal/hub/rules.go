@@ -25,6 +25,13 @@ var errLearn = errors.New("不能记住")
 // redactedMark 是 redact 包写进载荷的脱敏占位符。
 const redactedMark = "<redacted>"
 
+const (
+	// maxLearnAnchor 是“记住”时命令、路径、MCP 服务名与工具名、主机名的字节上限：规则要随快照整套下发，单帧至多 1 MiB。
+	maxLearnAnchor = 4 << 10
+	// frameHeadroom 是规则快照编成帧后距单帧上限至少留的余量（入库时 id 冲突会追加 -2 之类的后缀）。
+	frameHeadroom = 1 << 10
+)
+
 // pushRules 把当前规则快照发给所有守护进程并通知网页。快照在任何事务之外读（RuleSet 自开事务）。
 // 编不成帧（超过单帧上限）时记日志、不发给守护进程；网页照常收到 rules_updated。
 // 并发的两次下发可能乱序到达，守护进程忽略版本号不大于当前的快照，hub 不另加序。
@@ -52,8 +59,14 @@ func (s *Server) pushRules() {
 //   - 拒绝：denyRule 直接构造 user 来源的 deny，压过一切放行（见 policy.betterRule）。
 //
 // 载荷含脱敏占位符时不学：学出来的规则匹配的是占位符，不是原命令，用户却以为记住了。
-// 学不了的错误包 errLearn；读机器、存规则的错误不包（其中的 store.ErrNotFound 也不外露，免得被当成“没有这条请求”）。
+// 锚点超过 maxLearnAnchor，或现有规则加上这条编成快照会超过单帧上限（减去余量）时不学：否则快照与 welcome 都发不出去，
+// 所有守护进程会连不上。“读现有规则 → 试编 → 入库”在 rulesMu 下进行，与导入、启停串行。
+// 学不了的错误包 errLearn；读机器、读存规则的错误不包（其中的 store.ErrNotFound 也不外露，免得被当成“没有这条请求”）。
 func (s *Server) learnRule(r store.Request, action string) (string, error) {
+	// 先查长度（便宜），超长的大载荷不必再跑脱敏正则
+	if what, long := anchorTooLong(r.Payload); long {
+		return "", fmt.Errorf("%w：%s太长不能记住（超过 4 KiB）", errLearn, what)
+	}
 	if hasRedacted(r.Payload) {
 		return "", fmt.Errorf("%w：含凭据的命令不能记住", errLearn)
 	}
@@ -71,6 +84,16 @@ func (s *Server) learnRule(r store.Request, action string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w：%w", errLearn, err)
 	}
+	s.rulesMu.Lock()
+	defer s.rulesMu.Unlock()
+	rs, _, err := s.store.RuleSet()
+	if err != nil {
+		return "", fmt.Errorf("读规则: %v", err)
+	}
+	rs.Rules = append(rs.Rules, rule)
+	if !rulesFitFrame(rs) {
+		return "", fmt.Errorf("%w：规则集已接近下发上限，放不下这条规则，请先清理不用的规则", errLearn)
+	}
 	id, _, err := s.store.InsertRule(rule)
 	if err != nil {
 		return "", fmt.Errorf("存规则: %v", err)
@@ -78,14 +101,32 @@ func (s *Server) learnRule(r store.Request, action string) (string, error) {
 	return id, nil
 }
 
+// anchorTooLong 报告载荷里会成为规则锚点的部分是否超过 maxLearnAnchor，并说明是哪一部分。
+func anchorTooLong(p policy.Payload) (string, bool) {
+	switch p.Type {
+	case policy.PayloadShell:
+		return "命令", len(strings.TrimSpace(p.Command)) > maxLearnAnchor
+	case policy.PayloadFileWrite:
+		return "路径", len(p.Path) > maxLearnAnchor
+	case policy.PayloadMCP:
+		return "MCP 服务名或工具名", len(p.Server) > maxLearnAnchor || len(p.Tool) > maxLearnAnchor
+	case policy.PayloadNetwork:
+		u, err := url.Parse(p.URL)
+		return "主机名", err == nil && len(u.Hostname()) > maxLearnAnchor
+	}
+	return "", false
+}
+
 // rollbackLearned 撤销刚学的规则：请求在学规则之后、改状态之前已被别处结束（取消、过期、重发顶掉），规则不该留下。
-// 删掉后照样下发一次快照：期间别的改动若已把它带出去，守护进程随之收回。删除失败只能记日志，审计里标出来。
+// 删掉后照样下发一次快照：期间别的改动若已把它带出去，守护进程随之收回。规则已不在（期间被别处删掉）当作已删除，
+// 审计标 already_gone；删除失败只能记日志，审计里标 deleted false。
 func (s *Server) rollbackLearned(r store.Request, ruleID string) {
 	_, err := s.store.DeleteRule(ruleID)
-	if err != nil {
+	gone := errors.Is(err, store.ErrNotFound)
+	if err != nil && !gone {
 		s.log.Printf("撤销请求 %q 学到的规则 %s 失败，需在网页里手动删除: %v", r.ID, ruleID, err)
 	}
-	s.audit(r.MachineID, "user", r.ID, "rule_learn_rolled_back", map[string]any{"rule_id": ruleID, "deleted": err == nil})
+	s.audit(r.MachineID, "user", r.ID, "rule_learn_rolled_back", map[string]any{"rule_id": ruleID, "deleted": err == nil || gone, "already_gone": gone})
 	s.pushRules()
 }
 
@@ -211,8 +252,8 @@ func elevated(r policy.Rule) bool {
 	return r.Source == policy.SourceUser && r.Action == policy.ActionAllow && (r.Match.Risk == nil || *r.Match.Risk >= policy.RiskOutward)
 }
 
-// rulesFitFrame 报告整套规则入库后编成 welcome 帧是否不超过单帧上限。超过的规则集既下发不了，
-// welcome 也编不出来（守护进程会一直连不上），所以导入前先拒。
+// rulesFitFrame 报告整套规则入库后编成 welcome 帧是否不超过单帧上限减 frameHeadroom。超过的规则集既下发不了，
+// welcome 也编不出来（守护进程会一直连不上），所以导入与“记住”前先拒。
 func rulesFitFrame(rs policy.RuleSet) bool {
 	rules := make([]policy.Rule, len(rs.Rules))
 	for i, r := range rs.Rules {
@@ -224,8 +265,8 @@ func rulesFitFrame(rs policy.RuleSet) bool {
 	if err != nil {
 		return false
 	}
-	_, err = wire.Marshal(wire.Welcome{T: wire.TWelcome, RulesVersion: math.MaxInt, RulesYAML: string(y), Paused: true, ServerTime: time.Now().UTC()})
-	return err == nil
+	b, err := wire.Marshal(wire.Welcome{T: wire.TWelcome, RulesVersion: math.MaxInt, RulesYAML: string(y), Paused: true, ServerTime: time.Now().UTC()})
+	return err == nil && len(b) <= wire.MaxFrame-frameHeadroom
 }
 
 // setPaused 改全局总开关：写 settings 的 paused（"1"/"0"）、审计、向所有守护进程发 paused 帧、向网页广播 status。
