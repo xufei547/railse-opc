@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,12 +69,11 @@ func waitBroadcast(t *testing.T, sub chan []byte, kind, id string, skip func(cli
 	}
 }
 
-// quietHub 起一个日志写进缓冲的 hub，用于会记日志的用例（不往测试输出里打噪音，也能断言日志）。
+// quietHub 起一个 hub 并返回它的日志缓冲，用于要断言日志的用例。
 func quietHub(t *testing.T) (*testHub, *syncBuf) {
 	t.Helper()
-	logs := &syncBuf{}
-	h := newTestHubWith(t, nil, func(s *Server) { s.log = log.New(logs, "", 0) })
-	return h, logs
+	h := newTestHub(t)
+	return h, h.logs
 }
 
 // insertReq 直接往库里插一条请求。

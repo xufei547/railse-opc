@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
@@ -338,7 +339,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validName(body.Name) {
-		writeErr(w, http.StatusBadRequest, "name 必须是合法 UTF-8，且不能含控制字符")
+		writeErr(w, http.StatusBadRequest, "name 必须是合法 UTF-8，且不能含控制字符、bidi 控制字符或零宽字符")
 		return
 	}
 	secret := store.RandomToken()
@@ -358,13 +359,20 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"machine_id": m.ID, "secret": secret})
 }
 
-// validName 报告名字（机器名、webhook 标题）是否是合法 UTF-8 且不含 C0 控制字符与 DEL。
+// validName 报告名字（机器名、webhook 标题）能否安全显示：合法 UTF-8，不含控制字符（C0、DEL、C1），
+// 不含 bidi 覆盖与隔离字符（U+202A–U+202E、U+2066–U+2069）和零宽字符（U+200B–U+200F、U+FEFF）——
+// 它们能让名字在网页、终端里显示成另一个样子。
 func validName(s string) bool {
 	if !utf8.ValidString(s) {
 		return false
 	}
 	for _, c := range s {
-		if c < 0x20 || c == 0x7f {
+		switch {
+		case unicode.IsControl(c),
+			c >= 0x202a && c <= 0x202e,
+			c >= 0x2066 && c <= 0x2069,
+			c >= 0x200b && c <= 0x200f,
+			c == 0xfeff:
 			return false
 		}
 	}

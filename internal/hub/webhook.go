@@ -38,7 +38,7 @@ const (
 )
 
 // webhookCallback 是 requests.callback 里存的 JSON。Token 是出站回调令牌，hub 唯一明文存的凭据（用户决定 D）：
-// 回调成功或重试用尽后由 store.ClearCallbackToken 删掉 token 键，URL 留着。
+// 回调一结束（成功、重试用尽、因关停中止或没能发出）就由 store.ClearCallbackToken 删掉 token 键，URL 留着。
 type webhookCallback struct {
 	URL   string `json:"url"`
 	Token string `json:"token"`
@@ -86,7 +86,7 @@ func (b webhookBody) validate() string {
 	case utf8.RuneCountInString(b.Title) > maxWebhookTitle:
 		return fmt.Sprintf("title 至多 %d 个字符", maxWebhookTitle)
 	case !validName(b.Title):
-		return "title 不能含控制字符"
+		return "title 不能含控制字符、bidi 控制字符或零宽字符"
 	case utf8.RuneCountInString(b.Description) > maxWebhookDesc:
 		return fmt.Sprintf("description 至多 %d 个字符", maxWebhookDesc)
 	case len(b.CallbackURL) > maxCallbackURL:
@@ -167,11 +167,12 @@ func (s *Server) handleWebhookIngest(w http.ResponseWriter, r *http.Request) {
 
 // callbackWebhook 在后台把 webhook 请求 r 的结果回传给来源：POST callback_url，带 Authorization: Bearer <callback_token>（有令牌时），
 // body {"id","decision":"allow|deny","note"}；hub 判定过期时 decision 为 deny、note 为 expired。回调由 runCallback 执行。
-// hub 正在关停时不再发起，只记日志（hub 重启后不恢复未完成的回调）。
+// 回调已停止（hub 正在关停）时不再发起，按中止处理：记日志与审计、清掉令牌（hub 重启后不恢复未完成的回调，需来源重新提交）。
 func (s *Server) callbackWebhook(r store.Request) {
 	var cb webhookCallback
 	if err := json.Unmarshal([]byte(r.Callback), &cb); err != nil || cb.URL == "" {
 		s.log.Printf("webhook 请求 %s 没有可用的回调地址，不回调", r.ID)
+		s.clearCallbackToken(r.ID)
 		return
 	}
 	decision, note := "deny", r.DecisionNote
@@ -183,21 +184,25 @@ func (s *Server) callbackWebhook(r store.Request) {
 	}
 	body, _ := json.Marshal(map[string]string{"id": r.ID, "decision": decision, "note": note}) // 只有字符串，编码不会失败
 	if !s.callbacks.enter() {
-		s.log.Printf("hub 正在关停，webhook 请求 %s 的回调（%s）未发出；hub 重启后不会补发", r.ID, callbackTarget(cb.URL))
+		s.callbackAborted(r.ID, callbackTarget(cb.URL), 0)
 		return
 	}
+	// 送达时间只记用户的决定（store.MarkDelivered 只认 approved、denied）；过期请求的回调是否送到以审计 webhook_callback 为准
+	deliver := r.State == "approved" || r.State == "denied"
 	go func() {
 		defer s.callbacks.leave()
-		s.runCallback(r.ID, cb, body)
+		s.runCallback(r.ID, cb, body, deliver)
 	}()
 }
 
-// runCallback 最多试 callbackAttempts 次，失败后等 callbackRetryWait 再试；只有 2xx 算成功。
-// 成功：清掉库里的回调令牌、记送达时间，审计 webhook_callback ok:true。重试用尽：记日志、清令牌，审计 ok:false。
-// 审计在最后写，看到审计时库里的改动已经做完。
-// cbCtx 取消（hub 关停）时立即中止：之后只记日志与审计（ok:false、aborted:true），令牌留在库里（hub 重启后不恢复未完成的回调）。
-// 日志与审计只记回调地址的 scheme://host，不记令牌。
-func (s *Server) runCallback(id string, cb webhookCallback, body []byte) {
+// runCallback 最多试 callbackAttempts 次，失败后等 callbackRetryWait 再试；只有 2xx 算成功。每条路径都清掉库里的回调令牌：
+//   - 成功：清令牌，deliver 时记送达时间，审计 webhook_callback ok:true。已拿到 2xx 就照常收尾，不管 hub 是否正在关停
+//     （Run 等回调退出后才返回，库还开着）；
+//   - 重试用尽：记日志、清令牌，审计 ok:false；
+//   - cbCtx 取消（hub 关停）：立即中止，见 callbackAborted。
+//
+// 审计在最后写，看到审计时库里的改动已经做完。日志与审计只记回调地址的 scheme://host，不记令牌。审计的尝试次数一律记在 attempts。
+func (s *Server) runCallback(id string, cb webhookCallback, body []byte, deliver bool) {
 	ctx := s.cbCtx
 	target := callbackTarget(cb.URL)
 	var lastErr string
@@ -213,14 +218,17 @@ func (s *Server) runCallback(id string, cb webhookCallback, body []byte) {
 			return
 		}
 		err := s.postCallback(ctx, cb, body)
+		if s.afterCallbackPost != nil {
+			s.afterCallbackPost()
+		}
 		if err == nil {
-			if ctx.Err() == nil {
-				s.clearCallbackToken(id)
+			s.clearCallbackToken(id)
+			if deliver {
 				if err := s.store.MarkDelivered(webhookMachineID, id); err != nil {
 					s.log.Printf("标记 webhook 请求 %s 已回调: %v", id, err)
 				}
 			}
-			s.audit(webhookMachineID, "system", id, "webhook_callback", map[string]any{"ok": true, "attempt": attempt, "target": target})
+			s.audit(webhookMachineID, "system", id, "webhook_callback", map[string]any{"ok": true, "attempts": attempt, "target": target})
 			return
 		}
 		if ctx.Err() != nil {
@@ -234,9 +242,11 @@ func (s *Server) runCallback(id string, cb webhookCallback, body []byte) {
 	s.audit(webhookMachineID, "system", id, "webhook_callback", map[string]any{"ok": false, "attempts": callbackAttempts, "error": lastErr, "target": target})
 }
 
-// callbackAborted 记下因 hub 关停而中止的回调（已试 attempts 次）。只写日志与审计。
+// callbackAborted 处理因 hub 关停而中止（或没能发出，attempts 为 0）的回调：记日志、清令牌，审计 ok:false、aborted:true。
+// hub 重启后不恢复未完成的回调，令牌留着没有用处（用户决定 D），来源需重新提交。
 func (s *Server) callbackAborted(id, target string, attempts int) {
-	s.log.Printf("hub 关停，webhook 请求 %s 回调 %s 中止（已试 %d 次）；hub 重启后不会补发", id, target, attempts)
+	s.log.Printf("hub 关停，webhook 请求 %s 回调 %s 中止（已试 %d 次）；hub 重启后不会补发，令牌已清空，需来源重新提交", id, target, attempts)
+	s.clearCallbackToken(id)
 	s.audit(webhookMachineID, "system", id, "webhook_callback", map[string]any{"ok": false, "aborted": true, "attempts": attempts, "target": target})
 }
 
@@ -273,16 +283,14 @@ func (s *Server) postCallback(ctx context.Context, cb webhookCallback, body []by
 	return nil
 }
 
-// stopCallbacks 不再接纳新的回调，取消在跑的（重试等待与在途请求立即结束），至多等 shutdownTimeout 让它们退出。
-// Run 返回前调用；重复调用无害。
-func (s *Server) stopCallbacks() {
+// stopCallbacks 不再接纳新的回调，取消在跑的（重试等待与在途请求立即结束），等它们退出，至多等到 ctx 结束
+// （Run 传入关停截止时间，与 HTTP、WebSocket 的等待共用）。重复调用无害。
+func (s *Server) stopCallbacks(ctx context.Context) {
 	idle := s.callbacks.shutdown()
 	s.cbCancel()
-	timer := time.NewTimer(shutdownTimeout)
-	defer timer.Stop()
 	select {
 	case <-idle:
-	case <-timer.C:
+	case <-ctx.Done():
 		s.log.Printf("hub 关停超时，仍有 %d 个 webhook 回调未退出", s.callbacks.count())
 	}
 }

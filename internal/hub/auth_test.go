@@ -27,11 +27,13 @@ type testHub struct {
 	st   *store.Store
 	http *httptest.Server
 	dir  string
+	logs *syncBuf // hub 的日志（含 agents 的），测试失败时才打印出来
 }
 
 func newTestHub(t *testing.T) *testHub { return newTestHubWith(t, nil, nil) }
 
 // newTestHubWith 用默认配置起一个 hub：mod 非空时先改配置，srvMod 非空时在开始服务前改 Server（测试钩子）。
+// hub 的日志写进按测试分配的缓冲（h.logs），只在测试失败时 t.Log 出来，测试输出里没有游离的日志行。
 func newTestHubWith(t *testing.T, mod func(*Config), srvMod func(*Server)) *testHub {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "rs")
@@ -47,7 +49,8 @@ func newTestHubWith(t *testing.T, mod func(*Config), srvMod func(*Server)) *test
 	if mod != nil {
 		mod(&cfg)
 	}
-	srv, err := New(cfg, st, log.New(os.Stderr, "hub ", 0))
+	logs := &syncBuf{}
+	srv, err := New(cfg, st, log.New(logs, "hub ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,9 +58,18 @@ func newTestHubWith(t *testing.T, mod func(*Config), srvMod func(*Server)) *test
 		srvMod(srv)
 	}
 	hs := httptest.NewServer(srv.Handler())
-	// 先停回调（取消并等后台回调退出），再关库：回调不会在测试结束后还碰存储
-	t.Cleanup(func() { hs.Close(); srv.stopCallbacks(); st.Close() })
-	return &testHub{srv: srv, st: st, http: hs, dir: dir}
+	t.Cleanup(func() {
+		hs.Close()
+		// 先停回调（取消并等后台回调退出），再关库：回调不会在测试结束后还碰存储
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		srv.stopCallbacks(ctx)
+		cancel()
+		st.Close()
+		if t.Failed() {
+			t.Logf("hub 日志:\n%s", logs.String())
+		}
+	})
+	return &testHub{srv: srv, st: st, http: hs, dir: dir, logs: logs}
 }
 
 // postJSON 发 JSON 请求；响应体读进内存后关掉原连接，调用方可再读 resp.Body。
@@ -697,7 +709,8 @@ func TestLoginRateLimitBehindProxy(t *testing.T) {
 	}
 }
 
-// 不合法的机器名（非法 UTF-8、C0 控制字符、DEL）回 400，不消费接入码。
+// 不合法的机器名（非法 UTF-8、C0 控制字符、DEL）回 400，不消费接入码。其余被拒的字符见 TestValidName
+// （接入接口每来源每分钟限 5 次，这里只发 5 个请求）。
 func TestEnrollRejectsBadName(t *testing.T) {
 	h := newTestHub(t)
 	tok, err := h.st.CreateEnrollToken(10 * time.Minute)
@@ -717,6 +730,27 @@ func TestEnrollRejectsBadName(t *testing.T) {
 	}
 	if resp := postJSON(t, h.http.URL+"/api/enroll", map[string]string{"token": tok, "name": "工作站 mac"}, nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("合法名字应接入成功且接入码未被消费, 得到 %d", resp.StatusCode)
+	}
+}
+
+// validName（机器名与 webhook 标题共用）拒绝非法 UTF-8、C0、DEL、C1 控制字符、bidi 覆盖与隔离字符、零宽字符，
+// 其余可显示的字符（含中文、emoji、普通空格）照常接受。
+func TestValidName(t *testing.T) {
+	bad := map[string]string{
+		"C0": "mac\x01", "制表符": "mac\tpro", "换行": "a\nb", "DEL": "mac\x7f", "C1 NEL": "a\u0085b", "C1 CSI": "mac\u009b31m",
+		"LRE": "a\u202ab", "RLO": "批准\u202egnp.exe", "PDF": "a\u202cb", "LRI": "a\u2066b", "PDI": "a\u2069b",
+		"零宽空格": "ma\u200bc", "ZWNJ": "a\u200cb", "ZWJ": "a\u200db", "LRM": "a\u200eb", "RLM": "a\u200fb", "BOM": "\ufeffmac",
+		"非法 UTF-8": "mac\xff",
+	}
+	for name, s := range bad {
+		if validName(s) {
+			t.Errorf("%s（%q）应拒绝", name, s)
+		}
+	}
+	for _, s := range []string{"工作站 mac", "MacBook-Pro.local", "发布周报 🚀", "a\u00a0b", "a\u200ab", "a\u2065b", "a\u206ab"} {
+		if !validName(s) {
+			t.Errorf("%q 应接受", s)
+		}
 	}
 }
 

@@ -25,19 +25,15 @@ import (
 
 const webhookPath = "/api/webhook/approvals"
 
-// webhookHub 起一个配好来源令牌的 hub：日志写进缓冲，回调重试间隔缩到 10 毫秒。返回来源令牌。
+// webhookHub 起一个配好来源令牌的 hub：回调重试间隔缩到 10 毫秒。返回 hub、它的日志缓冲与来源令牌。
 func webhookHub(t *testing.T) (*testHub, *syncBuf, string) {
 	t.Helper()
-	logs := &syncBuf{}
-	h := newTestHubWith(t, nil, func(s *Server) {
-		s.log = log.New(logs, "", 0)
-		s.callbackRetryWait = 10 * time.Millisecond
-	})
+	h := newTestHubWith(t, nil, func(s *Server) { s.callbackRetryWait = 10 * time.Millisecond })
 	tok := store.RandomToken()
 	if err := h.st.SetSetting("webhook_token_hash", store.HashToken(tok)); err != nil {
 		t.Fatal(err)
 	}
-	return h, logs, tok
+	return h, h.logs, tok
 }
 
 // ingestRaw 原样提交 body：auth 非空时作 Authorization 头；不设 Content-Type。
@@ -202,7 +198,7 @@ func TestWebhookIngestAndCallback(t *testing.T) {
 	if cb.Path != "/cb" || cb.Auth != "Bearer cbtok" || len(cb.Body) != 3 || cb.Body["id"] != id || cb.Body["decision"] != "allow" || cb.Body["note"] != "去吧" {
 		t.Fatalf("回调 = %+v", cb)
 	}
-	if d := callbackAudits(t, h.st, id)[0]; d["ok"] != true || d["attempt"] != float64(1) || d["target"] != target.URL {
+	if d := callbackAudits(t, h.st, id)[0]; d["ok"] != true || d["attempts"] != float64(1) || d["target"] != target.URL {
 		t.Fatalf("回调审计 = %+v", d)
 	}
 	r = getReq(t, h.st, id)
@@ -255,6 +251,12 @@ func TestWebhookRejectsBadBody(t *testing.T) {
 		ok(func(b map[string]any) { b["title"] = strings.Repeat("标", 201) }),
 		ok(func(b map[string]any) { b["title"] = "a\nb" }),
 		ok(func(b map[string]any) { b["title"] = "a\x1b[31m" }),
+		ok(func(b map[string]any) { b["title"] = "a\u0085b" }), // C1
+		ok(func(b map[string]any) { b["title"] = "批准\u202egnp.exe" }),
+		ok(func(b map[string]any) { b["title"] = "a\u2066b\u2069" }),
+		ok(func(b map[string]any) { b["title"] = "a\u200bb" }),
+		ok(func(b map[string]any) { b["title"] = "a\u200fb" }),
+		ok(func(b map[string]any) { b["title"] = "\ufeffab" }),
 		ok(func(b map[string]any) { b["description"] = strings.Repeat("述", 4097) }),
 		ok(func(b map[string]any) {
 			b["callback_url"] = "https://n8n.example/" + strings.Repeat("a", 2049-len("https://n8n.example/"))
@@ -350,7 +352,7 @@ func TestWebhookCallbackRetries(t *testing.T) {
 			t.Fatalf("回调（不应跟随重定向）: %+v", c)
 		}
 	}
-	if d := callbackAudits(t, h.st, id)[0]; d["ok"] != true || d["attempt"] != float64(3) {
+	if d := callbackAudits(t, h.st, id)[0]; d["ok"] != true || d["attempts"] != float64(3) {
 		t.Fatalf("回调审计 = %+v", d)
 	}
 	if r := getReq(t, h.st, id); strings.Contains(r.Callback, "cbtok1") || r.DeliveredAt == nil {
@@ -420,6 +422,9 @@ func TestWebhookExpiryCallsBack(t *testing.T) {
 	if calls := target.got(); len(calls) != 1 || !mapsEqual(calls[0].Body, want) || calls[0].Auth != "" {
 		t.Fatalf("过期回调 = %+v", calls)
 	}
+	if r := getReq(t, h.st, id); r.DeliveredAt != nil {
+		t.Fatalf("过期请求不记送达时间（以审计为准）: %+v", r)
+	}
 
 	id2 := ingest(t, h, tok, map[string]any{"title": "t2", "callback_url": target.URL + "/cb", "callback_token": "cbtok"})
 	execDB(t, h, fmt.Sprintf("UPDATE requests SET expires_at = '%s' WHERE id = '%s'", store.FormatTime(time.Now().Add(-time.Second)), id2))
@@ -432,8 +437,8 @@ func TestWebhookExpiryCallsBack(t *testing.T) {
 	if len(calls) != 2 || !mapsEqual(calls[1].Body, want) || calls[1].Auth != "Bearer cbtok" {
 		t.Fatalf("决定时过期的回调 = %+v", calls)
 	}
-	if r := getReq(t, h.st, id2); r.State != "expired" || strings.Contains(r.Callback, "cbtok") {
-		t.Fatalf("过期回调成功后应清令牌: %+v", r)
+	if r := getReq(t, h.st, id2); r.State != "expired" || strings.Contains(r.Callback, "cbtok") || r.DeliveredAt != nil {
+		t.Fatalf("过期回调成功后应清令牌、不记送达时间: %+v", r)
 	}
 }
 
@@ -449,8 +454,8 @@ func mapsEqual(a, b map[string]any) bool {
 	return true
 }
 
-// Run 关停时取消在跑的回调（重试等待立即结束）并等它退出：令牌留在库里、审计标 aborted、日志说明中止；
-// 关停后的决定不再发起回调。
+// Run 关停时取消在跑的回调（重试等待立即结束）并等它退出：清掉令牌、不记送达、审计标 aborted、日志说明中止；
+// 关停后才做出的决定不再发起回调，同样清令牌、审计 aborted（attempts 0）。
 func TestWebhookCallbackAbortedOnShutdown(t *testing.T) {
 	dir, err := os.MkdirTemp("", "rs")
 	if err != nil {
@@ -504,8 +509,8 @@ func TestWebhookCallbackAbortedOnShutdown(t *testing.T) {
 	if len(ds) != 1 || ds[0]["ok"] != false || ds[0]["aborted"] != true || ds[0]["attempts"] != float64(1) {
 		t.Fatalf("中止的回调审计 = %+v", ds)
 	}
-	if r := getReq(t, st, "w1"); !strings.Contains(r.Callback, "cbtok") || r.DeliveredAt != nil {
-		t.Fatalf("中止的回调不清令牌、不记送达: %+v", r)
+	if r := getReq(t, st, "w1"); strings.Contains(r.Callback, "cbtok") || !strings.Contains(r.Callback, target.URL) || r.DeliveredAt != nil {
+		t.Fatalf("中止的回调应清令牌、保留 URL、不记送达: %+v", r)
 	}
 	if !strings.Contains(logs.String(), "中止") {
 		t.Fatalf("应记中止日志: %q", logs.String())
@@ -516,8 +521,80 @@ func TestWebhookCallbackAbortedOnShutdown(t *testing.T) {
 	if n := len(target.got()); n != 1 || srv.callbacks.count() != 0 {
 		t.Fatalf("关停后不应再发起回调: %d 次", n)
 	}
-	if !strings.Contains(logs.String(), "未发出") {
+	ds = callbackAudits(t, st, "w2")
+	if len(ds) != 1 || ds[0]["ok"] != false || ds[0]["aborted"] != true || ds[0]["attempts"] != float64(0) {
+		t.Fatalf("关停后没发出的回调审计 = %+v", ds)
+	}
+	if r := getReq(t, st, "w2"); strings.Contains(r.Callback, "cbtok") || r.DeliveredAt != nil {
+		t.Fatalf("关停后没发出的回调也应清令牌: %+v", r)
+	}
+	if !strings.Contains(logs.String(), "已试 0 次") {
 		t.Fatalf("关停后的回调应记日志: %q", logs.String())
+	}
+}
+
+// 回调已拿到 2xx 时恰好开始关停（回调运行期已取消）：照常收尾，清令牌、记送达、审计 ok:true。
+func TestWebhookCallbackSuccessDuringShutdown(t *testing.T) {
+	h, _, tok := webhookHub(t)
+	target := newCBTarget(t, func(int) int { return http.StatusOK })
+	h.srv.afterCallbackPost = func() { h.srv.cbCancel() }
+	id := ingest(t, h, tok, map[string]any{"title": "t", "callback_url": target.URL + "/cb", "callback_token": "cbtok"})
+	if _, err := h.srv.Decide(DecideInput{RequestID: id, Action: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "回调审计", func() bool { return len(callbackAudits(t, h.st, id)) == 1 })
+	if d := callbackAudits(t, h.st, id)[0]; d["ok"] != true || d["attempts"] != float64(1) {
+		t.Fatalf("回调审计 = %+v", d)
+	}
+	if r := getReq(t, h.st, id); strings.Contains(r.Callback, "cbtok") || r.DeliveredAt == nil {
+		t.Fatalf("拿到 2xx 后应清令牌、记送达: %+v", r)
+	}
+}
+
+// 决定与过期竞争：只有先结束请求的一方回调，来源只收到一次。
+func TestWebhookDecideExpireOnlyOneCallback(t *testing.T) {
+	h, _, tok := webhookHub(t)
+	target := newCBTarget(t, func(int) int { return http.StatusOK })
+	callsFor := func(id string) []cbCall {
+		var out []cbCall
+		for _, c := range target.got() {
+			if c.Body["id"] == id {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	settle := func(what, id string) {
+		t.Helper()
+		waitFor(t, what, func() bool { return len(callbackAudits(t, h.st, id)) >= 1 && h.srv.callbacks.count() == 0 })
+	}
+	body := map[string]any{"title": "t", "callback_url": target.URL + "/cb"}
+
+	// 先过期再决定：决定回 ErrNotPending，不再回调
+	id1 := ingest(t, h, tok, body)
+	h.srv.expireDue(time.Now().Add(25 * time.Hour))
+	settle("过期回调", id1)
+	if _, err := h.srv.Decide(DecideInput{RequestID: id1, Action: "allow"}); !errors.Is(err, store.ErrNotPending) {
+		t.Fatalf("已过期的请求再决定应 ErrNotPending: %v", err)
+	}
+	settle("决定之后", id1)
+	if calls := callsFor(id1); len(calls) != 1 || calls[0].Body["note"] != "expired" || len(callbackAudits(t, h.st, id1)) != 1 {
+		t.Fatalf("先过期：来源应只收到一次过期回调: %+v", calls)
+	}
+
+	// 先决定再过期：扫描不再动它，不再回调
+	id2 := ingest(t, h, tok, body)
+	if _, err := h.srv.Decide(DecideInput{RequestID: id2, Action: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	settle("决定回调", id2)
+	h.srv.expireDue(time.Now().Add(25 * time.Hour))
+	settle("扫描之后", id2)
+	if calls := callsFor(id2); len(calls) != 1 || calls[0].Body["decision"] != "allow" || len(callbackAudits(t, h.st, id2)) != 1 {
+		t.Fatalf("先决定：来源应只收到一次决定回调: %+v", calls)
+	}
+	if r := getReq(t, h.st, id2); r.State != "approved" {
+		t.Fatalf("已决定的请求不应被判过期: %+v", r)
 	}
 }
 

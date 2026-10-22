@@ -174,6 +174,9 @@ func TestAgentWSAuthStoreErrorIs500(t *testing.T) {
 	if err == nil || resp == nil || resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("存储出错应 500: %v %v", err, resp)
 	}
+	if !strings.Contains(h.logs.String(), "认证机器") {
+		t.Fatalf("应记日志: %q", h.logs.String())
+	}
 }
 
 func TestAgentWSHelloWelcome(t *testing.T) {
@@ -274,6 +277,9 @@ func TestAgentWSPingPong(t *testing.T) {
 		_, b, err := c.conn.Read(ctx)
 		if err != nil {
 			waitFor(t, "断开后注销", func() bool { return !h.srv.agents.connected(id) })
+			if !strings.Contains(h.logs.String(), "没有 pong") {
+				t.Fatalf("应记日志: %q", h.logs.String())
+			}
 			return
 		}
 		if k, _ := wire.Kind(b); k != wire.TPing {

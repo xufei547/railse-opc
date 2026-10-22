@@ -105,12 +105,14 @@ type Server struct {
 	clientRechecks atomic.Int64
 	// cbCtx 是 webhook 回调的运行期：New 里建，stopCallbacks（Run 返回前）取消，重试等待与在途回调随之结束；
 	// callbacks 记在跑的回调 goroutine，Run 返回前等它们退出。callbackRetryWait 是回调失败后重试前的等待，测试可缩短；
-	// callbackClient 发回调（超时 10 秒、不跟随重定向）。
+	// callbackClient 发回调（超时 10 秒、不跟随重定向）。afterCallbackPost 非空时在每次回调请求返回之后调用
+	// （测试用它在拿到 2xx 之后取消回调运行期）。
 	cbCtx             context.Context
 	cbCancel          context.CancelFunc
 	callbacks         tracker
 	callbackRetryWait time.Duration
 	callbackClient    *http.Client
+	afterCallbackPost func()
 }
 
 // tracker 计在跑的后台工作（WebSocket handler、webhook 回调）。shutdown 之后不再接纳新的，并给出全部退出时关闭的通道。
@@ -209,9 +211,9 @@ func (s *Server) routes() {
 // Handler 返回根处理器。
 func (s *Server) Handler() http.Handler { return s.mux }
 
-// Run 监听直到 ctx 取消。请求的 context 派生自 ctx，取消时长连接与在途请求都能看到；
-// 关停先等在途请求至多 shutdownTimeout，超时就强制断开；同一时限内还等 WebSocket handler（/ws/agent、/ws/client）全部退出；
-// 最后停下过期扫描，再取消在跑的 webhook 回调并至多等 shutdownTimeout 让它们退出（见 stopCallbacks）。
+// Run 监听直到 ctx 取消。请求的 context 派生自 ctx，取消时长连接与在途请求都能看到。
+// 关停的各步共用一个截止时间（shutdownTimeout，总关停不超过它）：先等在途请求，超时就强制断开；再等 WebSocket handler
+// （/ws/agent、/ws/client）全部退出；然后停下过期扫描；最后取消在跑的 webhook 回调并等它们退出（见 stopCallbacks）。
 // 正常关停时 Run 返回后不再有 handler 或回调碰存储，调用方可以关库。
 func (s *Server) Run(ctx context.Context) error {
 	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
@@ -221,8 +223,6 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	s.log.Printf("hub 监听 %s", ln.Addr())
-	// 最后执行的 defer：过期扫描停下之后（它会给过期的 webhook 请求发起回调）再停回调
-	defer s.stopCallbacks()
 	// 过期扫描随 Run 结束：Run 返回前等它退出，调用方随后关库也不会撞上它
 	sweepCtx, stopSweep := context.WithCancel(ctx)
 	sweepDone := make(chan struct{})
@@ -230,34 +230,44 @@ func (s *Server) Run(ctx context.Context) error {
 		defer close(sweepDone)
 		s.expireLoop(sweepCtx)
 	}()
-	defer func() {
-		stopSweep()
-		<-sweepDone
-	}()
 	errCh := make(chan error, 1)
 	go func() { errCh <- hs.Serve(ln) }()
+	var runErr error
+	serveEnded := false
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		wsIdle := s.ws.shutdown() // 先停止接纳新的 WebSocket handler
-		s.agents.closeAll()
-		if err := hs.Shutdown(shutdownCtx); err != nil {
-			s.log.Printf("hub 关停超时，强制断开: %v", err)
-			hs.Close()
-		}
-		// Shutdown 不管已劫持的 WebSocket 连接：它们的 handler 经 BaseContext 看到取消后自行退出，这里等到它们都退出
-		select {
-		case <-wsIdle:
-		case <-shutdownCtx.Done():
-			s.log.Printf("hub 关停超时，仍有 %d 个 WebSocket 连接的处理未退出", s.ws.count())
-		}
-		return nil
 	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		serveEnded = true
+		if !errors.Is(err, http.ErrServerClosed) {
+			runErr = err
 		}
-		return err
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if !serveEnded {
+		s.shutdownHTTP(shutdownCtx, hs)
+	}
+	// 过期扫描先停（它会给过期的 webhook 请求发起回调），再停回调
+	stopSweep()
+	<-sweepDone
+	s.stopCallbacks(shutdownCtx)
+	return runErr
+}
+
+// shutdownHTTP 停止接纳新的 WebSocket handler、断开守护进程，等在途请求到 ctx 结束（超时就强制断开），
+// 再在同一截止前等 WebSocket handler 全部退出。
+func (s *Server) shutdownHTTP(ctx context.Context, hs *http.Server) {
+	wsIdle := s.ws.shutdown() // 先停止接纳新的 WebSocket handler
+	s.agents.closeAll()
+	if err := hs.Shutdown(ctx); err != nil {
+		s.log.Printf("hub 关停超时，强制断开: %v", err)
+		hs.Close()
+	}
+	// Shutdown 不管已劫持的 WebSocket 连接：它们的 handler 经 BaseContext 看到取消后自行退出，这里等到它们都退出
+	select {
+	case <-wsIdle:
+	case <-ctx.Done():
+		s.log.Printf("hub 关停超时，仍有 %d 个 WebSocket 连接的处理未退出", s.ws.count())
 	}
 }
 
