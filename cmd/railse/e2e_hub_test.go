@@ -374,3 +374,44 @@ func TestEndToEndHubUnreachable(t *testing.T) {
 	}
 	mustAudit(t, cfg.AuditPath, "记 expired/hub_unreachable", `"action":"passthrough"`, `"state":"expired"`, `"decided_by":"hub_unreachable"`)
 }
+
+// 终审 I2：项目路径经过符号链接（macOS 的 /var → /private/var 同理）时，守护进程上报的载荷 cwd 与项目根同一口径，
+// hub 的“批准并记住”对项目内的写操作能学成规则，不会误判成项目外（write_outside）而回 422。
+func TestEndToEndRememberThroughSymlink(t *testing.T) {
+	h := startTestHub(t)
+	ck := hubLogin(t, h)
+	dir := tempDir(t)
+	cfgDir := filepath.Join(dir, "h")
+	enrollTestMachine(t, h, cfgDir)
+	cfg := agent.ConfigIn(cfgDir)
+	cfg.HubGrace = 5 * time.Second
+	serveAgent(t, cfg)
+	waitUntil(t, func() bool { ms, _ := h.st.ListMachines(); return len(ms) == 1 && ms[0].LastSeen != nil })
+	// 停用内置的项目内可写放行，项目内写入才会进 hub 等决定
+	if _, err := h.st.SetRuleEnabled("builtin-write-in-project", false); err != nil {
+		t.Fatal(err)
+	}
+	h.srv.PushRulesForTest()
+	rulesFromHub(t, h, cfg, "builtin-write-in-project")
+	real := filepath.Join(dir, "real")
+	os.MkdirAll(filepath.Join(real, "proj", ".git"), 0o755)
+	if err := os.Symlink(real, filepath.Join(dir, "link")); err != nil {
+		t.Skipf("无法创建符号链接: %v", err)
+	}
+	realProj, err := filepath.EvalSymlinks(filepath.Join(real, "proj"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := runHookAsync(t, sampleWithCommand(t, "claude/2.1.280/PermissionRequest.json", filepath.Join(dir, "link", "proj"), "mkdir build"), "claude", "--socket", cfg.SocketPath)
+	p := onlyPending(t, h)
+	if p.ProjectRoot != realProj || p.Payload.Cwd != realProj || p.Risk != "write_in_project" {
+		t.Fatalf("hub 里的请求：项目根 %q、载荷 cwd %q 都应是 %q，风险 %q", p.ProjectRoot, p.Payload.Cwd, realProj, p.Risk)
+	}
+	r := hookAnswer(t, res, decideOnPhone(t, h, ck, p.ID, "allow", "", true)) // 记不住时 decide 回 422，这里失败
+	if r.code != 0 || !strings.Contains(r.out, `"behavior":"allow"`) {
+		t.Fatalf("钩子应得到 allow: %d %q", r.code, r.out)
+	}
+	if id := settledRequest(t, h, p.ID, "approved").RuleID; !strings.HasPrefix(id, "learned-") {
+		t.Fatalf("批准并记住应学到 learned 规则: %q", id)
+	}
+}

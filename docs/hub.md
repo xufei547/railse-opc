@@ -23,8 +23,17 @@ railse hub run --listen 127.0.0.1:8787
 ## 接入一台机器
 
 1. hub 上：`railse hub token [--ttl 10m]` 打印一次性接入码，默认 10 分钟有效，`--ttl` 至多 24 小时，用一次即作废。
-2. 机器上：`railse agent enroll --hub https://hub.example.com --token <接入码> [--name 名字] [--force]`。名字默认主机名。`--hub` 只收 `http://`、`https://`，不能带 `user:pass`、`?` 查询或 `#` 片段；接入请求不跟随重定向；`http://` 且不是本机地址时警告明文传输密钥。
-3. 重启 `railse agent run`。日志出现“已连接 hub”即接上。
+2. **先导入本机规则**（本地闭环时手写过 `~/.railse/rules.yaml` 的才需要）。首次连上 hub 时，hub 的规则会整套覆盖本机 `rules.yaml`，其中手写的规则（例如禁止改 `migrations/**` 的 deny）随之失效。导入是整套替换 hub 的规则，第一次接入时 hub 里只有两条内置规则，直接导入本机文件即可（多台机器各有手写规则时先合并成一份）：
+
+   ```bash
+   read -s PW; printf '{"password":"%s"}' "$PW" | curl -sf -c ck.txt -H 'Content-Type: application/json' --data-binary @- https://hub.example.com/api/login; unset PW
+   curl -sf -b ck.txt -H 'Content-Type: application/yaml' --data-binary @"$HOME/.railse/rules.yaml" https://hub.example.com/api/rules/import
+   rm ck.txt   # 里面是登录会话
+   ```
+
+   忘了也不会丢：守护进程第一次用 hub 规则覆盖不是 hub 下发的 `rules.yaml` 之前，先把它原样备份为同目录的 `rules.local-<UTC 时间>.yaml`（0600），`agent.log` 记一条“已备份为 …”，之后把备份文件按上面的方法导入即可。只备份这一次，之后的 `rules.yaml` 都是 hub 的缓存。
+3. 机器上：`railse agent enroll --hub https://hub.example.com --token <接入码> [--name 名字] [--force]`。名字默认主机名。`--hub` 只收 `http://`、`https://`，不能带 `user:pass`、`?` 查询或 `#` 片段；接入请求不跟随重定向；`http://` 且不是本机地址时警告明文传输密钥。本机已有不是 hub 下发的 `rules.yaml` 时，成功后提示“首次连上 hub 时本机 rules.yaml 会被 hub 规则覆盖（会自动备份），如有手写规则请先导入”。
+4. 重启 `railse agent run`。日志出现“已连接 hub”即接上。
 
 `~/.railse/machine.json`（0600）存 `hub_url`、`machine_id`、`secret`（机器长期密钥）、`name`。已存在时 `enroll` 拒绝覆盖，换 hub 或重新接入要加 `--force`。文件损坏时守护进程拒绝启动（不会悄悄退回本地模式）；要退回本地闭环就删掉它再重启，残留的 hub 暂停随之清除。
 
@@ -32,7 +41,7 @@ railse hub run --listen 127.0.0.1:8787
 
 ## 接入后的行为
 
-- **规则以 hub 为准。** 每次连上，welcome 里的规则快照一律替换本机规则（不比版本：hub 重建库后版本可能变小）；连接期间的 `rules` 帧只收比本机新的版本。本机 `rules.yaml` 只是缓存，文件头写着“# 由 hub 下发，版本 N。本机修改会在下次下发时被覆盖。”。`railse agent reload`（或 SIGHUP）仍可临时加载本机改动，下一次下发或重连时被覆盖。
+- **规则以 hub 为准。** 每次连上，welcome 里的规则快照一律替换本机规则（不比版本：hub 重建库后版本可能变小）；连接期间的 `rules` 帧只收比本机新的版本。本机 `rules.yaml` 只是缓存，文件头写着“# 由 hub 下发，版本 N。本机修改会在下次下发时被覆盖。”；第一次覆盖本机原有的规则文件前先备份为 `rules.local-<UTC 时间>.yaml`（见“接入一台机器”第 2 步）。`railse agent reload`（或 SIGHUP）仍可临时加载本机改动，下一次下发或重连时被覆盖。
 - **引擎定不了的请求进 hub 等手机决定**（`outward`、`network`、`unknown` 等没有规则命中的 Claude、Codex 请求）。钩子一直等到手机上的决定、本机期限（约 24 小时）或下面的交回终端。规则能定的照旧在本机立即放行或拒绝，记录异步上报 hub。
 - **手机上的备注不会给到 agent。** 钩子只看到固定文案：放行“已在手机上批准”，拒绝时 Claude、Codex 看到“Railse：已在手机上拒绝”。备注只进本机审计的 `note` 字段与 hub 的 `decision_note`、审计。
 - **总开关：生效值 = 本机 || hub。** 两边分开存在 `state.json`（`paused`、`hub_paused`）。`railse agent pause`/`resume` 只改本机这一侧，不会被 hub 覆盖，也不反向同步到 hub；hub 的暂停（`POST /api/pause`，下发 paused 帧、写进 welcome）只改 hub 那一侧。`railse agent status` 显示 `paused: true (local)`、`(hub)` 或 `(local+hub)`；本机 resume 后 hub 仍暂停会提示。暂停时只有用户 deny 规则照常生效，其余一律交回终端，不送 hub。

@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/railse/railse-opc/internal/policy"
 )
@@ -15,7 +18,10 @@ const rulesHeader = `# Railse OPC 本机规则文件。守护进程启动和 rel
 # 格式见设计文档 4.3；hub 接入后由 hub 下发，这里只是本机缓存。
 `
 
-const hubRulesHeader = "# 由 hub 下发，版本 %d。本机修改会在下次下发时被覆盖。\n"
+// hubRulesMark 是 hub 下发的规则缓存的文件头开头；不以它开头的 rules.yaml 是本机规则，首次被 hub 覆盖前先备份。
+const hubRulesMark = "# 由 hub 下发"
+
+const hubRulesHeader = hubRulesMark + "，版本 %d。本机修改会在下次下发时被覆盖。\n"
 
 // Rules 持有当前引擎，并发安全。
 type Rules struct {
@@ -106,6 +112,7 @@ func (r *Rules) Reload() error {
 // Replace 用 hub 下发的规则集替换引擎并写缓存文件。hub 是唯一真相，总是替换（版本乱序由调用方过滤）。
 // 缓存写的是 hub 的原样 YAML，路径改写只作用于内存里的引擎（Reload 读缓存时会再改写一次，结果一致）。
 // 坏规则集在写文件前返回错误，当前引擎与缓存文件都不动；替换保持当前暂停状态。
+// 本机 rules.yaml 还不是 hub 下发的缓存时（首次接入），覆盖前先备份，见 backupLocal；备份失败也不覆盖。
 // 与 Reload 共用 reloadMu 串行，换引擎时持 mu 写锁，与 SetPaused 互斥。
 func (r *Rules) Replace(rs policy.RuleSet, version int) error {
 	r.reloadMu.Lock()
@@ -125,6 +132,9 @@ func (r *Rules) Replace(rs policy.RuleSet, version int) error {
 	if err != nil {
 		return fmt.Errorf("hub 下发的规则（版本 %d）: %w", version, err)
 	}
+	if err := r.backupLocal(); err != nil {
+		return fmt.Errorf("备份本机规则: %w", err)
+	}
 	if err := writeFileAtomic(r.path, append([]byte(fmt.Sprintf(hubRulesHeader, version)), b...)); err != nil {
 		return fmt.Errorf("写规则缓存: %w", err)
 	}
@@ -133,6 +143,70 @@ func (r *Rules) Replace(rs policy.RuleSet, version int) error {
 	r.engine, r.count, r.version = eng, len(rs.Rules), version
 	r.mu.Unlock()
 	return nil
+}
+
+// backupLocal 在 hub 规则第一次覆盖本机 rules.yaml 之前，把它原样复制为同目录的 rules.local-<UTC 时间>.yaml（0600）并记日志：
+// 第 2 份本地闭环里手写的规则（例如用户 deny）会被 hub 的规则替换掉，用户要能找回并导入 hub。
+// 文件不存在或已是 hub 下发的缓存（文件头以 hubRulesMark 开头）时什么都不做，所以只备份一次。
+// 备份失败时返回错误，调用方不覆盖（宁可暂时沿用本机规则，也不丢掉它们）。调用方持 reloadMu。
+func (r *Rules) backupLocal() error {
+	data, err := os.ReadFile(r.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if bytes.HasPrefix(data, []byte(hubRulesMark)) {
+		return nil
+	}
+	base := filepath.Join(filepath.Dir(r.path), "rules.local-"+time.Now().UTC().Format("20060102T150405Z"))
+	dst := base + ".yaml"
+	for i := 2; ; i++ {
+		err = writeFileExcl(dst, data)
+		if !errors.Is(err, os.ErrExist) || i > 100 {
+			break
+		}
+		dst = fmt.Sprintf("%s-%d.yaml", base, i) // 同一秒里已有一份（上次备份后覆盖失败又重试）
+	}
+	if err != nil {
+		return err
+	}
+	r.logf("本机 rules.yaml 不是 hub 下发的，被 hub 规则覆盖前已备份为 %s。其中手写的规则（例如 deny）不再生效；"+
+		"要沿用请在 hub 上导入：POST /api/rules/import（整套替换，见 docs/hub.md）", dst)
+	return nil
+}
+
+// writeFileExcl 新建 path（已存在时返回满足 os.ErrExist 的错误）、写入 data 并 fsync，权限 0600。中途失败时删掉。
+func writeFileExcl(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Chmod(0o600) // 不受 umask 影响
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(path)
+	}
+	return err
+}
+
+// HasLocalRules 报告 path 上的规则文件存在且不是 hub 下发的缓存：首次连上 hub 时它会被 hub 规则覆盖（覆盖前自动备份）。
+// 读不出来时按有处理（宁可多提示一次）。
+func HasLocalRules(path string) bool {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	return err != nil || !bytes.HasPrefix(data, []byte(hubRulesMark))
 }
 
 // Version 返回最近一次 hub 下发的版本，缓存文件加载的为 0。

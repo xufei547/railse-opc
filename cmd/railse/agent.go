@@ -206,6 +206,11 @@ func agentEnroll(cfg agent.Config, hubURL, token, name string, force bool, stdou
 		return fmt.Errorf("写 %s: %w", cfg.MachinePath, err)
 	}
 	fmt.Fprintf(stdout, "已接入 hub %s，机器 id %s，名字 %s\n已写入 %s；重启 railse agent run 后生效\n", origin, out.MachineID, name, cfg.MachinePath)
+	if agent.HasLocalRules(cfg.RulesPath) {
+		fmt.Fprintf(stdout, "注意：首次连上 hub 时本机 rules.yaml 会被 hub 规则覆盖（会自动备份），如有手写规则请先导入。\n"+
+			"  本机规则 %s，备份为同目录的 rules.local-<时间>.yaml；覆盖后其中手写的规则（例如 deny）不再生效\n"+
+			"  导入：POST %s/api/rules/import（整套替换 hub 的规则，见 docs/hub.md）\n", cfg.RulesPath, origin)
+	}
 	return nil
 }
 

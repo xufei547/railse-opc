@@ -250,6 +250,9 @@ func TestAgentEnrollWritesMachineJSON(t *testing.T) {
 	if !strings.Contains(out.String(), m.MachineID) {
 		t.Fatalf("输出应有机器 id: %q", out.String())
 	}
+	if strings.Contains(out.String(), "rules.yaml") {
+		t.Fatalf("本机没有规则文件时不必提示导入: %q", out.String())
+	}
 	if fi, _ := os.Stat(machinePath); fi.Mode().Perm() != 0o600 {
 		t.Fatalf("权限 %v", fi.Mode().Perm())
 	}
@@ -291,6 +294,28 @@ func TestAgentEnrollWritesMachineJSON(t *testing.T) {
 
 // 决定 5：--hub 只收 http(s)、要有主机、不带 user:pass 与查询；名字与 hub 的口径一致；这些都在联系 hub 之前挡下。
 // http 且主机不是回环时警告明文传输。
+// 终审 I3：本机已有不是 hub 下发的 rules.yaml 时，enroll 成功后提示首次连上 hub 会覆盖它（会自动备份），手写规则请先导入；
+// enroll 本身不动 rules.yaml。
+func TestAgentEnrollWarnsLocalRules(t *testing.T) {
+	h := startTestHub(t)
+	tok, _ := h.st.CreateEnrollToken(time.Minute)
+	cfgDir := filepath.Join(tempDir(t), "h")
+	os.MkdirAll(cfgDir, 0o700)
+	local := "version: 1\nrules: []\n"
+	rulesPath := filepath.Join(cfgDir, "rules.yaml")
+	os.WriteFile(rulesPath, []byte(local), 0o600)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"agent", "enroll", "--dir", cfgDir, "--hub", h.http.URL, "--token", tok, "--name", "mac"}, &out, &errOut); code != 0 {
+		t.Fatalf("enroll: %d %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "首次连上 hub 时本机 rules.yaml 会被 hub 规则覆盖（会自动备份）") || !strings.Contains(out.String(), "/api/rules/import") {
+		t.Fatalf("应提示先导入本机规则: %q", out.String())
+	}
+	if b, _ := os.ReadFile(rulesPath); string(b) != local {
+		t.Fatalf("enroll 不应改 rules.yaml: %q", b)
+	}
+}
+
 func TestAgentEnrollValidation(t *testing.T) {
 	cfgDir := filepath.Join(tempDir(t), "h")
 	for _, c := range []struct {

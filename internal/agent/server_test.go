@@ -538,3 +538,59 @@ func TestDenyPathGlobMatchesThroughSymlink(t *testing.T) {
 		t.Fatalf("规则之外的项目内写入应放行: %+v", resp)
 	}
 }
+
+// 终审 I2：项目路径经过符号链接（macOS 的 /var → /private/var 同理）时，交给 Decider（上报 hub）与写审计的载荷 Cwd
+// 与项目根同一口径，都是解析链接后的路径。hub 侧“记住”按载荷与项目根重新定级（policy.ProposeRule），
+// 两者口径不一会把项目内的相对路径写入误判成 write_outside，学不了规则。
+func TestReportedPayloadUsesCleanedCwd(t *testing.T) {
+	d := &blockingDecider{release: make(chan struct{}), outcome: Outcome{Action: "allow", DecidedBy: "user"}}
+	env := startServer(t, d, nil)
+	linkProj, realProj := symlinkedProject(t, filepath.Dir(env.repo))
+	if linkProj == realProj {
+		t.Fatal("测试前提：链接写法与真实路径应不同")
+	}
+	// 不放行任何东西，请求才会交给 Decider
+	os.WriteFile(env.cfg.RulesPath, []byte("version: 1\nrules: []\n"), 0o600)
+	if err := env.srv.rules.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	reqs := []proto.Request{permission(linkProj, "mkdir build")}
+	// 载荷没带 cwd 时取会话的 cwd，同样清理
+	noCwd := permission(linkProj, "touch notes.txt")
+	noCwd.Payload.Cwd = ""
+	reqs = append(reqs, noCwd)
+	for _, req := range reqs {
+		conn, err := net.Dial("unix", env.cfg.SocketPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proto.WriteLine(conn, req)
+		waitFor(t, func() bool { return env.srv.pending.Count() == 1 })
+		pr := env.srv.pending.List()[0]
+		if pr.ProjectRoot != realProj || pr.Redacted.Cwd != realProj {
+			t.Fatalf("%q：上报的项目根 %q 与载荷 cwd %q 都应是 %q", req.Payload.Command, pr.ProjectRoot, pr.Redacted.Cwd, realProj)
+		}
+		// hub 的 learnRule 就是拿这两样调 ProposeRule：项目内写入应能学成规则
+		rule, err := policy.ProposeRule(pr.Redacted, policy.Context{ProjectRoot: pr.ProjectRoot, HomeDir: env.cfg.HomeDir}, pr.ID)
+		if err != nil {
+			t.Fatalf("%q 在 hub 侧应能记住: %v", req.Payload.Command, err)
+		}
+		if rule.Match.Risk == nil || *rule.Match.Risk != policy.RiskWriteInProject {
+			t.Fatalf("%q 应按项目内写入记住: %+v", req.Payload.Command, rule.Match)
+		}
+		d.release <- struct{}{}
+		var resp proto.Response
+		json.NewDecoder(conn).Decode(&resp)
+		conn.Close()
+		if resp.Decision != "allow" {
+			t.Fatalf("%q 应得到 allow: %+v", req.Payload.Command, resp)
+		}
+		waitFor(t, func() bool { return env.srv.pending.Count() == 0 })
+	}
+	// 本机审计（也会转发给 hub）里的载荷 cwd 同样是清理后的
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		if e.Payload == nil || e.Payload.Cwd != realProj {
+			t.Fatalf("审计里的载荷 cwd 应是 %q: %+v", realProj, e.Payload)
+		}
+	}
+}

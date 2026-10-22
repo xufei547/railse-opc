@@ -254,28 +254,31 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// evaluate 算项目根并跑引擎。
-func (s *Server) evaluate(req proto.Request) (policy.Decision, policy.Context) {
-	cwd := req.Payload.Cwd
+// evaluate 清理 cwd（载荷没带时取会话的 cwd，解析符号链接）、算项目根并跑引擎，返回引擎实际评估的载荷（带清理后的 cwd）。
+// 审计与上报 hub 都用这份载荷：hub 侧“记住”按载荷 cwd 与项目根重新定级，两者必须同一口径
+// （macOS 的 /var 是 /private/var 的链接，口径不一会把项目内的相对路径写入判成项目外）。
+func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, policy.Context) {
+	p := req.Payload
+	cwd := p.Cwd
 	if cwd == "" {
 		cwd = req.Session.Cwd
 	}
 	cwd = CleanCwd(cwd)
-	req.Payload.Cwd = cwd
+	p.Cwd = cwd
 	// 相对路径（含空 cwd 清理后的 "."）会按守护进程自己的工作目录解析，不能拿来找项目根。
 	var root string
 	if filepath.IsAbs(cwd) {
 		root = FindProjectRoot(cwd)
 	}
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID}
-	return s.rules.Engine().Evaluate(req.Payload, pctx), pctx
+	return p, s.rules.Engine().Evaluate(p, pctx), pctx
 }
 
 // handlePermission 是审批主路径：引擎能定就定，定不了交给 Decider。
 func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.Response {
 	id := NewID()
-	d, pctx := s.evaluate(req)
-	redacted := redact.Payload(req.Payload)
+	evaluated, d, pctx := s.evaluate(req)
+	redacted := redact.Payload(evaluated)
 	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "permission", Session: req.Session, ToolName: req.ToolName, Payload: &redacted, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason}
 	resp := proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason}
 	switch d.Action {
