@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -120,7 +121,7 @@ func TestFindResend(t *testing.T) {
 	if _, err := s.FindResend(m.ID, "s1", "t2", "Bash", PayloadHash(first.Payload), 15*time.Minute); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("不同 turn 不算重发: %v", err)
 	}
-	s.SetRequestState("r1", "cancelled", "resend", "", "")
+	s.SetRequestState("r1", "cancelled", DecidedByResend, "", "")
 	if _, err := s.FindResend(m.ID, "s1", "t1", "Bash", PayloadHash(first.Payload), 15*time.Minute); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("非 pending 不算: %v", err)
 	}
@@ -219,10 +220,10 @@ func TestApplyAgentFinal(t *testing.T) {
 		want             bool
 	}{
 		{"pending", "", true},
-		{"cancelled", "agent_restart", true},
+		{"cancelled", DecidedByAgentRestart, true},
 		{"approved", "user", false},
 		{"denied", "user", false},
-		{"cancelled", "resend", false},
+		{"cancelled", DecidedByResend, false},
 	}
 	for i, c := range cases {
 		id := fmt.Sprintf("r%d", i)
@@ -344,5 +345,201 @@ func TestRecordedEventRoundTrip(t *testing.T) {
 	}
 	if pend, err := s.ListPendingForMachine(m.ID); err != nil || len(pend) != 1 || pend[0].ID != "p1" {
 		t.Fatalf("ListPendingForMachine = %+v, %v", pend, err)
+	}
+}
+
+// 去重键（机器、cli_session_id、turn_id、工具名、载荷哈希）任一不同都不算重发；窗口按 created_at 判定；同键取较新的。
+func TestFindResendKeyAndWindow(t *testing.T) {
+	s := openTemp(t)
+	m1, _ := s.CreateMachine("m1", RandomToken(), "/h")
+	m2, _ := s.CreateMachine("m2", RandomToken(), "/h")
+	now := time.Now()
+	add := func(id, sess, turn string, age time.Duration) {
+		t.Helper()
+		r := newReq(m1.ID, id, "touch a")
+		r.CLISessionID = sess
+		r.TurnID = turn
+		r.CreatedAt = FormatTime(now.Add(-age))
+		if err := s.InsertRequest(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("base", "s1", "t1", time.Minute)
+	add("old", "s1", "t-old", 16*time.Minute)       // 窗口外
+	add("recent", "s1", "t-recent", 14*time.Minute) // 窗口内
+	add("dup-old", "s1", "t-dup", 10*time.Minute)
+	add("dup-new", "s1", "t-dup", 5*time.Minute)
+	add("noturn", "s1", "", time.Minute)
+	add("nosess", "", "t-nosess", time.Minute)
+	h := PayloadHash(newReq("", "", "touch a").Payload)
+	other := PayloadHash(newReq("", "", "touch b").Payload)
+	cases := []struct{ name, machine, sess, turn, tool, hash, want string }{
+		{"同键命中", m1.ID, "s1", "t1", "Bash", h, "base"},
+		{"别的机器", m2.ID, "s1", "t1", "Bash", h, ""},
+		{"别的会话", m1.ID, "s2", "t1", "Bash", h, ""},
+		{"别的回合", m1.ID, "s1", "t2", "Bash", h, ""},
+		{"别的工具", m1.ID, "s1", "t1", "Write", h, ""},
+		{"别的载荷", m1.ID, "s1", "t1", "Bash", other, ""},
+		{"窗口外 16 分钟", m1.ID, "s1", "t-old", "Bash", h, ""},
+		{"窗口内 14 分钟", m1.ID, "s1", "t-recent", "Bash", h, "recent"},
+		{"同键两条取较新", m1.ID, "s1", "t-dup", "Bash", h, "dup-new"},
+		{"turn_id 为空按空串匹配", m1.ID, "s1", "", "Bash", h, "noturn"},
+		{"cli_session_id 为空不去重", m1.ID, "", "t-nosess", "Bash", h, ""},
+	}
+	for _, c := range cases {
+		got, err := s.FindResend(c.machine, c.sess, c.turn, c.tool, c.hash, 15*time.Minute)
+		if c.want == "" {
+			if !errors.Is(err, ErrNotFound) {
+				t.Errorf("%s: 应 ErrNotFound，得到 %+v, %v", c.name, got.ID, err)
+			}
+			continue
+		}
+		if err != nil || got.ID != c.want {
+			t.Errorf("%s: 得到 %q, %v，应为 %q", c.name, got.ID, err, c.want)
+		}
+	}
+}
+
+// 守护进程来源的写入不能把请求迁回 pending，也不能写成 recorded 或空状态。
+func TestAgentWritesRejectNonFinalState(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	if err := s.InsertRequest(newReq(m.ID, "p", "touch a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertRequest(newReq(m.ID, "c", "touch b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRequestState("c", "cancelled", DecidedByAgentRestart, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"pending", "recorded", ""} {
+		if err := s.SetMachineRequestState(m.ID, "p", bad, "agent", "", ""); !errors.Is(err, ErrInvalidState) {
+			t.Errorf("SetMachineRequestState(%q) = %v，应 ErrInvalidState", bad, err)
+		}
+		for _, id := range []string{"p", "c"} {
+			if ok, err := s.ApplyAgentFinal(m.ID, id, bad, "agent", "", ""); ok || !errors.Is(err, ErrInvalidState) {
+				t.Errorf("ApplyAgentFinal(%s, %q) = %v, %v，应 ErrInvalidState", id, bad, ok, err)
+			}
+		}
+	}
+	if got, err := s.GetRequest("p"); err != nil || got.State != "pending" || got.DecidedBy != "" || got.DecidedAt != nil {
+		t.Fatalf("pending 行不应变: %+v, %v", got, err)
+	}
+	if got, err := s.GetRequest("c"); err != nil || got.State != "cancelled" || got.DecidedBy != DecidedByAgentRestart {
+		t.Fatalf("cancelled/agent_restart 行不应被复活: %+v, %v", got, err)
+	}
+}
+
+// 送达只记已决定（approved、denied）的请求：对 pending 或其他终态的回执不写 delivered_at，之后的决定仍会补发。
+func TestMarkDeliveredOnlyDecided(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	for _, id := range []string{"r1", "r2"} {
+		if err := s.InsertRequest(newReq(m.ID, id, "cmd "+id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetRequestState("r2", "cancelled", DecidedByResend, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"r1", "r2"} {
+		if err := s.MarkDelivered(m.ID, id); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.GetRequest(id); err != nil || got.DeliveredAt != nil {
+			t.Fatalf("%s 未决定不应记送达: %+v, %v", id, got, err)
+		}
+	}
+	if err := s.SetRequestState("r1", "denied", "user", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if und, err := s.UndeliveredDecisions(m.ID); err != nil || len(und) != 1 || und[0].ID != "r1" {
+		t.Fatalf("决定后应待补发: %+v, %v", und, err)
+	}
+	if err := s.MarkDelivered(m.ID, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetRequest("r1"); err != nil || got.DeliveredAt == nil {
+		t.Fatalf("决定后应记送达: %+v, %v", got, err)
+	}
+}
+
+// InsertRequest 存的哈希就是 PayloadHash；载荷无法序列化时插入报错、PayloadHash 返回空串。
+func TestPayloadHashAndMarshalError(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	r := newReq(m.ID, "r1", "touch a")
+	if err := s.InsertRequest(r); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetRequest("r1"); err != nil || len(got.PayloadHash) != 64 || got.PayloadHash != PayloadHash(r.Payload) {
+		t.Fatalf("存的哈希 = %q, %v，应为 %q", got.PayloadHash, err, PayloadHash(r.Payload))
+	}
+	bad := newReq(m.ID, "r2", "x")
+	bad.Payload = policy.Payload{Type: policy.PayloadMCP, Server: "s", Tool: "t", Args: json.RawMessage("{bad")}
+	if h := PayloadHash(bad.Payload); h != "" {
+		t.Fatalf("无法序列化的载荷 PayloadHash = %q，应为空串", h)
+	}
+	if err := s.InsertRequest(bad); err == nil {
+		t.Fatal("无法序列化的载荷应插入失败")
+	}
+	if _, err := s.GetRequest("r2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("失败的插入不应留行: %v", err)
+	}
+}
+
+// created_at、expires_at 必须是定宽 UTC 格式（FormatTime 的输出），否则字典序比较会错。
+func TestInsertRequestRejectsNonCanonicalTime(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	ts := time.Date(2026, 10, 22, 8, 0, 0, 120000000, time.UTC)
+	bad := []string{
+		ts.Format(time.RFC3339),
+		ts.Format(time.RFC3339Nano),
+		ts.In(time.FixedZone("CST", 8*3600)).Format(timeLayout), // 位数对但不是 UTC
+		"yesterday",
+	}
+	for i, v := range bad {
+		c := newReq(m.ID, fmt.Sprintf("c%d", i), "x")
+		c.CreatedAt = v
+		if err := s.InsertRequest(c); err == nil {
+			t.Errorf("CreatedAt %q 应被拒绝", v)
+		}
+		e := newReq(m.ID, fmt.Sprintf("e%d", i), "x")
+		e.ExpiresAt = &v
+		if err := s.InsertRequest(e); err == nil {
+			t.Errorf("ExpiresAt %q 应被拒绝", v)
+		}
+	}
+	if all, err := s.ListRequests("", 100); err != nil || len(all) != 0 {
+		t.Fatalf("被拒绝的插入不应留行: %d, %v", len(all), err)
+	}
+	ok := newReq(m.ID, "ok", "x")
+	ok.CreatedAt = FormatTime(ts)
+	exp := FormatTime(ts.Add(time.Minute))
+	ok.ExpiresAt = &exp
+	if err := s.InsertRequest(ok); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 会话再次上报时 cwd、project 为空不覆盖已知值。
+func TestSessionUpsertKeepsKnownCwdProject(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	id, err := s.UpsertSession(m.ID, proto.Session{Tool: "claude", CLISessionID: "s1", Cwd: "/p"}, "proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertSession(m.ID, proto.Session{Tool: "claude", CLISessionID: "s1"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	var cwd, project string
+	if err := s.db.QueryRow("SELECT cwd, project FROM sessions WHERE id = ?", id).Scan(&cwd, &project); err != nil {
+		t.Fatal(err)
+	}
+	if cwd != "/p" || project != "proj" {
+		t.Fatalf("空值不应覆盖: cwd=%q project=%q", cwd, project)
 	}
 }
