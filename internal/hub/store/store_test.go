@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,9 +67,21 @@ func TestOpenMigratesAndSetsPerms(t *testing.T) {
 		t.Fatalf("schema_version = %d, %v", v, err)
 	}
 	var mode string
-	s.db.QueryRow("PRAGMA journal_mode").Scan(&mode)
-	if mode != "wal" {
-		t.Fatalf("journal_mode = %s", mode)
+	if err := s.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || mode != "wal" {
+		t.Fatalf("journal_mode = %s, %v", mode, err)
+	}
+	var fk, busy int
+	if err := s.db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil || fk != 1 {
+		t.Fatalf("foreign_keys = %d, %v", fk, err)
+	}
+	if err := s.db.QueryRow("PRAGMA busy_timeout").Scan(&busy); err != nil || busy != 5000 {
+		t.Fatalf("busy_timeout = %d, %v", busy, err)
+	}
+	for _, table := range []string{"settings", "machines", "enroll_tokens", "client_sessions", "sessions", "requests", "rules", "audit_events", "push_subscriptions"} {
+		var n int
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("表 %s: n=%d, %v", table, n, err)
+		}
 	}
 	s.Close()
 	// 已有文件权限过宽时，重开要收紧；重复打开不应报错（迁移幂等）
@@ -87,6 +100,21 @@ func TestOpenMigratesAndSetsPerms(t *testing.T) {
 	}
 }
 
+// tableExists 用一个独立连接查表是否存在，不经过 Open 的迁移。
+func tableExists(t *testing.T, path, table string) bool {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n == 1
+}
+
 func TestOpenRejectsOtherSchemaVersion(t *testing.T) {
 	path := filepath.Join(tempDir(t), "hub.db")
 	s, err := Open(path)
@@ -96,11 +124,93 @@ func TestOpenRejectsOtherSchemaVersion(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE schema_version SET v = ?", schemaVersion+1); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec("DROP TABLE push_subscriptions"); err != nil {
+		t.Fatal(err)
+	}
 	s.Close()
-	if s2, err := Open(path); err == nil {
+	s2, err := Open(path)
+	if err == nil {
 		s2.Close()
 		t.Fatal("版本不一致应报错")
 	}
+	if !strings.Contains(err.Error(), "数据库版本 2 与程序版本 1 不一致") {
+		t.Fatalf("错误应说明版本不一致: %v", err)
+	}
+	if tableExists(t, path, "push_subscriptions") {
+		t.Fatal("版本不一致时不应往库里补建表")
+	}
+}
+
+func TestOpenRejectsCorruptSchemaVersion(t *testing.T) {
+	cases := map[string]string{
+		"多行": "INSERT INTO schema_version(v) VALUES(1)",
+		"空表": "DELETE FROM schema_version",
+	}
+	for name, stmt := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(tempDir(t), "hub.db")
+			s, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(stmt); err != nil {
+				t.Fatal(err)
+			}
+			s.Close()
+			s2, err := Open(path)
+			if err == nil {
+				s2.Close()
+				t.Fatal("schema_version 不是恰好一行时应报错")
+			}
+			if !strings.Contains(err.Error(), "损坏") {
+				t.Fatalf("错误应说明损坏: %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenPathWithURIChars(t *testing.T) {
+	dir := tempDir(t)
+	name := "hub#1%41?x.db"
+	path := filepath.Join(dir, name)
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPerms(t, path)
+	if err := s.SetSetting("k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	// SQLite 打开的必须就是预建的文件，目录里不能冒出别的库文件
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != name && e.Name() != name+"-wal" && e.Name() != name+"-shm" {
+			t.Fatalf("多出了文件 %q", e.Name())
+		}
+	}
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if v, ok, err := s2.GetSetting("k"); err != nil || !ok || v != "v" {
+		t.Fatalf("重开后 GetSetting = %q %v %v", v, ok, err)
+	}
+}
+
+func TestOpenRelativePath(t *testing.T) {
+	dir := tempDir(t)
+	t.Chdir(dir)
+	s, err := Open("hub.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	assertPerms(t, filepath.Join(dir, "hub.db"))
 }
 
 func TestSettings(t *testing.T) {
@@ -131,8 +241,71 @@ func TestTxRollsBackOnError(t *testing.T) {
 	if !errors.Is(err, os.ErrInvalid) {
 		t.Fatalf("应把错误原样传出: %v", err)
 	}
-	if _, ok, _ := s.GetSetting("a"); ok {
-		t.Fatal("出错的事务应回滚")
+	if _, ok, err := s.GetSetting("a"); err != nil || ok {
+		t.Fatalf("出错的事务应回滚: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestTxPanicRollsBackAndReleasesConn(t *testing.T) {
+	s := openTemp(t)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("回调的 panic 应继续向上抛")
+			}
+		}()
+		s.Tx(func(tx *sql.Tx) error {
+			if _, err := tx.Exec("INSERT INTO settings(key, value) VALUES(?, ?)", "p", "1"); err != nil {
+				return err
+			}
+			panic("boom")
+		})
+	}()
+	// 单连接：panic 后若没回滚，连接被永久占住，下面的查询会一直阻塞
+	done := make(chan error, 1)
+	go func() {
+		_, ok, err := s.GetSetting("p")
+		if err == nil && ok {
+			err = errors.New("panic 的事务应回滚")
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("panic 后连接未释放，GetSetting 阻塞")
+	}
+}
+
+func TestTxBeginsImmediate(t *testing.T) {
+	path := filepath.Join(tempDir(t), "hub.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	// 另一个进程式的独立连接，不等锁
+	other, err := sql.Open("sqlite", path+"?_busy_timeout=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	err = s.Tx(func(tx *sql.Tx) error {
+		// 回调里还没读写；BEGIN IMMEDIATE 应已拿到写锁，别的连接写不进来
+		_, err := other.Exec("INSERT INTO settings(key, value) VALUES(?, ?)", "o", "1")
+		if err == nil {
+			return errors.New("事务期间另一连接写入成功，事务不是 BEGIN IMMEDIATE")
+		}
+		if !strings.Contains(err.Error(), "locked") {
+			return fmt.Errorf("另一连接应因写锁失败: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

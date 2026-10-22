@@ -6,7 +6,9 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -20,31 +22,43 @@ const schemaVersion = 1
 // ErrNotFound 表示查无此行。
 var ErrNotFound = errors.New("not found")
 
-// Store 包着一个数据库连接池。
+// Store 包着一个 SQLite 数据库，连接池上限为单连接（SetMaxOpenConns(1)）。
+// 单连接的约束：Tx 回调里只能用 tx，不得调用 s.db 或其他 Store 方法；回调里不做网络等阻塞 IO；
+// Query 得到的 rows 必须先 Close 再发下一个查询。违反任何一条都会让后续调用永久阻塞。
 type Store struct {
 	db *sql.DB
 }
 
+// dsnQuery 是 modernc.org/sqlite 的连接参数：_busy_timeout 最先应用；
+// _txlock=immediate 让事务以 BEGIN IMMEDIATE 开始，跨进程（如 railse hub token）写同一库时先拿写锁。
+const dsnQuery = "_busy_timeout=5000&_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+
 // Open 打开或创建数据库，设 WAL 与 busy_timeout，跑迁移。
 // 主库文件在交给 SQLite 之前就建好并收紧为 0600，SQLite 建 -wal、-shm 时沿用主库权限。
 func Open(path string) (*Store, error) {
-	if err := prepareFile(path); err != nil {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("数据库路径 %s: %w", path, err)
+	}
+	if err := prepareFile(abs); err != nil {
 		return nil, err
 	}
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	// 用 URL 编码路径：路径里的 %、#、? 不会被 SQLite 当成转义、片段或参数，打开的就是上面预建的文件。
+	// 路径必须是绝对路径，否则相对路径的第一段会被当成 URI 的 authority。
+	dsn := (&url.URL{Scheme: "file", Path: abs, RawQuery: dsnQuery}).String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("打开数据库 %s: %w", abs, err)
 	}
-	db.SetMaxOpenConns(1) // SQLite 单写者，用一个连接避免 SQLITE_BUSY
+	db.SetMaxOpenConns(1) // SQLite 单写者，用一个连接避免 SQLITE_BUSY；约束见 Store 注释
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("打开数据库 %s: %w", path, err)
+		return nil, fmt.Errorf("打开数据库 %s: %w", abs, err)
 	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("迁移数据库 %s: %w", abs, err)
 	}
 	return s, nil
 }
@@ -57,34 +71,47 @@ func prepareFile(path string) error {
 	}
 	if err := f.Chmod(0o600); err != nil {
 		f.Close()
-		return err
+		return fmt.Errorf("收紧数据库文件权限 %s: %w", path, err)
 	}
 	return f.Close()
 }
 
+// migrate 在一个事务里检查并建表：schema_version 已存在时只核对版本，不一致就报错且不改动库；
+// 不存在时建全部表并写入版本。
 func (s *Store) migrate() error {
-	if _, err := s.db.Exec(schemaSQL); err != nil {
-		return fmt.Errorf("建表: %w", err)
-	}
-	var n int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM schema_version").Scan(&n); err != nil {
-		return err
-	}
-	if n == 0 {
-		_, err := s.db.Exec("INSERT INTO schema_version(v) VALUES(?)", schemaVersion)
-		return err
-	}
-	var v int
-	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil {
-		return err
-	}
-	if v != schemaVersion {
-		return fmt.Errorf("数据库版本 %d 与程序版本 %d 不一致", v, schemaVersion)
-	}
-	return nil
+	return s.Tx(func(tx *sql.Tx) error {
+		var exists int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").Scan(&exists); err != nil {
+			return fmt.Errorf("查 schema_version 表: %w", err)
+		}
+		if exists == 0 {
+			if _, err := tx.Exec(schemaSQL); err != nil {
+				return fmt.Errorf("建表: %w", err)
+			}
+			if _, err := tx.Exec("INSERT INTO schema_version(v) VALUES(?)", schemaVersion); err != nil {
+				return fmt.Errorf("写 schema_version: %w", err)
+			}
+			return nil
+		}
+		var n int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM schema_version").Scan(&n); err != nil {
+			return fmt.Errorf("读 schema_version: %w", err)
+		}
+		if n != 1 {
+			return fmt.Errorf("schema_version 有 %d 行，数据库已损坏", n)
+		}
+		var v int
+		if err := tx.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil {
+			return fmt.Errorf("读 schema_version: %w", err)
+		}
+		if v != schemaVersion {
+			return fmt.Errorf("数据库版本 %d 与程序版本 %d 不一致", v, schemaVersion)
+		}
+		return nil
+	})
 }
 
-// Close 关闭连接池。
+// Close 关闭数据库。
 func (s *Store) Close() error { return s.db.Close() }
 
 // timeLayout 是时间列的定宽格式：纳秒补足 9 位、UTC 以 Z 结尾，按字典序比较即按时间先后。
@@ -116,14 +143,22 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
-// Tx 在一个事务里跑 fn，出错回滚。
-func (s *Store) Tx(fn func(tx *sql.Tx) error) error {
+// Tx 在一个事务（BEGIN IMMEDIATE）里跑 fn：fn 返回 nil 就提交，返回错误或 panic 就回滚，
+// panic 回滚后继续向上抛。回滚失败的错误与 fn 的错误一起返回。
+// 单连接：回调里只能用 tx，不得调用 s.db 或其他 Store 方法；回调里不做网络等阻塞 IO；
+// rows 必须先 Close 再发下一个查询。否则唯一的连接被占住，所有调用永久阻塞。
+func (s *Store) Tx(fn func(tx *sql.Tx) error) (err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return fmt.Errorf("开始事务: %w", err)
 	}
+	defer func() {
+		// 已提交时 Rollback 只返回 ErrTxDone；其余情况（含 panic）在这里回滚并释放连接
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("回滚事务: %w", rbErr))
+		}
+	}()
 	if err := fn(tx); err != nil {
-		tx.Rollback()
 		return err
 	}
 	return tx.Commit()
