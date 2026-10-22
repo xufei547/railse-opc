@@ -13,6 +13,14 @@ import (
 // ErrInvalidToken 表示接入码不存在、已用或过期。
 var ErrInvalidToken = errors.New("接入码无效或已过期")
 
+// errEmptySecret：空串的哈希是公开常量，登记了就能被空 Bearer 认证，机器密钥一律不许为空。
+var errEmptySecret = errors.New("机器密钥不能为空")
+
+// execer 是 *sql.DB 与 *sql.Tx 共有的写方法：同一段写入既能在事务外用 s.db，也能在 Tx 回调里只用 tx。
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // Machine 是一台接入的机器。
 type Machine struct {
 	ID           string
@@ -58,8 +66,10 @@ func (s *Store) CreateEnrollToken(ttl time.Duration) (string, error) {
 }
 
 // ConsumeEnrollToken 校验并作废接入码。一条带条件的 UPDATE 以受影响行数判定，并发消费只有一次成功。
-func (s *Store) ConsumeEnrollToken(raw string) error {
-	res, err := s.db.Exec("UPDATE enroll_tokens SET used = 1 WHERE token_hash = ? AND used = 0 AND expires_at > ?", HashToken(raw), Now())
+func (s *Store) ConsumeEnrollToken(raw string) error { return consumeEnrollToken(s.db, raw) }
+
+func consumeEnrollToken(e execer, raw string) error {
+	res, err := e.Exec("UPDATE enroll_tokens SET used = 1 WHERE token_hash = ? AND used = 0 AND expires_at > ?", HashToken(raw), Now())
 	if err != nil {
 		return err
 	}
@@ -73,11 +83,40 @@ func (s *Store) ConsumeEnrollToken(raw string) error {
 	return nil
 }
 
-// CreateMachine 登记机器，存密钥哈希。
+// CreateMachine 登记机器，存密钥哈希；密钥为空时报错。
 func (s *Store) CreateMachine(name, rawSecret, homeDir string) (Machine, error) {
+	return insertMachine(s.db, name, rawSecret, homeDir)
+}
+
+// EnrollMachine 在一个事务里消费接入码并登记机器：接入码不存在、已用或过期返回 ErrInvalidToken；
+// 登记失败（含密钥为空）整体回滚，接入码仍可用。并发用同一接入码只有一次成功。
+// 自开事务，不得在 Tx 回调里调用（单连接会永久自锁）。
+func (s *Store) EnrollMachine(rawToken, name, rawSecret, homeDir string) (Machine, error) {
+	var m Machine
+	err := s.Tx(func(tx *sql.Tx) error {
+		if err := consumeEnrollToken(tx, rawToken); err != nil {
+			return err
+		}
+		var err error
+		m, err = insertMachine(tx, name, rawSecret, homeDir)
+		return err
+	})
+	if err != nil {
+		return Machine{}, err
+	}
+	return m, nil
+}
+
+// insertMachine 插入一台机器，只存密钥哈希。失败时返回零值，不给出看似可用的机器。
+func insertMachine(e execer, name, rawSecret, homeDir string) (Machine, error) {
+	if rawSecret == "" {
+		return Machine{}, errEmptySecret
+	}
 	m := Machine{ID: NewID(), Name: name, HomeDir: homeDir, EnrolledAt: Now()}
-	_, err := s.db.Exec("INSERT INTO machines(id, name, secret_hash, home_dir, enrolled_at) VALUES(?, ?, ?, ?, ?)", m.ID, m.Name, HashToken(rawSecret), homeDir, m.EnrolledAt)
-	return m, err
+	if _, err := e.Exec("INSERT INTO machines(id, name, secret_hash, home_dir, enrolled_at) VALUES(?, ?, ?, ?, ?)", m.ID, m.Name, HashToken(rawSecret), homeDir, m.EnrolledAt); err != nil {
+		return Machine{}, err
+	}
+	return m, nil
 }
 
 const machineCols = "id, name, home_dir, agent_version, enrolled_at, last_seen, revoked"

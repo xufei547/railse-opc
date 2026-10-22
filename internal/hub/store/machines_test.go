@@ -213,3 +213,107 @@ func TestHashTokenIsStableAndHex(t *testing.T) {
 		t.Fatal("NewID 应为 32 个十六进制字符")
 	}
 }
+
+// 接入在一个事务里消费接入码并登记机器：成功时机器可用密钥认证；接入码无效返回 ErrInvalidToken 且不留机器行；
+// 建机失败（空密钥、数据库拒绝插入）整体回滚，接入码仍可用。
+func TestEnrollMachine(t *testing.T) {
+	s := openTemp(t)
+	tok, err := s.CreateEnrollToken(10 * time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnrollMachine(tok, "mac", "", "/Users/u"); err == nil || errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("空密钥应报建机错误: %v", err)
+	}
+	if _, err := s.db.Exec("CREATE TRIGGER no_machine BEFORE INSERT ON machines BEGIN SELECT RAISE(ABORT, 'no insert'); END"); err != nil {
+		t.Fatal(err)
+	}
+	secret := RandomToken()
+	if _, err := s.EnrollMachine(tok, "mac", secret, "/Users/u"); err == nil || errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("插入被拒时应报建机错误: %v", err)
+	}
+	if _, err := s.db.Exec("DROP TRIGGER no_machine"); err != nil {
+		t.Fatal(err)
+	}
+	if list, err := s.ListMachines(); err != nil || len(list) != 0 {
+		t.Fatalf("失败的接入不应留机器行: %+v, %v", list, err)
+	}
+	m, err := s.EnrollMachine(tok, "mac", secret, "/Users/u")
+	if err != nil || m.ID == "" || m.Name != "mac" || m.HomeDir != "/Users/u" || m.EnrolledAt == "" {
+		t.Fatalf("建机失败回滚后接入码应仍可用: %+v, %v", m, err)
+	}
+	if got, err := s.AuthMachine(secret); err != nil || got.ID != m.ID || got.HomeDir != "/Users/u" {
+		t.Fatalf("AuthMachine = %+v, %v", got, err)
+	}
+	if _, err := s.EnrollMachine(tok, "mac2", RandomToken(), ""); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("用过的接入码: %v", err)
+	}
+	if _, err := s.EnrollMachine("nope", "mac2", RandomToken(), ""); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("不存在的接入码: %v", err)
+	}
+	expired, err := s.CreateEnrollToken(-time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnrollMachine(expired, "mac2", RandomToken(), ""); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("过期的接入码: %v", err)
+	}
+	if list, err := s.ListMachines(); err != nil || len(list) != 1 {
+		t.Fatalf("无效接入码不应留机器行: %+v, %v", list, err)
+	}
+}
+
+// 并发用同一接入码接入只成功一次、只留一台机器；两个 Store 开同一个库文件，模拟两个连接。
+func TestEnrollMachineConcurrentOnce(t *testing.T) {
+	path := filepath.Join(tempDir(t), "hub.db")
+	stores := make([]*Store, 2)
+	for i := range stores {
+		s, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+		stores[i] = s
+	}
+	tok, err := stores[0].CreateEnrollToken(10 * time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 8
+	errs := make([]error, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, errs[i] = stores[i%len(stores)].EnrollMachine(tok, "m", RandomToken(), "")
+		}()
+	}
+	close(start)
+	wg.Wait()
+	ok := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case !errors.Is(err, ErrInvalidToken):
+			t.Fatalf("第 %d 次接入: 意外错误 %v", i, err)
+		}
+	}
+	if list, err := stores[0].ListMachines(); ok != 1 || err != nil || len(list) != 1 {
+		t.Fatalf("并发接入成功 %d 次、%d 台机器（%v），应各为 1", ok, len(list), err)
+	}
+}
+
+// 空密钥的哈希是公开常量，登记了就能被空 Bearer 认证，一律拒绝。
+func TestCreateMachineRejectsEmptySecret(t *testing.T) {
+	s := openTemp(t)
+	if m, err := s.CreateMachine("m", "", "/h"); err == nil || m.ID != "" {
+		t.Fatalf("CreateMachine 空密钥 = %+v, %v", m, err)
+	}
+	if list, err := s.ListMachines(); err != nil || len(list) != 0 {
+		t.Fatalf("不应留机器行: %+v, %v", list, err)
+	}
+}
