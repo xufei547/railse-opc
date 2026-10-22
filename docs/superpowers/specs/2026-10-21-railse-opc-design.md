@@ -43,6 +43,7 @@ Railse OPC 是给“用 AI agent 经营一人公司的人”用的公司层驾�
 | 技术栈 | 守护进程 Go 单二进制；网页 TypeScript，Vite 加 React |
 | 拓扑 | 一个 hub 跑在作者的云服务器上，各机器的守护进程向外连，手机只连 hub |
 | 作者现有环境 | Claude Code、Codex CLI、Gemini CLI 写代码；Claude Code 换 prompt、GPT-6、n8n 做内容运营；一台 Mac 加一台云服务器；手动开终端 |
+| 第 2 份计划执行中的偏离（2026-10-22 已拍板） | 接受：暂停自动审批时用户写的 deny 仍生效；审计与请求状态增加 `passthrough`；`setup hooks` 删旧钩子按条目而非按组。待改：Claude 的钩子改写到 `.claude/settings.local.json`，放到第 5 份计划的 setup 收尾里 |
 | Gemini CLI 最低版本 | 0.65.0。更早的版本在用户确认之后才触发 `BeforeTool`，钩子无法在审批前拦截（2026-10-21 实验）；`railse doctor` 对低于 0.65.0 的版本报警 |
 
 ## 1. 架构与组件
@@ -107,8 +108,8 @@ Railse OPC 是给“用 AI agent 经营一人公司的人”用的公司层驾�
 | kind | `permission`、`question`、`done`、`webhook` |
 | payload | 统一载荷，见 2.2 |
 | risk | 风险等级，见 4.1 |
-| state | `pending`、`auto_allowed`、`auto_denied`、`approved`、`denied`、`expired`、`cancelled` |
-| decided_by | 命中的规则 id、`user`、`timeout`、`terminal`（终端里处理了）、`hub_unreachable` |
+| state | `pending`、`auto_allowed`、`auto_denied`、`approved`、`denied`、`passthrough`、`expired`、`cancelled` |
+| decided_by | 命中的规则 id、`user`、`timeout`、`terminal`（终端里处理了）、`hub_unreachable`、`no_hub`、`paused`、`error` |
 | decision_note | 用户备注，可空 |
 | created_at、expires_at、decided_at、delivered_at | 时间戳 |
 | callback | 仅 webhook 类：回调 URL 与令牌 |
@@ -156,7 +157,10 @@ pending ──本地规则命中──▶ auto_allowed | auto_denied
 pending ──用户在 hub 决定──▶ approved | denied
 pending ──到期──▶ expired
 pending ──钩子进程消失（终端里处理了、Ctrl-C、CLI 退出）──▶ cancelled
+pending ──没有 hub、总开关暂停、或决定来源出错，交回终端──▶ passthrough（decided_by 为 no_hub、paused、error）
 ```
+
+`passthrough` 与 `expired`、`hub_unreachable` 的区别：`expired` 是等满期限；`hub_unreachable` 是本机守护进程连不上 hub 等 30 秒后放弃（见 3.2）；`passthrough` 是根本没去等。三者对 CLI 的效果相同，都是让终端弹原生框。
 
 过期或取消后到达的用户决定一律拒绝并提示。
 
@@ -249,7 +253,7 @@ rules:
 
 ### 4.5 总开关
 
-网页上“暂停自动审批”开关，打开后所有请求走 ask；可按机器单独暂停。每条自动决定记录命中的规则 id，收件箱历史中可见依据。
+网页上“暂停自动审批”开关，打开后所有请求走 ask，但用户手写的 deny 规则仍然生效（暂停是为了少放行，不是为了多放行）；可按机器单独暂停。每条自动决定记录命中的规则 id，收件箱历史中可见依据。
 
 ### 4.6 预留
 
