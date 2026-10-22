@@ -477,3 +477,10 @@ func (s *Server) LoadState() error {
 	s.pauseMu.Unlock()
 	return err
 }
+
+// HubPaused 报告 hub 那一侧的总开关（不含本机的 pause）。
+func (s *Server) HubPaused() bool {
+	s.pauseMu.Lock()
+	defer s.pauseMu.Unlock()
+	return s.hubPaused
+}

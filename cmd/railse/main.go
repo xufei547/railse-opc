@@ -16,7 +16,8 @@ const usage = `用法: railse <子命令> [参数]
   version   打印版本
   policy    策略引擎工具（eval、check）
   hook      各 CLI 钩子调用的翻译器（claude、codex、codex-notify、gemini）
-  agent     守护进程（run、status、pause、resume、reload）
+  agent     守护进程（run、status、pause、resume、reload、enroll）
+  hub       云端服务（run、password、token、webhook-token）
   setup     安装钩子（hooks）`
 
 func main() {
@@ -39,6 +40,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runHook(args[1:], stdinReader, stdout, stderr)
 	case "agent":
 		return runAgent(args[1:], stdout, stderr)
+	case "hub":
+		return runHub(args[1:], stdinReader, stdout, stderr)
 	case "setup":
 		return runSetup(args[1:], stdout, stderr)
 	default:

@@ -1,16 +1,24 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/hookclient"
@@ -18,8 +26,9 @@ import (
 )
 
 const agentUsage = `用法:
-  railse agent run [--dir 目录] [--foreground]   启动守护进程（前台运行；开机自启在第 5 份计划）
-  railse agent status|pause|resume|reload [--dir 目录]`
+  railse agent run [--dir 目录] [--foreground]   启动守护进程（前台运行；有 machine.json 时接 hub；开机自启在第 5 份计划）
+  railse agent status|pause|resume|reload [--dir 目录]
+  railse agent enroll --hub URL --token 接入码 [--name 名字] [--dir 目录] [--force]   接入 hub，写 machine.json`
 
 // runAgent 处理 agent 子命令：run 跑守护进程，其余经 socket 发本机管理命令。
 func runAgent(args []string, stdout, stderr io.Writer) int {
@@ -31,7 +40,15 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	dir := fs.String("dir", "", "配置目录，默认 $RAILSE_HOME 或 ~/.railse")
 	foreground := fs.Bool("foreground", false, "日志同时写到 stderr")
+	hubURL := fs.String("hub", "", "hub 地址，如 https://hub.example.com")
+	token := fs.String("token", "", "railse hub token 生成的接入码")
+	name := fs.String("name", "", "本机在 hub 里的名字，默认主机名")
+	force := fs.Bool("force", false, "覆盖已有的 machine.json")
 	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "多余的参数 %q\n%s\n", fs.Args(), agentUsage)
 		return 2
 	}
 	var cfg agent.Config
@@ -75,6 +92,12 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, "本机已恢复，hub 仍暂停：自动审批仍未生效，需在 hub 上恢复")
 		}
 		return 0
+	case "enroll":
+		if err := agentEnroll(cfg, *hubURL, *token, *name, *force, stdout, stderr); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintf(stderr, "未知的 agent 子命令 %q\n\n%s\n", args[0], agentUsage)
 		return 2
@@ -97,6 +120,151 @@ func pausedLine(st *proto.Status) string {
 	return "paused: true"
 }
 
+const (
+	enrollTimeout  = 15 * time.Second // 接入请求的总上限
+	enrollReplyMax = 64 << 10         // 读 hub 答复的字节上限
+	machineNameMax = 128              // 名字的字节上限，与 hub 一致
+	hubTextMax     = 200              // 转述 hub 报错文案的字符上限
+)
+
+// agentEnroll 用一次性接入码向 hub 换取本机长期密钥，写 machine.json。参数与名字在联系 hub 之前校验；
+// 接入码只放在请求体里发给 --hub 指定的地址（不跟随重定向），任何输出都不带接入码与密钥。
+func agentEnroll(cfg agent.Config, hubURL, token, name string, force bool, stdout, stderr io.Writer) error {
+	if hubURL == "" || token == "" {
+		return errors.New("需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）")
+	}
+	u, base, err := parseHubURL(hubURL)
+	if err != nil {
+		return err
+	}
+	origin := u.Scheme + "://" + u.Host
+	if name == "" {
+		name = cfg.MachineID // 主机名
+	}
+	if err := checkDisplayName(name); err != nil {
+		return fmt.Errorf("名字 %w（用 --name 另取一个）", err)
+	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		fmt.Fprintln(stderr, "警告: hub 地址是 http://，明文传输密钥，只适合本机或可信内网；公网请用 https://")
+	}
+	if _, err := os.Lstat(cfg.MachinePath); err == nil && !force {
+		return fmt.Errorf("%s 已存在，本机已接入过；要换 hub 或重新接入请加 --force", cfg.MachinePath)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := cfg.EnsureDirs(); err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]string{"token": token, "name": name, "home_dir": cfg.HomeDir}) // map[string]string 编码不会失败
+	client := &http.Client{Timeout: enrollTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Post(base+"/api/enroll", "application/json", bytes.NewReader(body))
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err // 去掉 *url.Error 带的完整地址，只留原因
+		}
+		return fmt.Errorf("连接 hub %s 失败: %w", origin, err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, enrollReplyMax+1))
+	if err != nil {
+		return fmt.Errorf("读 hub %s 的答复: %w", origin, err)
+	}
+	switch {
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		return fmt.Errorf("hub 返回重定向（HTTP %d），不跟随：接入码与密钥只发给 --hub 指定的地址，请把 --hub 改成最终地址", resp.StatusCode)
+	case resp.StatusCode != http.StatusOK:
+		return fmt.Errorf("hub 拒绝接入（HTTP %d）%s", resp.StatusCode, hubErrorText(data, token))
+	}
+	var out struct {
+		MachineID string `json:"machine_id"`
+		Secret    string `json:"secret"`
+	}
+	if len(data) > enrollReplyMax || json.Unmarshal(data, &out) != nil || out.MachineID == "" || out.Secret == "" || checkDisplayName(out.MachineID) != nil {
+		return errors.New("hub 的答复不完整或不合规，没有写 machine.json")
+	}
+	m := agent.MachineConfig{HubURL: base, MachineID: out.MachineID, Secret: out.Secret, Name: name}
+	if err := agent.SaveMachine(cfg.MachinePath, m); err != nil {
+		return fmt.Errorf("写 %s: %w", cfg.MachinePath, err)
+	}
+	fmt.Fprintf(stdout, "已接入 hub %s，机器 id %s，名字 %s\n已写入 %s；重启 railse agent run 后生效\n", origin, out.MachineID, name, cfg.MachinePath)
+	return nil
+}
+
+// parseHubURL 校验 --hub：只收 http、https，要有主机名，不带 user:pass（凭据只走接入码与机器密钥）、查询与片段。
+// 返回解析结果与去掉末尾 / 的基地址。错误信息不带原文（里面可能有密码）。
+func parseHubURL(raw string) (*url.URL, string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" || u.Hostname() == "" {
+		return nil, "", errors.New("--hub 必须是 http:// 或 https:// 开头、带主机名的地址")
+	}
+	if u.User != nil {
+		return nil, "", errors.New("--hub 不能带用户名或密码")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, "", errors.New("--hub 不能带 ? 查询或 # 片段")
+	}
+	return u, u.Scheme + "://" + u.Host + strings.TrimRight(u.EscapedPath(), "/"), nil
+}
+
+// isLoopbackHost 报告主机是否只在本机：localhost、*.localhost（RFC 6761）、127.0.0.0/8、::1。
+func isLoopbackHost(host string) bool {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	a, err := netip.ParseAddr(h)
+	return err == nil && a.Unmap().IsLoopback()
+}
+
+// checkDisplayName 按 hub 的口径检查名字（机器名、hub 发来的机器 id）：至多 machineNameMax 字节，合法 UTF-8，
+// 不含控制字符与不可见的格式字符（放行 ZWNJ、ZWJ）。
+func checkDisplayName(s string) error {
+	if len(s) > machineNameMax {
+		return fmt.Errorf("至多 %d 字节", machineNameMax)
+	}
+	if !utf8.ValidString(s) {
+		return errors.New("必须是合法 UTF-8")
+	}
+	for _, c := range s {
+		if unicode.IsControl(c) || (unicode.Is(unicode.Cf, c) && c != 0x200c && c != 0x200d) {
+			return errors.New("不能含控制字符或不可见的格式字符")
+		}
+	}
+	return nil
+}
+
+// hubErrorText 取 hub 报错 JSON 里的 error 文案，去掉控制字符与格式字符、把接入码换成占位、截到 hubTextMax 字符，
+// 前面加“: ”；不是 JSON 或没有文案时返回空串（不转述任意响应体）。
+func hubErrorText(data []byte, token string) string {
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(data, &e) != nil || e.Error == "" {
+		return ""
+	}
+	msg := strings.Map(func(c rune) rune {
+		if unicode.IsControl(c) || unicode.Is(unicode.Cf, c) {
+			return -1
+		}
+		return c
+	}, strings.ToValidUTF8(e.Error, ""))
+	msg = strings.ReplaceAll(msg, token, "<接入码>")
+	if r := []rune(msg); len(r) > hubTextMax {
+		msg = string(r[:hubTextMax]) + "…"
+	}
+	return ": " + msg
+}
+
+// hubOrigin 给出日志里显示的 hub 地址：只有 scheme://host。
+func hubOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "（无效的 hub 地址）"
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 // runAgentServe 跑守护进程直到 ctx 取消。SIGHUP 重载规则。
 // 日志只写路径与计数，绝不打印环境变量。
 func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stderr io.Writer) error {
@@ -107,6 +275,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 	if err := cfg.EnsureDirs(); err != nil {
 		return err
 	}
+	cfg.AgentVersion = version
 	logFile, err := os.OpenFile(cfg.LogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -130,7 +299,27 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 		return err
 	}
 	defer audit.Close()
+	// machine.json 决定接不接 hub：不存在就与第 2 份计划一样本地闭环；读不了或损坏就拒绝启动，
+	// 不静默退回本地模式（用户会以为接着 hub）。LoadMachine 的错误不带密钥。
+	var machine *agent.MachineConfig
+	switch m, err := agent.LoadMachine(cfg.MachinePath); {
+	case errors.Is(err, os.ErrNotExist):
+		logger.Printf("未接入 hub（没有 %s），引擎定不了的请求交回终端", cfg.MachinePath)
+	case err != nil:
+		logger.Printf("读 machine.json 失败，拒绝启动: %v", err)
+		return fmt.Errorf("读 machine.json 失败，拒绝启动（修好它、删掉它改回本地模式，或 railse agent enroll --force 重新接入）: %w", err)
+	default:
+		machine = &m
+		cfg.MachineID = m.MachineID // hub 学到的 scope: machine 规则用 hub 的机器 id，本机引擎必须一致
+	}
 	srv := agent.New(cfg, rules, audit, agent.LocalDecider{}, logger)
+	var client *agent.HubClient
+	if machine != nil {
+		// 决定来源与审计转发都要在 Listen 之前装好
+		client = agent.NewHubClient(cfg, *machine, rules, srv.Pending(), srv.SetHubPaused, logger)
+		srv.SetDecider(&agent.HubDecider{Client: client, Grace: cfg.HubGrace, Log: logger})
+		srv.SetAuditSink(client)
+	}
 	if err := srv.Listen(); err != nil {
 		return err
 	}
@@ -139,6 +328,34 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 	if err := srv.LoadState(); err != nil {
 		logger.Printf("恢复暂停状态失败，已按暂停启动（railse agent resume 可恢复）: %v", err)
 	}
+	if machine == nil && srv.HubPaused() {
+		// 取消接入后不应残留 hub 暂停：没有 hub 能再解除它，本机会一直暂停
+		logger.Printf("未接入 hub，清除上次残留的 hub 暂停")
+		if err := srv.SetHubPaused(false); err != nil {
+			logger.Printf("清除残留的 hub 暂停: %v", err)
+		}
+	}
+	// hub 客户端在 LoadState 之后才开始收帧：welcome 设的 hub 暂停不能被磁盘上的旧值盖掉。它与 Serve 共用同一个关停 ctx
+	// （派生自 ctx），返回前等它退出：它会写审计、改 state.json。被 hub 以 401 停用时 Run 自己返回并记日志（要重新 enroll），
+	// 这里不当致命错误、也不重启：HubDecider 见停用即交回终端，守护进程照常服务。
+	hubCtx, stopHub := context.WithCancel(ctx)
+	hubDone := make(chan struct{})
+	if client != nil {
+		logger.Printf("接入 hub %s，机器 %s", hubOrigin(machine.HubURL), machine.MachineID)
+		go func() {
+			defer close(hubDone)
+			client.Run(hubCtx)
+			if hubCtx.Err() == nil {
+				logger.Printf("hub 客户端已停止；守护进程继续运行，引擎定不了的请求一律交回终端")
+			}
+		}()
+	} else {
+		close(hubDone)
+	}
+	defer func() {
+		stopHub()
+		<-hubDone
+	}()
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
