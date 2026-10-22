@@ -25,6 +25,9 @@ import (
 // Run 仍尽力收尾后才返回它；那些还在跑的可能继续碰存储，调用方不宜随即关库（进程即将退出时直接退出即可）。
 var ErrShutdownTimeout = errors.New("hub 关停超时：仍有 WebSocket 处理或 webhook 回调没有退出")
 
+// ErrListen 表示 Run 没能开始监听（端口被占、地址无效等）：什么都还没开始跑，调用方可以照常关库。
+var ErrListen = errors.New("hub 监听失败")
+
 // Config 是 hub 的配置。
 type Config struct {
 	Dir           string
@@ -219,13 +222,14 @@ func (s *Server) Handler() http.Handler { return s.mux }
 // 长连接与在途请求都能看到。两种情况走同一套关停，各步共用一个截止时间（shutdownTimeout）：先等在途请求，超时就强制断开；
 // 再等 WebSocket handler（/ws/agent、/ws/client）全部退出；然后停下过期扫描；最后取消在跑的 webhook 回调并等它们退出
 // （见 stopCallbacks）。截止时间被前面的步骤耗尽时，回调仍有 callbackStopGrace 的收尾宽限，总关停不超过
-// shutdownTimeout + callbackStopGrace。返回 nil 时 WebSocket 处理与回调都已退出，调用方可以关库；服务自己出错结束时返回
-// 那个错误；有没等到退出的，收尾完照样返回，错误满足 errors.Is(err, ErrShutdownTimeout)。
+// shutdownTimeout + callbackStopGrace。返回 nil 时 WebSocket 处理与回调都已退出，调用方可以关库；没能开始监听时立即返回
+// 满足 errors.Is(err, ErrListen) 的错误（什么都没开始跑，也可以关库）；服务自己出错结束时返回那个错误；
+// 有没等到退出的，收尾完照样返回，错误满足 errors.Is(err, ErrShutdownTimeout)。
 // （HTTP 收尾超时被强制断开的普通请求不在其列：它们碰到已关的库只会得到错误。）
 func (s *Server) Run(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrListen, err) // net 的错误已带地址
 	}
 	return s.serve(ctx, ln)
 }

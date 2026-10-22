@@ -400,7 +400,11 @@ func TestHubRunCommand(t *testing.T) {
 	// 中途失败时也要停下 hub 并等它退出，再删数据目录（后登记先执行）
 	t.Cleanup(func() {
 		cancel()
-		<-exited
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			t.Error("hub run 没有在取消后 10 秒内退出")
+		}
 	})
 	waitUntil(t, func() bool {
 		resp, err := http.Get(base + "/api/status")
@@ -495,8 +499,8 @@ func TestDefaultHubDir(t *testing.T) {
 	}
 }
 
-// 修复轮 1、收尾修复 a：serveHub 返回任何错误（关停超时，或 HTTP 服务自己出错结束）时 runHubServe 不关库（还在跑的处理
-// 可能碰存储，进程随即退出）、记日志并把错误交上去；正常结束（nil）时才关库。
+// 修复轮 1、收尾修复 a：serveHub 返回关停超时或 HTTP 服务自己出错结束时 runHubServe 不关库（还在跑的处理可能碰存储，
+// 进程随即退出）、记日志并把错误交上去；正常结束（nil）与监听失败（什么都没开始跑）时照常关库。
 func TestHubRunServeShutdownTimeout(t *testing.T) {
 	oldServe, oldOpen := serveHub, openHubStore
 	t.Cleanup(func() { serveHub, openHubStore = oldServe, oldOpen })
@@ -509,6 +513,7 @@ func TestHubRunServeShutdownTimeout(t *testing.T) {
 		{"关停超时", fmt.Errorf("收尾: %w", hub.ErrShutdownTimeout), []string{"关停超时", "不关数据库"}, "hub 已停止"},
 		{"服务出错", errors.New("accept: 监听器坏了"), []string{"监听器坏了", "不关数据库"}, "hub 已停止"},
 		{"正常结束", nil, []string{"hub 已停止"}, "不关数据库"},
+		{"监听失败", fmt.Errorf("%w: listen tcp 127.0.0.1:1: 端口被占", hub.ErrListen), []string{"监听失败", "端口被占"}, "不关数据库"},
 	} {
 		var opened *store.Store
 		openHubStore = func(path string) (*store.Store, error) {
@@ -538,12 +543,13 @@ func TestHubRunServeShutdownTimeout(t *testing.T) {
 		if opened == nil {
 			t.Fatalf("%s: 没有打开库", c.name)
 		}
+		keepOpen := c.err != nil && !errors.Is(c.err, hub.ErrListen)
 		werr := opened.SetSetting("probe", "1")
-		if c.err != nil && werr != nil {
+		if keepOpen && werr != nil {
 			t.Fatalf("%s: 出错返回时不应关库: %v", c.name, werr)
 		}
-		if c.err == nil && werr == nil {
-			t.Fatalf("%s: 正常结束应关库", c.name)
+		if !keepOpen && werr == nil {
+			t.Fatalf("%s: 应关库", c.name)
 		}
 	}
 }

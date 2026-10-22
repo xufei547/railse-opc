@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -133,13 +134,36 @@ func mustAudit(t *testing.T, path, what string, parts ...string) {
 	}
 }
 
-// rulesFromHub 等本机 rules.yaml 被 hub 下发的规则覆盖：文件头注明来源，且含 ruleID。
-func rulesFromHub(t *testing.T, cfg agent.Config, ruleID string) {
+// rulesFromHub 等 hub 当前版本的规则在本机生效，再核对 rules.yaml 已被覆盖：文件头注明来源，且含 ruleID。
+// 生效的信号是 agent.log 里的“规则更新到版本 N，”：它在 Rules.Replace 换好引擎之后才写。不能拿 rules.yaml 的内容当信号：
+// Replace 先写缓存文件再换引擎，文件已新而引擎仍旧的窗口里跑钩子，请求会按旧规则进 hub 等决定。
+func rulesFromHub(t *testing.T, h *testHub, cfg agent.Config, ruleID string) {
 	t.Helper()
+	v, err := h.st.RulesVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := fmt.Sprintf("规则更新到版本 %d，", v)
 	waitUntil(t, func() bool {
-		b, _ := os.ReadFile(cfg.RulesPath)
-		return strings.HasPrefix(string(b), "# 由 hub 下发，版本 ") && strings.Contains(string(b), "id: "+ruleID+"\n")
+		b, _ := os.ReadFile(cfg.LogPath)
+		return strings.Contains(string(b), applied)
 	})
+	b, _ := os.ReadFile(cfg.RulesPath)
+	if !strings.HasPrefix(string(b), fmt.Sprintf("# 由 hub 下发，版本 %d。", v)) || !strings.Contains(string(b), "id: "+ruleID+"\n") {
+		t.Fatalf("本机 rules.yaml 应被 hub 下发的版本 %d 覆盖并含 %s:\n%s", v, ruleID, b)
+	}
+}
+
+// runHookTimed 跑钩子并等答复，10 秒内没有就失败：本地应立即定下的请求若误进 hub 等决定，测试快速失败而不是挂到钩子期限。
+func runHookTimed(t *testing.T, stdin string, args ...string) (string, int) {
+	t.Helper()
+	select {
+	case r := <-runHookAsync(t, stdin, args...):
+		return r.out, r.code
+	case <-time.After(10 * time.Second):
+		t.Fatal("钩子 10 秒内没有拿到答复")
+	}
+	return "", 0
 }
 
 // hub + 守护进程 + 钩子在一个进程里跑完整条链路：引擎定不了 → hub 登记 → 手机上决定 → 钩子拿到答复。
@@ -199,7 +223,7 @@ func TestEndToEndHubApproval(t *testing.T) {
 		`"request_id":"`+p.ID+`"`, `"state":"denied"`, `"reason":"已在手机上拒绝"`, `"note":"`+denyNote+`"`)
 
 	// 3. 自动放行的记录异步上报到 hub，hub 的 requests 里有历史行
-	o, _, c := runHookWith(t, sampleWithCwd(t, "claude/2.1.280/PermissionRequest.interactive.json", repo), "claude", "--socket", cfg.SocketPath)
+	o, c := runHookTimed(t, sampleWithCwd(t, "claude/2.1.280/PermissionRequest.interactive.json", repo), "claude", "--socket", cfg.SocketPath)
 	if c != 0 || !strings.Contains(o, `"behavior":"allow"`) {
 		t.Fatalf("touch 应本地放行: %d %q", c, o)
 	}
@@ -209,7 +233,7 @@ func TestEndToEndHubApproval(t *testing.T) {
 	})
 
 	// 4. Gemini 的请求不进 hub：直接交回原生确认框，hub 没有新的 pending，只有审计上报补的历史行
-	o, _, c = runHookWith(t, sampleWithCommand(t, "gemini/0.65.0/BeforeTool.json", repo, "git push origin main"), "gemini", "--socket", cfg.SocketPath)
+	o, c = runHookTimed(t, sampleWithCommand(t, "gemini/0.65.0/BeforeTool.json", repo, "git push origin main"), "gemini", "--socket", cfg.SocketPath)
 	if c != 0 || o != "" {
 		t.Fatalf("Gemini 应不作决定: %d %q", c, o)
 	}
@@ -234,8 +258,8 @@ func TestEndToEndHubApproval(t *testing.T) {
 	if !strings.HasPrefix(learnedID, "learned-") {
 		t.Fatalf("批准并记住应学到 learned 规则: %q", learnedID)
 	}
-	rulesFromHub(t, cfg, learnedID)
-	o, _, c = runHookWith(t, npmInstall, "claude", "--socket", cfg.SocketPath)
+	rulesFromHub(t, h, cfg, learnedID)
+	o, c = runHookTimed(t, npmInstall, "claude", "--socket", cfg.SocketPath)
 	if c != 0 || !strings.Contains(o, `"behavior":"allow"`) {
 		t.Fatalf("学到规则后同一命令应本地放行: %d %q", c, o)
 	}
@@ -263,8 +287,8 @@ func TestEndToEndHubApproval(t *testing.T) {
 		denyRule.Match.Payload != policy.PayloadShell || denyRule.Match.CommandRegex != "^git push origin main$" || denyRule.Match.Risk != nil {
 		t.Fatalf("拒绝并记住应是 user 来源、锚定整条命令的 deny: %q %+v", denyID, denyRule)
 	}
-	rulesFromHub(t, cfg, denyID)
-	o, _, c = runHookWith(t, gitPush, "claude", "--socket", cfg.SocketPath)
+	rulesFromHub(t, h, cfg, denyID)
+	o, c = runHookTimed(t, gitPush, "claude", "--socket", cfg.SocketPath)
 	if c != 0 || !strings.Contains(o, `"behavior":"deny"`) {
 		t.Fatalf("记住的拒绝应本地生效: %d %q", c, o)
 	}
@@ -279,8 +303,8 @@ func TestEndToEndHubApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.srv.PushRulesForTest()
-	rulesFromHub(t, cfg, "deny-rm")
-	o, _, c = runHookWith(t, sampleWithCommand(t, "claude/2.1.280/PermissionRequest.json", repo, "rm x"), "claude", "--socket", cfg.SocketPath)
+	rulesFromHub(t, h, cfg, "deny-rm")
+	o, c = runHookTimed(t, sampleWithCommand(t, "claude/2.1.280/PermissionRequest.json", repo, "rm x"), "claude", "--socket", cfg.SocketPath)
 	if c != 0 || !strings.Contains(o, `"behavior":"deny"`) {
 		t.Fatalf("hub 下发的 deny 应生效: %d %q", c, o)
 	}
@@ -341,7 +365,7 @@ func TestEndToEndHubUnreachable(t *testing.T) {
 	repo := filepath.Join(dir, "repo")
 	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
 	start := time.Now()
-	o, _, c := runHookWith(t, sampleWithCwd(t, "claude/2.1.280/PermissionRequest.json", repo), "claude", "--socket", cfg.SocketPath)
+	o, c := runHookTimed(t, sampleWithCwd(t, "claude/2.1.280/PermissionRequest.json", repo), "claude", "--socket", cfg.SocketPath)
 	if c != 0 || o != "" {
 		t.Fatalf("连不上 hub 应交回终端: %d %q", c, o)
 	}

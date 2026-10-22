@@ -1485,3 +1485,33 @@ func TestServeEndedStillShutsDown(t *testing.T) {
 		waitFor(t, "handler 退出", func() bool { return srv.ws.count() == 0 })
 	}
 }
+
+// 修复轮 1：监听失败（端口被占等）时 Run 立即返回满足 ErrListen 的错误，什么都没开始跑，调用方可以照常关库。
+func TestRunReportsListenFailure(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := DefaultConfig(dir)
+	cfg.Listen = busy.Addr().String()
+	var logs syncBuf
+	srv, err := New(cfg, st, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = srv.Run(context.Background())
+	if !errors.Is(err, ErrListen) || errors.Is(err, ErrShutdownTimeout) || !strings.Contains(err.Error(), cfg.Listen) {
+		t.Fatalf("端口被占时应返回 ErrListen 并带上地址: %v", err)
+	}
+}

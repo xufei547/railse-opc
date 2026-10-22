@@ -299,10 +299,14 @@ func runHubServe(ctx context.Context, cfg hub.Config, foreground bool, stderr io
 		p := proxyFlag(cfg.TrustedProxies)
 		logger.Printf("可信代理: %s", p.String())
 	}
-	// Run 返回 nil 时在跑的 WebSocket 处理与 webhook 回调都已退出，随后关库是安全的。返回任何错误（没在时限内等到它们退出的
-	// ErrShutdownTimeout，或 HTTP 服务自己出错结束）都不关库：还在跑的处理可能碰存储，进程随即退出，库由退出收拾。
+	// Run 返回 nil 时在跑的 WebSocket 处理与 webhook 回调都已退出，随后关库是安全的；监听失败（ErrListen）时什么都没开始跑，
+	// 也照常关库。其余错误（没在时限内等到它们退出的 ErrShutdownTimeout，或 HTTP 服务自己出错结束）都不关库：
+	// 还在跑的处理可能碰存储，进程随即退出，库由退出收拾。
 	err = serveHub(ctx, srv)
 	switch {
+	case errors.Is(err, hub.ErrListen):
+		logger.Printf("监听失败: %v", err)
+		return err
 	case errors.Is(err, hub.ErrShutdownTimeout):
 		closeStore = false
 		logger.Printf("hub 关停超时：仍有连接处理或回调没退出，不关数据库，进程随即退出: %v", err)

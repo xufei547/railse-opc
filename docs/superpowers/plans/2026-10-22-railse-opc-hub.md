@@ -6079,7 +6079,8 @@ func TestEndToEndHubApproval(t *testing.T) {
 		t.Fatal("钩子没有拿到决定")
 	}
 	waitUntil(t, func() bool { r, _ := h.st.GetRequest(pending[0].ID); return r.State == "approved" && r.DeliveredAt != nil })
-	if !auditHas(t, cfg.AuditPath, `"state":"approved"`, `"decided_by":"user"`, `"reason":"手机批准"`) {
+	// 钩子拿固定文案“已在手机上批准”，备注只在 note（2026-10-22 用户决定 C 修订）
+	if !auditHas(t, cfg.AuditPath, `"state":"approved"`, `"decided_by":"user"`, `"reason":"已在手机上批准"`, `"note":"手机批准"`) {
 		b, _ := os.ReadFile(cfg.AuditPath)
 		t.Fatalf("本机审计应记 approved/user:\n%s", b)
 	}
@@ -6186,7 +6187,7 @@ Expected: 全部 PASS。`TestEndToEndHubApproval` 约 3 到 5 秒（审计批量
    ```
    目录与文件：`~/.railse-hub/`（0700）、`hub.db`（0600，SQLite WAL）、`hub.log`（0600）。TLS 由反向代理（Caddy/nginx）终止，加 `--secure-cookies`；第 5 份计划提供内置 ACME。
 3. **接入一台机器**：hub 上 `railse hub token` → 机器上 `railse agent enroll --hub https://… --token …` → 重启 `railse agent run`。`machine.json` 的内容与权限；吊销：`DELETE /api/machines/{id}`（网页在第 4 份）。
-4. **接入后行为**：规则以 hub 为准，本机 `rules.yaml` 只是缓存（文件头有说明），`railse agent reload` 仍可临时加载本机改动，下次下发会覆盖；总开关以 hub 为准，`railse agent pause` 只在下次重连前有效；连不上 hub 时等 30 秒后交回终端（审计 `hub_unreachable`）；Gemini 的请求永远不进 hub。
+4. **接入后行为**：规则以 hub 为准，本机 `rules.yaml` 只是缓存（文件头有说明），`railse agent reload` 仍可临时加载本机改动，下次下发会覆盖；总开关生效值 = 本机 || hub，`railse agent pause` 只改本机一侧、不会被 hub 覆盖，也不反向同步（2026-10-22 用户决定 E 修订）；连不上 hub 时等 30 秒后交回终端（审计 `hub_unreachable`）；Gemini 的请求永远不进 hub。
 5. **API 一览表**：方法、路径、认证、用途（Task 9、10 的全部路由）；`/ws/client` 帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`；`/api/webhook/approvals` 的 body、回调格式（`POST callback_url`，`Authorization: Bearer <callback_token>`，body `{"id","action","note","decided_at"}`，3 次重试）。
 6. **安全要点**：存的全是哈希（机器密钥、会话 token、webhook 令牌、密码 argon2id）；cookie HttpOnly、SameSite=Lax；登录每 IP 每分钟 5 次；守护进程上报前脱敏；hub 不信任守护进程送来的路径与命令，只展示；`http://` 接入会警告。
 7. **故障排查**：`hub.log` 关键行；`GET /api/status` 的 `machines[].online`；守护进程 `agent.log` 里的“已连接 hub”“hub 连接结束”。
@@ -6263,6 +6264,6 @@ git commit -m "test: hub 与守护进程进程内端到端；docs: hub 说明、
 
 **已知取舍**
 - `railse hub password` 从标准输入读，终端下会回显；无回显方式写在文档里，不引入 `golang.org/x/term`。
-- 本机 `railse agent pause` 在接入 hub 后只到下次 `welcome`/`paused` 帧为止，不反向同步；第 4 份计划的网页提供 hub 侧暂停。
+- 本机 `railse agent pause` 在接入 hub 后只改本机一侧，生效值 = 本机 || hub，不会被 `welcome`/`paused` 帧覆盖，也不反向同步；第 4 份计划的网页提供 hub 侧暂停（2026-10-22 用户决定 E 修订）。
 - 守护进程重启后，hub 里它不再持有的 pending 全部按 `agent_restart` 取消，而不是让钩子重新等待：钩子进程早已随守护进程的 socket 关闭而得到 passthrough 或退出。
 - `TestHubRunServesAndStops` 用先占后放的端口，有极小的端口竞争概率；失败时重跑即可，不为此给 `Run` 加回调。
