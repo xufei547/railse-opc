@@ -291,11 +291,19 @@ func (s *Store) ApplyAgentFinal(machineID, id, state, decidedBy, note, ruleID st
 	return n == 1, nil
 }
 
-// MarkDelivered 记录决定已送到 machineID 的守护进程。只认该机器、已决定（approved、denied）的请求：
-// 对仍 pending 的回执不记，免得之后的决定不再补发；重复送达不覆盖第一次的时间。
-func (s *Store) MarkDelivered(machineID, id string) error {
-	_, err := s.db.Exec("UPDATE requests SET delivered_at = ? WHERE id = ? AND machine_id = ? AND state IN ('approved','denied') AND delivered_at IS NULL", Now(), id, machineID)
-	return err
+// MarkDelivered 记录决定已送到 machineID 的守护进程，返回是否真的更新了这一行（调用方据此推送送达变化）。
+// 只认该机器、已决定（approved、denied）的请求：对仍 pending 的回执不记，免得之后的决定不再补发；
+// 重复送达不覆盖第一次的时间（返回 false）。
+func (s *Store) MarkDelivered(machineID, id string) (bool, error) {
+	res, err := s.db.Exec("UPDATE requests SET delivered_at = ? WHERE id = ? AND machine_id = ? AND state IN ('approved','denied') AND delivered_at IS NULL", Now(), id, machineID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 // UndeliveredDecisions 列出已决定但未送达的请求，重连后补发。

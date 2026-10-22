@@ -190,6 +190,10 @@ func TestWebhookIngestAndCallback(t *testing.T) {
 		t.Fatalf("decide = %d", resp.StatusCode)
 	}
 	waitFor(t, "回调审计", func() bool { return len(callbackAudits(t, h.st, id)) == 1 })
+	// 终审 M2：回调成功记下送达时间后广播 request_updated，网页上的“已送达”随之更新
+	if f := waitDelivered(t, sub, id); f["machine_name"] != "" || f["state"] != "approved" {
+		t.Fatalf("送达后的推送应是请求视图: %+v", f)
+	}
 	calls := target.got()
 	if len(calls) != 1 {
 		t.Fatalf("应回调一次: %+v", calls)

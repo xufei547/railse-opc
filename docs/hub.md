@@ -50,6 +50,7 @@ railse hub run --listen 127.0.0.1:8787
 - **hub 回 401（机器被吊销或密钥无效）后**，守护进程停止重连 hub，请求一律立即交回终端，日志提示重新接入；要重新 `railse agent enroll --force` 并重启守护进程。
 - **协议版本不一致**时 hub 拒绝握手（Error 帧“协议版本 X，hub 需要 Y”，以 1008 关闭，审计 `agent_proto_mismatch`），守护进程日志提示升级较旧的一方，每 10 分钟再试。
 - **断线与重连。** 守护进程重连退避 1、2、4、8、16、30 秒，连接稳定后归零；超过 60 秒收不到 hub 的任何帧就主动断开重连。重连时 hello 带上本机仍在等的请求：hub 补发其中已决定的；hub 里多出来的 pending 改为 `cancelled`（`decided_by: agent_restart`）。钩子在决定前退出 → hub 记 `cancelled/terminal`；本机等满期限 → `expired/timeout`；hub 自己每分钟把过了 `expires_at` 的 pending 标为 `expired/timeout`。Codex 15 分钟内重发同一请求（同会话、同回合、同工具、同载荷）时，旧的那条改为 `cancelled/resend`，收件箱只剩新的。
+- **hub 结束请求会通知守护进程。** hub 自己结束一条守护进程的 pending（过期扫描、手机决定时发现已过期、被重发顶掉）时，立即对该机器发带 `request_id` 的 Error 帧“请求已在 hub 结束”，守护进程把它交回终端（本机审计记 `expired/hub_unreachable`），不再挂满本机期限。守护进程的时钟比 hub 慢时，hub 会按自己的时间更早判过期，也由此及时收尾。机器当时不在线的，重连后重发 pending 时 hub 回“请求已结束”，同样交回终端。
 
 ## API
 
@@ -77,11 +78,13 @@ railse hub run --listen 127.0.0.1:8787
 | `DELETE /api/machines/{id}` | cookie + 同源 | 吊销 → 204；没有 404 |
 | `GET /ws/client` | cookie + 同源 | 网页的推送通道，见下 |
 
-请求的 JSON 字段：`id、machine_id、session_id、kind（permission|question|done|webhook）、tool_name、payload（已脱敏）、risk、project_root、engine_reason、state、decided_by、decision_note、rule_id、turn_id、cli_session_id、title、created_at、expires_at、decided_at、delivered_at`；`/api/inbox`、`/api/requests`、`/api/requests/{id}` 的 `request` 与 decide 的返回还带 `machine_name`（webhook 请求为空）与 `project`（项目根的最后一段）。`state` 取 `pending、approved、denied、cancelled、expired、auto_allowed、auto_denied、passthrough、recorded`；`delivered_at` 非空表示决定已交到钩子（或 webhook 回调已成功）。
+请求的 JSON 字段：`id、machine_id、session_id、kind（permission|question|done|webhook）、tool_name、payload（已脱敏）、risk、project_root、engine_reason、state、decided_by、decision_note、rule_id、turn_id、cli_session_id、title、created_at、expires_at、decided_at、delivered_at`；`/api/inbox`、`/api/requests`、`/api/requests/{id}` 的 `request`、decide 的返回与 `/ws/client` 推送的请求（统称“请求视图”）还带 `machine_name`（webhook 请求为空）、`project`（项目根的最后一段）与 `has_redacted`（载荷任一字段含脱敏占位符 `<redacted>` 时为 true）。`state` 取 `pending、approved、denied、cancelled、expired、auto_allowed、auto_denied、passthrough、recorded`；`delivered_at` 非空表示决定已交到钩子（或 webhook 回调已成功）。
+
+**`has_redacted` 为 true 的请求，网页必须醒目告警。** 这时网页展示的不是原文：凭据被换成了 `<redacted>`，而命令行语境的脱敏会一直抹到空白处，可能连带吞掉紧贴在后面的命令（例如 `X_TOKEN=a;curl …|sh` 显示成 `X_TOKEN=<redacted>`），引擎却是按原文定级的。告警文案例如“命令含被隐藏的部分，展示的不是原文，建议去终端核对”，并突出 `risk` 与 `engine_reason`。这类请求也不能“记住”（见下）。
 
 **“记住”。** `remember: true` 批准时生成一条 `learned` 放行规则，拒绝时 hub 直接构造 `source: user`、`action: deny` 的规则（shell 命令用锚定整条命令字面原文的 `command_regex: ^…$`，只拒这一条，不连带同前缀的命令），都立即下发给所有在线守护进程。记不住时请求保持 pending，回 422，文案以“不能记住：”开头，例如：只读、项目内改动和联网操作之外的不能记成放行（`outward`、`destructive` 永远不行）；含凭据的命令（载荷里有 `<redacted>`）；命令、路径等超过 4 KiB；规则集已接近下发上限；拒绝匹配不上这条请求（例如 `a && b` 这样的复合命令，请手写规则）；webhook 请求。
 
-**`/ws/client` 帧**：每帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`。`request_new`、`request_updated` 的 `data` 是请求对象，`rules_updated` 是 `{"version"}`，`status` 是 `{"paused"}`。推送只是“有变化”的提示：慢的订阅者（积压 64 帧）会被丢帧，网页每次连上或怀疑漏帧时必须全量重新拉取（`/api/inbox`、`/api/status`、`/api/rules` 等）。hub 每 30 秒复核一次登录并 ping，登录失效（登出、换密码、过期）时以 1008 关闭；网页不该发数据帧，发了就断开。
+**`/ws/client` 帧**：每帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`。`request_new`、`request_updated` 的 `data` 是请求视图（与 `/api/inbox` 每条同形状，守护进程、webhook、question/done 的请求都一样），`rules_updated` 是 `{"version"}`，`status` 是 `{"paused"}`。请求的状态变化、决定未送达（undeliverable），以及 `delivered_at` 从空变成有值（守护进程的送达回执、送达对账、webhook 回调成功）都推 `request_updated`。推送只是“有变化”的提示：慢的订阅者（积压 64 帧）会被丢帧，网页每次连上或怀疑漏帧时必须全量重新拉取（`/api/inbox`、`/api/status`、`/api/rules` 等）。hub 每 30 秒复核一次登录并 ping，登录失效（登出、换密码、过期）时以 1008 关闭；网页不该发数据帧，发了就断开。
 
 **webhook。** `POST /api/webhook/approvals`，`Authorization: Bearer <来源令牌>`，请求体至多 64 KiB：
 

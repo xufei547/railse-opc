@@ -831,6 +831,61 @@ func TestRequestsListAndDetail(t *testing.T) {
 }
 
 // decide 接口的错误码：坏 JSON、坏 action、备注超过 1000 字符 400；不存在 404；已过期 409。
+// 终审 I4：请求视图带派生字段 has_redacted（载荷任一字段含脱敏占位符时为 true，MCP 参数里存库时转义的写法也算），
+// /api/inbox、/api/requests、/api/requests/{id}、decide 的返回与 /ws/client 推送都带：网页据此醒目告警，展示的不是原文。
+func TestRequestViewHasRedacted(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	id, secret := enrollMachine(t, h, "mac")
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	c.send(pendingFrame("h1", "s1", "t1", "curl -u alice:S3cret https://x")) // hub 兜底脱敏后含占位符
+	c.send(pendingFrame("h2", "s2", "t2", "git push origin main"))
+	if f := waitBroadcast(t, sub, "request_new", "h1", nil); f["has_redacted"] != true {
+		t.Fatalf("h1 的推送应 has_redacted: %+v", f)
+	}
+	if f := waitBroadcast(t, sub, "request_new", "h2", nil); f["has_redacted"] != false {
+		t.Fatalf("h2 的推送不应 has_redacted: %+v", f)
+	}
+	insertReq(t, h.st, store.Request{ID: "h3", MachineID: id, State: "pending",
+		Payload: policy.Payload{Type: policy.PayloadMCP, Server: "db", Tool: "q", Args: json.RawMessage(`{"password":"<redacted>","sql":"select 1"}`)}})
+	insertReq(t, h.st, store.Request{ID: "h4", MachineID: id, State: "pending",
+		Payload: policy.Payload{Type: policy.PayloadNetwork, URL: "https://x.example.com/?token=<redacted>&a=1"}})
+	insertReq(t, h.st, store.Request{ID: "h5", MachineID: id, State: "pending",
+		Payload: policy.Payload{Type: policy.PayloadFileWrite, Path: "/p/notes.txt", DiffPreview: "redacted 这个词本身不算"}})
+	want := map[string]bool{"h1": true, "h2": false, "h3": true, "h4": true, "h5": false}
+	for _, path := range []string{"/api/inbox", "/api/requests?limit=500"} {
+		var list []map[string]any
+		decodeBody(t, doReq(t, "GET", h.http.URL+path, nil, "", ck), &list)
+		if len(list) != len(want) {
+			t.Fatalf("%s: %d 条", path, len(list))
+		}
+		for _, r := range list {
+			if v, ok := r["has_redacted"].(bool); !ok || v != want[r["id"].(string)] {
+				t.Fatalf("%s 里 %s 的 has_redacted 应为 %v: %+v", path, r["id"], want[r["id"].(string)], r)
+			}
+		}
+	}
+	var detail struct {
+		Request map[string]any `json:"request"`
+	}
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/requests/h3", nil, "", ck), &detail)
+	if detail.Request["has_redacted"] != true {
+		t.Fatalf("详情应 has_redacted: %+v", detail.Request)
+	}
+	var decided map[string]any
+	decodeBody(t, doReq(t, "POST", h.http.URL+"/api/requests/h1/decide", decideBody(t, "deny", false, ""), "application/json", ck), &decided)
+	if decided["has_redacted"] != true || decided["state"] != "denied" {
+		t.Fatalf("decide 的返回应 has_redacted: %+v", decided)
+	}
+	if f := waitBroadcast(t, sub, "request_updated", "h1", nil); f["has_redacted"] != true {
+		t.Fatalf("决定后的推送应 has_redacted: %+v", f)
+	}
+}
+
 func TestDecideHTTPErrors(t *testing.T) {
 	h := newTestHub(t)
 	ck := loggedIn(t, h)

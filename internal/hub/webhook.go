@@ -196,7 +196,7 @@ func (s *Server) callbackWebhook(r store.Request) {
 }
 
 // runCallback 最多试 callbackAttempts 次，失败后等 callbackRetryWait 再试；只有 2xx 算成功。每条路径都清掉库里的回调令牌：
-//   - 成功：清令牌，deliver 时记送达时间，审计 webhook_callback ok:true。已拿到 2xx 就照常收尾，不管 hub 是否正在关停
+//   - 成功：清令牌，deliver 时记送达时间（真记下了就广播 request_updated），审计 webhook_callback ok:true。已拿到 2xx 就照常收尾，不管 hub 是否正在关停
 //     （Run 等回调退出后才返回，库还开着）；
 //   - 重试用尽：记日志、清令牌，审计 ok:false；
 //   - cbCtx 取消（hub 关停）：立即中止，见 callbackAborted。
@@ -224,8 +224,10 @@ func (s *Server) runCallback(id string, cb webhookCallback, body []byte, deliver
 		if err == nil {
 			s.clearCallbackToken(id)
 			if deliver {
-				if err := s.store.MarkDelivered(webhookMachineID, id); err != nil {
+				if updated, err := s.store.MarkDelivered(webhookMachineID, id); err != nil {
 					s.log.Printf("标记 webhook 请求 %s 已回调: %v", id, err)
+				} else if updated {
+					s.broadcastRequest(id)
 				}
 			}
 			s.audit(webhookMachineID, "system", id, "webhook_callback", map[string]any{"ok": true, "attempts": attempt, "target": target})

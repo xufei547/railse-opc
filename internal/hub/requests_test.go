@@ -69,6 +69,26 @@ func waitBroadcast(t *testing.T, sub chan []byte, kind, id string, skip func(cli
 	}
 }
 
+// waitDelivered 一直读到 data.id 为 id、delivered_at 非空的 request_updated 帧并返回它的 data（之前的帧跳过）。
+func waitDelivered(t *testing.T, sub chan []byte, id string) map[string]any {
+	t.Helper()
+	for {
+		if f := waitBroadcast(t, sub, "request_updated", id, nil); f["delivered_at"] != nil {
+			return f
+		}
+	}
+}
+
+// wantView 要求推送的 data 是请求视图（与 /api/inbox 同形状）：带 machine_name、project、has_redacted。
+func wantView(t *testing.T, what string, f map[string]any, machineName string) {
+	t.Helper()
+	_, hasProject := f["project"]
+	_, hasRedacted := f["has_redacted"]
+	if f["machine_name"] != machineName || !hasProject || !hasRedacted {
+		t.Fatalf("%s 的推送应是请求视图（machine_name %q、project、has_redacted）: %+v", what, machineName, f)
+	}
+}
+
 // quietHub 起一个 hub 并返回它的日志缓冲，用于要断言日志的用例。
 func quietHub(t *testing.T) (*testHub, *syncBuf) {
 	t.Helper()
@@ -669,6 +689,116 @@ func TestHubRedactsCredentialGaps(t *testing.T) {
 			t.Fatalf("不应含 %q: %s", s, events[0].Detail)
 		}
 	}
+}
+
+// 终审 M1：/ws/client 的 request_new、request_updated 对守护进程的请求一律推送请求视图（与 /api/inbox、webhook 请求同形状），
+// 不再推 store.Request：登记、重发、决定、取消、question/done、决定未送达都是。
+func TestClientPushUsesView(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	c.recv(5 * time.Second)
+	c.send(pendingFrame("v1", "s1", "t1", "npm run build"))
+	f := waitBroadcast(t, sub, "request_new", "v1", nil)
+	wantView(t, "登记", f, "mac")
+	if f["project"] != "p" || f["has_redacted"] != false {
+		t.Fatalf("登记的推送: %+v", f)
+	}
+	c.send(pendingFrame("v1", "s1", "t1", "npm run build")) // 重连后重发同一条
+	wantView(t, "重发", waitBroadcast(t, sub, "request_updated", "v1", nil), "mac")
+	if _, err := h.srv.Decide(DecideInput{RequestID: "v1", Action: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	wantView(t, "决定", waitBroadcast(t, sub, "request_updated", "v1", nil), "mac")
+	c.send(pendingFrame("v2", "s2", "t2", "git push"))
+	waitBroadcast(t, sub, "request_new", "v2", nil)
+	c.send(wire.Cancel{T: wire.TCancel, RequestID: "v2", Reason: "terminal"})
+	wantView(t, "取消", waitBroadcast(t, sub, "request_updated", "v2", nil), "mac")
+	sess := proto.Session{Tool: "claude", CLISessionID: "s3"}
+	c.send(auditFrame(t, agent.AuditEntry{TS: time.Now(), Kind: "done", Session: sess, State: "recorded", Message: "完成"}))
+	var doneID string
+	for doneID == "" {
+		var fr clientFrame
+		json.Unmarshal(nextBroadcast(t, sub), &fr)
+		if fr.Type == "request_new" && fr.Data["kind"] == "done" {
+			wantView(t, "done", fr.Data, "mac")
+			doneID, _ = fr.Data["id"].(string)
+		}
+	}
+	// 已决定未送达、守护进程重连后不再持有：记 undeliverable 并推送
+	c.close()
+	c = dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	wantView(t, "决定未送达", waitBroadcast(t, sub, "request_updated", "v1", nil), "mac")
+}
+
+// 终审 M2：送达时间真的更新了才推送 request_updated（delivered_at 非空）：守护进程的 delivered 回执、审计里的送达对账。
+func TestDeliveredBroadcast(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	c.send(pendingFrame("d1", "s1", "t1", "git push"))
+	waitBroadcast(t, sub, "request_new", "d1", nil)
+	if _, err := h.srv.Decide(DecideInput{RequestID: "d1", Action: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	if f := waitBroadcast(t, sub, "request_updated", "d1", nil); f["delivered_at"] != nil {
+		t.Fatalf("决定时还没送达: %+v", f)
+	}
+	c.recv(5 * time.Second) // decision
+	c.send(wire.Delivered{T: wire.TDelivered, RequestID: "d1"})
+	wantView(t, "送达回执", waitDelivered(t, sub, "d1"), "mac")
+
+	// 送达对账：本机审计记 approved、hub 未记送达
+	insertReq(t, h.st, store.Request{ID: "d2", MachineID: id, State: "approved", DecidedBy: "user"})
+	c.send(auditFrame(t, agent.AuditEntry{TS: time.Now(), RequestID: "d2", Kind: "permission", Session: proto.Session{Tool: "claude", CLISessionID: "s2"},
+		State: "approved", DecidedBy: "user"}))
+	wantView(t, "送达对账", waitDelivered(t, sub, "d2"), "mac")
+}
+
+// 终审 M3：hub 自己结束守护进程的 pending（过期扫描、决定时判过期、被重发顶掉）时，对该机器发带 request_id 的 Error 帧
+// “请求已在 hub 结束”，守护进程据此立即把请求交回终端，不必挂满本机期限。
+func TestHubEndedPendingNotifiesAgent(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	wantEnded := func(what, requestID string) {
+		t.Helper()
+		kind, b := c.recv(5 * time.Second)
+		var e wire.Error
+		wire.Unmarshal(b, &e)
+		if kind != wire.TError || e.RequestID != requestID || e.Message != "请求已在 hub 结束" {
+			t.Fatalf("%s：守护进程应收到 %s 的结束通知，得到 %s %+v", what, requestID, kind, e)
+		}
+	}
+	// 守护进程的时钟比 hub 慢：hub 按自己的时间早已过期
+	skewed := func(rid, sess string) wire.PendingRequest {
+		f := pendingFrame(rid, sess, "t1", "git push "+rid)
+		f.CreatedAt, f.DeadlineSeconds = time.Now().Add(-2*time.Hour).UTC(), 60
+		return f
+	}
+	c.send(skewed("x1", "s1"))
+	waitFor(t, "x1 登记", func() bool { _, err := h.st.GetRequest("x1"); return err == nil })
+	h.srv.expireDue(time.Now())
+	wantEnded("过期扫描", "x1")
+	c.send(skewed("x2", "s2"))
+	waitFor(t, "x2 登记", func() bool { _, err := h.st.GetRequest("x2"); return err == nil })
+	if _, err := h.srv.Decide(DecideInput{RequestID: "x2", Action: "allow"}); !errors.Is(err, errExpired) {
+		t.Fatalf("x2 应判过期: %v", err)
+	}
+	wantEnded("决定时判过期", "x2")
+	c.send(pendingFrame("x3", "s3", "t3", "touch a"))
+	waitFor(t, "x3 登记", func() bool { _, err := h.st.GetRequest("x3"); return err == nil })
+	c.send(pendingFrame("x4", "s3", "t3", "touch a"))
+	wantEnded("被重发顶掉", "x3")
 }
 
 // Gemini 的请求不进 hub 等待；请求 id 无效的拒收；都回带 request_id 的 Error 帧，不登记。

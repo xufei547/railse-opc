@@ -154,6 +154,50 @@ func TestHubDeciderWaitsForUserDecision(t *testing.T) {
 	})
 }
 
+// 终审 M3：hub 自己结束了请求（被重发顶掉、按 hub 的时钟判过期）时通知守护进程，等待中的 Decide 立即交回终端，
+// 不必挂满本机期限（这里给 Decide 的期限是 1 分钟，Grace 1 秒，连接一直在）。
+func TestHubDeciderReleasedWhenHubEndsRequest(t *testing.T) {
+	h := startHub(t)
+	m := enroll(t, h)
+	env := newClient(t, h, m, nil)
+	c, pending := env.c, env.pending
+	waitConnected(t, c)
+	d := &agent.HubDecider{Client: c, Grace: time.Second, Log: log.New(env.logs, "decider ", 0)}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	// 同一回合同一命令重发：旧的 r1 被 hub 标 cancelled/resend
+	pr1, pr2 := pendingFor("claude", "r1"), pendingFor("claude", "r2")
+	pending.Add(&pr1)
+	done1 := decideAsync(ctx, d, pr1)
+	waitHubState(t, h, "r1", "pending", "")
+	pending.Add(&pr2)
+	done2 := decideAsync(ctx, d, pr2)
+	waitHubState(t, h, "r1", "cancelled", store.DecidedByResend)
+	if r := waitDecide(t, done1, 5*time.Second, "被重发顶掉的请求应立即交回终端"); r.err != nil || !isUnreachable(r.out) {
+		t.Fatalf("r1 结论 = %+v %v", r.out, r.err)
+	}
+	// 守护进程的时钟比 hub 慢两小时：hub 按自己的时间判过期
+	pr3 := pendingFor("claude", "r3")
+	pr3.Req.Session.TurnID, pr3.Redacted.Command = "t3", "git push r3"
+	pr3.Created = time.Now().Add(-2 * time.Hour)
+	pr3.Deadline = pr3.Created.Add(time.Minute)
+	pending.Add(&pr3)
+	done3 := decideAsync(ctx, d, pr3)
+	waitHubState(t, h, "r3", "pending", "")
+	if _, err := h.srv.Decide(hub.DecideInput{RequestID: "r3", Action: "allow"}); !errors.Is(err, store.ErrNotPending) {
+		t.Fatalf("r3 应按 hub 的时钟判过期: %v", err)
+	}
+	if r := waitDecide(t, done3, 5*time.Second, "hub 判过期的请求应立即交回终端"); r.err != nil || !isUnreachable(r.out) {
+		t.Fatalf("r3 结论 = %+v %v", r.out, r.err)
+	}
+	if _, err := h.srv.Decide(hub.DecideInput{RequestID: "r2", Action: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	if r := waitDecide(t, done2, 5*time.Second, "r2 应拿到决定"); r.err != nil || r.out.Action != "allow" {
+		t.Fatalf("r2 结论 = %+v %v", r.out, r.err)
+	}
+}
+
 func TestHubDeciderCancelAndExpire(t *testing.T) {
 	h := startHub(t)
 	m := enroll(t, h)

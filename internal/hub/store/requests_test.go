@@ -95,8 +95,8 @@ func TestRequestLifecycle(t *testing.T) {
 	if len(und) != 1 {
 		t.Fatalf("未送达 = %+v", und)
 	}
-	if err := s.MarkDelivered(m.ID, "r1"); err != nil {
-		t.Fatal(err)
+	if updated, err := s.MarkDelivered(m.ID, "r1"); err != nil || !updated {
+		t.Fatalf("MarkDelivered = %v, %v", updated, err)
 	}
 	if und, _ := s.UndeliveredDecisions(m.ID); len(und) != 0 {
 		t.Fatal("送达后不应再列出")
@@ -182,8 +182,8 @@ func TestMarkDeliveredScopedAndOnce(t *testing.T) {
 	if err := s.SetRequestState("r1", "approved", "user", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkDelivered(m2.ID, "r1"); err != nil {
-		t.Fatal(err)
+	if updated, err := s.MarkDelivered(m2.ID, "r1"); err != nil || updated {
+		t.Fatalf("别的机器的回执不应更新行: %v, %v", updated, err)
 	}
 	if got, err := s.GetRequest("r1"); err != nil || got.DeliveredAt != nil {
 		t.Fatalf("别的机器不能标送达: %+v, %v", got, err)
@@ -191,8 +191,8 @@ func TestMarkDeliveredScopedAndOnce(t *testing.T) {
 	if und, err := s.UndeliveredDecisions(m1.ID); err != nil || len(und) != 1 {
 		t.Fatalf("应仍未送达: %+v, %v", und, err)
 	}
-	if err := s.MarkDelivered(m1.ID, "r1"); err != nil {
-		t.Fatal(err)
+	if updated, err := s.MarkDelivered(m1.ID, "r1"); err != nil || !updated {
+		t.Fatalf("本机的回执应更新行: %v, %v", updated, err)
 	}
 	if got, err := s.GetRequest("r1"); err != nil || got.DeliveredAt == nil {
 		t.Fatalf("本机送达后: %+v, %v", got, err)
@@ -202,8 +202,8 @@ func TestMarkDeliveredScopedAndOnce(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE requests SET delivered_at = ? WHERE id = ?", old, "r1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkDelivered(m1.ID, "r1"); err != nil {
-		t.Fatal(err)
+	if updated, err := s.MarkDelivered(m1.ID, "r1"); err != nil || updated {
+		t.Fatalf("重复送达不应更新行: %v, %v", updated, err)
 	}
 	if got, err := s.GetRequest("r1"); err != nil || got.DeliveredAt == nil || *got.DeliveredAt != old {
 		t.Fatalf("重复送达不应覆盖第一次时间: %+v, %v", got, err)
@@ -446,8 +446,8 @@ func TestMarkDeliveredOnlyDecided(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"r1", "r2"} {
-		if err := s.MarkDelivered(m.ID, id); err != nil {
-			t.Fatal(err)
+		if updated, err := s.MarkDelivered(m.ID, id); err != nil || updated {
+			t.Fatalf("%s 未决定的回执不应更新行: %v, %v", id, updated, err)
 		}
 		if got, err := s.GetRequest(id); err != nil || got.DeliveredAt != nil {
 			t.Fatalf("%s 未决定不应记送达: %+v, %v", id, got, err)
@@ -459,8 +459,8 @@ func TestMarkDeliveredOnlyDecided(t *testing.T) {
 	if und, err := s.UndeliveredDecisions(m.ID); err != nil || len(und) != 1 || und[0].ID != "r1" {
 		t.Fatalf("决定后应待补发: %+v, %v", und, err)
 	}
-	if err := s.MarkDelivered(m.ID, "r1"); err != nil {
-		t.Fatal(err)
+	if updated, err := s.MarkDelivered(m.ID, "r1"); err != nil || !updated {
+		t.Fatalf("决定后的回执应更新行: %v, %v", updated, err)
 	}
 	if got, err := s.GetRequest("r1"); err != nil || got.DeliveredAt == nil {
 		t.Fatalf("决定后应记送达: %+v, %v", got, err)

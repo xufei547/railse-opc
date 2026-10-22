@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"mime"
 	"net/http"
@@ -66,14 +68,32 @@ func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// requestView 是接口与网页看到的请求：请求本身（不含载荷哈希与 webhook 回调）加机器名与项目名。
+// requestView 是接口与网页看到的请求：请求本身（不含载荷哈希与 webhook 回调）加机器名、项目名与 has_redacted。
+// REST（/api/inbox、/api/requests、/api/requests/{id}、decide 的返回）与 /ws/client 的 request_new、request_updated 都用它。
+// HasRedacted 为 true 表示载荷里有被脱敏抹掉的部分：网页展示的不是原文（命令行语境的脱敏可能连带吞掉紧贴的后半截命令），
+// 必须醒目告警，建议去终端核对。
 type requestView struct {
 	store.Request
 	MachineName string `json:"machine_name"`
 	Project     string `json:"project"`
+	HasRedacted bool   `json:"has_redacted"`
 }
 
-// views 给请求配上机器名（每台机器只查一次；查不到时留空，读库出错记日志）与项目名。
+// payloadHasRedacted 报告库里的载荷有没有脱敏占位符。库里的载荷入库前都经 redact.Payload，字符串字段里的占位符是字面；
+// MCP 参数是原始 JSON，存库时 < > 被转义成 \u003c \u003e，两种写法都认。只做字面查找，不再跑脱敏正则（列表一次至多 500 条）。
+// 编码失败当作有（宁可多告警）。
+func payloadHasRedacted(p policy.Payload) bool {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(p); err != nil {
+		return true
+	}
+	b := buf.Bytes()
+	return bytes.Contains(b, []byte(redactedMark)) || bytes.Contains(b, []byte(`\u003credacted\u003e`))
+}
+
+// views 给请求配上机器名（每台机器只查一次；查不到时留空，读库出错记日志）、项目名与 has_redacted。
 func (s *Server) views(rs []store.Request) []requestView {
 	names := map[string]string{}
 	out := make([]requestView, 0, len(rs))
@@ -87,7 +107,7 @@ func (s *Server) views(rs []store.Request) []requestView {
 			}
 			names[r.MachineID] = name
 		}
-		out = append(out, requestView{Request: r, MachineName: name, Project: projectName(r.ProjectRoot)})
+		out = append(out, requestView{Request: r, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: payloadHasRedacted(r.Payload)})
 	}
 	return out
 }

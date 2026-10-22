@@ -152,14 +152,27 @@ func (s *Server) audit(machineID, actor, requestID, action string, detail any) {
 	}
 }
 
-// broadcastRequest 读出请求的当前行并广播 request_updated。
+// broadcastRequest 读出请求的当前行并广播 request_updated（请求视图，见 view）。
 func (s *Server) broadcastRequest(id string) {
 	r, err := s.store.GetRequest(id)
 	if err != nil {
 		s.log.Printf("读请求 %q: %v", clip(id), err)
 		return
 	}
-	s.clients.broadcast("request_updated", r)
+	s.clients.broadcast("request_updated", s.view(r))
+}
+
+// msgEndedByHub 是 hub 自己结束守护进程的 pending 时发给它的 Error 帧文案。
+const msgEndedByHub = "请求已在 hub 结束"
+
+// notifyEnded 在 hub 自己结束了守护进程的一条 pending（过期、被重发顶掉）后，对该机器发带 request_id 的 Error 帧：
+// 守护进程据此把请求立即交回终端，不必挂满本机期限（两端时钟不一致时 hub 可能早得多判过期）。经 send 的下发白名单；
+// 机器不在线时不发（它重连后重发 pending，pendingAgain 回“请求已结束”）。webhook 请求没有机器，不发。
+func (s *Server) notifyEnded(r store.Request) {
+	if r.Kind == "webhook" || r.MachineID == webhookMachineID {
+		return
+	}
+	s.agents.send(r.MachineID, wire.Error{T: wire.TError, RequestID: r.ID, Message: msgEndedByHub})
 }
 
 // settled 在一次状态迁移成功后写审计并广播。
@@ -238,12 +251,13 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 		case err == nil:
 			s.audit(m.ID, "system", old.ID, "cancelled_resend", map[string]string{"replaced_by": p.RequestID})
 			s.broadcastRequest(old.ID)
+			s.notifyEnded(old) // 旧的等待者（若还在）立即交回终端
 		case !errors.Is(err, store.ErrNotPending):
 			s.log.Printf("取消重发前的请求 %q: %v", old.ID, err)
 		}
 	}
 	s.audit(m.ID, "agent", r.ID, "request_pending", map[string]string{"risk": r.Risk, "tool": r.ToolName})
-	s.clients.broadcast("request_new", r)
+	s.clients.broadcast("request_new", s.view(r))
 }
 
 // pendingAgain 处理守护进程从连接 c 再次送来的、hub 已有的请求 id（重连后重发）。回的 Error 帧只发给 c
@@ -267,7 +281,7 @@ func (s *Server) pendingAgain(c *agentConn, r store.Request, p wire.PendingReque
 		s.log.Printf("机器 %s 重发的待决请求 %q 与库里的请求（%s）内容不符，拒收", m.ID, r.ID, r.State)
 		reject("请求内容不符")
 	case r.State == "pending":
-		s.clients.broadcast("request_updated", r)
+		s.clients.broadcast("request_updated", s.view(r))
 	case r.State == "approved" || r.State == "denied":
 		if c.wasResent(r.ID) {
 			return // 对齐时已在这条连接上补发过
@@ -325,10 +339,16 @@ func (s *Server) agentFinish(m store.Machine, id, state, decidedBy, note string)
 	s.settled(m.ID, "agent", id, state, decidedBy)
 }
 
-// onDelivered 记录决定已交给钩子。只认该机器、已决定未送达的请求（见 store.MarkDelivered）。
+// onDelivered 记录决定已交给钩子，真记下了送达时间时广播 request_updated。只认该机器、已决定未送达的请求
+// （见 store.MarkDelivered）。
 func (s *Server) onDelivered(m store.Machine, d wire.Delivered) {
-	if err := s.store.MarkDelivered(m.ID, d.RequestID); err != nil {
+	updated, err := s.store.MarkDelivered(m.ID, d.RequestID)
+	if err != nil {
 		s.log.Printf("标记送达 %q: %v", clip(d.RequestID), err)
+		return
+	}
+	if updated {
+		s.broadcastRequest(d.RequestID)
 	}
 }
 
@@ -403,7 +423,7 @@ func (s *Server) markUndeliverable(r store.Request) {
 		}
 	}
 	s.audit(r.MachineID, "system", r.ID, "undeliverable", map[string]string{"state": r.State})
-	s.clients.broadcast("request_updated", r)
+	s.clients.broadcast("request_updated", s.view(r))
 }
 
 // decisionFrame 把已决定的请求编成 decision 帧。
@@ -464,7 +484,7 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	} else {
 		s.sendDecision(r) // 未连接时留给重连对齐补发
 	}
-	s.clients.broadcast("request_updated", r)
+	s.clients.broadcast("request_updated", s.view(r))
 	return r, nil
 }
 
@@ -533,13 +553,16 @@ func (s *Server) machineRevoked(machineID string) (bool, error) {
 	return m.Revoked, nil
 }
 
-// settleExpired 在 hub 把请求 r（改状态前读出的行）判为过期后审计并广播；webhook 请求还要回调来源（deny，备注 expired）。
+// settleExpired 在 hub 把请求 r（改状态前读出的行）判为过期后审计并广播；webhook 请求还要回调来源（deny，备注 expired），
+// 守护进程的请求通知该机器（notifyEnded）。
 func (s *Server) settleExpired(r store.Request) {
 	s.settled(r.MachineID, "system", r.ID, "expired", "timeout")
 	if r.Kind == "webhook" {
 		r.State = "expired"
 		s.callbackWebhook(r)
+		return
 	}
+	s.notifyEnded(r)
 }
 
 // expireDue 把 expires_at 已到的 pending 改成 expired/timeout，审计并广播（webhook 请求还回调来源）：hub 自己执行过期，
@@ -655,7 +678,7 @@ func (s *Server) recordEvent(m store.Machine, e agent.AuditEntry, ts time.Time, 
 		return
 	}
 	if inserted {
-		s.clients.broadcast("request_new", r)
+		s.clients.broadcast("request_new", s.view(r))
 	}
 }
 
@@ -670,8 +693,11 @@ func (s *Server) applyAgentPermission(m store.Machine, e agent.AuditEntry, ts ti
 	switch e.State {
 	case "approved", "denied":
 		if found && existing.State == e.State && existing.DeliveredAt == nil {
-			if err := s.store.MarkDelivered(m.ID, e.RequestID); err != nil {
+			updated, err := s.store.MarkDelivered(m.ID, e.RequestID)
+			if err != nil {
 				s.log.Printf("对账送达 %q: %v", e.RequestID, err)
+			} else if updated {
+				s.broadcastRequest(e.RequestID)
 			}
 		}
 		return
