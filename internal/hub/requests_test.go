@@ -1,0 +1,818 @@
+package hub
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
+	"testing"
+	"time"
+	"unicode/utf8"
+
+	"github.com/railse/railse-opc/internal/agent"
+	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/railse/railse-opc/internal/policy"
+	"github.com/railse/railse-opc/internal/proto"
+)
+
+func pendingFrame(id, session, turn, cmd string) wire.PendingRequest {
+	return wire.PendingRequest{T: wire.TPending, RequestID: id,
+		Session:  proto.Session{Tool: "claude", CLISessionID: session, TurnID: turn, Cwd: "/p"},
+		ToolName: "Bash", Payload: policy.Payload{Type: policy.PayloadShell, Command: cmd, Cwd: "/p"},
+		Risk: "outward", ProjectRoot: "/p", EngineReason: "无规则命中", DeadlineSeconds: 86390, CreatedAt: time.Now().UTC()}
+}
+
+func contains(b []byte, s string) bool { return strings.Contains(string(b), s) }
+
+// nextBroadcast 读订阅通道的下一帧，5 秒超时。
+func nextBroadcast(t *testing.T, sub chan []byte) []byte {
+	t.Helper()
+	select {
+	case b := <-sub:
+		return b
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待广播超时")
+		return nil
+	}
+}
+
+// clientFrame 是广播给网页的帧。
+type clientFrame struct {
+	Type string         `json:"type"`
+	Data map[string]any `json:"data"`
+}
+
+// waitBroadcast 一直读到 data.id 为 id 的 kind 帧并返回它的 data；skip 非空时，期间每个跳过的帧都交给它检查。
+func waitBroadcast(t *testing.T, sub chan []byte, kind, id string, skip func(clientFrame)) map[string]any {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case b := <-sub:
+			var f clientFrame
+			if err := json.Unmarshal(b, &f); err != nil {
+				t.Fatalf("广播帧不是 JSON: %s", b)
+			}
+			if f.Type == kind && f.Data["id"] == id {
+				return f.Data
+			}
+			if skip != nil {
+				skip(f)
+			}
+		case <-deadline:
+			t.Fatalf("等待广播 %s %s 超时", kind, id)
+			return nil
+		}
+	}
+}
+
+// quietHub 起一个日志写进缓冲的 hub，用于会记日志的用例（不往测试输出里打噪音，也能断言日志）。
+func quietHub(t *testing.T) (*testHub, *syncBuf) {
+	t.Helper()
+	logs := &syncBuf{}
+	h := newTestHubWith(t, nil, func(s *Server) { s.log = log.New(logs, "", 0) })
+	return h, logs
+}
+
+// insertReq 直接往库里插一条请求。
+func insertReq(t *testing.T, st *store.Store, r store.Request) {
+	t.Helper()
+	if r.Kind == "" {
+		r.Kind = "permission"
+	}
+	if r.Payload.Type == "" {
+		r.Payload = policy.Payload{Type: policy.PayloadShell, Command: "echo " + r.ID}
+	}
+	if r.State != "pending" && r.State != "recorded" && r.DecidedAt == nil {
+		now := store.Now()
+		r.DecidedAt = &now
+	}
+	if err := st.InsertRequest(r); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func getReq(t *testing.T, st *store.Store, id string) store.Request {
+	t.Helper()
+	r, err := st.GetRequest(id)
+	if err != nil {
+		t.Fatalf("取请求 %s: %v", id, err)
+	}
+	return r
+}
+
+func auditActions(t *testing.T, st *store.Store, requestID string) []string {
+	t.Helper()
+	events, err := st.ListAudit(0, requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range events {
+		out = append(out, e.Action)
+	}
+	return out
+}
+
+func countOf(xs []string, x string) int {
+	n := 0
+	for _, v := range xs {
+		if v == x {
+			n++
+		}
+	}
+	return n
+}
+
+func ruleHits(t *testing.T, st *store.Store, id string) int {
+	t.Helper()
+	rules, err := st.ListRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range rules {
+		if x.ID == id {
+			return x.HitCount
+		}
+	}
+	t.Fatalf("没有规则 %s", id)
+	return 0
+}
+
+func auditFrame(t *testing.T, entries ...any) wire.Audit {
+	t.Helper()
+	a := wire.Audit{T: wire.TAudit}
+	for _, e := range entries {
+		if raw, ok := e.(json.RawMessage); ok {
+			a.Entries = append(a.Entries, raw)
+			continue
+		}
+		a.Entries = append(a.Entries, mustJSON(t, e))
+	}
+	return a
+}
+
+func TestPendingThenDecideDeliversToAgent(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second) // welcome
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+
+	c.send(pendingFrame("r1", "s1", "t1", "git push origin main"))
+	waitFor(t, "r1 登记", func() bool { n, _ := h.st.CountPending(); return n == 1 })
+	if msg := nextBroadcast(t, sub); !contains(msg, `"type":"request_new"`) || !contains(msg, "r1") {
+		t.Fatalf("应广播 request_new: %s", msg)
+	}
+	req, _ := h.st.GetRequest("r1")
+	if req.MachineID != id || req.State != "pending" || req.SessionID == "" || req.ExpiresAt == nil {
+		t.Fatalf("登记的请求: %+v", req)
+	}
+
+	got, err := h.srv.Decide(DecideInput{RequestID: "r1", Action: "allow", Note: "ok"})
+	if err != nil || got.State != "approved" || got.DecidedBy != "user" {
+		t.Fatalf("Decide = %+v, %v", got, err)
+	}
+	kind, b := c.recv(5 * time.Second)
+	var d wire.Decision
+	wire.Unmarshal(b, &d)
+	if kind != wire.TDecision || d.RequestID != "r1" || d.Action != "allow" || d.DecidedBy != "user" || d.Reason != "ok" {
+		t.Fatalf("守护进程应收到决定: %s %+v", kind, d)
+	}
+	if f := waitBroadcast(t, sub, "request_updated", "r1", nil); f["state"] != "approved" {
+		t.Fatalf("应广播决定后的请求: %+v", f)
+	}
+	c.send(wire.Delivered{T: wire.TDelivered, RequestID: "r1"})
+	waitFor(t, "r1 送达", func() bool { r, _ := h.st.GetRequest("r1"); return r.DeliveredAt != nil })
+	if _, err := h.srv.Decide(DecideInput{RequestID: "r1", Action: "deny"}); !errors.Is(err, store.ErrNotPending) {
+		t.Fatalf("二次决定应 ErrNotPending: %v", err)
+	}
+	if _, err := h.srv.Decide(DecideInput{RequestID: "r1", Action: "maybe"}); !errors.Is(err, errBadAction) {
+		t.Fatalf("坏 action: %v", err)
+	}
+	if _, err := h.srv.Decide(DecideInput{RequestID: "nope", Action: "allow"}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("不存在: %v", err)
+	}
+	if acts := auditActions(t, h.st, "r1"); countOf(acts, "request_pending") != 1 || countOf(acts, "allow") != 1 {
+		t.Fatalf("审计应有登记与决定: %v", acts)
+	}
+}
+
+func TestResendCancelsOld(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	c.send(pendingFrame("r1", "s1", "t1", "touch a"))
+	waitFor(t, "r1 登记", func() bool { n, _ := h.st.CountPending(); return n == 1 })
+	c.send(pendingFrame("r2", "s1", "t1", "touch a"))
+	waitFor(t, "r2 登记", func() bool { r, _ := h.st.GetRequest("r2"); return r.State == "pending" })
+	old, _ := h.st.GetRequest("r1")
+	if old.State != "cancelled" || old.DecidedBy != store.DecidedByResend {
+		t.Fatalf("旧请求应被标 resend: %+v", old)
+	}
+	if n, _ := h.st.CountPending(); n != 1 {
+		t.Fatalf("pending 应只剩一条, 得到 %d", n)
+	}
+	if acts := auditActions(t, h.st, "r1"); countOf(acts, "cancelled_resend") != 1 {
+		t.Fatalf("旧请求应记 cancelled_resend: %v", acts)
+	}
+}
+
+// 同 id 重发只广播不重复插入；cancel 的原因只认 terminal、shutdown，其余记 terminal；expired 记 timeout。
+func TestCancelExpiredAndDuplicatePending(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	c.send(pendingFrame("r1", "s1", "t1", "a"))
+	c.send(pendingFrame("r2", "s2", "t2", "b"))
+	c.send(pendingFrame("r3", "s3", "t3", "c"))
+	waitFor(t, "三条 pending", func() bool { n, _ := h.st.CountPending(); return n == 3 })
+	before := getReq(t, h.st, "r1")
+	c.send(pendingFrame("r1", "s1", "t1", "a")) // 重连后重发同 id
+	if f := waitBroadcast(t, sub, "request_updated", "r1", nil); f["state"] != "pending" {
+		t.Fatalf("重发同 id 应广播现有的行: %+v", f)
+	}
+	if n, _ := h.st.CountPending(); n != 3 {
+		t.Fatalf("同 id 重发不应重复插入, 得到 %d", n)
+	}
+	if after := getReq(t, h.st, "r1"); after.CreatedAt != before.CreatedAt || countOf(auditActions(t, h.st, "r1"), "request_pending") != 1 {
+		t.Fatalf("同 id 重发不应改动现有的行: %+v", after)
+	}
+	c.send(wire.Cancel{T: wire.TCancel, RequestID: "r1", Reason: "rm -rf /"})
+	c.send(wire.Expired{T: wire.TExpired, RequestID: "r2"})
+	c.send(wire.Cancel{T: wire.TCancel, RequestID: "r3", Reason: "shutdown"})
+	waitFor(t, "全部结束", func() bool { n, _ := h.st.CountPending(); return n == 0 })
+	r1, r2, r3 := getReq(t, h.st, "r1"), getReq(t, h.st, "r2"), getReq(t, h.st, "r3")
+	if r1.State != "cancelled" || r1.DecidedBy != "terminal" || r2.State != "expired" || r2.DecidedBy != "timeout" ||
+		r3.State != "cancelled" || r3.DecidedBy != "shutdown" {
+		t.Fatalf("r1=%+v r2=%+v r3=%+v", r1, r2, r3)
+	}
+	waitBroadcast(t, sub, "request_updated", "r3", nil)
+}
+
+// 守护进程只能动自己机器的请求：别的机器的同 id 待决请求忽略（不广播），cancel、expired、delivered 不生效。
+func TestAgentFramesScopedToMachine(t *testing.T) {
+	h, logs := quietHub(t)
+	idA, secretA := enrollMachine(t, h, "a")
+	idB, secretB := enrollMachine(t, h, "b")
+	a := dialAgent(t, h, secretA, wire.Hello{Proto: wire.Proto, MachineID: idA})
+	defer a.close()
+	a.recv(5 * time.Second)
+	b := dialAgent(t, h, secretB, wire.Hello{Proto: wire.Proto, MachineID: idB})
+	defer b.close()
+	b.recv(5 * time.Second)
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+
+	a.send(pendingFrame("r1", "s1", "t1", "a"))
+	a.send(pendingFrame("r2", "s2", "t2", "b"))
+	waitFor(t, "a 的两条 pending", func() bool { n, _ := h.st.CountPending(); return n == 2 })
+	if _, err := h.srv.Decide(DecideInput{RequestID: "r2", Action: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	b.send(pendingFrame("r1", "sx", "tx", "evil"))
+	b.send(wire.Cancel{T: wire.TCancel, RequestID: "r1", Reason: "terminal"})
+	b.send(wire.Expired{T: wire.TExpired, RequestID: "r1"})
+	b.send(wire.Delivered{T: wire.TDelivered, RequestID: "r2"})
+	b.send(pendingFrame("rb", "sb", "tb", "ok")) // 同一连接按序处理：它登记了，前面几帧也处理完了
+	waitBroadcast(t, sub, "request_new", "rb", func(f clientFrame) {
+		if f.Data["id"] == "r1" && f.Data["machine_id"] != idA {
+			t.Errorf("不应广播别的机器的同 id 请求: %+v", f)
+		}
+		if f.Type == "request_updated" && f.Data["id"] == "r1" {
+			t.Errorf("机器 b 的帧不应改动 r1: %+v", f)
+		}
+	})
+	r1, r2 := getReq(t, h.st, "r1"), getReq(t, h.st, "r2")
+	if r1.MachineID != idA || r1.State != "pending" || r1.Payload.Command != "a" {
+		t.Fatalf("r1 不应被机器 b 改动: %+v", r1)
+	}
+	if r2.DeliveredAt != nil {
+		t.Fatalf("机器 b 的送达回执不应记到 a 的请求上: %+v", r2)
+	}
+	if !strings.Contains(logs.String(), "同 id") {
+		t.Fatalf("应记日志: %q", logs.String())
+	}
+}
+
+func TestResyncOnReconnect(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	c.recv(5 * time.Second)
+	c.send(pendingFrame("r1", "s1", "t1", "a"))
+	c.send(pendingFrame("r2", "s2", "t2", "b"))
+	waitFor(t, "两条 pending", func() bool { n, _ := h.st.CountPending(); return n == 2 })
+	c.close()
+	waitFor(t, "断开", func() bool { return !h.srv.agents.connected(id) })
+	// 断线期间用户决定了 r1
+	if _, err := h.srv.Decide(DecideInput{RequestID: "r1", Action: "deny", Note: "no"}); err != nil {
+		t.Fatal(err)
+	}
+	// 重连：守护进程只还持有 r1，r2 已经随钩子消失
+	c2 := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id, Pending: []wire.PendingSummary{{RequestID: "r1", CreatedAt: time.Now()}}})
+	defer c2.close()
+	c2.recv(5 * time.Second) // welcome
+	kind, b := c2.recv(5 * time.Second)
+	var d wire.Decision
+	wire.Unmarshal(b, &d)
+	if kind != wire.TDecision || d.RequestID != "r1" || d.Action != "deny" || d.Reason != "no" {
+		t.Fatalf("重连后应补发 r1 的决定: %s %+v", kind, d)
+	}
+	r2, _ := h.st.GetRequest("r2")
+	if r2.State != "cancelled" || r2.DecidedBy != store.DecidedByAgentRestart {
+		t.Fatalf("守护进程不再持有的 pending 应被取消: %+v", r2)
+	}
+	if r1 := getReq(t, h.st, "r1"); r1.DeliveredAt != nil {
+		t.Fatalf("补发入队不等于送达: %+v", r1)
+	}
+}
+
+// 重连对齐：hub 多出的 pending 取消；已决定未送达的只补发守护进程仍持有的；不再持有的记一次 undeliverable 并广播，
+// 不标送达；再次对齐不重复记。
+func TestAgentHelloAlign(t *testing.T) {
+	h := newTestHub(t)
+	m, err := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := h.st.CreateMachine("o", store.RandomToken(), "/h")
+	delivered := store.Now()
+	insertReq(t, h.st, store.Request{ID: "p1", MachineID: m.ID, State: "pending"})
+	insertReq(t, h.st, store.Request{ID: "p2", MachineID: m.ID, State: "pending"})
+	insertReq(t, h.st, store.Request{ID: "d1", MachineID: m.ID, State: "approved", DecidedBy: "user", DecisionNote: "好"})
+	insertReq(t, h.st, store.Request{ID: "d2", MachineID: m.ID, State: "denied", DecidedBy: "user"})
+	insertReq(t, h.st, store.Request{ID: "d3", MachineID: m.ID, State: "approved", DecidedBy: "user", DeliveredAt: &delivered})
+	insertReq(t, h.st, store.Request{ID: "o1", MachineID: other.ID, State: "pending"})
+	c := newFakeConn(m.ID, 16)
+	h.srv.agents.register(c)
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	hello := wire.Hello{T: wire.THello, Proto: wire.Proto, MachineID: m.ID, Pending: []wire.PendingSummary{{RequestID: "p1"}, {RequestID: "d1"}, {RequestID: "d3"}, {RequestID: "o1"}}}
+
+	h.srv.onAgentHello(c, hello)
+	if p1, p2 := getReq(t, h.st, "p1"), getReq(t, h.st, "p2"); p1.State != "pending" || p2.State != "cancelled" || p2.DecidedBy != store.DecidedByAgentRestart {
+		t.Fatalf("p1=%+v p2=%+v", p1, p2)
+	}
+	if o1 := getReq(t, h.st, "o1"); o1.State != "pending" {
+		t.Fatalf("别的机器的请求不受影响: %+v", o1)
+	}
+	if len(c.out) != 1 {
+		t.Fatalf("只应补发 d1, 队列 %d 帧", len(c.out))
+	}
+	var d wire.Decision
+	if err := wire.Unmarshal(<-c.out, &d); err != nil || d.T != wire.TDecision || d.RequestID != "d1" || d.Action != "allow" || d.Reason != "好" || d.DecidedBy != "user" {
+		t.Fatalf("补发的决定: %+v, %v", d, err)
+	}
+	if acts := auditActions(t, h.st, "d2"); countOf(acts, "undeliverable") != 1 {
+		t.Fatalf("d2 应记一次 undeliverable: %v", acts)
+	}
+	if d2 := getReq(t, h.st, "d2"); d2.DeliveredAt != nil || d2.State != "denied" {
+		t.Fatalf("undeliverable 不标送达: %+v", d2)
+	}
+	waitBroadcast(t, sub, "request_updated", "d2", nil)
+	if acts := auditActions(t, h.st, "d1"); countOf(acts, "undeliverable") != 0 {
+		t.Fatalf("仍持有的不记 undeliverable: %v", acts)
+	}
+
+	h.srv.onAgentHello(c, hello)
+	if len(c.out) != 1 {
+		t.Fatalf("再次对齐仍只补发 d1, 队列 %d 帧", len(c.out))
+	}
+	if acts := auditActions(t, h.st, "d2"); countOf(acts, "undeliverable") != 1 {
+		t.Fatalf("undeliverable 同一请求只记一次: %v", acts)
+	}
+}
+
+// 旧连接（已被替换或已断开）的对齐不执行，不会覆盖新连接的对齐结果。
+func TestAgentHelloSkipsStaleConn(t *testing.T) {
+	h := newTestHub(t)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	insertReq(t, h.st, store.Request{ID: "p1", MachineID: m.ID, State: "pending"})
+	insertReq(t, h.st, store.Request{ID: "d1", MachineID: m.ID, State: "approved", DecidedBy: "user"})
+	old, cur := newFakeConn(m.ID, 16), newFakeConn(m.ID, 16)
+	h.srv.agents.register(old)
+	h.srv.agents.register(cur) // 替换并关掉 old
+	h.srv.onAgentHello(old, wire.Hello{T: wire.THello, MachineID: m.ID, Pending: []wire.PendingSummary{{RequestID: "d1"}}})
+	if p1 := getReq(t, h.st, "p1"); p1.State != "pending" {
+		t.Fatalf("旧连接的对齐不应取消请求: %+v", p1)
+	}
+	if len(old.out)+len(cur.out) != 0 {
+		t.Fatal("旧连接的对齐不应补发")
+	}
+	unregistered := newFakeConn(m.ID, 16)
+	h.srv.onAgentHello(unregistered, wire.Hello{T: wire.THello, MachineID: m.ID})
+	if p1 := getReq(t, h.st, "p1"); p1.State != "pending" {
+		t.Fatalf("不是当前连接的对齐不应执行: %+v", p1)
+	}
+}
+
+// 补发数有上限：超出的留到下次对齐，记日志。
+func TestAgentHelloResendCapped(t *testing.T) {
+	h, logs := quietHub(t)
+	old := helloResendMax
+	helloResendMax = 2
+	t.Cleanup(func() { helloResendMax = old })
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	var held []wire.PendingSummary
+	for i := range 3 {
+		id := fmt.Sprintf("d%d", i)
+		insertReq(t, h.st, store.Request{ID: id, MachineID: m.ID, State: "approved", DecidedBy: "user"})
+		held = append(held, wire.PendingSummary{RequestID: id})
+	}
+	c := newFakeConn(m.ID, 16)
+	h.srv.agents.register(c)
+	h.srv.onAgentHello(c, wire.Hello{T: wire.THello, MachineID: m.ID, Pending: held})
+	if len(c.out) != 2 {
+		t.Fatalf("应只补发 2 条, 得到 %d", len(c.out))
+	}
+	if !strings.Contains(logs.String(), "补发") {
+		t.Fatalf("超出上限应记日志: %q", logs.String())
+	}
+}
+
+func TestAuditIngestCreatesHistoryRows(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	p := policy.Payload{Type: policy.PayloadShell, Command: "ls", Cwd: "/p"}
+	e1, _ := json.Marshal(agent.AuditEntry{TS: time.Now(), RequestID: "auto1", Kind: "permission", Session: proto.Session{Tool: "claude", CLISessionID: "s1", Cwd: "/p"}, ToolName: "Bash", Payload: &p, Risk: "read", Action: "allow", State: "auto_allowed", RuleID: "builtin-readonly", DecidedBy: "rule:builtin-readonly"})
+	e2, _ := json.Marshal(agent.AuditEntry{TS: time.Now(), Kind: "done", Session: proto.Session{Tool: "claude", CLISessionID: "s1"}, State: "recorded", Message: "DONE"})
+	c.send(wire.Audit{T: wire.TAudit, Entries: []json.RawMessage{e1, e2}})
+	waitFor(t, "历史行", func() bool { _, err := h.st.GetRequest("auto1"); return err == nil })
+	r, _ := h.st.GetRequest("auto1")
+	if r.State != "auto_allowed" || r.RuleID != "builtin-readonly" || r.Payload.Command != "ls" || r.MachineID != id || r.SessionID == "" || r.DecidedAt == nil {
+		t.Fatalf("历史行: %+v", r)
+	}
+	if hits := ruleHits(t, h.st, "builtin-readonly"); hits != 1 {
+		t.Fatalf("应记一次命中, 得到 %d", hits)
+	}
+	waitFor(t, "两条审计", func() bool { events, _ := h.st.ListAudit(10, ""); return len(events) >= 2 })
+}
+
+// 本机终态覆盖：hello 把不再持有的 pending 标 cancelled/agent_restart，随后到达的审计里的本机终态把它改正；
+// 已被用户决定的不覆盖；白名单外的状态不改 hub；已有的 id 不再补 auto_* 历史行，也不记命中。
+func TestAuditAgentFinalAfterHello(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	c.recv(5 * time.Second)
+	c.send(pendingFrame("r1", "s1", "t1", "a"))
+	c.send(pendingFrame("r2", "s2", "t2", "b"))
+	c.send(pendingFrame("r3", "s3", "t3", "c"))
+	waitFor(t, "三条 pending", func() bool { n, _ := h.st.CountPending(); return n == 3 })
+	if _, err := h.srv.Decide(DecideInput{RequestID: "r3", Action: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	c.close()
+	waitFor(t, "断开", func() bool { return !h.srv.agents.connected(id) })
+
+	c2 := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c2.close()
+	c2.recv(5 * time.Second)
+	waitFor(t, "对齐取消 r1、r2", func() bool { n, _ := h.st.CountPending(); return n == 0 })
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	sess := proto.Session{Tool: "claude", CLISessionID: "s1"}
+	c2.send(auditFrame(t,
+		agent.AuditEntry{TS: time.Now(), RequestID: "r2", Kind: "permission", Session: sess, State: "approved", Action: "allow", DecidedBy: "hub"},
+		agent.AuditEntry{TS: time.Now(), RequestID: "r3", Kind: "permission", Session: sess, State: "cancelled", DecidedBy: "terminal"},
+		agent.AuditEntry{TS: time.Now(), RequestID: "r4", Kind: "permission", Session: sess, State: "approved", DecidedBy: "hub"},
+		agent.AuditEntry{TS: time.Now(), RequestID: "r2", Kind: "permission", Session: sess, State: "auto_allowed", RuleID: "builtin-readonly"},
+		agent.AuditEntry{TS: time.Now(), RequestID: "r1", Kind: "permission", Session: sess, State: "expired", DecidedBy: "hub_unreachable", Reason: "hub 不通，交回终端"},
+	))
+	waitFor(t, "r1 被本机终态改正", func() bool { r, _ := h.st.GetRequest("r1"); return r.State == "expired" })
+	if r1 := getReq(t, h.st, "r1"); r1.DecidedBy != "hub_unreachable" || r1.DecisionNote != "hub 不通，交回终端" {
+		t.Fatalf("r1 = %+v", r1)
+	}
+	waitBroadcast(t, sub, "request_updated", "r1", nil)
+	if r2 := getReq(t, h.st, "r2"); r2.State != "cancelled" || r2.DecidedBy != store.DecidedByAgentRestart {
+		t.Fatalf("白名单外的状态不应改 hub: %+v", r2)
+	}
+	if r3 := getReq(t, h.st, "r3"); r3.State != "approved" || r3.DecidedBy != "user" {
+		t.Fatalf("用户的决定不应被覆盖: %+v", r3)
+	}
+	if _, err := h.st.GetRequest("r4"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("approved 不在补行白名单里: %v", err)
+	}
+	if hits := ruleHits(t, h.st, "builtin-readonly"); hits != 0 {
+		t.Fatalf("已有的 id 不应记命中, 得到 %d", hits)
+	}
+}
+
+// question、done 的 recorded 条目进 requests 表：新 id、state recorded、标题为脱敏消息并截到 500 字符、刷新会话，广播 request_new；
+// suppressed 的跳过；时间零值或超前 1 分钟以上用 hub 时间，其余照用条目时间。
+func TestAuditQuestionDoneRecorded(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	past := time.Now().Add(-time.Hour).UTC()
+	sess := proto.Session{Tool: "claude", CLISessionID: "s1", TurnID: "t9", Cwd: "/p"}
+	before := time.Now()
+	c.send(auditFrame(t,
+		agent.AuditEntry{TS: past, Kind: "done", Session: sess, State: "suppressed", Message: "不该进表"},
+		agent.AuditEntry{TS: time.Now().Add(time.Hour), Kind: "question", Session: sess, State: "recorded", Message: strings.Repeat("问", 600)},
+		agent.AuditEntry{TS: past, Kind: "done", Session: sess, State: "recorded", Message: "完成了 mysql --password hunter22"},
+	))
+	waitFor(t, "两条 recorded", func() bool { rs, _ := h.st.ListRequests("recorded", 10); return len(rs) == 2 })
+	after := time.Now()
+	rs, _ := h.st.ListRequests("recorded", 10)
+	byKind := map[string]store.Request{}
+	for _, r := range rs {
+		byKind[r.Kind] = r
+	}
+	done, q := byKind["done"], byKind["question"]
+	if done.ID == "" || q.ID == "" || done.ID == q.ID || len(done.ID) != 32 {
+		t.Fatalf("应各一条、用新 id: %+v", rs)
+	}
+	if strings.Contains(done.Title, "hunter22") || !strings.Contains(done.Title, "完成了") || done.MachineID != id || done.SessionID == "" ||
+		done.CLISessionID != "s1" || done.TurnID != "t9" || done.ExpiresAt != nil || done.CreatedAt != store.FormatTime(past) {
+		t.Fatalf("done 行: %+v", done)
+	}
+	if n := utf8.RuneCountInString(q.Title); n != 500 {
+		t.Fatalf("标题应截到 500 字符, 得到 %d", n)
+	}
+	if q.CreatedAt < store.FormatTime(before) || q.CreatedAt > store.FormatTime(after) {
+		t.Fatalf("超前的时间应换成 hub 当前时间: %s 不在 [%s, %s]", q.CreatedAt, store.FormatTime(before), store.FormatTime(after))
+	}
+	if q.SessionID != done.SessionID {
+		t.Fatalf("同一会话应复用会话行: %s vs %s", q.SessionID, done.SessionID)
+	}
+	waitBroadcast(t, sub, "request_new", q.ID, nil)
+}
+
+// 审计 detail 兜底脱敏：解码成 AuditEntry 后再编码（未知字段如 env 被丢弃），载荷与消息再脱敏一次；坏条目跳过并汇总记日志。
+func TestAuditDetailRedacted(t *testing.T) {
+	h, logs := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	raw := json.RawMessage(`{"ts":"2026-01-02T08:00:00Z","request_id":"a1","kind":"permission","session":{"tool":"claude","cli_session_id":"s1"},` +
+		`"tool_name":"Bash","payload":{"type":"shell","command":"mysql --password hunter22 db"},"risk":"read","action":"allow","state":"auto_allowed",` +
+		`"rule_id":"builtin-readonly","reason":"token=abcdefsecret","env":{"AWS_SECRET":"SECRET_ENV_VALUE"}}`)
+	c.send(auditFrame(t, json.RawMessage(`"不是对象"`), raw))
+	waitFor(t, "a1 历史行", func() bool { _, err := h.st.GetRequest("a1"); return err == nil })
+	events, err := h.st.ListAudit(10, "a1")
+	if err != nil || len(events) != 1 {
+		t.Fatalf("审计: %+v, %v", events, err)
+	}
+	e := events[0]
+	for _, bad := range []string{"hunter22", "SECRET_ENV_VALUE", `"env"`, "abcdefsecret"} {
+		if strings.Contains(e.Detail, bad) {
+			t.Fatalf("detail 不应含 %q: %s", bad, e.Detail)
+		}
+	}
+	if e.Actor != "agent" || e.Action != "auto_allowed" || e.MachineID != id || e.TS != store.FormatTime(time.Date(2026, 1, 2, 8, 0, 0, 0, time.UTC)) ||
+		!strings.Contains(e.Detail, "redacted") {
+		t.Fatalf("审计行: %+v", e)
+	}
+	if r := getReq(t, h.st, "a1"); strings.Contains(r.Payload.Command, "hunter22") || strings.Contains(r.EngineReason, "abcdefsecret") {
+		t.Fatalf("历史行应脱敏: %+v", r)
+	}
+	if !strings.Contains(logs.String(), "无法解析") {
+		t.Fatalf("坏条目应记日志: %q", logs.String())
+	}
+}
+
+// Gemini 的请求不进 hub 等待；请求 id 无效的拒收；都回带 request_id 的 Error 帧，不登记。
+func TestPendingRejected(t *testing.T) {
+	h, logs := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	g := pendingFrame("g1", "s1", "t1", "ls")
+	g.Session.Tool = "gemini"
+	c.send(g)
+	kind, b := c.recv(5 * time.Second)
+	var e wire.Error
+	wire.Unmarshal(b, &e)
+	if kind != wire.TError || e.RequestID != "g1" || !strings.Contains(e.Message, "gemini") {
+		t.Fatalf("应回 Error: %s %+v", kind, e)
+	}
+	long := strings.Repeat("x", 200)
+	for _, bad := range []string{"", long} {
+		c.send(pendingFrame(bad, "s1", "t1", "ls"))
+		kind, b = c.recv(5 * time.Second)
+		e = wire.Error{}
+		wire.Unmarshal(b, &e)
+		if kind != wire.TError || e.RequestID != bad || e.Message != "登记失败" {
+			t.Fatalf("无效 id 应回 Error: %s %+v", kind, e)
+		}
+	}
+	if n, _ := h.st.CountPending(); n != 0 {
+		t.Fatalf("不应登记, 得到 %d", n)
+	}
+	if !strings.Contains(logs.String(), "gemini") {
+		t.Fatalf("应记日志: %q", logs.String())
+	}
+}
+
+// 落库失败（这里关掉存储）回带 request_id 的 Error 帧，守护进程据此按 hub_unreachable 交回终端。
+func TestPendingStoreErrorRepliesError(t *testing.T) {
+	h, logs := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	h.st.Close()
+	c.send(pendingFrame("r1", "s1", "t1", "ls"))
+	kind, b := c.recv(5 * time.Second)
+	var e wire.Error
+	wire.Unmarshal(b, &e)
+	if kind != wire.TError || e.RequestID != "r1" || e.Message != "登记失败" {
+		t.Fatalf("应回 Error: %s %+v", kind, e)
+	}
+	if !strings.Contains(logs.String(), "r1") {
+		t.Fatalf("应记日志: %q", logs.String())
+	}
+}
+
+// hub 不信任守护进程：时间零值或超前用 hub 时间，期限夹到 [1, 86400] 秒，载荷再脱敏，长字段截断。
+func TestPendingSanitized(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	past := time.Now().Add(-2 * time.Hour).UTC()
+	f1 := pendingFrame("f1", "s1", "t1", "curl --password hunter22 https://x")
+	f1.CreatedAt, f1.DeadlineSeconds = time.Time{}, 0
+	f2 := pendingFrame("f2", "s2", "t2", "b")
+	f2.CreatedAt, f2.DeadlineSeconds = time.Now().Add(time.Hour), 1_000_000_000
+	f3 := pendingFrame("f3", strings.Repeat("s", 300), strings.Repeat("t", 300), "c")
+	f3.CreatedAt, f3.DeadlineSeconds = past, 600
+	f3.ToolName, f3.Risk = strings.Repeat("工", 300), strings.Repeat("r", 300)
+	f3.EngineReason, f3.ProjectRoot = strings.Repeat("理", 1200), "/"+strings.Repeat("p", 5000)
+	before := time.Now()
+	c.send(f1)
+	c.send(f2)
+	c.send(f3)
+	waitFor(t, "三条登记", func() bool { n, _ := h.st.CountPending(); return n == 3 })
+	after := time.Now()
+	span := func(r store.Request) (time.Time, time.Duration) {
+		t.Helper()
+		created, err1 := time.Parse(time.RFC3339Nano, r.CreatedAt)
+		expires, err2 := time.Parse(time.RFC3339Nano, *r.ExpiresAt)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("时间解析: %v %v", err1, err2)
+		}
+		return created, expires.Sub(created)
+	}
+	r1, r2, r3 := getReq(t, h.st, "f1"), getReq(t, h.st, "f2"), getReq(t, h.st, "f3")
+	if created, d := span(r1); created.Before(before) || created.After(after) || d != time.Second {
+		t.Fatalf("零值时间用 hub 时间、期限至少 1 秒: %s %s", created, d)
+	}
+	if created, d := span(r2); created.Before(before) || created.After(after) || d != 86400*time.Second {
+		t.Fatalf("超前时间用 hub 时间、期限至多 86400 秒: %s %s", created, d)
+	}
+	if created, d := span(r3); !created.Equal(past) || d != 600*time.Second {
+		t.Fatalf("合理的时间照用: %s %s", created, d)
+	}
+	if strings.Contains(r1.Payload.Command, "hunter22") {
+		t.Fatalf("载荷应再脱敏: %+v", r1.Payload)
+	}
+	if utf8.RuneCountInString(r3.ToolName) != 256 || len(r3.Risk) != 256 || len(r3.CLISessionID) != 256 || len(r3.TurnID) != 256 ||
+		utf8.RuneCountInString(r3.EngineReason) != 1000 || len(r3.ProjectRoot) != 4096 {
+		t.Fatalf("长字段应截断: tool %d risk %d sess %d turn %d reason %d root %d", utf8.RuneCountInString(r3.ToolName), len(r3.Risk),
+			len(r3.CLISessionID), len(r3.TurnID), utf8.RuneCountInString(r3.EngineReason), len(r3.ProjectRoot))
+	}
+}
+
+// hub 自己执行过期：Decide 遇到已过期的先改 expired 再回 ErrNotPending；expireDue 把到期的 pending 改 expired 并广播。
+func TestHubExpiry(t *testing.T) {
+	h := newTestHub(t)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	past, future := store.FormatTime(time.Now().Add(-time.Second)), store.FormatTime(time.Now().Add(time.Hour))
+	insertReq(t, h.st, store.Request{ID: "e1", MachineID: m.ID, State: "pending", ExpiresAt: &past})
+	insertReq(t, h.st, store.Request{ID: "e2", MachineID: m.ID, State: "pending", ExpiresAt: &future})
+	insertReq(t, h.st, store.Request{ID: "e3", MachineID: m.ID, State: "pending", ExpiresAt: &past})
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+
+	_, err := h.srv.Decide(DecideInput{RequestID: "e1", Action: "allow"})
+	if !errors.Is(err, store.ErrNotPending) || !errors.Is(err, errExpired) {
+		t.Fatalf("过期的请求应回 ErrNotPending（已过期）: %v", err)
+	}
+	if e1 := getReq(t, h.st, "e1"); e1.State != "expired" || e1.DecidedBy != "timeout" {
+		t.Fatalf("e1 = %+v", e1)
+	}
+	waitBroadcast(t, sub, "request_updated", "e1", nil)
+	if acts := auditActions(t, h.st, "e1"); countOf(acts, "expired") != 1 || countOf(acts, "allow") != 0 {
+		t.Fatalf("e1 审计: %v", acts)
+	}
+
+	h.srv.expireDue(time.Now())
+	if e2, e3 := getReq(t, h.st, "e2"), getReq(t, h.st, "e3"); e2.State != "pending" || e3.State != "expired" || e3.DecidedBy != "timeout" {
+		t.Fatalf("e2=%+v e3=%+v", e2, e3)
+	}
+	waitBroadcast(t, sub, "request_updated", "e3", nil)
+	h.srv.expireDue(time.Now().Add(2 * time.Hour))
+	if e2 := getReq(t, h.st, "e2"); e2.State != "expired" {
+		t.Fatalf("e2 = %+v", e2)
+	}
+	if acts := auditActions(t, h.st, "e3"); countOf(acts, "expired") != 1 {
+		t.Fatalf("e3 审计: %v", acts)
+	}
+}
+
+// 并发两次决定同一请求：一次成功、一次 ErrNotPending。
+func TestDecideConcurrent(t *testing.T) {
+	h := newTestHub(t)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	insertReq(t, h.st, store.Request{ID: "c1", MachineID: m.ID, State: "pending"})
+	errs := make(chan error, 2)
+	for _, a := range []string{"allow", "deny"} {
+		go func() {
+			_, err := h.srv.Decide(DecideInput{RequestID: "c1", Action: a, Remember: true})
+			errs <- err
+		}()
+	}
+	var ok, notPending int
+	for range 2 {
+		switch err := <-errs; {
+		case err == nil:
+			ok++
+		case errors.Is(err, store.ErrNotPending):
+			notPending++
+		default:
+			t.Fatalf("意外的错误: %v", err)
+		}
+	}
+	if ok != 1 || notPending != 1 {
+		t.Fatalf("应一次成功一次 ErrNotPending: ok=%d notPending=%d", ok, notPending)
+	}
+	if acts := auditActions(t, h.st, "c1"); countOf(acts, "allow")+countOf(acts, "deny") != 1 {
+		t.Fatalf("只应有一次决定审计: %v", acts)
+	}
+}
+
+// 用户备注至多 1000 字符，原样（截断后）放进下发的决定。
+func TestDecideNoteTruncated(t *testing.T) {
+	h := newTestHub(t)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	insertReq(t, h.st, store.Request{ID: "n1", MachineID: m.ID, State: "pending"})
+	c := newFakeConn(m.ID, 4)
+	h.srv.agents.register(c)
+	got, err := h.srv.Decide(DecideInput{RequestID: "n1", Action: "deny", Note: strings.Repeat("备", 1500)})
+	if err != nil || got.State != "denied" || utf8.RuneCountInString(got.DecisionNote) != 1000 {
+		t.Fatalf("Decide = %+v, %v", got, err)
+	}
+	var d wire.Decision
+	if err := wire.Unmarshal(<-c.out, &d); err != nil || d.Action != "deny" || d.Reason != got.DecisionNote {
+		t.Fatalf("下发的决定: %+v, %v", d, err)
+	}
+}
+
+// 广播帧为 {"type","data"}；慢的订阅者丢帧不阻塞；取消订阅后不再收到；编码失败的载荷不发。
+func TestClientHubBroadcast(t *testing.T) {
+	h := newClientHub()
+	slow, stopSlow := h.subscribe()
+	fast, stopFast := h.subscribe()
+	h.broadcast("x", map[string]int{"n": 1})
+	if b := <-fast; string(b) != `{"data":{"n":1},"type":"x"}` {
+		t.Fatalf("帧: %s", b)
+	}
+	h.broadcast("bad", make(chan int))
+	if len(fast) != 0 || len(slow) != 1 {
+		t.Fatalf("编码失败的载荷不应发出: fast %d slow %d", len(fast), len(slow))
+	}
+	stopFast()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 200 {
+			h.broadcast("x", 1)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("慢的订阅者不应阻塞广播")
+	}
+	if len(slow) != cap(slow) || len(fast) != 0 {
+		t.Fatalf("慢订阅者应收满后丢帧, 已取消的不再收到: slow %d fast %d", len(slow), len(fast))
+	}
+	stopSlow()
+	h.broadcast("x", 2)
+	if len(slow) != cap(slow) {
+		t.Fatal("取消订阅后不应再收到")
+	}
+}

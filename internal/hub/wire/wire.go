@@ -136,9 +136,12 @@ type Ping struct {
 type Pong struct {
 	T string `json:"t"`
 }
+
+// Error 的 RequestID 非空时表示针对这条请求（如登记失败、拒收），守护进程据此把它立即交回终端。
 type Error struct {
-	T       string `json:"t"`
-	Message string `json:"message"`
+	T         string `json:"t"`
+	RequestID string `json:"request_id,omitempty"`
+	Message   string `json:"message"`
 }
 
 // Kind 读帧种类。

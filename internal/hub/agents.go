@@ -145,6 +145,13 @@ func (h *agentHub) send(machineID string, frame any) bool {
 	}
 }
 
+// current 报告 c 是否仍是其机器的当前连接且未被要求断开。
+func (h *agentHub) current(c *agentConn) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.conns[c.machine.ID] == c && !c.isClosed()
+}
+
 func (h *agentHub) connected(machineID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -497,11 +504,3 @@ func clip(s string) string {
 	}
 	return s
 }
-
-// 以下六个在 Task 8 实现。onAgentHello 拿到连接本身（机器为 c.machine），可确认它仍是该机器的当前连接。
-func (s *Server) onAgentHello(c *agentConn, h wire.Hello)          {}
-func (s *Server) onPending(m store.Machine, p wire.PendingRequest) {}
-func (s *Server) onCancel(m store.Machine, c wire.Cancel)          {}
-func (s *Server) onExpired(m store.Machine, e wire.Expired)        {}
-func (s *Server) onDelivered(m store.Machine, d wire.Delivered)    {}
-func (s *Server) onAudit(m store.Machine, a wire.Audit)            {}

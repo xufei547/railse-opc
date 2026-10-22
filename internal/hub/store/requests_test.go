@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -553,5 +554,37 @@ func TestSessionUpsertKeepsKnownCwdProject(t *testing.T) {
 	}
 	if cwd != "/p" || project != "proj" {
 		t.Fatalf("空值不应覆盖: cwd=%q project=%q", cwd, project)
+	}
+}
+
+// Request 序列化为 snake_case；载荷哈希与 webhook 回调（含明文回调令牌）不出现在 JSON 里，广播与 API 不会外泄。
+func TestRequestJSONHidesCallback(t *testing.T) {
+	exp := FormatTime(time.Now())
+	r := newReq("m", "r1", "ls")
+	r.PayloadHash = "hash-value-xyz"
+	r.Callback = `{"url":"https://example.test/cb","callback_token":"tok-secret-123"}`
+	r.ExpiresAt = &exp
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"tok-secret-123", "callback", "Callback", "hash-value-xyz", "payload_hash", "PayloadHash"} {
+		if strings.Contains(string(b), bad) {
+			t.Fatalf("序列化结果不应含 %q: %s", bad, b)
+		}
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"id", "machine_id", "session_id", "kind", "tool_name", "payload", "risk", "project_root", "engine_reason", "state",
+		"decided_by", "decision_note", "rule_id", "turn_id", "cli_session_id", "title", "created_at", "expires_at", "decided_at", "delivered_at"}
+	for _, k := range want {
+		if _, ok := m[k]; !ok {
+			t.Fatalf("缺字段 %s: %s", k, b)
+		}
+	}
+	if len(m) != len(want) || m["expires_at"] != exp || m["machine_id"] != "m" {
+		t.Fatalf("字段不符: %s", b)
 	}
 }

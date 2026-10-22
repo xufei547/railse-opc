@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -86,6 +87,9 @@ type Server struct {
 	verifyWait time.Duration
 	// helloTimeout 是守护进程连上后发 hello 的期限，测试可缩短。
 	helloTimeout time.Duration
+	// decideMu 串行化用户决定（取请求、校验、学规则、改状态）；helloLocks 让同一机器的重连对齐串行执行。
+	decideMu   sync.Mutex
+	helloLocks machineLocks
 }
 
 // New 组装 hub：校验配置，确保有内置规则，注册路由。
@@ -125,6 +129,17 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	s.log.Printf("hub 监听 %s", ln.Addr())
+	// 过期扫描随 Run 结束：Run 返回前等它退出，调用方随后关库也不会撞上它
+	sweepCtx, stopSweep := context.WithCancel(ctx)
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		s.expireLoop(sweepCtx)
+	}()
+	defer func() {
+		stopSweep()
+		<-sweepDone
+	}()
 	errCh := make(chan error, 1)
 	go func() { errCh <- hs.Serve(ln) }()
 	select {
@@ -202,8 +217,3 @@ func (s *Server) internalErr(w http.ResponseWriter, what string, err error) {
 	s.log.Printf("%s: %v", what, err)
 	writeErr(w, http.StatusInternalServerError, "内部错误")
 }
-
-// clientHub 的完整实现见 Task 8。
-type clientHub struct{}
-
-func newClientHub() *clientHub { return &clientHub{} }

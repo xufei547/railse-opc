@@ -67,3 +67,22 @@ func TestHelloProtoRoundTrip(t *testing.T) {
 		t.Fatalf("往返不一致: %+v", out)
 	}
 }
+
+// Error 可带 request_id（按请求拒收或登记失败），往返不变；不带时省略该字段。
+func TestErrorRequestIDRoundTrip(t *testing.T) {
+	b, err := Marshal(Error{T: TError, RequestID: "r1", Message: "登记失败"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"request_id":"r1"`) {
+		t.Fatalf("应带 request_id: %s", b)
+	}
+	var out Error
+	if err := Unmarshal(b, &out); err != nil || out != (Error{T: TError, RequestID: "r1", Message: "登记失败"}) {
+		t.Fatalf("往返不一致: %+v, %v", out, err)
+	}
+	b, err = Marshal(Error{T: TError, Message: "x"})
+	if err != nil || strings.Contains(string(b), "request_id") {
+		t.Fatalf("没有 request_id 时应省略: %s, %v", b, err)
+	}
+}

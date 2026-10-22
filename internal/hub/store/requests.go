@@ -27,29 +27,30 @@ const (
 
 // Request 是 requests 表的一行。question/done 也存成一行：Kind 为 question|done，State 为 recorded，
 // Title 为脱敏后的消息，Payload 为空值，ExpiresAt 为 nil。
+// JSON 为 snake_case，广播与 API 直接输出它；PayloadHash 与 Callback（webhook 回调，含明文回调令牌）不序列化。
 type Request struct {
-	ID           string
-	MachineID    string
-	SessionID    string
-	Kind         string
-	ToolName     string
-	Payload      policy.Payload
-	PayloadHash  string
-	Risk         string
-	ProjectRoot  string
-	EngineReason string
-	State        string
-	DecidedBy    string
-	DecisionNote string
-	RuleID       string
-	TurnID       string
-	CLISessionID string
-	Title        string
-	Callback     string
-	CreatedAt    string
-	ExpiresAt    *string
-	DecidedAt    *string
-	DeliveredAt  *string
+	ID           string         `json:"id"`
+	MachineID    string         `json:"machine_id"`
+	SessionID    string         `json:"session_id"`
+	Kind         string         `json:"kind"`
+	ToolName     string         `json:"tool_name"`
+	Payload      policy.Payload `json:"payload"`
+	PayloadHash  string         `json:"-"`
+	Risk         string         `json:"risk"`
+	ProjectRoot  string         `json:"project_root"`
+	EngineReason string         `json:"engine_reason"`
+	State        string         `json:"state"`
+	DecidedBy    string         `json:"decided_by"`
+	DecisionNote string         `json:"decision_note"`
+	RuleID       string         `json:"rule_id"`
+	TurnID       string         `json:"turn_id"`
+	CLISessionID string         `json:"cli_session_id"`
+	Title        string         `json:"title"`
+	Callback     string         `json:"-"`
+	CreatedAt    string         `json:"created_at"`
+	ExpiresAt    *string        `json:"expires_at"`
+	DecidedAt    *string        `json:"decided_at"`
+	DeliveredAt  *string        `json:"delivered_at"`
 }
 
 // PayloadHash 是载荷 JSON 的 SHA-256，用于去重，与 InsertRequest 存的哈希一致。
