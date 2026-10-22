@@ -276,6 +276,75 @@ func TestStringCredentialGaps(t *testing.T) {
 	}
 }
 
+// 终审复审 R1–R3 与 curl 组合短选项：反斜杠续行的同一条命令、未闭合的引号（适配器把 diff_preview 截到 4 KB，
+// 截断点落在引号括起的秘密中间）、JSON 带引号的敏感键、curl -su 这类组合短选项。每种都配反例，并断言幂等。
+func TestStringCredentialGapsRound2(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// R1：反斜杠紧跟换行（含 \r\n）是同一条命令的续行
+		{"curl https://x \\\n  -u alice:S3cretPass \\\n  -H 'Accept: */*'", "curl https://x \\\n  -u alice:<redacted> \\\n  -H 'Accept: */*'"},
+		{"mysql \\\n  -u root \\\n  -pS3cretPass db", "mysql \\\n  -u root \\\n  -p<redacted> db"},
+		{"curl https://x \\\r\n  -u alice:S3cretPass", "curl https://x \\\r\n  -u alice:<redacted>"},
+		// 反例：没有反斜杠的换行是另一条命令
+		{"curl https://x\ndocker run -u 1000:1000 alpine id", "curl https://x\ndocker run -u 1000:1000 alpine id"},
+		{"mysql -u root -p app\nmkdir -pv build", "mysql -u root -p app\nmkdir -pv build"},
+
+		// R2：未闭合的引号抹到文本末尾
+		{`npm login --password "S3cretPass`, `npm login --password <redacted>`},
+		{`export API_KEY="sk-proj-abc`, `export API_KEY=<redacted>`},
+		{`gh auth login --token 'abc123`, `gh auth login --token <redacted>`},
+		{"npm login --password \"S3cret\nPass", "npm login --password <redacted>"},
+		// 反例：成对的引号照旧只抹引号里的那段
+		{`npm login --password "hunter 2" --username bob`, `npm login --password <redacted> --username bob`},
+		{`git commit -m "fix token refresh"`, `git commit -m "fix token refresh"`},
+
+		// R3：JSON 带引号的敏感键，值是字符串、数字或 true/false；替换成 "<redacted>"，JSON 仍合法
+		{`curl -d '{"username":"bob","password":"my pass"}' https://x`, `curl -d '{"username":"bob","password":"<redacted>"}' https://x`},
+		{`{"api_key":"sk-abc"}`, `{"api_key":"<redacted>"}`},
+		{`{"PASSWORD" : 123456, "user": "bob"}`, `{"PASSWORD" : "<redacted>", "user": "bob"}`},
+		{`{"auth_token": true, "x-api-key": "k\"q"}`, `{"auth_token": "<redacted>", "x-api-key": "<redacted>"}`},
+		// 键名沿用敏感键表：password 后接任意后缀都算（与 MCP 参数按结构脱敏一致）
+		{`{"password_hint": "猫的名字"}`, `{"password_hint": "<redacted>"}`},
+		// 反例：非敏感键、值是 password 字样、tokens 类计数
+		{`{"type": "password", "name": "pw"}`, `{"type": "password", "name": "pw"}`},
+		{`{"username": "bob", "max_tokens": 10, "author": "a"}`, `{"username": "bob", "max_tokens": 10, "author": "a"}`},
+
+		// curl 组合短选项里的 -u、-U
+		{`curl -su alice:S3cret https://x`, `curl -su alice:<redacted> https://x`},
+		{`curl -sSu alice:S3cret https://x`, `curl -sSu alice:<redacted> https://x`},
+		{`curl -fsSLU proxy:S3cret -x http://p:3128 https://x`, `curl -fsSLU proxy:<redacted> -x http://p:3128 https://x`},
+		// 反例：不在 curl 命令里的 -u（含组合选项）
+		{`curl -sS https://x && sudo -su root:wheel id`, `curl -sS https://x && sudo -su root:wheel id`},
+		{`curl -sS -o out.txt https://x`, `curl -sS -o out.txt https://x`},
+	}
+	for _, c := range cases {
+		got := String(c.in)
+		if got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := String(got); again != got {
+			t.Errorf("String 不幂等: %q → %q", got, again)
+		}
+	}
+	// 截断的 diff_preview、事件消息：文本语境同样抹到末尾
+	texts := []struct{ in, want string }{
+		{`password="abcdefghij`, `password=<redacted>`},
+		{"*** Add File: .env\n+DB_HOST=db\n+DB_PASSWORD=\"Xy7&kP(2)q-abc", "*** Add File: .env\n+DB_HOST=db\n+DB_PASSWORD=<redacted>"},
+		{"已运行 npm login --password \"S3cret", "已运行 npm login --password <redacted>"},
+		{`{"password": "hunter2"}`, `{"password": "<redacted>"}`},
+	}
+	for _, c := range texts {
+		if got := Text(c.in); got != c.want {
+			t.Errorf("Text(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if got := Payload(policy.Payload{Type: policy.PayloadFileWrite, DiffPreview: c.in}).DiffPreview; got != c.want {
+			t.Errorf("DiffPreview %q\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := Text(Text(c.in)); again != Text(c.in) {
+			t.Errorf("Text 不幂等: %q", c.in)
+		}
+	}
+}
+
 // 上面几种写法在其他语境同样生效：文件内容与事件消息（Text）、URL 字段、MCP 参数（JSON 叶子与键名）。
 func TestCredentialGapsOtherModes(t *testing.T) {
 	texts := []struct{ in, want string }{
