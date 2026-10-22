@@ -216,10 +216,15 @@ func TestHubClientConnectsAndAppliesRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventually(t, 5*time.Second, "hub 暂停应下发到守护进程", rules.Paused)
-	// 只改 hub 这一侧：state.json 里 hub_paused 为真，本机的 paused 不动
-	b, _ := os.ReadFile(cfg.StatePath)
-	if !strings.Contains(string(b), `"hub_paused":true`) || !strings.Contains(string(b), `"paused":false`) {
-		t.Fatalf("state.json 应只记下 hub 暂停: %q", b)
+	// 只改 hub 这一侧：state.json 里 hub_paused 为真，本机的 paused 不动。
+	// 暂停时 SetHubPaused 先改内存再落盘，所以轮询文件内容
+	var b []byte
+	eventually(t, 5*time.Second, "state.json 应记下 hub 暂停", func() bool {
+		b, _ = os.ReadFile(cfg.StatePath)
+		return strings.Contains(string(b), `"hub_paused":true`)
+	})
+	if !strings.Contains(string(b), `"paused":false`) {
+		t.Fatalf("state.json 不应改本机暂停: %q", b)
 	}
 	if err := h.srv.SetPausedForTest(false); err != nil {
 		t.Fatal(err)
@@ -420,10 +425,9 @@ func TestHubClientRefusesGeminiPending(t *testing.T) {
 	m := enroll(t, h)
 	env := newClient(t, h, m, nil)
 	waitConnected(t, env.c)
-	if err := env.c.SendPending(shellPending("g1", "gemini")); err == nil || errors.Is(err, agent.ErrHubDisconnected) {
+	if err := env.c.SendPending(shellPending("g1", "gemini")); !errors.Is(err, agent.ErrGeminiNotForHub) || errors.Is(err, agent.ErrHubDisconnected) {
 		t.Fatalf("gemini 请求应被拒绝送往 hub: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
 	if _, err := h.st.GetRequest("g1"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("hub 不应有 gemini 请求: %v", err)
 	}

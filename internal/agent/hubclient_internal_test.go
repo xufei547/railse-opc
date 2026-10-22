@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -428,15 +429,98 @@ func TestHubClientBackoffGrowsWithoutWelcome(t *testing.T) {
 	}
 }
 
-// 收到 welcome 之后退避归零：连上又断开两次，仍按第一档重连。
-func TestHubClientBackoffResetsAfterWelcome(t *testing.T) {
+// setVar 临时改一个包级变量（NewHubClient 时复制进客户端），测试结束时还原。
+func setVar[T any](t *testing.T, p *T, v T) {
+	t.Helper()
+	old := *p
+	*p = v
+	t.Cleanup(func() { *p = old })
+}
+
+// 握手后立即被断开（例如两台守护进程共用 machine.json 互相顶替）不算稳定：退避照常变长，不会每秒重连。
+func TestHubClientBackoffNotResetOnImmediateClose(t *testing.T) {
 	setHubTimings(t, []time.Duration{30 * time.Millisecond, 5 * time.Second}, 0, 0, 0)
 	f := newFakeHub(t, 0, func(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
 		f.welcome(conn, 1, defaultRulesYAML(), false)
 		conn.Close(websocket.StatusNormalClosure, "bye")
 	})
 	startTestClient(t, f)
+	waitFor(t, func() bool { return f.dials.Load() >= 2 })
+	time.Sleep(time.Second)
+	if n := f.dials.Load(); n != 2 {
+		t.Fatalf("握手后立即断开不应把退避归零: 拨号 %d 次", n)
+	}
+}
+
+// 收到 hub 的第一个 ping 就算稳定：之后断开按第一档重连，连上又断开多次仍是第一档。
+func TestHubClientBackoffResetsAfterPing(t *testing.T) {
+	setHubTimings(t, []time.Duration{30 * time.Millisecond, 5 * time.Second}, 0, 0, 0)
+	f := newFakeHub(t, 0, func(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
+		f.welcome(conn, 1, defaultRulesYAML(), false)
+		f.send(conn, wire.Ping{T: wire.TPing})
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn.Read(ctx) // 等到 pong：客户端已处理过 ping
+		conn.Close(websocket.StatusNormalClosure, "bye")
+	})
+	startTestClient(t, f)
 	waitFor(t, func() bool { return f.dials.Load() >= 4 })
+}
+
+// 没有 ping、但连接持续超过 stableAfter 也算稳定。
+func TestHubClientBackoffResetsAfterStableDuration(t *testing.T) {
+	setHubTimings(t, []time.Duration{30 * time.Millisecond, 5 * time.Second}, 0, 0, 0)
+	setVar(t, &hubStableAfter, 100*time.Millisecond)
+	f := newFakeHub(t, 0, func(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
+		f.welcome(conn, 1, defaultRulesYAML(), false)
+		time.Sleep(200 * time.Millisecond)
+		conn.Close(websocket.StatusNormalClosure, "bye")
+	})
+	startTestClient(t, f)
+	waitFor(t, func() bool { return f.dials.Load() >= 4 })
+}
+
+// 重连后重发 pending 时，编不进一帧的请求跳过：连接不断、其余照常重发、它的等待者立即收到 hub_error。
+func TestHubClientResendSkipsOversizePending(t *testing.T) {
+	setHubTimings(t, []time.Duration{20 * time.Millisecond}, 0, 0, 0)
+	f := newFakeHub(t, 0, welcomeThenHandOver)
+	tc := newTestClient(t, f.http.URL)
+	now := time.Now()
+	huge := pendingFor("huge", "claude", now.Add(-2*time.Second))
+	huge.Redacted.DiffPreview = strings.Repeat("x", 2<<20)
+	tc.pending.Add(huge)
+	tc.pending.Add(pendingFor("small", "claude", now.Add(-time.Second)))
+	ch := tc.c.Await("huge")
+	tc.run(t)
+	tc.waitConnected(t)
+	conn := <-f.conns
+	f.pingAndWaitPong(t, conn) // 重发在读循环之前：pong 到了说明重发已经走完
+	frames := f.framesOf(wire.TPending)
+	if len(frames) != 1 || !strings.Contains(string(frames[0]), `"request_id":"small"`) {
+		t.Fatalf("超大请求应跳过、其余照常重发: %d 帧", len(frames))
+	}
+	select {
+	case d := <-ch:
+		if d.RequestID != "huge" || d.Action != "" || d.DecidedBy != "hub_error" {
+			t.Fatalf("超大请求的等待者应收到 hub_error: %+v", d)
+		}
+	default:
+		t.Fatal("超大请求的等待者没有收到结论")
+	}
+	if n := f.dials.Load(); n != 1 || !tc.c.Connected() {
+		t.Fatalf("超大请求不应让连接断开: 拨号 %d 次，connected=%v", n, tc.c.Connected())
+	}
+	if !strings.Contains(tc.logs.String(), `"huge"`) {
+		t.Fatalf("应记下跳过的请求: %s", tc.logs.String())
+	}
+	// 直接 SendPending 也只报编码错误，不当作连接问题
+	err := tc.c.SendPending(*huge)
+	if !errors.Is(err, wire.ErrFrameTooLarge) || errors.Is(err, ErrHubDisconnected) {
+		t.Fatalf("超大请求应报 ErrFrameTooLarge 而非未连接: %v", err)
+	}
+	if n := f.dials.Load(); n != 1 || !tc.c.Connected() {
+		t.Fatal("SendPending 的编码错误不应影响连接")
+	}
 }
 
 // hub 连上后不再发任何帧：超过 idle 超时主动断开并重连。
@@ -823,5 +907,84 @@ func TestAuditKickAt50(t *testing.T) {
 	json.Unmarshal(f.framesOf(wire.TAudit)[0], &a)
 	if len(a.Entries) != auditBatchMax {
 		t.Fatalf("应一次发 50 条: %d", len(a.Entries))
+	}
+}
+
+// 积压超过总字节上限时丢最旧，只记一次日志；字节计数与队列一致。
+func TestAuditQueueByteCap(t *testing.T) {
+	setVar(t, &hubAuditMaxBytes, 10_000)
+	tc := newTestClient(t, "http://127.0.0.1:1")
+	h := tc.c
+	for i := 0; i < 30; i++ {
+		e := auditEntry("m" + itoa(i))
+		e.Payload.Command = strings.Repeat("c", 1000)
+		h.Forward(e)
+	}
+	sum := func() (n, size, counted int) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for _, it := range h.auditQ {
+			size += len(it.b)
+		}
+		return len(h.auditQ), size, h.auditBytes
+	}
+	n, size, counted := sum()
+	ids := queuedIDs(h)
+	if size > 10_000 || size != counted || n >= 30 || ids[len(ids)-1] != "m29" || ids[0] != "m"+itoa(30-n) {
+		t.Fatalf("应按字节丢最旧: n=%d size=%d counted=%d first=%s last=%s", n, size, counted, ids[0], ids[len(ids)-1])
+	}
+	if c := strings.Count(tc.logs.String(), "丢弃最旧"); c != 1 {
+		t.Fatalf("超限只记一次日志: %d", c)
+	}
+	h.ackAudit(h.auditBatch()[2].seq)
+	if n2, size2, counted2 := sum(); n2 != n-3 || size2 != counted2 {
+		t.Fatalf("确认后字节计数应随之减少: n=%d size=%d counted=%d", n2, size2, counted2)
+	}
+}
+
+// 批次编码失败（理论上不会发生）不结束上报：退到只发队头一条，仍编不出就丢弃它并记日志，其余照常上报。
+func TestAuditFlushFallsBackOnEncodeError(t *testing.T) {
+	setHubTimings(t, nil, 0, 0, 50*time.Millisecond)
+	f := newFakeHub(t, 0, welcomeThenRecord)
+	tc := newTestClient(t, f.http.URL)
+	h := tc.c
+	good := func(id string) json.RawMessage {
+		b, err := json.Marshal(auditEntry(id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	h.mu.Lock()
+	for _, raw := range []json.RawMessage{good("g0"), json.RawMessage(`{bad`), good("g2"), good("g3")} {
+		h.auditSeq++
+		h.auditQ = append(h.auditQ, auditItem{seq: h.auditSeq, b: raw})
+		h.auditBytes += len(raw)
+	}
+	h.mu.Unlock()
+	tc.run(t)
+	got := func() []string {
+		var ids []string
+		for _, fr := range f.framesOf(wire.TAudit) {
+			var a wire.Audit
+			json.Unmarshal(fr, &a)
+			for _, raw := range a.Entries {
+				var e AuditEntry
+				json.Unmarshal(raw, &e)
+				ids = append(ids, e.RequestID)
+			}
+		}
+		return ids
+	}
+	waitFor(t, func() bool { return len(got()) == 3 })
+	if ids := got(); ids[0] != "g0" || ids[1] != "g2" || ids[2] != "g3" {
+		t.Fatalf("坏条目应丢弃、其余按序上报: %v", ids)
+	}
+	if !strings.Contains(tc.logs.String(), "丢弃 1 条") {
+		t.Fatalf("丢弃应记日志: %s", tc.logs.String())
+	}
+	waitFor(t, func() bool { return len(queuedIDs(h)) == 0 })
+	if !tc.c.Connected() || f.dials.Load() != 1 {
+		t.Fatal("编码失败不应断开连接")
 	}
 }

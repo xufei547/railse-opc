@@ -25,13 +25,18 @@ var ErrHubDisconnected = errors.New("未连接 hub")
 // ErrHubDisabled 表示 hub 以 401 拒绝了本机密钥（机器被吊销或密钥无效），客户端已停止连接，直到进程重启。
 var ErrHubDisabled = errors.New("hub 拒绝了本机密钥，已停止连接 hub")
 
-// errGeminiNotForHub 表示试图把 Gemini 会话的请求送去 hub 等待（Gemini 只作审计上报）。
-var errGeminiNotForHub = errors.New("gemini 请求不进 hub 等待")
+// ErrGeminiNotForHub 表示试图把 Gemini 会话的请求送去 hub 等待（Gemini 只作审计上报）。
+var ErrGeminiNotForHub = errors.New("gemini 请求不进 hub 等待")
 
-// 以下时长是包级变量只为测试能缩短；NewHubClient 时复制进客户端。
+// 以下是包级变量只为测试能调；NewHubClient 时复制进客户端。
 var (
-	// hubBackoff 是断线后的重连退避，逐档变长，最后一档封顶；收到 welcome 后归零。
+	// hubBackoff 是断线后的重连退避，逐档变长，最后一档封顶；连接稳定（见 hubStableAfter）后归零。
 	hubBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second}
+	// hubStableAfter：连上后先收到 hub 的第一个 ping，或连接持续这么久，才算稳定、退避归零。
+	// 握手后立即被断开（例如两台守护进程共用 machine.json 互相顶替）不算，退避照常变长，不会每秒重连。
+	hubStableAfter = 30 * time.Second
+	// hubAuditMaxBytes 是审计积压的总字节上限（与 auditQueueMax 条数上限同时生效），超了丢最旧的。
+	hubAuditMaxBytes = 32 << 20
 	// hubIdleTimeout：超过这么久没收到 hub 的任何帧就断开重连（hub 每 30 秒 ping，取两倍）。
 	hubIdleTimeout = 2 * 30 * time.Second
 	// hubProtoBackoff 是协议版本与 hub 不一致时的重连间隔：升级之前重连也没用，不必每 30 秒刷一次。
@@ -75,9 +80,11 @@ type HubClient struct {
 	addr         string // 日志里用的 hub 地址，只有 scheme://host
 
 	backoff       []time.Duration
+	stableAfter   time.Duration
 	idleTimeout   time.Duration
 	protoBackoff  time.Duration
 	auditInterval time.Duration
+	auditMaxBytes int
 
 	mu       sync.Mutex
 	conn     *websocket.Conn
@@ -86,6 +93,7 @@ type HubClient struct {
 	waiters  map[string]chan wire.Decision
 
 	auditQ        []auditItem
+	auditBytes    int // auditQ 里条目的字节总数
 	auditSeq      uint64
 	auditDropping bool          // 本轮积压已记过“丢弃最旧”的日志
 	auditKick     chan struct{} // 攒够一批时叫醒上报循环，容量 1
@@ -99,7 +107,8 @@ func NewHubClient(cfg Config, m MachineConfig, rules *Rules, pending *Pending, s
 		panic("agent.NewHubClient: setHubPaused 不能为 nil")
 	}
 	return &HubClient{cfg: cfg, machine: m, rules: rules, pending: pending, setHubPaused: setHubPaused, log: logger, addr: hubOrigin(m.HubURL),
-		backoff: append([]time.Duration(nil), hubBackoff...), idleTimeout: hubIdleTimeout, protoBackoff: hubProtoBackoff, auditInterval: hubAuditInterval,
+		backoff: append([]time.Duration(nil), hubBackoff...), stableAfter: hubStableAfter, idleTimeout: hubIdleTimeout, protoBackoff: hubProtoBackoff,
+		auditInterval: hubAuditInterval, auditMaxBytes: hubAuditMaxBytes,
 		changed: make(chan struct{}), waiters: map[string]chan wire.Decision{}, auditKick: make(chan struct{}, 1)}
 }
 
@@ -139,6 +148,8 @@ func wsURL(raw string) (string, error) {
 var noRedirectClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 // ConnState 返回当前是否连着 hub，以及一个在下一次状态变化（连上、断开，或被 401 停用）时关闭的通道。
+// 要同时关心停用的调用方，先调 ConnState 取通道、再查 Disabled：停用也会关闭这个通道，按这个顺序不会漏掉
+// 两次调用之间发生的停用（反过来先查 Disabled 再取通道，拿到的可能是停用之后的新通道，永远不会关闭）。
 func (h *HubClient) ConnState() (connected bool, changed <-chan struct{}) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -161,10 +172,11 @@ func (h *HubClient) Disabled() bool {
 // WaitConnected 等到连上或 ctx 结束；客户端已停用时立即返回 ErrHubDisabled。
 func (h *HubClient) WaitConnected(ctx context.Context) error {
 	for {
+		// 先取通道再查停用（见 ConnState）
+		connected, changed := h.ConnState()
 		if h.Disabled() {
 			return ErrHubDisabled
 		}
-		connected, changed := h.ConnState()
 		if connected {
 			return nil
 		}
@@ -196,7 +208,7 @@ func (h *HubClient) disable() {
 
 // sessionEnd 说明一次连接为什么结束。
 type sessionEnd struct {
-	welcomed      bool  // 收到过 welcome：之后退避归零
+	stable        bool  // 连接稳定过（收到 hub 的 ping，或持续了 stableAfter）：之后退避归零
 	unauthorized  bool  // 握手被 401 拒绝
 	protoMismatch bool  // hub 回 Error 帧后以 PolicyViolation 关闭（协议版本不一致）
 	err           error // 其他原因；ctx 取消时不看
@@ -216,7 +228,7 @@ func (h *HubClient) Run(ctx context.Context) {
 				"已停止连接 hub，请求一律交回终端；请重新 railse agent enroll 后重启守护进程", h.addr)
 			return
 		}
-		if end.welcomed {
+		if end.stable {
 			attempt = 0
 		}
 		var wait time.Duration
@@ -287,14 +299,26 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 	h.setConn(conn)
 	defer h.setConn(nil)
 	h.log.Printf("已连接 hub %s，规则版本 %d", h.addr, welcome.RulesVersion)
+	connectedAt, pinged := time.Now(), false
+	ended := func(err error) sessionEnd {
+		return sessionEnd{stable: pinged || time.Since(connectedAt) >= h.stableAfter, err: err}
+	}
 
-	// 重发本机全部 pending（Gemini 除外）；hub 对已知 id 不重复登记，已决定的再发一次决定
+	// 重发本机全部 pending（Gemini 除外）；hub 对已知 id 不重复登记，已决定的再发一次决定。
+	// 编不进一帧的请求（大 heredoc、大 MCP 参数）跳过并让它的等待者立即交回终端，不当作连接错误：
+	// 否则每次重连都在这里断开，后面的 pending 与审计永远发不出去。
 	for _, pr := range h.pending.List() {
 		if isGemini(pr) {
 			continue
 		}
-		if err := writeFrame(ctx, conn, toWire(pr)); err != nil {
-			return sessionEnd{welcomed: true, err: err}
+		b, err := wire.Marshal(toWire(pr))
+		if err != nil {
+			h.log.Printf("请求 %q 无法送往 hub（%v），跳过，交回终端", clipText(pr.ID, hubLogFieldMax), err)
+			h.failWaiter(pr.ID, "请求太大，无法送往 hub")
+			continue
+		}
+		if err := writeRaw(ctx, conn, b); err != nil {
+			return ended(err)
 		}
 	}
 
@@ -308,7 +332,7 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 		stop()
 		<-auditDone
 	}()
-	return sessionEnd{welcomed: true, err: h.readLoop(sctx, conn)}
+	return ended(h.readLoop(sctx, conn, &pinged))
 }
 
 // readWelcome 读 hub 的第一帧。是 welcome 时返回它；hub 回 Error 帧并以 PolicyViolation 关闭时记下 hub 的文案、
@@ -348,8 +372,8 @@ func (h *HubClient) applyWelcome(w wire.Welcome) {
 }
 
 // readLoop 读 hub 的帧并逐帧分发，连接出错、ctx 结束或超过 idleTimeout 没收到任何帧时返回。
-// 只有这里读连接（库不允许并发读）。
-func (h *HubClient) readLoop(ctx context.Context, conn *websocket.Conn) error {
+// 收到 ping 时把 *pinged 置真（连接稳定的标志）。只有这里读连接（库不允许并发读）。
+func (h *HubClient) readLoop(ctx context.Context, conn *websocket.Conn, pinged *bool) error {
 	for {
 		b, err := readFrame(ctx, conn, h.idleTimeout)
 		if err != nil {
@@ -364,6 +388,7 @@ func (h *HubClient) readLoop(ctx context.Context, conn *websocket.Conn) error {
 		}
 		switch kind {
 		case wire.TPing:
+			*pinged = true
 			if err := writeFrame(ctx, conn, wire.Pong{T: wire.TPong}); err != nil {
 				return err
 			}
@@ -435,9 +460,15 @@ func (h *HubClient) onError(e wire.Error) {
 		h.log.Printf("hub 报错: %q", msg)
 		return
 	}
-	if !h.deliver(wire.Decision{T: wire.TDecision, RequestID: e.RequestID, Action: "", DecidedBy: "hub_error", Reason: msg}) {
+	if !h.failWaiter(e.RequestID, msg) {
 		h.log.Printf("hub 拒收请求 %q: %q（没有等待者）", clipText(e.RequestID, hubLogFieldMax), msg)
 	}
+}
+
+// failWaiter 给请求的等待者投递 hub_error 的合成决定（Action 为空，理由截到 hubErrorReasonMax 字符），
+// 决定方据此把请求立即交回终端。没有等待者时返回 false。
+func (h *HubClient) failWaiter(id, reason string) bool {
+	return h.deliver(wire.Decision{T: wire.TDecision, RequestID: id, Action: "", DecidedBy: "hub_error", Reason: clipText(reason, hubErrorReasonMax)})
 }
 
 // replaceRules 解析并换上 hub 下发的规则；坏规则集保留本地并记日志。
@@ -492,14 +523,27 @@ func writeRaw(ctx context.Context, conn *websocket.Conn, b []byte) error {
 	return conn.Write(wctx, websocket.MessageText, b)
 }
 
+// send 编码并发出一帧。编码错误原样返回（不是连接问题）；未连接或写连接失败返回包着 ErrHubDisconnected 的错误
+// （写失败说明连接已坏，读循环随之结束，重连后 pending 会随对齐重发）。
 func (h *HubClient) send(v any) error {
+	b, err := wire.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return h.sendRaw(b)
+}
+
+func (h *HubClient) sendRaw(b []byte) error {
 	h.mu.Lock()
 	conn := h.conn
 	h.mu.Unlock()
 	if conn == nil {
 		return ErrHubDisconnected
 	}
-	return writeFrame(context.Background(), conn, v)
+	if err := writeRaw(context.Background(), conn, b); err != nil {
+		return fmt.Errorf("%w: %v", ErrHubDisconnected, err)
+	}
+	return nil
 }
 
 // toWire 把未完成请求编成 pending 帧。载荷只用脱敏后的 Redacted，永远不用 Req 里的原始载荷；
@@ -510,12 +554,18 @@ func toWire(pr PendingRequest) wire.PendingRequest {
 		DeadlineSeconds: int(pr.Deadline.Sub(pr.Created).Seconds()), CreatedAt: pr.Created.UTC()}
 }
 
-// SendPending 送一条待决请求。未连接返回 ErrHubDisconnected；Gemini 会话的请求不送（返回错误）。
+// SendPending 送一条待决请求。返回满足 errors.Is(err, ErrHubDisconnected) 的错误（未连接，或写连接失败）时，
+// 调用方可以在宽限期内等重连（请求仍在未完成表里，重连后随对齐重发）；非 ErrHubDisconnected 的错误一律交回终端：
+// Gemini 会话的请求（ErrGeminiNotForHub）、编码后超过单帧上限（errors.Is(err, wire.ErrFrameTooLarge)）等。
 func (h *HubClient) SendPending(pr PendingRequest) error {
 	if isGemini(pr) {
-		return errGeminiNotForHub
+		return ErrGeminiNotForHub
 	}
-	return h.send(toWire(pr))
+	b, err := wire.Marshal(toWire(pr))
+	if err != nil {
+		return fmt.Errorf("请求 %q 无法送往 hub: %w", pr.ID, err)
+	}
+	return h.sendRaw(b)
 }
 
 // SendCancel 告诉 hub 钩子已消失。
@@ -550,7 +600,7 @@ func (h *HubClient) Forget(id string) {
 	h.mu.Unlock()
 }
 
-// Forward 实现 AuditSink：编码后进队列就返回，不阻塞。队列满（auditQueueMax）时丢最旧的并记一次日志；
+// Forward 实现 AuditSink：编码后进队列就返回，不阻塞。积压超过 auditQueueMax 条或 auditMaxBytes 字节时丢最旧的并记一次日志；
 // 攒够 auditBatchMax 条时叫醒上报循环立即发，否则等定时。未连接时积压，连上后补发。
 func (h *HubClient) Forward(e AuditEntry) {
 	b, err := encodeAuditEntry(e)
@@ -559,18 +609,25 @@ func (h *HubClient) Forward(e AuditEntry) {
 		return
 	}
 	h.mu.Lock()
+	// 放进新条目后条数不超过 auditQueueMax、字节不超过 auditMaxBytes：从队头丢
+	n := 0
+	for n < len(h.auditQ) && (len(h.auditQ)-n >= auditQueueMax || h.auditBytes+len(b) > h.auditMaxBytes) {
+		h.auditBytes -= len(h.auditQ[n].b)
+		n++
+	}
 	logDrop := false
-	if n := len(h.auditQ) - auditQueueMax + 1; n > 0 {
+	if n > 0 {
 		h.auditQ = h.auditQ[n:]
 		logDrop = !h.auditDropping
 		h.auditDropping = true
 	}
 	h.auditSeq++
 	h.auditQ = append(h.auditQ, auditItem{seq: h.auditSeq, b: b})
+	h.auditBytes += len(b)
 	full := len(h.auditQ) >= auditBatchMax
 	h.mu.Unlock()
 	if logDrop {
-		h.log.Printf("审计积压超过 %d 条（hub 未连接或上报太慢），开始丢弃最旧的", auditQueueMax)
+		h.log.Printf("审计积压超过上限（%d 条或 %d 字节；hub 未连接或上报太慢），开始丢弃最旧的", auditQueueMax, h.auditMaxBytes)
 	}
 	if full {
 		select {
@@ -657,6 +714,7 @@ func (h *HubClient) ackAudit(seq uint64) {
 	defer h.mu.Unlock()
 	i := 0
 	for i < len(h.auditQ) && h.auditQ[i].seq <= seq {
+		h.auditBytes -= len(h.auditQ[i].b)
 		i++
 	}
 	h.auditQ = h.auditQ[i:]
