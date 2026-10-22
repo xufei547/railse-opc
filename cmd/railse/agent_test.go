@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/railse/railse-opc/internal/agent"
+	"github.com/railse/railse-opc/internal/proto"
 )
 
 func TestAgentServeAndControl(t *testing.T) {
@@ -45,7 +46,7 @@ func TestAgentServeAndControl(t *testing.T) {
 	}
 	out.Reset()
 	run([]string{"agent", "status", "--dir", cfgDir}, &out, &errOut)
-	if !strings.Contains(out.String(), "paused: true") {
+	if !strings.Contains(out.String(), "paused: true (local)\n") {
 		t.Fatalf("status after pause: %q", out.String())
 	}
 	run([]string{"agent", "resume", "--dir", cfgDir}, &out, &errOut)
@@ -151,5 +152,21 @@ func TestAgentLogIsPrivate(t *testing.T) {
 	}
 	if err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("已有的 agent.log 应收紧为 0600: %v %v", st.Mode().Perm(), err)
+	}
+}
+
+func TestPausedLineShowsSource(t *testing.T) {
+	for _, c := range []struct {
+		st   proto.Status
+		want string
+	}{
+		{proto.Status{}, "paused: false"},
+		{proto.Status{Paused: true, LocalPaused: true}, "paused: true (local)"},
+		{proto.Status{Paused: true, HubPaused: true}, "paused: true (hub)"},
+		{proto.Status{Paused: true, LocalPaused: true, HubPaused: true}, "paused: true (local+hub)"},
+	} {
+		if got := pausedLine(&c.st); got != c.want {
+			t.Fatalf("%+v: got %q want %q", c.st, got, c.want)
+		}
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/hookclient"
+	"github.com/railse/railse-opc/internal/proto"
 )
 
 const agentUsage = `用法:
@@ -65,7 +66,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		}
 		if reply.Status != nil {
 			st := reply.Status
-			fmt.Fprintf(stdout, "paused: %v\nrules: %d\npending: %d\nmachine: %s\nrules_path: %s\nuptime: %s\n", st.Paused, st.Rules, st.Pending, st.MachineID, st.RulesPath, st.Uptime)
+			fmt.Fprintf(stdout, "%s\nrules: %d\npending: %d\nmachine: %s\nrules_path: %s\nuptime: %s\n", pausedLine(st), st.Rules, st.Pending, st.MachineID, st.RulesPath, st.Uptime)
 		} else {
 			fmt.Fprintln(stdout, "ok")
 		}
@@ -74,6 +75,22 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "未知的 agent 子命令 %q\n\n%s\n", args[0], agentUsage)
 		return 2
 	}
+}
+
+// pausedLine 显示总开关的生效值；暂停时在括号里注明来源：本机（local）、hub，或两者都有。
+func pausedLine(st *proto.Status) string {
+	if !st.Paused {
+		return "paused: false"
+	}
+	switch {
+	case st.LocalPaused && st.HubPaused:
+		return "paused: true (local+hub)"
+	case st.LocalPaused:
+		return "paused: true (local)"
+	case st.HubPaused:
+		return "paused: true (hub)"
+	}
+	return "paused: true"
 }
 
 // runAgentServe 跑守护进程直到 ctx 取消。SIGHUP 重载规则。
