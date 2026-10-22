@@ -22,9 +22,10 @@ const schemaVersion = 1
 // ErrNotFound 表示查无此行。
 var ErrNotFound = errors.New("not found")
 
-// Store 包着一个 SQLite 数据库，连接池上限为单连接（SetMaxOpenConns(1)）。
-// 单连接的约束：Tx 回调里只能用 tx，不得调用 s.db 或其他 Store 方法；回调里不做网络等阻塞 IO；
-// Query 得到的 rows 必须先 Close 再发下一个查询。违反任何一条都会让后续调用永久阻塞。
+// Store 包着一个 SQLite 数据库，连接池上限为单连接（SetMaxOpenConns(1)）。单连接的约束：
+// Tx 回调里只能用 tx，不得调用 s.db 或其他 Store 方法，否则回调占着唯一的连接又去等连接，自锁永久挂死；
+// Tx 回调里不做网络等阻塞 IO，否则其他调用都要一直等到该 IO 结束、事务结束；
+// Tx 之外用 s.db 查询得到的 rows 必须先 Close 再发下一个查询，否则 rows 占着唯一的连接，下一个查询等不到连接而挂死。
 type Store struct {
 	db *sql.DB
 }
@@ -121,6 +122,9 @@ const timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 // fmtTime 把 t 转成 UTC 再按 timeLayout 格式化，所有写时间列的地方都用它。
 func fmtTime(t time.Time) string { return t.UTC().Format(timeLayout) }
 
+// FormatTime 返回 fmtTime(t)。hub 包与测试写时间列（如 expires_at 这类非当前时间）时用它，保证定宽可比较。
+func FormatTime(t time.Time) string { return fmtTime(t) }
+
 // Now 返回统一格式的当前时间。
 func Now() string { return fmtTime(time.Now()) }
 
@@ -145,8 +149,8 @@ func (s *Store) SetSetting(key, value string) error {
 
 // Tx 在一个事务（BEGIN IMMEDIATE）里跑 fn：fn 返回 nil 就提交，返回错误或 panic 就回滚，
 // panic 回滚后继续向上抛。回滚失败的错误与 fn 的错误一起返回。
-// 单连接：回调里只能用 tx，不得调用 s.db 或其他 Store 方法；回调里不做网络等阻塞 IO；
-// rows 必须先 Close 再发下一个查询。否则唯一的连接被占住，所有调用永久阻塞。
+// 单连接：回调里只能用 tx，不得调用 s.db 或其他 Store 方法，否则自锁永久挂死；
+// 回调里不做网络等阻塞 IO，否则其他调用都要一直等到该 IO 结束、事务结束。详见 Store 的注释。
 func (s *Store) Tx(fn func(tx *sql.Tx) error) (err error) {
 	tx, err := s.db.Begin()
 	if err != nil {

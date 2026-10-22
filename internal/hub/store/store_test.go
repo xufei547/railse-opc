@@ -352,3 +352,24 @@ func TestTimeFormatSortsLexically(t *testing.T) {
 		t.Fatalf("Now() 不可解析: %v", err)
 	}
 }
+
+func TestFormatTimeMatchesFmtTime(t *testing.T) {
+	cst := time.FixedZone("CST", 8*3600)
+	for _, in := range []time.Time{
+		time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC),
+		time.Date(2026, 10, 22, 16, 0, 0, 120000000, cst),
+		time.Now().Add(10 * time.Minute),
+	} {
+		got := FormatTime(in)
+		if got != fmtTime(in) {
+			t.Fatalf("FormatTime(%v) = %q, fmtTime = %q", in, got, fmtTime(in))
+		}
+		if len(got) != len(Now()) || !strings.HasSuffix(got, "Z") {
+			t.Fatalf("FormatTime(%v) = %q，应为定宽 UTC", in, got)
+		}
+	}
+	// 非 UTC 输入先转 UTC：东八区 16:00 即 UTC 08:00
+	if got := FormatTime(time.Date(2026, 10, 22, 16, 0, 0, 0, cst)); got != "2026-10-22T08:00:00.000000000Z" {
+		t.Fatalf("FormatTime 东八区 = %q", got)
+	}
+}
