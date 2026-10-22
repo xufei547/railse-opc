@@ -198,6 +198,19 @@ func (s *Store) ValidateClientSession(raw string) (bool, error) {
 	return n == 1, nil
 }
 
+// SetPasswordHash 在一个事务里写入网页登录密码哈希（settings 的 password_hash）并删掉全部登录会话：
+// 换密码后旧 cookie 立即失效；任一步失败整体回滚，密码不变。
+// 自开事务，不得在 Tx 回调里调用（单连接会永久自锁）。
+func (s *Store) SetPasswordHash(encoded string) error {
+	return s.Tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec("INSERT INTO settings(key, value) VALUES('password_hash', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", encoded); err != nil {
+			return err
+		}
+		_, err := tx.Exec("DELETE FROM client_sessions")
+		return err
+	})
+}
+
 // DeleteClientSession 登出。
 func (s *Store) DeleteClientSession(raw string) error {
 	_, err := s.db.Exec("DELETE FROM client_sessions WHERE token_hash = ?", HashToken(raw))

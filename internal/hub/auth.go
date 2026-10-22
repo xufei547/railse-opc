@@ -1,17 +1,19 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 
@@ -33,7 +35,14 @@ const (
 	maxNameLen     = 128  // 字节
 	maxHomeDirLen  = 4096 // 字节
 	sweepEvery     = time.Minute
+	// argonConcurrency 是同时进行的登录密码校验上限（每次 64 MiB），loginVerifyWait 是等名额的上限。
+	argonConcurrency = 2
+	loginVerifyWait  = 2 * time.Second
 )
+
+// argonSlots 是登录密码校验的包级信号量：多个来源同时猛试也只有 argonConcurrency 个 argon2 在算，内存与 CPU 有上限。
+// 不另加全局登录限速（那会让攻击者远程锁死主人）；暴力破解靠按来源（IPv6 按 /64）限速。
+var argonSlots = make(chan struct{}, argonConcurrency)
 
 // argonHeader 是编码串里算法、版本与参数三段，HashPassword 写出的与 VerifyPassword 接受的完全一致。
 var argonHeader = fmt.Sprintf("argon2id$v=%d$m=%d,t=%d,p=%d", argon2.Version, argonMemory, argonTime, argonThreads)
@@ -74,16 +83,32 @@ func VerifyPassword(encoded, pw string) bool {
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
-// SetPassword 设置或更换网页登录密码。settings 的 password_hash 只存 argon2id 编码串。
+// SetPassword 设置或更换网页登录密码（至少 8 个字符，按 rune 计）。settings 的 password_hash 只存 argon2id 编码串；
+// 写入密码与删光已有登录会话在同一事务里，换密码后旧 cookie 立即失效。
 func (s *Server) SetPassword(pw string) error {
-	if len(pw) < 8 {
+	if utf8.RuneCountInString(pw) < 8 {
 		return errors.New("密码至少 8 个字符")
 	}
 	enc, err := HashPassword(pw)
 	if err != nil {
 		return err
 	}
-	return s.store.SetSetting("password_hash", enc)
+	return s.store.SetPasswordHash(enc)
+}
+
+// verifyLogin 在信号量名额内校验登录密码。等 verifyWait 仍拿不到名额（或请求已取消）时 busy 为 true，不做校验。
+func (s *Server) verifyLogin(ctx context.Context, encoded, pw string) (ok, busy bool) {
+	timer := time.NewTimer(s.verifyWait)
+	defer timer.Stop()
+	select {
+	case argonSlots <- struct{}{}:
+	case <-timer.C:
+		return false, true
+	case <-ctx.Done():
+		return false, true
+	}
+	defer func() { <-argonSlots }()
+	return s.verify(encoded, pw), false
 }
 
 // limiter 是按键的滑动窗口计数器。每个键只留窗口内的时间戳（至多 max 个）；
@@ -140,13 +165,60 @@ func (l *limiter) sweep(now time.Time) {
 	}
 }
 
-// clientIP 取 TCP 对端地址，不信任 X-Forwarded-For 之类可伪造的头。
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// clientIP 给出限速用的客户端键。默认取 TCP 对端地址；只有对端落在 trusted 前缀内时才看 X-Forwarded-For，
+// 从右往左跳过可信地址，取第一个不可信的（再往左的条目客户端可以伪造）；遇到解析不了的条目就停在上一跳。
+// 键做归一：IPv4-mapped 换成 IPv4，IPv6 取所在 /64（一台主机通常握有整段 /64）。对端地址解析不了时原样返回。
+func clientIP(r *http.Request, trusted []netip.Prefix) string {
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
-	return host
+	addr := normAddr(ap.Addr())
+	if inPrefixes(addr, trusted) {
+		hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+		for i := len(hops) - 1; i >= 0; i-- {
+			a, ok := parseHop(hops[i])
+			if !ok {
+				break
+			}
+			addr = a
+			if !inPrefixes(a, trusted) {
+				break
+			}
+		}
+	}
+	if addr.Is4() {
+		return addr.String()
+	}
+	p, err := addr.Prefix(64)
+	if err != nil {
+		return addr.String()
+	}
+	return p.String()
+}
+
+// normAddr 去掉 IPv6 zone，IPv4-mapped 换成 IPv4。
+func normAddr(a netip.Addr) netip.Addr { return a.WithZone("").Unmap() }
+
+// parseHop 解析 X-Forwarded-For 的一项，接受带或不带端口的写法。
+func parseHop(s string) (netip.Addr, bool) {
+	s = strings.TrimSpace(s)
+	if a, err := netip.ParseAddr(s); err == nil {
+		return normAddr(a), true
+	}
+	if ap, err := netip.ParseAddrPort(s); err == nil {
+		return normAddr(ap.Addr()), true
+	}
+	return netip.Addr{}, false
+}
+
+func inPrefixes(a netip.Addr, ps []netip.Prefix) bool {
+	for _, p := range ps {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionCookie 是登录会话 cookie：HttpOnly、SameSite=Lax、Path=/，配置要求或请求经 TLS 时加 Secure。
@@ -156,7 +228,7 @@ func (s *Server) sessionCookie(r *http.Request, value string, maxAge int) *http.
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.limiter.allow("login:"+clientIP(r), loginMax, loginWindow) {
+	if !s.limiter.allow("login:"+clientIP(r, s.cfg.TrustedProxies), loginMax, loginWindow) {
 		writeErr(w, http.StatusTooManyRequests, "尝试太频繁，一分钟后再试")
 		return
 	}
@@ -176,7 +248,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "需要 password")
 		return
 	}
-	if !VerifyPassword(enc, body.Password) {
+	ok, busy := s.verifyLogin(r.Context(), enc, body.Password)
+	if busy {
+		writeErr(w, http.StatusServiceUnavailable, "服务器忙，请稍后再试")
+		return
+	}
+	if !ok {
 		writeErr(w, http.StatusUnauthorized, "密码错误")
 		return
 	}
@@ -224,7 +301,8 @@ func (s *Server) requireClient(next http.HandlerFunc) http.HandlerFunc {
 
 // handleEnroll 用一次性接入码换机器长期密钥。消费接入码与登记机器在同一事务里，登记失败时接入码仍可用。
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
-	if !s.limiter.allow("enroll:"+clientIP(r), loginMax, loginWindow) {
+	w.Header().Set("Cache-Control", "no-store") // 响应里有机器密钥
+	if !s.limiter.allow("enroll:"+clientIP(r, s.cfg.TrustedProxies), loginMax, loginWindow) {
 		writeErr(w, http.StatusTooManyRequests, "尝试太频繁")
 		return
 	}
@@ -239,6 +317,10 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(body.Name) > maxNameLen || len(body.HomeDir) > maxHomeDirLen {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("name 至多 %d 字节，home_dir 至多 %d 字节", maxNameLen, maxHomeDirLen))
+		return
+	}
+	if !validName(body.Name) {
+		writeErr(w, http.StatusBadRequest, "name 必须是合法 UTF-8，且不能含控制字符")
 		return
 	}
 	secret := store.RandomToken()
@@ -258,11 +340,28 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"machine_id": m.ID, "secret": secret})
 }
 
-// authMachine 从 Authorization: Bearer 取机器密钥。
+// validName 报告机器名是否是合法 UTF-8 且不含 C0 控制字符与 DEL。
+func validName(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, c := range s {
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// authMachine 从 Authorization: Bearer 取机器密钥。方案名大小写不敏感，值去首尾空白后不能为空。
 func (s *Server) authMachine(r *http.Request) (store.Machine, error) {
-	secret, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	secret = strings.TrimSpace(secret)
-	if !ok || secret == "" {
+	const scheme = "Bearer "
+	h := r.Header.Get("Authorization")
+	if len(h) < len(scheme) || !strings.EqualFold(h[:len(scheme)], scheme) {
+		return store.Machine{}, errors.New("缺少 Bearer 密钥")
+	}
+	secret := strings.TrimSpace(h[len(scheme):])
+	if secret == "" {
 		return store.Machine{}, errors.New("缺少 Bearer 密钥")
 	}
 	return s.store.AuthMachine(secret)

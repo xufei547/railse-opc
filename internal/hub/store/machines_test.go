@@ -317,3 +317,42 @@ func TestCreateMachineRejectsEmptySecret(t *testing.T) {
 		t.Fatalf("不应留机器行: %+v, %v", list, err)
 	}
 }
+
+// 写密码哈希与删光登录会话在同一事务里：换密码后旧会话全部失效；删除失败时密码也不变。
+func TestSetPasswordHashRevokesSessions(t *testing.T) {
+	s := openTemp(t)
+	if err := s.SetPasswordHash("old"); err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.CreateClientSession(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.CreateClientSession(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("CREATE TRIGGER no_delete BEFORE DELETE ON client_sessions BEGIN SELECT RAISE(ABORT, 'no delete'); END"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPasswordHash("new"); err == nil {
+		t.Fatal("删会话失败时应报错")
+	}
+	if v, ok, err := s.GetSetting("password_hash"); err != nil || !ok || v != "old" {
+		t.Fatalf("删会话失败时密码不应变: %q, %v, %v", v, ok, err)
+	}
+	if _, err := s.db.Exec("DROP TRIGGER no_delete"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPasswordHash("new"); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok, err := s.GetSetting("password_hash"); err != nil || !ok || v != "new" {
+		t.Fatalf("password_hash = %q, %v, %v", v, ok, err)
+	}
+	for _, tok := range []string{a, b} {
+		if ok, err := s.ValidateClientSession(tok); err != nil || ok {
+			t.Fatalf("换密码后旧会话应失效: %v, %v", ok, err)
+		}
+	}
+}

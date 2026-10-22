@@ -6,11 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	"github.com/railse/railse-opc/internal/hub/store"
 )
@@ -25,6 +29,38 @@ type Config struct {
 	PingInterval  time.Duration
 	PongTimeout   time.Duration
 	ResendWindow  time.Duration
+	// TrustedProxies 是可信反向代理的地址前缀。只有 TCP 对端落在其中时才看 X-Forwarded-For；默认空，一律用对端地址。
+	TrustedProxies []netip.Prefix
+}
+
+// validate 检查时长为正、可信代理前缀有效。
+func (c Config) validate() error {
+	for _, d := range []struct {
+		name string
+		v    time.Duration
+	}{{"SessionTTL", c.SessionTTL}, {"PingInterval", c.PingInterval}, {"PongTimeout", c.PongTimeout}, {"ResendWindow", c.ResendWindow}} {
+		if d.v <= 0 {
+			return fmt.Errorf("配置 %s 必须为正，得到 %s", d.name, d.v)
+		}
+	}
+	for _, p := range c.TrustedProxies {
+		if !p.IsValid() {
+			return fmt.Errorf("可信代理前缀无效: %q", p)
+		}
+	}
+	return nil
+}
+
+// normPrefixes 规整可信代理前缀：去掉主机位，IPv4-mapped 的前缀换成对应的 IPv4 前缀（与 clientIP 归一后的地址对得上）。
+func normPrefixes(ps []netip.Prefix) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(ps))
+	for _, p := range ps {
+		if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
+		}
+		out = append(out, p.Masked())
+	}
+	return out
 }
 
 // DefaultConfig 给出目录下的默认配置。
@@ -45,14 +81,22 @@ type Server struct {
 	agents  *agentHub
 	clients *clientHub
 	start   time.Time
+	// verify 与 verifyWait 是登录校验密码的函数与等名额的上限，测试可替换。
+	verify     func(encoded, pw string) bool
+	verifyWait time.Duration
 }
 
-// New 组装 hub：确保有内置规则，注册路由。
+// New 组装 hub：校验配置，确保有内置规则，注册路由。
 func New(cfg Config, st *store.Store, logger *log.Logger) (*Server, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	cfg.TrustedProxies = normPrefixes(cfg.TrustedProxies)
 	if _, err := st.EnsureDefaultRules(); err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, log: logger, mux: http.NewServeMux(), limiter: newLimiter(), agents: newAgentHub(), clients: newClientHub(), start: time.Now()}
+	s := &Server{cfg: cfg, store: st, log: logger, mux: http.NewServeMux(), limiter: newLimiter(), agents: newAgentHub(), clients: newClientHub(), start: time.Now(),
+		verify: VerifyPassword, verifyWait: loginVerifyWait}
 	s.routes()
 	return s, nil
 }
@@ -69,9 +113,11 @@ func (s *Server) routes() {
 // Handler 返回根处理器。
 func (s *Server) Handler() http.Handler { return s.mux }
 
-// Run 监听直到 ctx 取消。
+// Run 监听直到 ctx 取消。请求的 context 派生自 ctx，取消时长连接与在途请求都能看到；
+// 关停先等在途请求至多 shutdownTimeout，超时就强制断开。
 func (s *Server) Run(ctx context.Context) error {
-	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 10 * time.Second}
+	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
+		BaseContext: func(net.Listener) context.Context { return ctx }}
 	ln, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
 		return err
@@ -81,10 +127,14 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() { errCh <- hs.Serve(ln) }()
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		s.agents.closeAll()
-		return hs.Shutdown(shutdownCtx)
+		if err := hs.Shutdown(shutdownCtx); err != nil {
+			s.log.Printf("hub 关停超时，强制断开: %v", err)
+			hs.Close()
+		}
+		return nil
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
@@ -108,9 +158,26 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"pending": pending, "rules_version": version, "uptime": time.Since(s.start).Round(time.Second).String()})
 }
 
-// decodeJSON 把限长 limit 字节的请求体解码进 v；超长或不是 JSON 都返回错误。所有 JSON 请求体都经它读。
+const (
+	idleTimeout     = 120 * time.Second
+	shutdownTimeout = 3 * time.Second
+	bodyReadTimeout = 10 * time.Second
+)
+
+// decodeJSON 把限长 limit 字节的请求体解码进 v，读请求体有 bodyReadTimeout 的截止（慢速发送占不住连接）。
+// 超长、超时、不是合法 UTF-8（encoding/json 会把非法字节悄悄换成 U+FFFD，这里先拒）、不是 JSON 都返回错误。
+// 所有 JSON 请求体都经它读。
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) error {
-	return json.NewDecoder(http.MaxBytesReader(w, r.Body, limit)).Decode(v)
+	// 不支持设截止的 ResponseWriter（如测试里的 ResponseRecorder）忽略错误，照常读
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout))
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
+		return err
+	}
+	if !utf8.Valid(data) {
+		return errors.New("请求体不是合法的 UTF-8")
+	}
+	return json.Unmarshal(data, v)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

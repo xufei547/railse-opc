@@ -2,15 +2,20 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,10 +29,10 @@ type testHub struct {
 	dir  string
 }
 
-func newTestHub(t *testing.T) *testHub { return newTestHubWith(t, nil) }
+func newTestHub(t *testing.T) *testHub { return newTestHubWith(t, nil, nil) }
 
-// newTestHubWith 用默认配置起一个 hub，mod 非空时先改配置。
-func newTestHubWith(t *testing.T, mod func(*Config)) *testHub {
+// newTestHubWith 用默认配置起一个 hub：mod 非空时先改配置，srvMod 非空时在开始服务前改 Server（测试钩子）。
+func newTestHubWith(t *testing.T, mod func(*Config), srvMod func(*Server)) *testHub {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "rs")
 	if err != nil {
@@ -45,6 +50,9 @@ func newTestHubWith(t *testing.T, mod func(*Config)) *testHub {
 	srv, err := New(cfg, st, log.New(os.Stderr, "hub ", 0))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if srvMod != nil {
+		srvMod(srv)
 	}
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { hs.Close(); st.Close() })
@@ -263,7 +271,7 @@ func TestLoginBadBody(t *testing.T) {
 
 // SecureCookies 打开或请求经 TLS 时，登录与登出的 cookie 都带 Secure。
 func TestSessionCookieSecure(t *testing.T) {
-	h := newTestHubWith(t, func(c *Config) { c.SecureCookies = true })
+	h := newTestHubWith(t, func(c *Config) { c.SecureCookies = true }, nil)
 	if err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
@@ -372,8 +380,8 @@ func TestEnroll(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := postJSON(t, h.http.URL+"/api/enroll", map[string]string{"token": tok, "name": "mac", "home_dir": "/Users/u"}, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("enroll = %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("enroll = %d, Cache-Control %q", resp.StatusCode, resp.Header.Get("Cache-Control"))
 	}
 	var out struct {
 		MachineID string `json:"machine_id"`
@@ -383,11 +391,14 @@ func TestEnroll(t *testing.T) {
 		t.Fatalf("enroll 返回 %+v, %v", out, err)
 	}
 	req, _ := http.NewRequest("GET", "/ws/agent", nil)
-	req.Header.Set("Authorization", "Bearer "+out.Secret)
-	if m, err := h.srv.authMachine(req); err != nil || m.ID != out.MachineID || m.HomeDir != "/Users/u" {
-		t.Fatalf("authMachine = %+v, %v", m, err)
+	// 方案名大小写不敏感，值去首尾空白
+	for _, v := range []string{"Bearer " + out.Secret, "bearer " + out.Secret, "BEARER  " + out.Secret + " "} {
+		req.Header.Set("Authorization", v)
+		if m, err := h.srv.authMachine(req); err != nil || m.ID != out.MachineID || m.HomeDir != "/Users/u" {
+			t.Fatalf("Authorization %q: authMachine = %+v, %v", v, m, err)
+		}
 	}
-	for _, v := range []string{"Bearer nope", "", "Bearer ", "Basic " + out.Secret, out.Secret} {
+	for _, v := range []string{"Bearer nope", "", "Bearer ", "Bearer    ", "Bearer", "Bearer" + out.Secret, "Basic " + out.Secret, out.Secret} {
 		req.Header.Set("Authorization", v)
 		if _, err := h.srv.authMachine(req); err == nil {
 			t.Fatalf("Authorization %q 应失败", v)
@@ -426,14 +437,14 @@ func TestEnrollRejectsBadInput(t *testing.T) {
 	}
 }
 
-// 接入审计的 detail 是合法 JSON，名字里的引号、控制字符、非 ASCII 原样往返。
+// 接入审计的 detail 是合法 JSON，名字里的引号、反斜杠、非 ASCII（含 %q 会转成 \U 的不可打印字符）原样往返。
 func TestEnrollAuditDetail(t *testing.T) {
 	h := newTestHub(t)
 	tok, err := h.st.CreateEnrollToken(10 * time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := "mac \"pro\" \x01\x7f 工作站  "
+	name := "mac \"pro\" \\ 工作站 \u2028 \U000E0001"
 	resp := postJSON(t, h.http.URL+"/api/enroll", map[string]string{"token": tok, "name": name}, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("enroll = %d", resp.StatusCode)
@@ -478,4 +489,338 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// waitFor 轮询 cond 直到为真，5 秒超时。只在测试 goroutine 里调用。
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("等待超时: %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// loginCode 发一次登录，返回状态码；出错返回 -1。可在 goroutine 里调用（不调 t.Fatal）。
+func loginCode(url, pw string) int {
+	b, _ := json.Marshal(map[string]string{"password": pw})
+	resp, err := http.Post(url+"/api/login", "application/json", bytes.NewReader(b))
+	if err != nil {
+		return -1
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+// 同时在算 argon2 的登录不超过 2 个：名额占满时新的登录等 verifyWait 后回 503，不进入校验；名额归还后照常。
+func TestLoginArgonConcurrencyCap(t *testing.T) {
+	var inFlight, peak, calls atomic.Int32
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	h := newTestHubWith(t, nil, func(s *Server) {
+		s.verifyWait = 100 * time.Millisecond
+		s.verify = func(enc, pw string) bool {
+			calls.Add(1)
+			n := inFlight.Add(1)
+			defer inFlight.Add(-1)
+			for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+			}
+			<-release
+			return VerifyPassword(enc, pw)
+		}
+	})
+	// 在 hub 的清理（hs.Close 会等在途请求）之后注册，先于它运行：测试中途失败也不会卡在被阻塞的校验上
+	t.Cleanup(unblock)
+	if err := h.srv.SetPassword("hunter22"); err != nil {
+		t.Fatal(err)
+	}
+	codes := make(chan int, 2)
+	for i := 0; i < 2; i++ {
+		go func() { codes <- loginCode(h.http.URL, "hunter22") }()
+	}
+	waitFor(t, "两个登录进入校验", func() bool { return inFlight.Load() == 2 })
+	third := make(chan int, 1)
+	go func() { third <- loginCode(h.http.URL, "hunter22") }()
+	select {
+	case code := <-third:
+		if code != http.StatusServiceUnavailable {
+			t.Fatalf("名额占满时应 503, 得到 %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("名额占满时第三个登录应在 verifyWait 后回 503，却一直没返回（同时校验 %d 个）", inFlight.Load())
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("等不到名额的登录不应进入校验: 校验 %d 次", n)
+	}
+	unblock()
+	for i := 0; i < 2; i++ {
+		if code := <-codes; code != http.StatusNoContent {
+			t.Fatalf("被放行的登录应 204, 得到 %d", code)
+		}
+	}
+	if code := loginCode(h.http.URL, "wrong-pass"); code != http.StatusUnauthorized {
+		t.Fatalf("名额归还后应照常校验, 得到 %d", code)
+	}
+	if p := peak.Load(); p != 2 {
+		t.Fatalf("同时校验峰值 = %d，应为 2", p)
+	}
+}
+
+// 换密码后已有会话全部失效：旧 cookie 访问需要登录的接口得 401；旧密码登录 401，新密码 204。
+func TestSetPasswordRevokesSessions(t *testing.T) {
+	h := newTestHub(t)
+	if err := h.srv.SetPassword("hunter22"); err != nil {
+		t.Fatal(err)
+	}
+	c := login(t, h, "hunter22")
+	status := func() int {
+		req, _ := http.NewRequest("GET", h.http.URL+"/api/status", nil)
+		req.AddCookie(c)
+		return do(t, req).StatusCode
+	}
+	if code := status(); code != http.StatusOK {
+		t.Fatalf("换密码前应 200, 得到 %d", code)
+	}
+	if err := h.srv.SetPassword("another-pass"); err != nil {
+		t.Fatal(err)
+	}
+	if code := status(); code != http.StatusUnauthorized {
+		t.Fatalf("换密码后旧 cookie 应 401, 得到 %d", code)
+	}
+	if code := loginCode(h.http.URL, "hunter22"); code != http.StatusUnauthorized {
+		t.Fatalf("旧密码应 401, 得到 %d", code)
+	}
+	login(t, h, "another-pass")
+}
+
+// 密码长度按字符（rune）计，不按字节：7 个汉字 21 字节也不够 8 个字符。
+func TestSetPasswordCountsRunes(t *testing.T) {
+	h := newTestHub(t)
+	if err := h.srv.SetPassword("密码密码密码密"); err == nil {
+		t.Fatal("7 个字符应被拒")
+	}
+	if err := h.srv.SetPassword("密码密码密码密码"); err != nil {
+		t.Fatalf("8 个字符应通过: %v", err)
+	}
+}
+
+// 过期的会话在 HTTP 层同样 401。
+func TestExpiredSessionHTTP(t *testing.T) {
+	h := newTestHub(t)
+	raw, err := h.st.CreateClientSession(-time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("GET", h.http.URL+"/api/status", nil)
+	req.AddCookie(&http.Cookie{Name: "railse_session", Value: raw})
+	if code := do(t, req).StatusCode; code != http.StatusUnauthorized {
+		t.Fatalf("过期会话应 401, 得到 %d", code)
+	}
+}
+
+// clientIP：IPv4-mapped 归一为 IPv4，IPv6 归一到 /64；只有对端在可信前缀内才看 X-Forwarded-For，
+// 从右往左取第一个不可信的地址。
+func TestClientIP(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("fd00::/8")}
+	cases := []struct {
+		name    string
+		remote  string
+		xff     []string
+		trusted []netip.Prefix
+		want    string
+	}{
+		{"IPv4", "192.0.2.1:1234", nil, nil, "192.0.2.1"},
+		{"IPv4-mapped", "[::ffff:192.0.2.1]:1234", nil, nil, "192.0.2.1"},
+		{"IPv6 归一到 /64", "[2001:db8:1:2:3:4:5:6]:1", nil, nil, "2001:db8:1:2::/64"},
+		{"IPv6 带 zone", "[fe80::1%en0]:1", nil, nil, "fe80::/64"},
+		{"无法解析的对端原样", "pipe", nil, nil, "pipe"},
+		{"未配置可信代理时忽略 XFF", "192.0.2.1:1", []string{"203.0.113.5"}, nil, "192.0.2.1"},
+		{"不可信对端伪造 XFF", "192.0.2.1:1", []string{"203.0.113.5"}, trusted, "192.0.2.1"},
+		{"可信对端取 XFF", "10.0.0.2:5", []string{"203.0.113.5"}, trusted, "203.0.113.5"},
+		{"跳过可信的中间代理", "10.0.0.2:5", []string{"198.51.100.1, 203.0.113.5, 10.0.0.3"}, trusted, "203.0.113.5"},
+		{"多行 XFF 按顺序拼接", "10.0.0.2:5", []string{"198.51.100.1", "203.0.113.5"}, trusted, "203.0.113.5"},
+		{"全是可信地址取最左", "10.0.0.2:5", []string{"10.0.0.7, 10.0.0.3"}, trusted, "10.0.0.7"},
+		{"可信对端没有 XFF", "10.0.0.2:5", nil, trusted, "10.0.0.2"},
+		{"最右是垃圾时停在最后一个可信跳", "10.0.0.2:5", []string{"203.0.113.5, garbage"}, trusted, "10.0.0.2"},
+		{"XFF 里的 IPv6 带端口", "10.0.0.2:5", []string{"[2001:db8::1]:443"}, trusted, "2001:db8::/64"},
+		{"XFF 里的 IPv4-mapped", "10.0.0.2:5", []string{"::ffff:203.0.113.5"}, trusted, "203.0.113.5"},
+		{"IPv6 可信对端", "[fd00::1]:5", []string{"203.0.113.5"}, trusted, "203.0.113.5"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/api/login", nil)
+			r.RemoteAddr = c.remote
+			for _, v := range c.xff {
+				r.Header.Add("X-Forwarded-For", v)
+			}
+			if got := clientIP(r, c.trusted); got != c.want {
+				t.Fatalf("clientIP = %q，应为 %q", got, c.want)
+			}
+		})
+	}
+}
+
+// 不可信对端换 X-Forwarded-For 换不出新的限速键；可信对端时按 XFF 里的客户端地址分别限速，
+// 左侧伪造的地址不影响取到的客户端地址。
+func TestLoginRateLimitBehindProxy(t *testing.T) {
+	try := func(h *testHub, xff string) int {
+		req, _ := http.NewRequest("POST", h.http.URL+"/api/login", strings.NewReader(`{"password":"x"}`))
+		req.Header.Set("X-Forwarded-For", xff)
+		return do(t, req).StatusCode
+	}
+	h := newTestHub(t) // 未设密码：放行的登录回 503，被限速的回 429，不必跑 argon2
+	for i := 0; i < 5; i++ {
+		try(h, fmt.Sprintf("203.0.113.%d", i))
+	}
+	if code := try(h, "203.0.113.99"); code != http.StatusTooManyRequests {
+		t.Fatalf("不可信对端换 XFF 也应被限速, 得到 %d", code)
+	}
+
+	h = newTestHubWith(t, func(c *Config) {
+		c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
+	}, nil)
+	for i := 0; i < 6; i++ {
+		if code := try(h, fmt.Sprintf("203.0.113.%d", i)); code != http.StatusServiceUnavailable {
+			t.Fatalf("可信代理后不同客户端各自计数，第 %d 个得到 %d", i+1, code)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		try(h, fmt.Sprintf("198.51.100.%d, 192.0.2.9", i))
+	}
+	if code := try(h, "198.51.100.200, 192.0.2.9"); code != http.StatusTooManyRequests {
+		t.Fatalf("同一客户端左侧伪造地址也应被限速, 得到 %d", code)
+	}
+}
+
+// 不合法的机器名（非法 UTF-8、C0 控制字符、DEL）回 400，不消费接入码。
+func TestEnrollRejectsBadName(t *testing.T) {
+	h := newTestHub(t)
+	tok, err := h.st.CreateEnrollToken(10 * time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string][]byte{
+		"C0 控制字符":  mustJSON(t, map[string]string{"token": tok, "name": "mac\x01"}),
+		"制表符":      mustJSON(t, map[string]string{"token": tok, "name": "mac\tpro"}),
+		"DEL":      mustJSON(t, map[string]string{"token": tok, "name": "mac\x7f"}),
+		"非法 UTF-8": []byte(`{"token":"` + tok + `","name":"mac` + "\xff" + `"}`),
+	}
+	for name, body := range cases {
+		if resp := postRaw(t, h.http.URL+"/api/enroll", body, nil); resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s 应 400, 得到 %d", name, resp.StatusCode)
+		}
+	}
+	if resp := postJSON(t, h.http.URL+"/api/enroll", map[string]string{"token": tok, "name": "工作站 mac"}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("合法名字应接入成功且接入码未被消费, 得到 %d", resp.StatusCode)
+	}
+}
+
+// New 拒绝非正的时长与无效的可信代理前缀。
+func TestNewRejectsBadConfig(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	mods := map[string]func(*Config){
+		"SessionTTL":     func(c *Config) { c.SessionTTL = 0 },
+		"PingInterval":   func(c *Config) { c.PingInterval = -time.Second },
+		"PongTimeout":    func(c *Config) { c.PongTimeout = 0 },
+		"ResendWindow":   func(c *Config) { c.ResendWindow = 0 },
+		"TrustedProxies": func(c *Config) { c.TrustedProxies = []netip.Prefix{{}} },
+	}
+	for name, mod := range mods {
+		cfg := DefaultConfig(dir)
+		mod(&cfg)
+		if _, err := New(cfg, st, log.New(io.Discard, "", 0)); err == nil {
+			t.Errorf("%s 不合法时 New 应报错", name)
+		}
+	}
+	if _, err := New(DefaultConfig(dir), st, log.New(io.Discard, "", 0)); err != nil {
+		t.Fatalf("默认配置应可用: %v", err)
+	}
+}
+
+// syncBuf 是并发安全的日志缓冲。
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// Run 监听并服务；取消 ctx 后很快返回 nil。在途请求经 BaseContext 看到取消，不必等关停超时。
+func TestRunShutsDownOnCancel(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := DefaultConfig(dir)
+	cfg.Listen = "127.0.0.1:0"
+	var logs syncBuf
+	srv, err := New(cfg, st, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waiting atomic.Bool
+	srv.mux.HandleFunc("GET /test/wait", func(w http.ResponseWriter, r *http.Request) {
+		waiting.Store(true)
+		<-r.Context().Done()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	const prefix = "hub 监听 "
+	waitFor(t, "Run 开始监听", func() bool { return strings.Contains(logs.String(), prefix) })
+	line := logs.String()
+	addr := strings.TrimSpace(strings.SplitN(line[strings.Index(line, prefix)+len(prefix):], "\n", 2)[0])
+	req, _ := http.NewRequest("GET", "http://"+addr+"/api/status", nil)
+	if code := do(t, req).StatusCode; code != http.StatusUnauthorized {
+		t.Fatalf("Run 应在服务, /api/status = %d", code)
+	}
+	go func() {
+		if resp, err := http.Get("http://" + addr + "/test/wait"); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	waitFor(t, "在途请求进入处理器", waiting.Load)
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run 返回 %v", err)
+		}
+		if d := time.Since(start); d >= 2*time.Second {
+			t.Fatalf("Run 用了 %s 才返回，在途请求应经 BaseContext 看到取消", d)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("取消后 Run 未返回")
+	}
 }
