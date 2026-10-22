@@ -777,11 +777,12 @@ func TestHubExpiry(t *testing.T) {
 	}
 }
 
-// 并发两次决定同一请求：一次成功、一次 ErrNotPending。
+// 并发两次决定同一请求（都带 Remember，两种都能学）：一次成功、一次 ErrNotPending，只学一条规则。
 func TestDecideConcurrent(t *testing.T) {
 	h := newTestHub(t)
 	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
-	insertReq(t, h.st, store.Request{ID: "c1", MachineID: m.ID, State: "pending"})
+	insertReq(t, h.st, store.Request{ID: "c1", MachineID: m.ID, State: "pending", ProjectRoot: "/p",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "echo c1", Cwd: "/p"}})
 	errs := make(chan error, 2)
 	for _, a := range []string{"allow", "deny"} {
 		go func() {
@@ -803,8 +804,11 @@ func TestDecideConcurrent(t *testing.T) {
 	if ok != 1 || notPending != 1 {
 		t.Fatalf("应一次成功一次 ErrNotPending: ok=%d notPending=%d", ok, notPending)
 	}
-	if acts := auditActions(t, h.st, "c1"); countOf(acts, "allow")+countOf(acts, "deny") != 1 {
-		t.Fatalf("只应有一次决定审计: %v", acts)
+	if acts := auditActions(t, h.st, "c1"); countOf(acts, "allow")+countOf(acts, "deny") != 1 || countOf(acts, "rule_learned") != 1 {
+		t.Fatalf("只应有一次决定审计、一次学规则: %v", acts)
+	}
+	if rules, _ := h.st.ListRules(); len(rules) != 3 {
+		t.Fatalf("只应学一条规则: %+v", rules)
 	}
 }
 
@@ -1081,5 +1085,75 @@ func TestRedactTextNoLeakAcrossCut(t *testing.T) {
 	b := "Bearer " + strings.Repeat("t", 1000) + " " + strings.Repeat("a", 240) + " ghp_ABCDEFGHIJKLMNOPQRSTUV tail"
 	if out := redactText(b, 1000); strings.Contains(out, "ghp_ABC") || strings.Contains(out, "tttt") {
 		t.Errorf("B：左移后的半截裸 token 漏出: %q", out[250:])
+	}
+}
+
+// 同一机器重发仍 pending 的请求：载荷哈希、工具名、CLI 会话与库里一致才广播；不一致回 Error（请求内容不符）并记日志，
+// 库里那行不动、不广播。
+func TestPendingAgainPendingMismatch(t *testing.T) {
+	h, logs := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	c.send(pendingFrame("r1", "s1", "t1", "echo a"))
+	waitBroadcast(t, sub, "request_new", "r1", nil)
+	before := getReq(t, h.st, "r1")
+	otherTool := pendingFrame("r1", "s1", "t1", "echo a")
+	otherTool.ToolName = "Write"
+	for _, f := range []wire.PendingRequest{pendingFrame("r1", "s1", "t1", "rm -rf /"), otherTool, pendingFrame("r1", "s2", "t1", "echo a")} {
+		c.send(f)
+		kind, b := c.recv(5 * time.Second)
+		var e wire.Error
+		wire.Unmarshal(b, &e)
+		if kind != wire.TError || e.RequestID != "r1" || e.Message != "请求内容不符" {
+			t.Fatalf("内容不符应回 Error: %s %+v", kind, e)
+		}
+	}
+	c.send(pendingFrame("r1", "s1", "t1", "echo a")) // 内容一致：照常只广播
+	waitBroadcast(t, sub, "request_updated", "r1", nil)
+	c.send(pendingFrame("r2", "s9", "t9", "echo b"))
+	waitBroadcast(t, sub, "request_new", "r2", func(f clientFrame) {
+		if f.Type == "request_updated" && f.Data["id"] == "r1" {
+			t.Errorf("一致的重发只应广播一次: %+v", f)
+		}
+	})
+	if after := getReq(t, h.st, "r1"); after.State != "pending" || after.Payload.Command != "echo a" || after.ToolName != before.ToolName ||
+		after.CLISessionID != "s1" || after.CreatedAt != before.CreatedAt {
+		t.Fatalf("库里那行不应改动: %+v", after)
+	}
+	if !strings.Contains(logs.String(), "不符") {
+		t.Fatalf("应记日志: %q", logs.String())
+	}
+}
+
+// pendingAgain 的三种 Error（别的机器的同 id、内容不符、已结束）只回给送来 pending 的那条连接：
+// 它已不是该机器的当前连接时不发，帧也不落到新连接上。
+func TestPendingAgainRepliesOnlyToSender(t *testing.T) {
+	h, _ := quietHub(t)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	other, _ := h.st.CreateMachine("o", store.RandomToken(), "/h")
+	f := pendingFrame("p1", "s1", "t1", "echo p1")
+	insertReq(t, h.st, store.Request{ID: "p1", MachineID: m.ID, State: "pending", ToolName: f.ToolName, CLISessionID: "s1", Payload: f.Payload})
+	insertReq(t, h.st, store.Request{ID: "x1", MachineID: m.ID, State: "cancelled", DecidedBy: "terminal"})
+	insertReq(t, h.st, store.Request{ID: "f1", MachineID: other.ID, State: "pending"})
+	cases := []struct {
+		id  string
+		cmd string
+	}{{"f1", "echo f1"}, {"p1", "rm -rf /"}, {"x1", "echo x1"}}
+	cur, stale := newFakeConn(m.ID, 8), newFakeConn(m.ID, 8)
+	h.srv.agents.register(cur)
+	for _, tc := range cases {
+		h.srv.pendingAgain(stale, getReq(t, h.st, tc.id), pendingFrame(tc.id, "s1", "t1", tc.cmd))
+		if len(cur.out) != 0 || len(stale.out) != 0 {
+			t.Fatalf("%s: 送来 pending 的连接已不是当前连接，Error 不应发出、也不应落到当前连接", tc.id)
+		}
+		h.srv.pendingAgain(cur, getReq(t, h.st, tc.id), pendingFrame(tc.id, "s1", "t1", tc.cmd))
+		var e wire.Error
+		if len(cur.out) != 1 || wire.Unmarshal(<-cur.out, &e) != nil || e.T != wire.TError || e.RequestID != tc.id {
+			t.Fatalf("%s: 应只给送来的连接回 Error: %+v", tc.id, e)
+		}
 	}
 }

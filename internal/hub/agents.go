@@ -158,16 +158,57 @@ func (h *agentHub) enqueue(machineID string, want *agentConn, frame any) bool {
 	h.mu.Lock()
 	c := h.conns[machineID]
 	h.mu.Unlock()
-	if c == nil || c.isClosed() || (want != nil && c != want) {
+	if c == nil || (want != nil && c != want) {
+		return false
+	}
+	return h.push(c, b)
+}
+
+// push 把编好的帧排进 c 的发送队列，从不阻塞：c 已关闭返回 false；队列满时记日志、断开它并返回 false。
+func (h *agentHub) push(c *agentConn, b []byte) bool {
+	if c.isClosed() {
 		return false
 	}
 	select {
 	case c.out <- b:
 		return true
 	default:
-		h.log.Printf("机器 %s（%s）的发送队列已满，断开连接", c.machine.Name, machineID)
+		h.log.Printf("机器 %s（%s）的发送队列已满，断开连接", c.machine.Name, c.machine.ID)
 		c.close()
 		return false
+	}
+}
+
+// broadcast 把一帧排进所有已连接机器的发送队列（规则快照、总开关），只编码一次。
+// 不在下发白名单里或编码失败（如超过单帧上限）时一帧也不发，返回错误由调用方记日志。
+func (h *agentHub) broadcast(frame any) error {
+	if _, ok := outboundKind(frame); !ok {
+		return fmt.Errorf("%T 帧不在 hub 允许下发的种类里", frame)
+	}
+	b, err := wire.Marshal(frame)
+	if err != nil {
+		return err
+	}
+	h.mu.Lock()
+	conns := make([]*agentConn, 0, len(h.conns))
+	for _, c := range h.conns {
+		conns = append(conns, c)
+	}
+	h.mu.Unlock()
+	for _, c := range conns {
+		h.push(c, b)
+	}
+	return nil
+}
+
+// disconnect 把机器的当前连接移出连接表并要求它断开（吊销时用）。没有连接时什么也不做。
+func (h *agentHub) disconnect(machineID string) {
+	h.mu.Lock()
+	c := h.conns[machineID]
+	delete(h.conns, machineID)
+	h.mu.Unlock()
+	if c != nil {
+		c.close()
 	}
 }
 
@@ -266,6 +307,16 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	// 登记之前的变更已在快照里。welcome 永远是第一帧，也不会漏掉变更。
 	s.agents.register(c)
 	defer s.agents.unregister(c)
+	// 登记之后再核对一次吊销：吊销若发生在认证之后、登记之前，吊销接口的 disconnect 找不到这条连接。
+	// 吊销先落库再 disconnect，所以登记在 disconnect 之后时这里一定读到 revoked。读不出也断开（宁可不连）。
+	if cur, err := s.store.GetMachine(machine.ID); err != nil {
+		s.log.Printf("核对机器 %s 是否吊销: %v", machine.ID, err)
+		conn.Close(websocket.StatusInternalError, "hub 内部错误")
+		return
+	} else if cur.Revoked {
+		conn.Close(websocket.StatusPolicyViolation, "机器已吊销")
+		return
+	}
 	welcome, err := welcomeFrame(s.store)
 	if err != nil {
 		s.log.Printf("组装 welcome: %v", err)

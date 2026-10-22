@@ -143,7 +143,7 @@ func cleanEntry(e agent.AuditEntry) agent.AuditEntry {
 }
 
 func (s *Server) audit(machineID, actor, requestID, action string, detail any) {
-	b, _ := json.Marshal(detail) // 调用方只传字符串与布尔组成的 map，编码不会失败
+	b, _ := json.Marshal(detail) // 调用方只传字符串、数字、布尔与字符串切片组成的 map，编码不会失败
 	if err := s.store.InsertAudit(store.AuditEvent{MachineID: machineID, Actor: actor, RequestID: requestID, Action: action, Detail: string(b)}); err != nil {
 		s.log.Printf("写审计 %q: %v", action, err)
 	}
@@ -174,9 +174,10 @@ func (s *Server) upsertSession(machineID string, sess proto.Session, project str
 	return id
 }
 
-// rejectPending 回该机器一个带 request_id 的 Error 帧：守护进程据此把这条请求立即按 hub_unreachable 交回终端。
-func (s *Server) rejectPending(machineID, requestID, msg string) {
-	s.agents.send(machineID, wire.Error{T: wire.TError, RequestID: requestID, Message: msg})
+// rejectPending 在连接 c 上回一个带 request_id 的 Error 帧：守护进程据此把这条请求立即按 hub_unreachable 交回终端。
+// 只发给送来 pending 的那条连接（sendTo）：它已被替换或断开时不发，不落到同一机器的新连接上。
+func (s *Server) rejectPending(c *agentConn, requestID, msg string) {
+	s.agents.sendTo(c, wire.Error{T: wire.TError, RequestID: requestID, Message: msg})
 }
 
 // onPending 登记守护进程从连接 c 送来的待决请求。hub 不信任守护进程：id 不合规或 Gemini 会话的拒收，
@@ -185,12 +186,12 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 	m := c.machine
 	if !validRequestID(p.RequestID) {
 		s.log.Printf("机器 %s 送来的待决请求 id 不合规（%d 字节），拒收", m.ID, len(p.RequestID))
-		s.rejectPending(m.ID, p.RequestID, "登记失败")
+		s.rejectPending(c, p.RequestID, "登记失败")
 		return
 	}
 	if strings.EqualFold(p.Session.Tool, "gemini") {
 		s.log.Printf("机器 %s 送来 gemini 会话的待决请求 %q，拒收：gemini 请求不进 hub 等待", m.ID, p.RequestID)
-		s.rejectPending(m.ID, p.RequestID, "gemini 请求不进 hub")
+		s.rejectPending(c, p.RequestID, "gemini 请求不进 hub")
 		return
 	}
 	existing, err := s.store.GetRequest(p.RequestID)
@@ -200,7 +201,7 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 		return
 	case !errors.Is(err, store.ErrNotFound):
 		s.log.Printf("登记请求 %q 前查重: %v", p.RequestID, err)
-		s.rejectPending(m.ID, p.RequestID, "登记失败")
+		s.rejectPending(c, p.RequestID, "登记失败")
 		return
 	}
 	sess := cleanSession(p.Session)
@@ -225,7 +226,7 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 		CreatedAt: store.FormatTime(created), ExpiresAt: &expires}
 	if err := s.store.InsertRequest(r); err != nil {
 		s.log.Printf("登记请求 %q: %v", p.RequestID, err)
-		s.rejectPending(m.ID, p.RequestID, "登记失败")
+		s.rejectPending(c, p.RequestID, "登记失败")
 		return
 	}
 	if resend {
@@ -242,28 +243,29 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 	s.clients.broadcast("request_new", r)
 }
 
-// pendingAgain 处理守护进程从连接 c 再次送来的、hub 已有的请求 id（重连后重发）：
+// pendingAgain 处理守护进程从连接 c 再次送来的、hub 已有的请求 id（重连后重发）。回的 Error 帧只发给 c
+// （c 已不是该机器的当前连接时不发，不落到新连接上）：
 //   - 属于别的机器 → 回 Error；
+//   - 仍 pending 或已决定（approved、denied），但内容（载荷哈希、工具名、CLI 会话）与库里不符 → 回 Error 并记日志，
+//     库里那行不动：免得把另一条命令当成这条重发，或把用户对另一条命令的决定套到这条上；
 //   - 仍 pending → 只广播；
-//   - 已决定（approved、denied）→ 内容（载荷哈希、工具名、CLI 会话）与库里一致才在 c 上再发决定，守护进程还在等它
-//     （补发上限截下的决定也由此带出）；对齐时已在 c 上补发过的不再发；已送达的照发并记日志；内容不符回 Error 并记日志，
-//     免得把用户对另一条命令的决定套到这条上；
+//   - 已决定 → 在 c 上再发决定，守护进程还在等它（补发上限截下的决定也由此带出）；对齐时已在 c 上补发过的不再发；
+//     已送达的照发并记日志；
 //   - 其他终态 → 回 Error，守护进程把它交回终端。
 func (s *Server) pendingAgain(c *agentConn, r store.Request, p wire.PendingRequest) {
 	m := c.machine
+	reject := func(msg string) { s.rejectPending(c, r.ID, msg) }
+	live := r.State == "pending" || r.State == "approved" || r.State == "denied"
 	switch {
 	case r.MachineID != m.ID:
 		s.log.Printf("机器 %s 送来的待决请求 %q 与另一台机器的请求同 id，拒收", m.ID, r.ID)
-		s.rejectPending(m.ID, r.ID, "登记失败")
+		reject("登记失败")
+	case live && !sameRequest(r, p):
+		s.log.Printf("机器 %s 重发的待决请求 %q 与库里的请求（%s）内容不符，拒收", m.ID, r.ID, r.State)
+		reject("请求内容不符")
 	case r.State == "pending":
 		s.clients.broadcast("request_updated", r)
 	case r.State == "approved" || r.State == "denied":
-		if store.PayloadHash(redact.Payload(p.Payload)) != r.PayloadHash || truncate(p.ToolName, maxFieldLen) != r.ToolName ||
-			truncate(p.Session.CLISessionID, maxFieldLen) != r.CLISessionID {
-			s.log.Printf("机器 %s 重发的待决请求 %q 与已决定的请求内容不符，拒收、不发决定", m.ID, r.ID)
-			s.rejectPending(m.ID, r.ID, "请求内容不符")
-			return
-		}
 		if c.wasResent(r.ID) {
 			return // 对齐时已在这条连接上补发过
 		}
@@ -272,8 +274,14 @@ func (s *Server) pendingAgain(c *agentConn, r store.Request, p wire.PendingReque
 		}
 		s.agents.sendTo(c, decisionFrame(r))
 	default:
-		s.rejectPending(m.ID, r.ID, "请求已结束")
+		reject("请求已结束")
 	}
+}
+
+// sameRequest 报告重发的 pending 与库里的请求是否同一条：载荷（按登记时的方式再脱敏后）哈希、工具名、CLI 会话都相同。
+func sameRequest(r store.Request, p wire.PendingRequest) bool {
+	return store.PayloadHash(redact.Payload(p.Payload)) == r.PayloadHash && truncate(p.ToolName, maxFieldLen) == r.ToolName &&
+		truncate(p.Session.CLISessionID, maxFieldLen) == r.CLISessionID
 }
 
 func projectName(root string) string {
@@ -410,8 +418,10 @@ func (s *Server) sendDecision(r store.Request) bool {
 }
 
 // Decide 是用户的决定入口（网页或 CLI）：只能 allow 或 deny，请求必须仍 pending 且未过期。
-// Remember 时先学规则（失败则请求保持 pending，错误带“生成规则”前缀），再改状态、审计、下发（未连接时留给重连对齐补发）、广播。
-// 错误：errBadAction、store.ErrNotFound、store.ErrNotPending（已过期时为 errExpired，也满足 errors.Is(err, store.ErrNotPending)）。
+// Remember 时先学规则（学不了时请求保持 pending，错误包 errLearn），再改状态；成功后审计学到的规则并下发规则快照，
+// 再审计决定、下发决定（未连接时留给重连对齐补发）、广播。快照先于决定排进同一连接的队列，守护进程先拿到规则。
+// 错误：errBadAction、store.ErrNotFound、store.ErrNotPending（已过期时为 errExpired，也满足 errors.Is(err, store.ErrNotPending)）、
+// errLearn；其余是存储错误。
 func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	if in.Action != "allow" && in.Action != "deny" {
 		return store.Request{}, errBadAction
@@ -437,6 +447,10 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 		now := store.Now()
 		r.State, r.DecidedBy, r.DecisionNote, r.RuleID, r.DecidedAt = state, "user", note, ruleID, &now
 	}
+	if ruleID != "" {
+		s.audit(r.MachineID, "user", r.ID, "rule_learned", map[string]string{"rule_id": ruleID, "action": in.Action})
+		s.pushRules()
+	}
 	// 审计动作是 allow 或 deny，与 wire.Decision 的 action 一致（简报接口文字里的 approve 不用）
 	s.audit(r.MachineID, "user", r.ID, in.Action, map[string]any{"note": note, "remember": in.Remember, "rule_id": ruleID})
 	if r.Kind == "webhook" {
@@ -450,6 +464,7 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 
 // commitDecision 在 decideMu 下完成“取请求 → 校验 pending 与过期 → 学规则 → 改状态”，并发的两次决定不会都去学规则。
 // 已过期时把请求改成 expired/timeout，返回请求与 errExpired，由调用方审计并广播。
+// 学完规则后改状态失败（期间守护进程取消、hub 判过期、重发顶掉——这些不经 decideMu）时撤销刚学的规则，不留下已学未决的规则。
 func (s *Server) commitDecision(in DecideInput, state, note string) (store.Request, string, error) {
 	s.decideMu.Lock()
 	defer s.decideMu.Unlock()
@@ -470,11 +485,17 @@ func (s *Server) commitDecision(in DecideInput, state, note string) (store.Reque
 	if in.Remember {
 		id, err := s.learnRule(r, in.Action)
 		if err != nil {
-			return store.Request{}, "", fmt.Errorf("生成规则: %w", err)
+			return store.Request{}, "", err
 		}
 		ruleID = id
+		if s.beforeSettle != nil {
+			s.beforeSettle(r)
+		}
 	}
 	if err := s.store.SetRequestState(r.ID, state, "user", note, ruleID); err != nil {
+		if ruleID != "" {
+			s.rollbackLearned(r, ruleID)
+		}
 		return store.Request{}, "", err
 	}
 	return r, ruleID, nil
@@ -650,6 +671,5 @@ func (s *Server) applyAgentPermission(m store.Machine, e agent.AuditEntry, ts ti
 	}
 }
 
-// learnRule 与 callbackWebhook 在 Task 9、10 实现。
-func (s *Server) learnRule(r store.Request, action string) (string, error) { return "", nil }
-func (s *Server) callbackWebhook(r store.Request)                          {}
+// callbackWebhook 在 Task 10 实现。
+func (s *Server) callbackWebhook(r store.Request) {}

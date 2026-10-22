@@ -90,6 +90,12 @@ type Server struct {
 	// decideMu 串行化用户决定（取请求、校验、学规则、改状态）；helloLocks 让同一机器的重连对齐串行执行。
 	decideMu   sync.Mutex
 	helloLocks machineLocks
+	// rulesMu 串行化“读规则现状 → 改 → 记审计”（启停、导入），审计里的“从停用改为启用”与提升规则列表不被并发改动打乱；
+	// pauseMu 让总开关的写库与下发按同一顺序进行，守护进程最后收到的就是库里的值。
+	rulesMu sync.Mutex
+	pauseMu sync.Mutex
+	// beforeSettle 非空时在“记住”学完规则之后、改请求状态之前调用（测试用它制造请求先被别处结束的竞态）。
+	beforeSettle func(store.Request)
 }
 
 // New 组装 hub：校验配置，确保有内置规则，注册路由。
@@ -107,13 +113,13 @@ func New(cfg Config, st *store.Store, logger *log.Logger) (*Server, error) {
 	return s, nil
 }
 
-// routes 注册全部路由；后面的 Task 往里加。
+// routes 注册认证、接入与守护进程入口，再注册网页用的接口（apiRoutes）；后面的 Task 往里加。
 func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/login", s.handleLogin)
-	s.mux.HandleFunc("POST /api/logout", s.handleLogout)
+	s.mux.HandleFunc("POST /api/logout", sameOrigin(s.handleLogout))
 	s.mux.HandleFunc("POST /api/enroll", s.handleEnroll)
-	s.mux.HandleFunc("GET /api/status", s.requireClient(s.handleStatus))
 	s.mux.HandleFunc("GET /ws/agent", s.handleAgentWS)
+	s.apiRoutes()
 }
 
 // Handler 返回根处理器。
@@ -160,21 +166,6 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-// handleStatus 在 Task 9 扩充；这里先给认证测试一个受保护的端点。
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	pending, err := s.store.CountPending()
-	if err != nil {
-		s.internalErr(w, "统计待审批", err)
-		return
-	}
-	version, err := s.store.RulesVersion()
-	if err != nil {
-		s.internalErr(w, "读规则版本", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"pending": pending, "rules_version": version, "uptime": time.Since(s.start).Round(time.Second).String()})
-}
-
 const (
 	idleTimeout     = 120 * time.Second
 	shutdownTimeout = 3 * time.Second
@@ -188,18 +179,28 @@ var bodyReadTimeout = 10 * time.Second
 // 超长、超时、不是合法 UTF-8（encoding/json 会把非法字节悄悄换成 U+FFFD，这里先拒）、不是 JSON 都返回错误。
 // 所有 JSON 请求体都经它读。
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) error {
+	data, err := readBody(w, r, limit)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+// readBody 读至多 limit 字节的请求体（截止与清除同 decodeJSON），并要求是合法 UTF-8。
+// 超长时错误是 *http.MaxBytesError。非 JSON 的请求体（如规则导入的 YAML）经它读。
+func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
 	// 不支持设截止的 ResponseWriter（如测试里的 ResponseRecorder）忽略错误，照常读
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	_ = rc.SetReadDeadline(time.Time{})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !utf8.Valid(data) {
-		return errors.New("请求体不是合法的 UTF-8")
+		return nil, errors.New("请求体不是合法的 UTF-8")
 	}
-	return json.Unmarshal(data, v)
+	return data, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
