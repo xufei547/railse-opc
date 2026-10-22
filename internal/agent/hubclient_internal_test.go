@@ -470,10 +470,10 @@ func TestHubClientBackoffResetsAfterPing(t *testing.T) {
 // 没有 ping、但连接持续超过 stableAfter 也算稳定。
 func TestHubClientBackoffResetsAfterStableDuration(t *testing.T) {
 	setHubTimings(t, []time.Duration{30 * time.Millisecond, 5 * time.Second}, 0, 0, 0)
-	setVar(t, &hubStableAfter, 100*time.Millisecond)
+	setVar(t, &hubStableAfter, 50*time.Millisecond)
 	f := newFakeHub(t, 0, func(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
 		f.welcome(conn, 1, defaultRulesYAML(), false)
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(400 * time.Millisecond) // 远长于 stableAfter，-race 下也稳
 		conn.Close(websocket.StatusNormalClosure, "bye")
 	})
 	startTestClient(t, f)

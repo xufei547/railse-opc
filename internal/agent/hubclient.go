@@ -34,10 +34,11 @@ var (
 	hubBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second}
 	// hubStableAfter：连上后先收到 hub 的第一个 ping，或连接持续这么久，才算稳定、退避归零。
 	// 握手后立即被断开（例如两台守护进程共用 machine.json 互相顶替）不算，退避照常变长，不会每秒重连。
+	// 必须小于 hubIdleTimeout：否则收不到任何帧的连接总在算作稳定之前就因 idle 断开，退避永远不归零。
 	hubStableAfter = 30 * time.Second
 	// hubAuditMaxBytes 是审计积压的总字节上限（与 auditQueueMax 条数上限同时生效），超了丢最旧的。
 	hubAuditMaxBytes = 32 << 20
-	// hubIdleTimeout：超过这么久没收到 hub 的任何帧就断开重连（hub 每 30 秒 ping，取两倍）。
+	// hubIdleTimeout：超过这么久没收到 hub 的任何帧就断开重连（hub 每 30 秒 ping，取两倍）。必须大于 hubStableAfter（见上）。
 	hubIdleTimeout = 2 * 30 * time.Second
 	// hubProtoBackoff 是协议版本与 hub 不一致时的重连间隔：升级之前重连也没用，不必每 30 秒刷一次。
 	hubProtoBackoff = 10 * time.Minute
@@ -524,7 +525,7 @@ func writeRaw(ctx context.Context, conn *websocket.Conn, b []byte) error {
 }
 
 // send 编码并发出一帧。编码错误原样返回（不是连接问题）；未连接或写连接失败返回包着 ErrHubDisconnected 的错误
-// （写失败说明连接已坏，读循环随之结束，重连后 pending 会随对齐重发）。
+// （写失败时 sendRaw 关掉这条连接，读循环随之结束，重连后 pending 会随对齐重发）。
 func (h *HubClient) send(v any) error {
 	b, err := wire.Marshal(v)
 	if err != nil {
@@ -541,6 +542,9 @@ func (h *HubClient) sendRaw(b []byte) error {
 		return ErrHubDisconnected
 	}
 	if err := writeRaw(context.Background(), conn, b); err != nil {
+		// 写失败就关掉这条连接：等写锁超时时库不会自己关，连接还会被当作连着。关掉后读循环随之结束、状态变为断开，
+		// 调用方按 ErrHubDisconnected 等重连才成立。
+		conn.CloseNow()
 		return fmt.Errorf("%w: %v", ErrHubDisconnected, err)
 	}
 	return nil
