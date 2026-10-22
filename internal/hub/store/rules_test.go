@@ -308,3 +308,34 @@ func TestEnsureDefaultRulesConcurrentOpen(t *testing.T) {
 		t.Fatalf("默认规则应只导入一次: %d, %v", len(rows), err)
 	}
 }
+
+// 默认规则只在规则版本为 0（从未初始化）时导入：删光或导入空集后再启动，不悄悄恢复内置放行规则。
+func TestEnsureDefaultRulesOnlyWhenUninitialized(t *testing.T) {
+	s := openTemp(t)
+	if v, err := s.EnsureDefaultRules(); err != nil || v != 1 {
+		t.Fatalf("EnsureDefaultRules = %d, %v", v, err)
+	}
+	for _, id := range []string{"builtin-readonly", "builtin-write-in-project"} {
+		if _, err := s.DeleteRule(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if v, err := s.EnsureDefaultRules(); err != nil || v != 3 {
+		t.Fatalf("删光后 EnsureDefaultRules = %d, %v，版本应不变", v, err)
+	}
+	if rows, err := s.ListRules(); err != nil || len(rows) != 0 {
+		t.Fatalf("删光后不应重新导入: %d, %v", len(rows), err)
+	}
+	if _, err := s.ReplaceRules(policy.DefaultRuleSet()); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := s.ReplaceRules(policy.RuleSet{Version: policy.RuleSetVersion}); err != nil || v != 5 {
+		t.Fatalf("导入空集 v=%d, %v", v, err)
+	}
+	if v, err := s.EnsureDefaultRules(); err != nil || v != 5 {
+		t.Fatalf("导入空集后 EnsureDefaultRules = %d, %v，版本应不变", v, err)
+	}
+	if rows, err := s.ListRules(); err != nil || len(rows) != 0 {
+		t.Fatalf("导入空集后不应重新导入: %d, %v", len(rows), err)
+	}
+}

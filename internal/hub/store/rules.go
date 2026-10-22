@@ -60,18 +60,14 @@ func bumpVersion(tx *sql.Tx) (int, error) {
 	return n, err
 }
 
-// EnsureDefaultRules 在表为空时导入内置规则包，返回当前版本。判空与导入在同一事务里，
-// 两个进程同时首次启动也只导入一次。
+// EnsureDefaultRules 只在规则版本为 0（从未初始化）时导入内置规则包，返回当前版本。
+// 不按“表为空”判断：用户删光规则或导入空集后重启，不会悄悄恢复内置放行规则。
+// 判断与导入在同一事务里，两个进程同时首次启动也只导入一次。
 func (s *Store) EnsureDefaultRules() (int, error) {
 	var version int
 	err := s.Tx(func(tx *sql.Tx) error {
-		var n int
-		if err := tx.QueryRow("SELECT COUNT(*) FROM rules").Scan(&n); err != nil {
-			return err
-		}
 		var err error
-		if n > 0 {
-			version, err = rulesVersion(tx)
+		if version, err = rulesVersion(tx); err != nil || version > 0 {
 			return err
 		}
 		version, err = replaceRulesTx(tx, policy.DefaultRuleSet())
