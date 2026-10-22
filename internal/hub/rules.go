@@ -58,11 +58,15 @@ func (s *Server) pushRules() {
 //     所以“记住”永远产生不了能放行这几类的规则。
 //   - 拒绝：denyRule 直接构造 user 来源的 deny，压过一切放行（见 policy.betterRule）。
 //
-// 载荷含脱敏占位符时不学：学出来的规则匹配的是占位符，不是原命令，用户却以为记住了。
+// webhook 请求不学。载荷含脱敏占位符时不学：学出来的规则匹配的是占位符，不是原命令，用户却以为记住了。
 // 锚点超过 maxLearnAnchor，或现有规则加上这条编成快照会超过单帧上限（减去余量）时不学：否则快照与 welcome 都发不出去，
 // 所有守护进程会连不上。“读现有规则 → 试编 → 入库”在 rulesMu 下进行，与导入、启停串行。
 // 学不了的错误包 errLearn；读机器、读存规则的错误不包（其中的 store.ErrNotFound 也不外露，免得被当成“没有这条请求”）。
 func (s *Server) learnRule(r store.Request, action string) (string, error) {
+	// webhook 请求不是工具调用：学出来的规则会下发给所有守护进程，而且它没有机器可查
+	if r.Kind == "webhook" {
+		return "", fmt.Errorf("%w：webhook 请求不能记住", errLearn)
+	}
 	// 先查长度（便宜），超长的大载荷不必再跑脱敏正则
 	if what, long := anchorTooLong(r.Payload); long {
 		return "", fmt.Errorf("%w：%s太长不能记住（超过 4 KiB）", errLearn, what)

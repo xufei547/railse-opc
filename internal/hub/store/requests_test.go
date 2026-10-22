@@ -612,3 +612,43 @@ func TestInsertRequestIfAbsent(t *testing.T) {
 		t.Fatalf("非定宽时间应报错: %v, %v", ok, err)
 	}
 }
+
+// ClearCallbackToken 去掉 callback 里的回调令牌、保留 URL，可重复调用；callback 不是合法 JSON 时整个清空；
+// 没有这条请求回 ErrNotFound。
+func TestClearCallbackToken(t *testing.T) {
+	s := openTemp(t)
+	r := newReq("webhook", "w1", "x")
+	r.Kind = "webhook"
+	r.Callback = `{"url":"https://n8n.example/cb?x=1","token":"tok-secret-123"}`
+	if err := s.InsertRequest(r); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := s.ClearCallbackToken("w1"); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := s.GetRequest("w1")
+		var cb map[string]any
+		if err := json.Unmarshal([]byte(got.Callback), &cb); err != nil {
+			t.Fatalf("callback 应仍是 JSON: %q", got.Callback)
+		}
+		if _, ok := cb["token"]; ok || cb["url"] != "https://n8n.example/cb?x=1" || strings.Contains(got.Callback, "tok-secret-123") {
+			t.Fatalf("应去掉令牌、保留 URL: %q", got.Callback)
+		}
+	}
+	bad := newReq("webhook", "w2", "y")
+	bad.Kind = "webhook"
+	bad.Callback = `not json tok-secret-456`
+	if err := s.InsertRequest(bad); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClearCallbackToken("w2"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetRequest("w2"); got.Callback != "" {
+		t.Fatalf("不是 JSON 的 callback 应整个清空: %q", got.Callback)
+	}
+	if err := s.ClearCallbackToken("nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("没有这条请求应 ErrNotFound: %v", err)
+	}
+}

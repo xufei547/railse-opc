@@ -178,7 +178,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDecide 是网页的决定入口：{"action":"allow|deny","note":"…","remember":true}。
-// 200 返回决定后的请求；坏请求体、坏 action、备注超过 1000 字符 400；没有这条请求 404；已处理或已过期 409；记不住 422。
+// 200 返回决定后的请求；坏请求体、坏 action、备注超过 1000 字符 400；没有这条请求 404；已处理、已过期或机器已吊销 409；记不住 422。
 func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Action   string `json:"action"`
@@ -201,6 +201,8 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "没有这条请求")
+	case errors.Is(err, errRevoked):
+		writeErr(w, http.StatusConflict, "机器已吊销，请求已取消")
 	case errors.Is(err, errExpired):
 		writeErr(w, http.StatusConflict, "请求已过期")
 	case errors.Is(err, store.ErrNotPending):
@@ -445,7 +447,7 @@ func (s *Server) cancelRevokedPending(machineID string) {
 // 必须全量重新拉取（/api/inbox、/api/status、/api/rules 等），不能只靠推送增量维护状态。
 //
 // 网页不该发数据帧（发了就断开）。每 PingInterval 复核一次登录会话（登出、换密码、过期后断开）并 ping，
-// PongTimeout 内没有 pong 就断开。handler 返回前等这些都停下，返回之后不再碰存储；Run 关停时等 handler 返回（见 wsTracker）。
+// PongTimeout 内没有 pong 就断开。handler 返回前等这些都停下，返回之后不再碰存储；Run 关停时等 handler 返回（见 tracker）。
 func (s *Server) handleClientWS(w http.ResponseWriter, r *http.Request) {
 	if !s.trackWS(w) {
 		return

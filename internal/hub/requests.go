@@ -23,6 +23,9 @@ var errBadAction = errors.New("action 只能是 allow 或 deny")
 // errExpired 表示决定时请求已过 expires_at（hub 已把它改成 expired）。它也满足 errors.Is(err, store.ErrNotPending)。
 var errExpired = fmt.Errorf("%w：已过期", store.ErrNotPending)
 
+// errRevoked 表示决定时请求所属机器已吊销（hub 已把它改成 cancelled/machine_revoked）。它也满足 errors.Is(err, store.ErrNotPending)。
+var errRevoked = fmt.Errorf("%w：机器已吊销", store.ErrNotPending)
+
 // 守护进程送来的字段在 hub 存储前的上限（按字符计，超出截断）。请求 id 不合规（见 validRequestID）直接拒收、不截断
 // （截断会变成另一个 id）。
 const (
@@ -417,11 +420,11 @@ func (s *Server) sendDecision(r store.Request) bool {
 	return s.agents.send(r.MachineID, decisionFrame(r))
 }
 
-// Decide 是用户的决定入口（网页或 CLI）：只能 allow 或 deny，请求必须仍 pending 且未过期。
+// Decide 是用户的决定入口（网页或 CLI）：只能 allow 或 deny，请求必须仍 pending、所属机器未吊销且未过期。
 // Remember 时先学规则（学不了时请求保持 pending，错误包 errLearn），再改状态；成功后审计学到的规则并下发规则快照，
-// 再审计决定、下发决定（未连接时留给重连对齐补发）、广播。快照先于决定排进同一连接的队列，守护进程先拿到规则。
-// 错误：errBadAction、store.ErrNotFound、store.ErrNotPending（已过期时为 errExpired，也满足 errors.Is(err, store.ErrNotPending)）、
-// errLearn；其余是存储错误。
+// 再审计决定、下发决定（未连接时留给重连对齐补发；webhook 请求改为回调来源）、广播。快照先于决定排进同一连接的队列，守护进程先拿到规则。
+// 错误：errBadAction、store.ErrNotFound、store.ErrNotPending（机器已吊销时为 errRevoked、已过期时为 errExpired，
+// 都满足 errors.Is(err, store.ErrNotPending)）、errLearn；其余是存储错误。
 func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	if in.Action != "allow" && in.Action != "deny" {
 		return store.Request{}, errBadAction
@@ -432,11 +435,14 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 		state = "approved"
 	}
 	r, ruleID, err := s.commitDecision(in, state, note)
-	if errors.Is(err, errExpired) {
-		s.settled(r.MachineID, "system", r.ID, "expired", "timeout")
+	switch {
+	case errors.Is(err, errExpired):
+		s.settleExpired(r)
 		return store.Request{}, err
-	}
-	if err != nil {
+	case errors.Is(err, errRevoked):
+		s.settled(r.MachineID, "system", r.ID, "cancelled", decidedByRevoked)
+		return store.Request{}, err
+	case err != nil:
 		return store.Request{}, err
 	}
 	if fresh, err := s.store.GetRequest(r.ID); err == nil {
@@ -462,8 +468,9 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	return r, nil
 }
 
-// commitDecision 在 decideMu 下完成“取请求 → 校验 pending 与过期 → 学规则 → 改状态”，并发的两次决定不会都去学规则。
-// 已过期时把请求改成 expired/timeout，返回请求与 errExpired，由调用方审计并广播。
+// commitDecision 在 decideMu 下完成“取请求 → 校验 pending、机器吊销与过期 → 学规则 → 改状态”，并发的两次决定不会都去学规则。
+// 所属机器已吊销时把请求改成 cancelled/machine_revoked，返回请求与 errRevoked（吊销时与在途 pending 竞态漏取消的，在这里收尾）；
+// 已过期时把请求改成 expired/timeout，返回请求与 errExpired。两者都由调用方审计并广播。
 // 学完规则后改状态失败（期间守护进程取消、hub 判过期、重发顶掉——这些不经 decideMu）时撤销刚学的规则，不留下已学未决的规则。
 func (s *Server) commitDecision(in DecideInput, state, note string) (store.Request, string, error) {
 	s.decideMu.Lock()
@@ -474,6 +481,16 @@ func (s *Server) commitDecision(in DecideInput, state, note string) (store.Reque
 	}
 	if r.State != "pending" {
 		return store.Request{}, "", store.ErrNotPending
+	}
+	revoked, err := s.machineRevoked(r.MachineID)
+	if err != nil {
+		return store.Request{}, "", err
+	}
+	if revoked {
+		if err := s.store.SetMachineRequestState(r.MachineID, r.ID, "cancelled", decidedByRevoked, "机器已吊销", ""); err != nil {
+			return store.Request{}, "", err
+		}
+		return r, "", errRevoked
 	}
 	if r.ExpiresAt != nil && *r.ExpiresAt <= store.FormatTime(time.Now()) {
 		if err := s.store.SetRequestState(r.ID, "expired", "timeout", "hub 判定过期", ""); err != nil {
@@ -501,7 +518,31 @@ func (s *Server) commitDecision(in DecideInput, state, note string) (store.Reque
 	return r, ruleID, nil
 }
 
-// expireDue 把 expires_at 已到的 pending 改成 expired/timeout，审计并广播：hub 自己执行过期，
+// machineRevoked 报告请求所属机器是否已吊销。webhook 请求与库里没有的机器不算。
+func (s *Server) machineRevoked(machineID string) (bool, error) {
+	if machineID == webhookMachineID {
+		return false, nil
+	}
+	m, err := s.store.GetMachine(machineID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("读机器 %s: %w", machineID, err)
+	}
+	return m.Revoked, nil
+}
+
+// settleExpired 在 hub 把请求 r（改状态前读出的行）判为过期后审计并广播；webhook 请求还要回调来源（deny，备注 expired）。
+func (s *Server) settleExpired(r store.Request) {
+	s.settled(r.MachineID, "system", r.ID, "expired", "timeout")
+	if r.Kind == "webhook" {
+		r.State = "expired"
+		s.callbackWebhook(r)
+	}
+}
+
+// expireDue 把 expires_at 已到的 pending 改成 expired/timeout，审计并广播（webhook 请求还回调来源）：hub 自己执行过期，
 // 守护进程掉线或崩溃时 pending 也不会一直挂着。
 func (s *Server) expireDue(now time.Time) {
 	due, err := s.store.ExpiredPending(now)
@@ -518,7 +559,7 @@ func (s *Server) expireDue(now time.Time) {
 			s.log.Printf("过期请求 %q: %v", r.ID, err)
 			continue
 		}
-		s.settled(r.MachineID, "system", r.ID, "expired", "timeout")
+		s.settleExpired(r)
 	}
 }
 
@@ -670,6 +711,3 @@ func (s *Server) applyAgentPermission(m store.Machine, e agent.AuditEntry, ts ti
 		}
 	}
 }
-
-// callbackWebhook 在 Task 10 实现。
-func (s *Server) callbackWebhook(r store.Request) {}

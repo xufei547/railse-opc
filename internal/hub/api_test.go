@@ -901,7 +901,7 @@ func TestClientWSRechecksSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.CloseNow()
-	frames, closed := readFrames(conn)
+	frames, closed := readFrames(t, conn)
 	base := h.srv.clientRechecks.Load()
 	waitFor(t, "复核至少 3 轮", func() bool { return h.srv.clientRechecks.Load() >= base+3 })
 	h.srv.clients.broadcast("status", map[string]bool{"paused": false})
@@ -929,18 +929,30 @@ func TestClientWSRechecksSession(t *testing.T) {
 }
 
 // readFrames 在后台一直读 conn（顺带回 pong），数据帧送进 frames，读出错时把错误送进 closed 后退出。不调 t.Fatal。
-func readFrames(conn *websocket.Conn) (<-chan []byte, <-chan error) {
+// 测试结束时关掉 conn 并等后台 goroutine 退出：没人收的帧不会让它一直堵在 frames 上。
+func readFrames(t *testing.T, conn *websocket.Conn) (<-chan []byte, <-chan error) {
 	frames, closed := make(chan []byte, 16), make(chan error, 1)
+	done, exited := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(exited)
 		for {
 			_, b, err := conn.Read(context.Background())
 			if err != nil {
 				closed <- err
 				return
 			}
-			frames <- b
+			select {
+			case frames <- b:
+			case <-done:
+				return
+			}
 		}
 	}()
+	t.Cleanup(func() {
+		close(done)
+		conn.CloseNow()
+		<-exited
+	})
 	return frames, closed
 }
 
@@ -1091,8 +1103,8 @@ func TestRememberRefusedNearFrameLimit(t *testing.T) {
 	} {
 		p := policy.Payload{Type: policy.PayloadShell, Command: tc.cmd, Cwd: "/p"}
 		insertReq(t, h.st, store.Request{ID: tc.id, MachineID: m.ID, State: "pending", Payload: p, ProjectRoot: "/p"})
-		if _, err := h.srv.Decide(DecideInput{RequestID: tc.id, Action: tc.action, Remember: true}); !errors.Is(err, errLearn) {
-			t.Fatalf("%s: 放不下应 errLearn, 得到 %v", tc.action, err)
+		if _, err := h.srv.Decide(DecideInput{RequestID: tc.id, Action: tc.action, Remember: true}); !errors.Is(err, errLearn) || !strings.Contains(err.Error(), "上限") {
+			t.Fatalf("%s: 放不下应 errLearn（说明接近上限）, 得到 %v", tc.action, err)
 		}
 		if r := getReq(t, h.st, tc.id); r.State != "pending" {
 			t.Fatalf("%s: 应保持 pending: %+v", tc.action, r)
@@ -1175,6 +1187,46 @@ func TestRevokeCancelsPending(t *testing.T) {
 	}
 }
 
+// 请求所属机器已吊销、请求却还 pending（吊销时没取消到，如与在途 pending 竞态）：决定时把它改为 cancelled/machine_revoked，
+// 审计并广播，回 ErrNotPending，不学规则、不下发；HTTP 回 409。
+func TestDecideRevokedMachineCancels(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	insertReq(t, h.st, store.Request{ID: "v1", MachineID: m.ID, State: "pending", ProjectRoot: "/p",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "ls", Cwd: "/p"}})
+	insertReq(t, h.st, store.Request{ID: "v2", MachineID: m.ID, State: "pending"})
+	if err := h.st.RevokeMachine(m.ID); err != nil { // 直接改库：绕过吊销接口里的取消
+		t.Fatal(err)
+	}
+	c := newFakeConn(m.ID, 4)
+	h.srv.agents.register(c)
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	if _, err := h.srv.Decide(DecideInput{RequestID: "v1", Action: "allow", Remember: true}); !errors.Is(err, store.ErrNotPending) {
+		t.Fatalf("机器已吊销应回 ErrNotPending: %v", err)
+	}
+	if r := getReq(t, h.st, "v1"); r.State != "cancelled" || r.DecidedBy != "machine_revoked" || r.DecidedAt == nil {
+		t.Fatalf("v1 应被取消: %+v", r)
+	}
+	if acts := auditActions(t, h.st, "v1"); countOf(acts, "cancelled") != 1 || countOf(acts, "allow") != 0 || countOf(acts, "rule_learned") != 0 {
+		t.Fatalf("v1 审计: %v", acts)
+	}
+	waitBroadcast(t, sub, "request_updated", "v1", nil)
+	if rows, _ := ruleRows(t, h.st); len(rows) != 2 {
+		t.Fatalf("不应学规则: %+v", rows)
+	}
+	if len(c.out) != 0 {
+		t.Fatalf("不应下发: %d", len(c.out))
+	}
+	if resp := doReq(t, "POST", h.http.URL+"/api/requests/v2/decide", decideBody(t, "deny", false, ""), "application/json", ck); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("机器已吊销应 409, 得到 %d", resp.StatusCode)
+	}
+	if r := getReq(t, h.st, "v2"); r.State != "cancelled" || r.DecidedBy != "machine_revoked" {
+		t.Fatalf("v2 应被取消: %+v", r)
+	}
+}
+
 // Run 关停时等 /ws/client 与 /ws/agent 的 handler 都退出后才返回（handler 退出前的钩子故意慢一些）。
 func TestRunWaitsForWebSocketHandlers(t *testing.T) {
 	dir, err := os.MkdirTemp("", "rs")
@@ -1232,7 +1284,7 @@ func TestRunWaitsForWebSocketHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.CloseNow()
-	readFrames(client)
+	readFrames(t, client)
 	agentConn, _, err := websocket.Dial(dctx, "ws://"+addr+"/ws/agent", &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + secret}}})
 	if err != nil {
 		t.Fatal(err)
@@ -1244,7 +1296,7 @@ func TestRunWaitsForWebSocketHandlers(t *testing.T) {
 	if kind, _ := ac.recv(5 * time.Second); kind != wire.TWelcome {
 		t.Fatalf("应先收到 welcome, 得到 %s", kind)
 	}
-	readFrames(agentConn) // 关停时要读到关闭帧并回应，关闭握手才能完成
+	readFrames(t, agentConn) // 关停时要读到关闭帧并回应，关闭握手才能完成
 	waitFor(t, "两个 handler 在跑", func() bool { return srv.ws.count() == 2 })
 	cancel()
 	select {

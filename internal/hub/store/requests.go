@@ -309,3 +309,22 @@ func (s *Store) CountPending() (int, error) {
 	err := s.db.QueryRow("SELECT COUNT(*) FROM requests WHERE state = 'pending'").Scan(&n)
 	return n, err
 }
+
+// ClearCallbackToken 去掉 webhook 请求 callback（JSON 对象，回调令牌在 token 键）里的回调令牌，URL 保留：
+// 回调成功或重试用尽后调用，明文令牌不再留在库里。callback 不是合法 JSON 时整个清空（宁可丢 URL 也不留可能的令牌）。
+// 可重复调用；没有这条请求时返回 ErrNotFound。
+func (s *Store) ClearCallbackToken(id string) error {
+	res, err := s.db.Exec(`UPDATE requests SET callback = CASE WHEN json_valid(callback) THEN json_remove(callback, '$.token') ELSE '' END
+		WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrNotFound
+	}
+	return nil
+}

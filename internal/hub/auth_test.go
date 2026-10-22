@@ -55,7 +55,8 @@ func newTestHubWith(t *testing.T, mod func(*Config), srvMod func(*Server)) *test
 		srvMod(srv)
 	}
 	hs := httptest.NewServer(srv.Handler())
-	t.Cleanup(func() { hs.Close(); st.Close() })
+	// 先停回调（取消并等后台回调退出），再关库：回调不会在测试结束后还碰存储
+	t.Cleanup(func() { hs.Close(); srv.stopCallbacks(); st.Close() })
 	return &testHub{srv: srv, st: st, http: hs, dir: dir}
 }
 

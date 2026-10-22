@@ -98,24 +98,32 @@ type Server struct {
 	// beforeSettle 非空时在“记住”学完规则之后、改请求状态之前调用（测试用它制造请求先被别处结束的竞态）。
 	beforeSettle func(store.Request)
 	// ws 记在跑的 WebSocket handler（/ws/agent、/ws/client）：http.Server.Shutdown 不管已劫持的连接，Run 靠它等这些 handler 退出。
-	ws wsTracker
+	ws tracker
 	// beforeWSExit 非空时在 WebSocket handler 退出前调用（测试用它让退出变慢）。
 	beforeWSExit func()
 	// clientRechecks 计 /ws/client 复核登录会话的次数（测试观测用）。
 	clientRechecks atomic.Int64
+	// cbCtx 是 webhook 回调的运行期：New 里建，stopCallbacks（Run 返回前）取消，重试等待与在途回调随之结束；
+	// callbacks 记在跑的回调 goroutine，Run 返回前等它们退出。callbackRetryWait 是回调失败后重试前的等待，测试可缩短；
+	// callbackClient 发回调（超时 10 秒、不跟随重定向）。
+	cbCtx             context.Context
+	cbCancel          context.CancelFunc
+	callbacks         tracker
+	callbackRetryWait time.Duration
+	callbackClient    *http.Client
 }
 
-// wsTracker 计在跑的 WebSocket handler。shutdown 之后不再接纳新的 handler，并给出全部退出时关闭的通道。
-// 不用 sync.WaitGroup：关停超时后 hs.Close 不等 handler，已开始但还没登记的 handler 可能在 Wait 时才 Add。
-type wsTracker struct {
+// tracker 计在跑的后台工作（WebSocket handler、webhook 回调）。shutdown 之后不再接纳新的，并给出全部退出时关闭的通道。
+// 不用 sync.WaitGroup：关停超时后不再等，已开始但还没登记的工作可能在 Wait 时才 Add（计数为零时与 Wait 并发 Add 是误用）。
+type tracker struct {
 	mu      sync.Mutex
 	n       int
 	closing bool
 	idle    chan struct{} // closing 之后 n 归零时关闭
 }
 
-// enter 登记一个 handler；已在关停时返回 false，调用方不该再处理这个连接。
-func (t *wsTracker) enter() bool {
+// enter 登记一项工作；已在关停时返回 false，调用方不该再开始它。
+func (t *tracker) enter() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closing {
@@ -125,7 +133,7 @@ func (t *wsTracker) enter() bool {
 	return true
 }
 
-func (t *wsTracker) leave() {
+func (t *tracker) leave() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.n--
@@ -135,8 +143,8 @@ func (t *wsTracker) leave() {
 	}
 }
 
-// shutdown 不再接纳新的 handler，返回在跑的 handler 全部退出时关闭的通道。
-func (t *wsTracker) shutdown() <-chan struct{} {
+// shutdown 不再接纳新的工作，返回在跑的工作全部结束时关闭的通道。
+func (t *tracker) shutdown() <-chan struct{} {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.closing = true
@@ -149,7 +157,7 @@ func (t *wsTracker) shutdown() <-chan struct{} {
 	return ch
 }
 
-func (t *wsTracker) count() int {
+func (t *tracker) count() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.n
@@ -181,7 +189,9 @@ func New(cfg Config, st *store.Store, logger *log.Logger) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{cfg: cfg, store: st, log: logger, mux: http.NewServeMux(), limiter: newLimiter(), agents: newAgentHub(logger), clients: newClientHub(), start: time.Now(),
-		verify: VerifyPassword, verifyWait: loginVerifyWait, helloTimeout: defaultHelloTimeout}
+		verify: VerifyPassword, verifyWait: loginVerifyWait, helloTimeout: defaultHelloTimeout,
+		callbackRetryWait: defaultCallbackRetryWait, callbackClient: newCallbackClient()}
+	s.cbCtx, s.cbCancel = context.WithCancel(context.Background())
 	s.routes()
 	return s, nil
 }
@@ -192,6 +202,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/logout", sameOrigin(s.handleLogout))
 	s.mux.HandleFunc("POST /api/enroll", s.handleEnroll)
 	s.mux.HandleFunc("GET /ws/agent", s.handleAgentWS)
+	s.mux.HandleFunc("POST /api/webhook/approvals", s.handleWebhookIngest)
 	s.apiRoutes()
 }
 
@@ -199,8 +210,9 @@ func (s *Server) routes() {
 func (s *Server) Handler() http.Handler { return s.mux }
 
 // Run 监听直到 ctx 取消。请求的 context 派生自 ctx，取消时长连接与在途请求都能看到；
-// 关停先等在途请求至多 shutdownTimeout，超时就强制断开；同一时限内还等 WebSocket handler（/ws/agent、/ws/client）全部退出，
-// 正常关停时 Run 返回后不再有 handler 碰存储，调用方可以关库。
+// 关停先等在途请求至多 shutdownTimeout，超时就强制断开；同一时限内还等 WebSocket handler（/ws/agent、/ws/client）全部退出；
+// 最后停下过期扫描，再取消在跑的 webhook 回调并至多等 shutdownTimeout 让它们退出（见 stopCallbacks）。
+// 正常关停时 Run 返回后不再有 handler 或回调碰存储，调用方可以关库。
 func (s *Server) Run(ctx context.Context) error {
 	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
@@ -209,6 +221,8 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	s.log.Printf("hub 监听 %s", ln.Addr())
+	// 最后执行的 defer：过期扫描停下之后（它会给过期的 webhook 请求发起回调）再停回调
+	defer s.stopCallbacks()
 	// 过期扫描随 Run 结束：Run 返回前等它退出，调用方随后关库也不会撞上它
 	sweepCtx, stopSweep := context.WithCancel(ctx)
 	sweepDone := make(chan struct{})

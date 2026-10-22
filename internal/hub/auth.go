@@ -358,7 +358,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"machine_id": m.ID, "secret": secret})
 }
 
-// validName 报告机器名是否是合法 UTF-8 且不含 C0 控制字符与 DEL。
+// validName 报告名字（机器名、webhook 标题）是否是合法 UTF-8 且不含 C0 控制字符与 DEL。
 func validName(s string) bool {
 	if !utf8.ValidString(s) {
 		return false
@@ -374,16 +374,23 @@ func validName(s string) bool {
 // errNoBearer 表示请求没带 Bearer 机器密钥。
 var errNoBearer = errors.New("缺少 Bearer 密钥")
 
-// authMachine 从 Authorization: Bearer 取机器密钥。方案名大小写不敏感，值去首尾空白后不能为空。
-// 没带密钥返回 errNoBearer，密钥不对或已吊销返回 store.ErrNotFound，其余是存储错误。
-func (s *Server) authMachine(r *http.Request) (store.Machine, error) {
+// bearerToken 从 Authorization: Bearer 取凭据。方案名大小写不敏感，值去首尾空白后不能为空，否则 ok 为 false。
+// 机器密钥（/ws/agent）与 webhook 来源令牌共用。
+func bearerToken(r *http.Request) (string, bool) {
 	const scheme = "Bearer "
 	h := r.Header.Get("Authorization")
 	if len(h) < len(scheme) || !strings.EqualFold(h[:len(scheme)], scheme) {
-		return store.Machine{}, errNoBearer
+		return "", false
 	}
-	secret := strings.TrimSpace(h[len(scheme):])
-	if secret == "" {
+	tok := strings.TrimSpace(h[len(scheme):])
+	return tok, tok != ""
+}
+
+// authMachine 从 Authorization: Bearer 取机器密钥（见 bearerToken）。
+// 没带密钥返回 errNoBearer，密钥不对或已吊销返回 store.ErrNotFound，其余是存储错误。
+func (s *Server) authMachine(r *http.Request) (store.Machine, error) {
+	secret, ok := bearerToken(r)
+	if !ok {
 		return store.Machine{}, errNoBearer
 	}
 	return s.store.AuthMachine(secret)
