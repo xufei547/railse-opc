@@ -506,7 +506,8 @@ func TestAgentWSRejectsBadHello(t *testing.T) {
 func TestAgentWSAcceptsLargeFrame(t *testing.T) {
 	h := newTestHubWith(t, func(c *Config) {
 		c.PingInterval = 20 * time.Millisecond
-		c.PongTimeout = 500 * time.Millisecond
+		// 处理这一帧要对近 1 MiB 的消息全文脱敏，-race 下要几秒，期间读循环读不到 pong
+		c.PongTimeout = 5 * time.Second
 	}, nil)
 	id, secret := enrollMachine(t, h, "mac")
 	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})

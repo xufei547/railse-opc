@@ -36,11 +36,31 @@ type agentConn struct {
 	out     chan []byte
 	closed  chan struct{}
 	once    sync.Once
+	// resent 是重连对齐时在这条连接上已补发决定的请求 id：守护进程随后重发这些请求的 pending 时不再重复补发。
+	resentMu sync.Mutex
+	resent   map[string]bool
 }
 
 // close 要求断开这条连接：只关 closed，不碰 conn，不阻塞，可重复调用。关闭握手由连接自己的写 goroutine 完成，
 // 调用方（例如登记新连接时替换旧连接）不会被不响应的对端拖住。
 func (c *agentConn) close() { c.once.Do(func() { close(c.closed) }) }
+
+// markResent 记下这条连接上已补发过决定的请求。
+func (c *agentConn) markResent(id string) {
+	c.resentMu.Lock()
+	defer c.resentMu.Unlock()
+	if c.resent == nil {
+		c.resent = map[string]bool{}
+	}
+	c.resent[id] = true
+}
+
+// wasResent 报告这条连接上是否已补发过该请求的决定。
+func (c *agentConn) wasResent(id string) bool {
+	c.resentMu.Lock()
+	defer c.resentMu.Unlock()
+	return c.resent[id]
+}
 
 // isClosed 报告是否已被要求断开（被替换、吊销、关停、队列满）。
 func (c *agentConn) isClosed() bool {
@@ -451,7 +471,7 @@ func (s *Server) handleAgentFrame(c *agentConn, b []byte, pongs *pongClock, bad 
 	case wire.TPong:
 		pongs.mark()
 	case wire.TPending:
-		dispatchFrame(bad, kind, b, func(f wire.PendingRequest) { s.onPending(m, f) })
+		dispatchFrame(bad, kind, b, func(f wire.PendingRequest) { s.onPending(c, f) })
 	case wire.TCancel:
 		dispatchFrame(bad, kind, b, func(f wire.Cancel) { s.onCancel(m, f) })
 	case wire.TExpired:

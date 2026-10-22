@@ -589,3 +589,26 @@ func TestRequestJSONHidesCallback(t *testing.T) {
 		t.Fatalf("字段不符: %s", b)
 	}
 }
+
+// InsertRequestIfAbsent：id 已存在时不插入、不报错、返回 false，原行不变；时间校验与 InsertRequest 相同。
+func TestInsertRequestIfAbsent(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	r := newReq(m.ID, "e1", "first")
+	ok, err := s.InsertRequestIfAbsent(r)
+	if err != nil || !ok {
+		t.Fatalf("首次应插入: %v, %v", ok, err)
+	}
+	ok, err = s.InsertRequestIfAbsent(newReq(m.ID, "e1", "second"))
+	if err != nil || ok {
+		t.Fatalf("已存在时应返回 false 且不报错: %v, %v", ok, err)
+	}
+	if got, _ := s.GetRequest("e1"); got.Payload.Command != "first" {
+		t.Fatalf("原行不应变: %+v", got)
+	}
+	bad := newReq(m.ID, "e2", "x")
+	bad.CreatedAt = "2026-10-22T00:00:00Z"
+	if ok, err := s.InsertRequestIfAbsent(bad); ok || err == nil {
+		t.Fatalf("非定宽时间应报错: %v, %v", ok, err)
+	}
+}

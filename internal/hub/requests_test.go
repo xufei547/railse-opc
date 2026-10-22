@@ -889,19 +889,31 @@ func TestPendingInsertFailureKeepsOld(t *testing.T) {
 	}
 }
 
-// 守护进程再次送来 hub 已有的 id：仍 pending 只广播；已决定（未送达或已送达）直接再发决定；其他终态回 Error。
+// 守护进程再次送来 hub 已有的 id：已决定的、内容（载荷哈希、工具名、CLI 会话）与库里一致才再发决定，
+// 对齐时已补发过的不再发，已送达的照发并记日志，内容不符回 Error 并记日志；其他终态回 Error。
 func TestDuplicatePendingReplies(t *testing.T) {
-	h := newTestHub(t)
+	old := helloResendMax
+	helloResendMax = 1 // 在 hub 起服务之前改、在 hub 关停之后恢复（t.Cleanup 后进先出）
+	t.Cleanup(func() { helloResendMax = old })
+	h, logs := quietHub(t)
 	id, secret := enrollMachine(t, h, "mac")
-	m, _ := h.st.GetMachine(id)
-	insertReq(t, h.st, store.Request{ID: "d1", MachineID: id, State: "approved", DecidedBy: "user", DecisionNote: "行"})
-	delivered := store.Now()
-	insertReq(t, h.st, store.Request{ID: "d2", MachineID: id, State: "denied", DecidedBy: "user", DeliveredAt: &delivered})
+	same := func(rid, state string, delivered bool) store.Request {
+		f := pendingFrame(rid, "s1", "t1", "echo "+rid)
+		r := store.Request{ID: rid, MachineID: id, State: state, DecidedBy: "user", ToolName: f.ToolName, CLISessionID: "s1", Payload: f.Payload}
+		if delivered {
+			now := store.Now()
+			r.DeliveredAt = &now
+		}
+		return r
+	}
+	insertReq(t, h.st, same("d1", "approved", false)) // 对齐时补发
+	insertReq(t, h.st, same("d4", "approved", false)) // 超过补发上限 1，留给重发的 pending 带出
+	insertReq(t, h.st, same("d2", "denied", true))    // 已送达
+	insertReq(t, h.st, same("d3", "approved", false)) // 重发的内容不符
 	insertReq(t, h.st, store.Request{ID: "x1", MachineID: id, State: "cancelled", DecidedBy: "terminal"})
 	insertReq(t, h.st, store.Request{ID: "x2", MachineID: id, State: "expired", DecidedBy: "timeout"})
-	// hello 持有全部，d1 会在对齐时补发一次；之后重发 pending 时再各带一次
-	held := []wire.PendingSummary{{RequestID: "d1"}, {RequestID: "d2"}, {RequestID: "x1"}, {RequestID: "x2"}}
-	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: m.ID, Pending: held})
+	held := []wire.PendingSummary{{RequestID: "d1"}, {RequestID: "d4"}, {RequestID: "d2"}, {RequestID: "x1"}, {RequestID: "x2"}}
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id, Pending: held})
 	defer c.close()
 	c.recv(5 * time.Second) // welcome
 	recvDecision := func(want, action string) {
@@ -922,16 +934,24 @@ func TestDuplicatePendingReplies(t *testing.T) {
 			t.Fatalf("应收到 %s 的 Error: %s %+v", want, kind, e)
 		}
 	}
-	recvDecision("d1", "allow") // 对齐补发
-	for _, x := range []string{"d1", "d2", "x1", "x2"} {
+	recvDecision("d1", "allow") // 对齐补发（上限 1）
+	for _, x := range []string{"d1", "d4", "d2", "x1", "x2"} {
 		c.send(pendingFrame(x, "s1", "t1", "echo "+x))
 	}
-	recvDecision("d1", "allow")
+	c.send(pendingFrame("d3", "s1", "t1", "rm -rf /")) // 同 id、不同命令
+	// d1 对齐时已补发过，不再发；按序应依次收到：
+	recvDecision("d4", "allow")
 	recvDecision("d2", "deny")
 	recvError("x1")
 	recvError("x2")
+	recvError("d3")
 	if d1 := getReq(t, h.st, "d1"); d1.State != "approved" || d1.DeliveredAt != nil {
 		t.Fatalf("再发决定不改状态、不标送达: %+v", d1)
+	}
+	for _, want := range []string{`"d2"`, "已送达", `"d3"`, "不符"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("日志应含 %s: %q", want, logs.String())
+		}
 	}
 }
 
@@ -974,9 +994,9 @@ func TestAuditForeignRequestID(t *testing.T) {
 	}
 }
 
-// 守护进程重发同一批审计：question/done 用确定性 id，只登记一行。
+// 守护进程重发同一批审计：question/done 用确定性 id，只登记一行；撞上已有的行静默跳过，不记错误日志。
 func TestAuditEventsDedup(t *testing.T) {
-	h := newTestHub(t)
+	h, logs := quietHub(t)
 	id, secret := enrollMachine(t, h, "mac")
 	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
 	defer c.close()
@@ -999,6 +1019,9 @@ func TestAuditEventsDedup(t *testing.T) {
 		if len(r.ID) != 32 || strings.Trim(r.ID, "0123456789abcdef") != "" {
 			t.Fatalf("id 应为 32 个十六进制字符: %q", r.ID)
 		}
+	}
+	if logs.String() != "" {
+		t.Fatalf("重复的条目不应记日志: %q", logs.String())
 	}
 }
 
@@ -1044,5 +1067,19 @@ func TestRedactTextStraddlingCut(t *testing.T) {
 	}
 	if got := redactText("mysql --password hunter22", 1000); got != "mysql --password <redacted>" {
 		t.Fatalf("短文本照常脱敏: %q", got)
+	}
+}
+
+// 先全文脱敏再截断（审查复现的两种泄漏）：
+// A：引号括起、长于余量的秘密，右引号在预截点之后——预截会让引号规则匹配不上；
+// B：前面的长 Bearer token 换成 <redacted> 后文本左移，预截时被截成不足 16 字符的裸 token 被拉进前 1000 字符。
+func TestRedactTextNoLeakAcrossCut(t *testing.T) {
+	a := strings.Repeat("a", 897) + ` SECRET_KEY="` + strings.Repeat("Q", 450) + `" tail`
+	if out := redactText(a, 1000); strings.Contains(out, "QQQQ") {
+		t.Errorf("A：引号括起的长秘密漏出: %q", out[880:])
+	}
+	b := "Bearer " + strings.Repeat("t", 1000) + " " + strings.Repeat("a", 240) + " ghp_ABCDEFGHIJKLMNOPQRSTUV tail"
+	if out := redactText(b, 1000); strings.Contains(out, "ghp_ABC") || strings.Contains(out, "tttt") {
+		t.Errorf("B：左移后的半截裸 token 漏出: %q", out[250:])
 	}
 }

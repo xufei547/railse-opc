@@ -100,9 +100,29 @@ const requestCols = "id, machine_id, session_id, kind, tool_name, payload, paylo
 // InsertRequest 插入一条请求。PayloadHash 为空时按存下的载荷 JSON 计算；CreatedAt 为空时用 Now()。
 // CreatedAt、ExpiresAt、DecidedAt、DeliveredAt 给了就必须是 FormatTime 的输出，否则返回错误。
 func (s *Store) InsertRequest(r Request) error {
+	_, err := s.insertRequest(r, "")
+	return err
+}
+
+// InsertRequestIfAbsent 同 InsertRequest，但 id 已存在时什么也不做并返回 false（ON CONFLICT(id) DO NOTHING）。
+// 用于可能重复到达的同一事件（如守护进程重发的审计批次）：并发撞主键也不报错。
+func (s *Store) InsertRequestIfAbsent(r Request) (bool, error) {
+	res, err := s.insertRequest(r, " ON CONFLICT(id) DO NOTHING")
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// insertRequest 校验并插入，suffix 接在 VALUES(...) 之后（冲突处理子句）。
+func (s *Store) insertRequest(r Request, suffix string) (sql.Result, error) {
 	payload, err := payloadJSON(r.Payload)
 	if err != nil {
-		return fmt.Errorf("序列化载荷: %w", err)
+		return nil, fmt.Errorf("序列化载荷: %w", err)
 	}
 	if r.PayloadHash == "" {
 		r.PayloadHash = hashJSON(payload)
@@ -110,7 +130,7 @@ func (s *Store) InsertRequest(r Request) error {
 	if r.CreatedAt == "" {
 		r.CreatedAt = Now()
 	} else if err := checkTime("created_at", r.CreatedAt); err != nil {
-		return err
+		return nil, err
 	}
 	for _, c := range []struct {
 		col string
@@ -118,7 +138,7 @@ func (s *Store) InsertRequest(r Request) error {
 	}{{"expires_at", r.ExpiresAt}, {"decided_at", r.DecidedAt}, {"delivered_at", r.DeliveredAt}} {
 		if c.v != nil {
 			if err := checkTime(c.col, *c.v); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
@@ -126,10 +146,9 @@ func (s *Store) InsertRequest(r Request) error {
 	if r.SessionID != "" {
 		sessionID = r.SessionID
 	}
-	_, err = s.db.Exec("INSERT INTO requests("+requestCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+	return s.db.Exec("INSERT INTO requests("+requestCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"+suffix,
 		r.ID, r.MachineID, sessionID, r.Kind, r.ToolName, string(payload), r.PayloadHash, r.Risk, r.ProjectRoot, r.EngineReason,
 		r.State, r.DecidedBy, r.DecisionNote, r.RuleID, r.TurnID, r.CLISessionID, r.Title, r.Callback, r.CreatedAt, r.ExpiresAt, r.DecidedAt, r.DeliveredAt)
-	return err
 }
 
 func scanRequest(row interface{ Scan(...any) error }) (Request, error) {

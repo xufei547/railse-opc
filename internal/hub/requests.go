@@ -108,14 +108,9 @@ func hubTime(t time.Time) time.Time {
 	return t
 }
 
-// redactMargin 是 redactText 先截时多留的字符数。
-const redactMargin = 256
-
-// redactText 脱敏并截到至多 n 个字符。先截到 n+redactMargin 再脱敏：反正不存的部分不必花时间脱敏（1 MiB 文本要上百毫秒，
-// 占着该连接的读循环），多留的余量让跨截断点的凭据在脱敏时仍完整，不会只剩不够长的半截而漏过裸 token 规则。
-func redactText(s string, n int) string {
-	return truncate(redact.Text(truncate(s, n+redactMargin)), n)
-}
+// redactText 先对全文脱敏，再截到至多 n 个字符。不能先截再脱敏：截断会让引号括起的长秘密丢了右引号而匹配不上，
+// 脱敏后文本变短又会把截断点之后的半截凭据拉进保留部分。全文脱敏的开销受单帧 1 MiB 上限约束（约百毫秒量级）。
+func redactText(s string, n int) string { return truncate(redact.Text(s), n) }
 
 // cleanSession 截断会话里来自守护进程的字段。
 func cleanSession(sess proto.Session) proto.Session {
@@ -184,9 +179,10 @@ func (s *Server) rejectPending(machineID, requestID, msg string) {
 	s.agents.send(machineID, wire.Error{T: wire.TError, RequestID: requestID, Message: msg})
 }
 
-// onPending 登记守护进程送来的待决请求。hub 不信任守护进程：id 不合规或 Gemini 会话的拒收，
+// onPending 登记守护进程从连接 c 送来的待决请求。hub 不信任守护进程：id 不合规或 Gemini 会话的拒收，
 // 时间与期限按 hub 的时钟夹紧，载荷再脱敏，字段截断；hub 已有的 id（重连后重发）交给 pendingAgain。
-func (s *Server) onPending(m store.Machine, p wire.PendingRequest) {
+func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
+	m := c.machine
 	if !validRequestID(p.RequestID) {
 		s.log.Printf("机器 %s 送来的待决请求 id 不合规（%d 字节），拒收", m.ID, len(p.RequestID))
 		s.rejectPending(m.ID, p.RequestID, "登记失败")
@@ -200,7 +196,7 @@ func (s *Server) onPending(m store.Machine, p wire.PendingRequest) {
 	existing, err := s.store.GetRequest(p.RequestID)
 	switch {
 	case err == nil:
-		s.pendingAgain(m, existing)
+		s.pendingAgain(c, existing, p)
 		return
 	case !errors.Is(err, store.ErrNotFound):
 		s.log.Printf("登记请求 %q 前查重: %v", p.RequestID, err)
@@ -246,10 +242,15 @@ func (s *Server) onPending(m store.Machine, p wire.PendingRequest) {
 	s.clients.broadcast("request_new", r)
 }
 
-// pendingAgain 处理守护进程再次送来的、hub 已有的请求 id（重连后重发）：
-// 属于别的机器 → 回 Error；仍 pending → 只广播；已决定（approved、denied）→ 直接再发决定，守护进程还在等它
-// （补发上限截下的决定也由此带出）；其他终态 → 回 Error，守护进程把它交回终端。
-func (s *Server) pendingAgain(m store.Machine, r store.Request) {
+// pendingAgain 处理守护进程从连接 c 再次送来的、hub 已有的请求 id（重连后重发）：
+//   - 属于别的机器 → 回 Error；
+//   - 仍 pending → 只广播；
+//   - 已决定（approved、denied）→ 内容（载荷哈希、工具名、CLI 会话）与库里一致才在 c 上再发决定，守护进程还在等它
+//     （补发上限截下的决定也由此带出）；对齐时已在 c 上补发过的不再发；已送达的照发并记日志；内容不符回 Error 并记日志，
+//     免得把用户对另一条命令的决定套到这条上；
+//   - 其他终态 → 回 Error，守护进程把它交回终端。
+func (s *Server) pendingAgain(c *agentConn, r store.Request, p wire.PendingRequest) {
+	m := c.machine
 	switch {
 	case r.MachineID != m.ID:
 		s.log.Printf("机器 %s 送来的待决请求 %q 与另一台机器的请求同 id，拒收", m.ID, r.ID)
@@ -257,7 +258,19 @@ func (s *Server) pendingAgain(m store.Machine, r store.Request) {
 	case r.State == "pending":
 		s.clients.broadcast("request_updated", r)
 	case r.State == "approved" || r.State == "denied":
-		s.sendDecision(r)
+		if store.PayloadHash(redact.Payload(p.Payload)) != r.PayloadHash || truncate(p.ToolName, maxFieldLen) != r.ToolName ||
+			truncate(p.Session.CLISessionID, maxFieldLen) != r.CLISessionID {
+			s.log.Printf("机器 %s 重发的待决请求 %q 与已决定的请求内容不符，拒收、不发决定", m.ID, r.ID)
+			s.rejectPending(m.ID, r.ID, "请求内容不符")
+			return
+		}
+		if c.wasResent(r.ID) {
+			return // 对齐时已在这条连接上补发过
+		}
+		if r.DeliveredAt != nil {
+			s.log.Printf("机器 %s 又送来已送达的请求 %q 的 pending，再发一次决定", m.ID, r.ID)
+		}
+		s.agents.sendTo(c, decisionFrame(r))
 	default:
 		s.rejectPending(m.ID, r.ID, "请求已结束")
 	}
@@ -354,7 +367,9 @@ func (s *Server) onAgentHello(c *agentConn, h wire.Hello) {
 		case resent >= helloResendMax:
 			skipped++
 		default:
-			s.agents.sendTo(c, decisionFrame(r)) // 入队不等于送达：送达只认 delivered 回执
+			if s.agents.sendTo(c, decisionFrame(r)) { // 入队不等于送达：送达只认 delivered 回执
+				c.markResent(r.ID)
+			}
 			resent++
 		}
 	}
@@ -568,22 +583,18 @@ func eventID(machineID string, e agent.AuditEntry, detail []byte) string {
 }
 
 // recordEvent 把 question/done 存成一行 recorded（第 4 份的收件箱靠它列出谁在等回答），刷新会话并广播 request_new。
-// e 已经过 cleanEntry：Message 已脱敏。同一条目再来（批次重发）时已有该行，跳过。
+// e 已经过 cleanEntry：Message 已脱敏。同一条目再来（批次重发，含两条连接并发处理同一批）时该行已存在，静默跳过。
 func (s *Server) recordEvent(m store.Machine, e agent.AuditEntry, ts time.Time, detail []byte) {
-	id := eventID(m.ID, e, detail)
-	if _, err := s.store.GetRequest(id); err == nil {
-		return
-	} else if !errors.Is(err, store.ErrNotFound) {
-		s.log.Printf("读请求 %s: %v", id, err)
-		return
-	}
-	r := store.Request{ID: id, MachineID: m.ID, SessionID: s.upsertSession(m.ID, e.Session, ""), Kind: e.Kind, ToolName: e.ToolName,
+	r := store.Request{ID: eventID(m.ID, e, detail), MachineID: m.ID, SessionID: s.upsertSession(m.ID, e.Session, ""), Kind: e.Kind, ToolName: e.ToolName,
 		State: "recorded", Title: truncate(e.Message, maxTitleLen), TurnID: e.Session.TurnID, CLISessionID: e.Session.CLISessionID, CreatedAt: store.FormatTime(ts)}
-	if err := s.store.InsertRequest(r); err != nil {
+	inserted, err := s.store.InsertRequestIfAbsent(r)
+	if err != nil {
 		s.log.Printf("记机器 %s 的 %q 事件: %v", m.ID, e.Kind, err)
 		return
 	}
-	s.clients.broadcast("request_new", r)
+	if inserted {
+		s.clients.broadcast("request_new", r)
+	}
 }
 
 // applyAgentPermission 按白名单用本机器的 permission 条目更新 hub（existing/found 是 hub 里该 id 的行，已确认属于本机器）。
