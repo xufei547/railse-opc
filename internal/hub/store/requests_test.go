@@ -35,7 +35,7 @@ func TestSessionUpsert(t *testing.T) {
 	}
 }
 
-// UpsertSession 每次都刷新 last_event_at、cwd、project，started_at 不变；hub 用它记会话最近活动。
+// UpsertSession 非空才覆盖 cwd、project；每次刷新 last_event_at，started_at 不变；hub 用它记会话最近活动。
 func TestSessionUpsertRefreshesLastEvent(t *testing.T) {
 	s := openTemp(t)
 	m, err := s.CreateMachine("m", RandomToken(), "/h")
@@ -489,7 +489,7 @@ func TestPayloadHashAndMarshalError(t *testing.T) {
 	}
 }
 
-// created_at、expires_at 必须是定宽 UTC 格式（FormatTime 的输出），否则字典序比较会错。
+// created_at、expires_at、decided_at、delivered_at 必须是定宽 UTC 格式（FormatTime 的输出），否则字典序比较会错。
 func TestInsertRequestRejectsNonCanonicalTime(t *testing.T) {
 	s := openTemp(t)
 	m, _ := s.CreateMachine("m", RandomToken(), "/h")
@@ -511,6 +511,16 @@ func TestInsertRequestRejectsNonCanonicalTime(t *testing.T) {
 		if err := s.InsertRequest(e); err == nil {
 			t.Errorf("ExpiresAt %q 应被拒绝", v)
 		}
+		d := newReq(m.ID, fmt.Sprintf("d%d", i), "x")
+		d.DecidedAt = &v
+		if err := s.InsertRequest(d); err == nil {
+			t.Errorf("DecidedAt %q 应被拒绝", v)
+		}
+		l := newReq(m.ID, fmt.Sprintf("l%d", i), "x")
+		l.DeliveredAt = &v
+		if err := s.InsertRequest(l); err == nil {
+			t.Errorf("DeliveredAt %q 应被拒绝", v)
+		}
 	}
 	if all, err := s.ListRequests("", 100); err != nil || len(all) != 0 {
 		t.Fatalf("被拒绝的插入不应留行: %d, %v", len(all), err)
@@ -519,6 +529,8 @@ func TestInsertRequestRejectsNonCanonicalTime(t *testing.T) {
 	ok.CreatedAt = FormatTime(ts)
 	exp := FormatTime(ts.Add(time.Minute))
 	ok.ExpiresAt = &exp
+	ok.DecidedAt = &exp
+	ok.DeliveredAt = &exp
 	if err := s.InsertRequest(ok); err != nil {
 		t.Fatal(err)
 	}

@@ -97,7 +97,7 @@ func (s *Store) UpsertSession(machineID string, sess proto.Session, project stri
 const requestCols = "id, machine_id, session_id, kind, tool_name, payload, payload_hash, risk, project_root, engine_reason, state, decided_by, decision_note, rule_id, turn_id, cli_session_id, title, callback, created_at, expires_at, decided_at, delivered_at"
 
 // InsertRequest 插入一条请求。PayloadHash 为空时按存下的载荷 JSON 计算；CreatedAt 为空时用 Now()。
-// CreatedAt、ExpiresAt 给了就必须是 FormatTime 的输出，否则返回错误。
+// CreatedAt、ExpiresAt、DecidedAt、DeliveredAt 给了就必须是 FormatTime 的输出，否则返回错误。
 func (s *Store) InsertRequest(r Request) error {
 	payload, err := payloadJSON(r.Payload)
 	if err != nil {
@@ -111,9 +111,14 @@ func (s *Store) InsertRequest(r Request) error {
 	} else if err := checkTime("created_at", r.CreatedAt); err != nil {
 		return err
 	}
-	if r.ExpiresAt != nil {
-		if err := checkTime("expires_at", *r.ExpiresAt); err != nil {
-			return err
+	for _, c := range []struct {
+		col string
+		v   *string
+	}{{"expires_at", r.ExpiresAt}, {"decided_at", r.DecidedAt}, {"delivered_at", r.DeliveredAt}} {
+		if c.v != nil {
+			if err := checkTime(c.col, *c.v); err != nil {
+				return err
+			}
 		}
 	}
 	var sessionID any
