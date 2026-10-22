@@ -633,6 +633,44 @@ func TestAuditDetailRedacted(t *testing.T) {
 	}
 }
 
+// 终审 I1：redact 补的写法（URL 的 user:pass、curl -u、API key 头、MYSQL_PWD、mysql -p）在 hub 兜底脱敏时同样生效：
+// 守护进程送来未脱敏的 pending 与审计条目，库里的请求、审计 detail 都不含原文。
+func TestHubRedactsCredentialGaps(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	secrets := []string{"S3cretPass", "abcdef123456", "PwdS3cret", "MyPS3cret", "UrlS3cret"}
+	c.send(pendingFrame("p1", "s1", "t1", "curl -u alice:S3cretPass -H 'X-API-Key: abcdef123456' https://x"))
+	entry := agent.AuditEntry{TS: time.Now().UTC(), RequestID: "a1", Kind: "permission", Session: proto.Session{Tool: "claude", CLISessionID: "s2"},
+		ToolName: "Bash", Payload: &policy.Payload{Type: policy.PayloadShell, Command: "MYSQL_PWD=PwdS3cret mysql -uroot -pMyPS3cret app"},
+		Risk: "read", Action: "allow", State: "auto_allowed", RuleID: "builtin-readonly", Reason: "git clone https://bob:UrlS3cret@git.example.com/r.git"}
+	c.send(auditFrame(t, entry))
+	waitFor(t, "p1、a1 入库", func() bool {
+		_, e1 := h.st.GetRequest("p1")
+		_, e2 := h.st.GetRequest("a1")
+		return e1 == nil && e2 == nil
+	})
+	p1, a1 := getReq(t, h.st, "p1"), getReq(t, h.st, "a1")
+	if p1.Payload.Command != "curl -u alice:<redacted> -H 'X-API-Key: <redacted>' https://x" {
+		t.Fatalf("pending 的载荷应再脱敏: %q", p1.Payload.Command)
+	}
+	if a1.Payload.Command != "MYSQL_PWD=<redacted> mysql -uroot -p<redacted> app" ||
+		a1.EngineReason != "git clone https://bob:<redacted>@git.example.com/r.git" {
+		t.Fatalf("审计补的历史行应再脱敏: %q %q", a1.Payload.Command, a1.EngineReason)
+	}
+	events, err := h.st.ListAudit(10, "a1")
+	if err != nil || len(events) != 1 {
+		t.Fatalf("审计: %+v, %v", events, err)
+	}
+	for _, s := range secrets {
+		if strings.Contains(events[0].Detail, s) || strings.Contains(p1.Payload.Command, s) {
+			t.Fatalf("不应含 %q: %s", s, events[0].Detail)
+		}
+	}
+}
+
 // Gemini 的请求不进 hub 等待；请求 id 无效的拒收；都回带 request_id 的 Error 帧，不登记。
 func TestPendingRejected(t *testing.T) {
 	h, logs := quietHub(t)

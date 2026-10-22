@@ -16,11 +16,17 @@ const placeholder = "<redacted>"
 const quoted = `"[^"]*"|'[^']*'|\\"(?:[^"\\]|\\.)*?\\"`
 
 // key 是敏感键名，前面可带任意前缀。token 不认 tokens，auth 只认 auth、auth_token、
-// auth-key、authorization 这类，免得误抹 max_tokens、author。
+// auth-key、authorization 这类，免得误抹 max_tokens、author。pwd 只认作后缀且前面要有 _ . - 分隔
+// （MYSQL_PWD、db.pwd）：PWD、OLDPWD 是 shell 的目录变量，cwd 是工作目录，都不是凭据；代价是单独的 pwd=xxx 不抹。
 const key = `[a-z0-9_.-]*(?:` +
 	`token(?:[a-rt-z0-9_.-][a-z0-9_.-]*)?` +
 	`|auth(?:orization|[_-]?(?:token|key))?` +
-	`|(?:api[-_]?key|secret|password|passwd)[a-z0-9_.-]*)`
+	`|(?:api[-_]?key|secret|password|passwd)[a-z0-9_.-]*` +
+	`|[_.-]pwd)`
+
+// sameCmd 是同一条命令里命令名之后、目标参数之前的部分：不越过换行、; |、&&（单个 & 放过，免得查询串里的 & 截断匹配），
+// 引号括起的整段当一个单位（其中的 ; | & 不算分隔）。curl 的 -u、mysql 的 -p 只在这样的范围里认，不误抹别的命令的同名选项。
+const sameCmd = `(?:[^|;&\n'"]|'[^']*'|"[^"]*"|&[^&\n'"])*?`
 
 // sensitiveKey 判断 JSON 对象的键名是否敏感。
 var sensitiveKey = regexp.MustCompile(`(?i)^` + key + `$`)
@@ -41,9 +47,20 @@ func compile(bare string) []rule {
 		{regexp.MustCompile(`(?i)\b(bearer\s+)` + bare), "${1}" + placeholder},
 		// --token xxx、--password "xxx"、--api-key 'xxx'
 		{regexp.MustCompile(`(?i)(--?(token|password|passwd|api[-_]?key|secret|auth)\s+)` + value), "${1}" + placeholder},
-		// token=xxx、DB2_PASSWORD="xxx"、--env=DB_PASSWORD=xxx、+API_KEY=xxx、:_authToken=xxx。
+		// token=xxx、DB2_PASSWORD="xxx"、--env=DB_PASSWORD=xxx、+API_KEY=xxx、:_authToken=xxx、MYSQL_PWD=xxx。
 		// 不设左边界：key 的前缀字符类会吸收键名前缀，${1} 只含键名本身。
 		{regexp.MustCompile(`(?i)(` + key + `=)` + value), "${1}" + placeholder},
+		// X-API-Key: xxx、PRIVATE-TOKEN: xxx、X-Auth-Token:xxx 这类请求头（Authorization 见上）。头名要带连字符，
+		// 免得误抹代码里的 apiKey: config.key、YAML 里的 max_tokens: 10
+		{regexp.MustCompile(`(?i)\b((?:[a-z0-9]+-)*(?:api-key|[a-z0-9]+-token|[a-z0-9]+-secret)[ \t]*:[ \t]*)` + value), "${1}" + placeholder},
+		// URL 里的 user:pass@（任意 scheme）：用户名留着，只抹密码。密码里的 @ 算在密码里（取 / ? # 之前最后一个 @）
+		{regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@'"\\]*:)[^\s/?#'"\\]+@`), "${1}" + placeholder + "@"},
+		// curl 的 -u/--user、-U/--proxy-user 的 user:pass：用户名与引号留着，只抹密码；不带冒号的（curl 会提示输入密码）不动
+		{regexp.MustCompile(`(\bcurl\b` + sameCmd + `\s(?:-u\s*|-U\s*|--user\s+|--proxy-user\s+))` +
+			`(?:('[^'":\s\\]*:)[^']*|("[^'":\s\\]*:)[^"\\]*|(\\"[^'":\s\\]*:)[^"\\]*|([^'":\s\\]*:)` + bare + `)`),
+			"${1}${2}${3}${4}${5}" + placeholder},
+		// mysql 系命令紧贴 -p 的密码（-pxxx、-p'xxx'）。-p 单独出现时 mysql 提示输入密码、后面的是库名；-P 是端口：都不动
+		{regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + sameCmd + `\s-p)` + value), "${1}" + placeholder},
 		// 裸 token：GitHub、OpenAI、Slack、AWS
 		{regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), placeholder},
 	}
