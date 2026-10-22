@@ -215,19 +215,29 @@ func (s *Server) routes() {
 // Handler 返回根处理器。
 func (s *Server) Handler() http.Handler { return s.mux }
 
-// Run 监听直到 ctx 取消。请求的 context 派生自 ctx，取消时长连接与在途请求都能看到。
-// 关停的各步共用一个截止时间（shutdownTimeout）：先等在途请求，超时就强制断开；再等 WebSocket handler
-// （/ws/agent、/ws/client）全部退出；然后停下过期扫描；最后取消在跑的 webhook 回调并等它们退出（见 stopCallbacks）。
-// 截止时间被前面的步骤耗尽时，回调仍有 callbackStopGrace 的收尾宽限，总关停不超过 shutdownTimeout + callbackStopGrace。
-// 返回 nil 时 WebSocket 处理与回调都已退出，调用方可以关库；有没等到退出的，收尾完照样返回，错误满足
-// errors.Is(err, ErrShutdownTimeout)。（HTTP 收尾超时被强制断开的普通请求不在其列：它们碰到已关的库只会得到错误。）
+// Run 监听直到 ctx 取消，或 HTTP 服务自己出错结束（如监听器坏了）。请求的 context 派生自 ctx，两种情况下都会被取消，
+// 长连接与在途请求都能看到。两种情况走同一套关停，各步共用一个截止时间（shutdownTimeout）：先等在途请求，超时就强制断开；
+// 再等 WebSocket handler（/ws/agent、/ws/client）全部退出；然后停下过期扫描；最后取消在跑的 webhook 回调并等它们退出
+// （见 stopCallbacks）。截止时间被前面的步骤耗尽时，回调仍有 callbackStopGrace 的收尾宽限，总关停不超过
+// shutdownTimeout + callbackStopGrace。返回 nil 时 WebSocket 处理与回调都已退出，调用方可以关库；服务自己出错结束时返回
+// 那个错误；有没等到退出的，收尾完照样返回，错误满足 errors.Is(err, ErrShutdownTimeout)。
+// （HTTP 收尾超时被强制断开的普通请求不在其列：它们碰到已关的库只会得到错误。）
 func (s *Server) Run(ctx context.Context) error {
-	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
-		BaseContext: func(net.Listener) context.Context { return ctx }}
 	ln, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
 		return err
 	}
+	return s.serve(ctx, ln)
+}
+
+// serve 是 Run 在监听之后的部分，测试可传入自己的监听器。
+func (s *Server) serve(parent context.Context, ln net.Listener) error {
+	// 请求的 context 派生自 ctx：parent 取消或 HTTP 服务自己出错结束时都取消它。后一种情况没有人取消 parent，
+	// 不取消的话 /ws/client 的 handler 一直挂着，关停等不到它们退出。
+	ctx, cancelRun := context.WithCancel(parent)
+	defer cancelRun()
+	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
+		BaseContext: func(net.Listener) context.Context { return ctx }}
 	s.log.Printf("hub 监听 %s", ln.Addr())
 	// 过期扫描随 Run 结束：Run 返回前等它退出，调用方随后关库也不会撞上它
 	sweepCtx, stopSweep := context.WithCancel(ctx)
@@ -239,21 +249,19 @@ func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- hs.Serve(ln) }()
 	var runErr error
-	serveEnded := false
 	select {
 	case <-ctx.Done():
 	case err := <-errCh:
-		serveEnded = true
+		// 服务自己结束（还没开始关停，不会是 ErrServerClosed）：在跑的 WebSocket handler 与回调照样要收尾，
+		// 先取消请求的 context，再走同一套关停
 		if !errors.Is(err, http.ErrServerClosed) {
 			runErr = err
 		}
+		cancelRun()
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	clean := true
-	if !serveEnded {
-		clean = s.shutdownHTTP(shutdownCtx, hs)
-	}
+	clean := s.shutdownHTTP(shutdownCtx, hs)
 	// 过期扫描先停（它会给过期的 webhook 请求发起回调），再停回调
 	stopSweep()
 	<-sweepDone

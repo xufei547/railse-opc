@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1384,4 +1385,103 @@ func TestRunReportsShutdownTimeout(t *testing.T) {
 	}
 	letGo()
 	waitFor(t, "handler 退出", func() bool { return srv.ws.count() == 0 })
+}
+
+// 收尾修复 a：Serve 自己异常结束（监听器出错，不是取消）时也走完整关停：取消请求的 context、断开守护进程、等 WebSocket
+// 处理退出后才返回 Serve 的错误；时限内等不到它们退出时错误同样满足 ErrShutdownTimeout，调用方据此不关库。
+func TestServeEndedStillShutsDown(t *testing.T) {
+	old := shutdownTimeout
+	shutdownTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { shutdownTimeout = old })
+	for _, stuck := range []bool{false, true} {
+		dir, err := os.MkdirTemp("", "rs")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(dir) })
+		st, err := store.Open(filepath.Join(dir, "hub.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		var logs syncBuf
+		srv, err := New(DefaultConfig(dir), st, log.New(&logs, "", 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		letGo := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(letGo) // 后登记先执行：关库之前先放 handler 走
+		var exited atomic.Int32
+		srv.beforeWSExit = func() {
+			if stuck {
+				<-release
+			} else {
+				time.Sleep(100 * time.Millisecond)
+			}
+			exited.Add(1)
+		}
+		if err := srv.SetPassword("hunter22"); err != nil {
+			t.Fatal(err)
+		}
+		secret := store.RandomToken()
+		m, err := st.CreateMachine("m", secret, "/h")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- srv.serve(context.Background(), ln) }()
+		addr := ln.Addr().String()
+		resp := postJSON(t, "http://"+addr+"/api/login", map[string]string{"password": "hunter22"}, nil)
+		var ck *http.Cookie
+		for _, c := range resp.Cookies() {
+			if c.Name == cookieName {
+				ck = c
+			}
+		}
+		if ck == nil {
+			t.Fatalf("login = %d", resp.StatusCode)
+		}
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		client, _, err := websocket.Dial(dctx, "ws://"+addr+"/ws/client", &websocket.DialOptions{HTTPHeader: http.Header{"Cookie": {ck.Name + "=" + ck.Value}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		readFrames(t, client)
+		agentConn, _, err := websocket.Dial(dctx, "ws://"+addr+"/ws/agent", &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + secret}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		agentConn.SetReadLimit(wire.MaxFrame)
+		ac := &agentClient{conn: agentConn, t: t}
+		ac.send(wire.Hello{T: wire.THello, Proto: wire.Proto, MachineID: m.ID})
+		if kind, _ := ac.recv(5 * time.Second); kind != wire.TWelcome {
+			t.Fatalf("应先收到 welcome, 得到 %s", kind)
+		}
+		readFrames(t, agentConn) // 关停时要读到关闭帧并回应，关闭握手才能完成
+		waitFor(t, "两个 handler 在跑", func() bool { return srv.ws.count() == 2 })
+		ln.Close() // 监听器出错：Serve 以非 ErrServerClosed 的错误结束，没有谁取消 ctx
+		select {
+		case err := <-done:
+			if !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("stuck=%v: 应交上 Serve 的错误: %v", stuck, err)
+			}
+			if errors.Is(err, ErrShutdownTimeout) != stuck {
+				t.Fatalf("stuck=%v: 只有等不到 handler 退出时才带 ErrShutdownTimeout: %v", stuck, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("stuck=%v: Serve 结束后 Run 未返回", stuck)
+		}
+		if n, live := exited.Load(), srv.ws.count(); !stuck && (n != 2 || live != 0) {
+			t.Fatalf("Run 返回时 handler 应都已退出: 已退出 %d, 仍在跑 %d", n, live)
+		}
+		letGo()
+		waitFor(t, "handler 退出", func() bool { return srv.ws.count() == 0 })
+	}
 }

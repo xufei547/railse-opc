@@ -99,10 +99,14 @@ func TestHubDeciderNormalizesDecisions(t *testing.T) {
 
 // 决定 1：送出后每次断线都起一次完整的 Grace 计时，Grace 内重连就停表。第二次断线的重连越过了第一次断线的期限，
 // 但在它自己的 Grace 内，所以接着等，决定到了照常交给钩子（表若没在重连时停，第一次的期限一到就交回终端了）。
+// 时间尺度放大（收尾修复 c）：第二次重连比它自己的期限早约 1.5 秒，负载重时握手慢一些也不会误判。
 func TestHubDeciderGraceStopsOnReconnect(t *testing.T) {
-	const grace = time.Second
-	// 连接都不稳定（假 hub 不发 ping）：第一次断线 20 毫秒后重连，第二次退避升一档，500 毫秒后重连
-	setHubTimings(t, []time.Duration{20 * time.Millisecond, 500 * time.Millisecond}, 0, 0, 0)
+	const (
+		grace   = 3 * time.Second
+		backoff = 1500 * time.Millisecond // 第二档退避
+	)
+	// 连接都不稳定（假 hub 不发 ping）：第一次断线 20 毫秒后重连，第二次退避升一档，1.5 秒后重连
+	setHubTimings(t, []time.Duration{20 * time.Millisecond, backoff}, 0, 0, 0)
 	f := newFakeHub(t, 0, welcomeThenHandOver)
 	tc := newTestClient(t, f.http.URL)
 	pr := pendingFor("g1", "claude", time.Now())
@@ -126,8 +130,9 @@ func TestHubDeciderGraceStopsOnReconnect(t *testing.T) {
 	conn.CloseNow()
 	t0 := time.Now()
 	conn = nextConn()
-	// 以下只能按时间安排：第二次断线在第一次的期限前 300 毫秒，它的重连（500 毫秒后）越过第一次的期限
-	time.Sleep(time.Until(t0.Add(grace - 300*time.Millisecond)))
+	// 以下只能按时间安排：第二次断线在第一次的期限前 1 秒（t0+2s），它的重连（1.5 秒后，约 t0+3.5s）越过第一次的期限（t0+3s），
+	// 比它自己的期限（约 t0+5s）早约 1.5 秒
+	time.Sleep(time.Until(t0.Add(grace - time.Second)))
 	conn.CloseNow()
 	conn = nextConn()
 	tc.waitConnected(t)

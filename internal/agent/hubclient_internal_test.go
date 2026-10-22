@@ -534,9 +534,11 @@ func TestHubClientIdleTimeoutReconnects(t *testing.T) {
 	}
 }
 
-// hub 按时 ping：连接保持，客户端回 pong。
+// hub 按时 ping：连接保持，客户端回 pong。观察两倍 idle 的时长（没有 ping 早就断开重连了）；idle 是 ping 间隔的 40 倍
+// （收尾修复 c），负载重时 ping 晚到一些也不会误断。
 func TestHubClientPingKeepsConnection(t *testing.T) {
-	setHubTimings(t, []time.Duration{20 * time.Millisecond}, 600*time.Millisecond, 0, 0)
+	const idle, every = time.Second, 25 * time.Millisecond
+	setHubTimings(t, []time.Duration{20 * time.Millisecond}, idle, 0, 0)
 	f := newFakeHub(t, 0, func(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
 		f.welcome(conn, 1, defaultRulesYAML(), false)
 		done := make(chan struct{})
@@ -544,7 +546,7 @@ func TestHubClientPingKeepsConnection(t *testing.T) {
 			defer close(done)
 			f.record(conn)
 		}()
-		tick := time.NewTicker(50 * time.Millisecond)
+		tick := time.NewTicker(every)
 		defer tick.Stop()
 		for {
 			select {
@@ -557,7 +559,7 @@ func TestHubClientPingKeepsConnection(t *testing.T) {
 	})
 	tc := startTestClient(t, f)
 	tc.waitConnected(t)
-	time.Sleep(time.Second)
+	time.Sleep(2 * idle)
 	if n := f.dials.Load(); n != 1 {
 		t.Fatalf("有 ping 时不应断开重连: 拨号 %d 次", n)
 	}

@@ -542,7 +542,8 @@ func (h *HubClient) sendNotice(ctx context.Context, v any) error {
 
 // sendRaw 发出编好的一帧。未连接返回 ErrHubDisconnected。closeOnFail 为真时写失败就关掉这条连接并返回包着
 // ErrHubDisconnected 的错误：等写锁超时时库不会自己关，连接还会被当作连着；关掉后读循环随之结束、状态变为断开，
-// 调用方按 ErrHubDisconnected 等重连才成立（重连后 pending 会随对齐重发）。closeOnFail 为假时只返回写错误。
+// 调用方按 ErrHubDisconnected 等重连才成立（重连后 pending 会随对齐重发）。closeOnFail 为假时（回执）只返回写错误，
+// 不关连接；文案不说连接是否还在：写帧中途超时时库已自己关了连接。
 func (h *HubClient) sendRaw(ctx context.Context, b []byte, closeOnFail bool) error {
 	h.mu.Lock()
 	conn := h.conn
@@ -552,7 +553,7 @@ func (h *HubClient) sendRaw(ctx context.Context, b []byte, closeOnFail bool) err
 	}
 	if err := writeRaw(ctx, conn, b); err != nil {
 		if !closeOnFail {
-			return fmt.Errorf("没写出去（连接保留）: %w", err)
+			return fmt.Errorf("回执没写出去: %w", err)
 		}
 		conn.CloseNow()
 		return fmt.Errorf("%w: %v", ErrHubDisconnected, err)

@@ -391,10 +391,16 @@ func TestHubRunCommand(t *testing.T) {
 	addr := freeAddr(t)
 	base := "http://" + addr
 	var out, errOut lockedBuf
-	done := make(chan int, 1)
+	done, exited := make(chan int, 1), make(chan struct{})
 	go func() {
+		defer close(exited)
 		done <- runHub([]string{"run", "--dir", dir, "--listen", addr, "--trusted-proxy", "10.0.0.0/8", "--trusted-proxy", "127.0.0.1"}, nil, &out, &errOut)
 	}()
+	// 中途失败时也要停下 hub 并等它退出，再删数据目录（后登记先执行）
+	t.Cleanup(func() {
+		cancel()
+		<-exited
+	})
 	waitUntil(t, func() bool {
 		resp, err := http.Get(base + "/api/status")
 		if err != nil {
@@ -488,18 +494,55 @@ func TestDefaultHubDir(t *testing.T) {
 	}
 }
 
-// 修复轮 1：hub 关停超时（还有处理或回调没退出）时 runHubServe 不关库、记日志并把错误交上去。
+// 修复轮 1、收尾修复 a：serveHub 返回任何错误（关停超时，或 HTTP 服务自己出错结束）时 runHubServe 不关库（还在跑的处理
+// 可能碰存储，进程随即退出）、记日志并把错误交上去；正常结束（nil）时才关库。
 func TestHubRunServeShutdownTimeout(t *testing.T) {
-	old := serveHub
-	serveHub = func(context.Context, *hub.Server) error { return fmt.Errorf("收尾: %w", hub.ErrShutdownTimeout) }
-	t.Cleanup(func() { serveHub = old })
-	dir := filepath.Join(tempDir(t), "hub")
-	err := runHubServe(context.Background(), hub.DefaultConfig(dir), false, os.Stderr)
-	if !errors.Is(err, hub.ErrShutdownTimeout) {
-		t.Fatalf("应交上关停超时: %v", err)
-	}
-	b, _ := os.ReadFile(filepath.Join(dir, "hub.log"))
-	if !strings.Contains(string(b), "不关数据库") || strings.Contains(string(b), "hub 已停止") {
-		t.Fatalf("日志:\n%s", b)
+	oldServe, oldOpen := serveHub, openHubStore
+	t.Cleanup(func() { serveHub, openHubStore = oldServe, oldOpen })
+	for _, c := range []struct {
+		name string
+		err  error
+		logs []string // 日志应含
+		not  string   // 日志不应含
+	}{
+		{"关停超时", fmt.Errorf("收尾: %w", hub.ErrShutdownTimeout), []string{"关停超时", "不关数据库"}, "hub 已停止"},
+		{"服务出错", errors.New("accept: 监听器坏了"), []string{"监听器坏了", "不关数据库"}, "hub 已停止"},
+		{"正常结束", nil, []string{"hub 已停止"}, "不关数据库"},
+	} {
+		var opened *store.Store
+		openHubStore = func(path string) (*store.Store, error) {
+			st, err := store.Open(path)
+			if err == nil {
+				opened = st
+				t.Cleanup(func() { st.Close() }) // 没被关的库由测试收尾（Close 可重复调用）
+			}
+			return st, err
+		}
+		serveHub = func(context.Context, *hub.Server) error { return c.err }
+		dir := filepath.Join(tempDir(t), "hub")
+		err := runHubServe(context.Background(), hub.DefaultConfig(dir), false, os.Stderr)
+		if !errors.Is(err, c.err) || (c.err == nil) != (err == nil) {
+			t.Fatalf("%s: 应原样交上 serveHub 的结果: %v", c.name, err)
+		}
+		b, _ := os.ReadFile(filepath.Join(dir, "hub.log"))
+		for _, want := range c.logs {
+			if !strings.Contains(string(b), want) {
+				t.Fatalf("%s: 日志应含 %q:\n%s", c.name, want, b)
+			}
+		}
+		if strings.Contains(string(b), c.not) {
+			t.Fatalf("%s: 日志不应含 %q:\n%s", c.name, c.not, b)
+		}
+		// 库是否还开着：开着时能写，关了写会报错
+		if opened == nil {
+			t.Fatalf("%s: 没有打开库", c.name)
+		}
+		werr := opened.SetSetting("probe", "1")
+		if c.err != nil && werr != nil {
+			t.Fatalf("%s: 出错返回时不应关库: %v", c.name, werr)
+		}
+		if c.err == nil && werr == nil {
+			t.Fatalf("%s: 正常结束应关库", c.name)
+		}
 	}
 }

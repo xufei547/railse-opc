@@ -30,12 +30,13 @@ const hubUsage = `用法:
   反向代理须追加 X-Forwarded-For（nginx: proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for）
   并传原 Host（proxy_set_header Host $host）`
 
-// 以下两个是变量只为测试能替换：hub run 的运行期（SIGINT、SIGTERM 时取消），与跑 hub 的那一步。
+// 以下三个是变量只为测试能替换：hub run 的运行期（SIGINT、SIGTERM 时取消）、跑 hub 的那一步，与 hub run 打开数据库的那一步。
 var (
 	hubRunContext = func() (context.Context, context.CancelFunc) {
 		return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	}
-	serveHub = func(ctx context.Context, srv *hub.Server) error { return srv.Run(ctx) }
+	serveHub     = func(ctx context.Context, srv *hub.Server) error { return srv.Run(ctx) }
+	openHubStore = store.Open
 )
 
 // hubFlags 是各 hub 子命令认的标志。
@@ -276,7 +277,7 @@ func runHubServe(ctx context.Context, cfg hub.Config, foreground bool, stderr io
 		w = io.MultiWriter(logFile, stderr)
 	}
 	logger := log.New(w, "railse-hub ", log.LstdFlags)
-	st, err := store.Open(cfg.DBPath)
+	st, err := openHubStore(cfg.DBPath)
 	if err != nil {
 		return err
 	}
@@ -298,15 +299,17 @@ func runHubServe(ctx context.Context, cfg hub.Config, foreground bool, stderr io
 		p := proxyFlag(cfg.TrustedProxies)
 		logger.Printf("可信代理: %s", p.String())
 	}
-	// Run 返回 nil 时在跑的 WebSocket 处理与 webhook 回调都已退出，随后关库是安全的；没在时限内等到它们退出时返回
-	// ErrShutdownTimeout，那些还可能碰存储，就不关库（进程随即退出）。
+	// Run 返回 nil 时在跑的 WebSocket 处理与 webhook 回调都已退出，随后关库是安全的。返回任何错误（没在时限内等到它们退出的
+	// ErrShutdownTimeout，或 HTTP 服务自己出错结束）都不关库：还在跑的处理可能碰存储，进程随即退出，库由退出收拾。
 	err = serveHub(ctx, srv)
-	if errors.Is(err, hub.ErrShutdownTimeout) {
+	switch {
+	case errors.Is(err, hub.ErrShutdownTimeout):
 		closeStore = false
-		logger.Printf("hub 关停超时：仍有连接处理或回调没退出，不关数据库，进程随即退出")
+		logger.Printf("hub 关停超时：仍有连接处理或回调没退出，不关数据库，进程随即退出: %v", err)
 		return err
-	}
-	if err != nil {
+	case err != nil:
+		closeStore = false
+		logger.Printf("hub 异常结束，不关数据库，进程随即退出: %v", err)
 		return err
 	}
 	logger.Printf("hub 已停止")

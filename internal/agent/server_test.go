@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -47,6 +48,12 @@ type testEnv struct {
 
 func startServer(t *testing.T, decider Decider, mutate func(*Config)) *testEnv {
 	t.Helper()
+	return startServerLog(t, decider, mutate, os.Stderr)
+}
+
+// startServerLog 同 startServer，守护进程的日志写到 w。
+func startServerLog(t *testing.T, decider Decider, mutate func(*Config), w io.Writer) *testEnv {
+	t.Helper()
 	dir := shortTempDir(t)
 	cfg := ConfigIn(filepath.Join(dir, "h"))
 	cfg.HomeDir = filepath.Join(dir, "home")
@@ -65,7 +72,7 @@ func startServer(t *testing.T, decider Decider, mutate func(*Config)) *testEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(cfg, rules, audit, decider, log.New(os.Stderr, "test ", 0))
+	srv := New(cfg, rules, audit, decider, log.New(w, "test ", 0))
 	if err := srv.Listen(); err != nil {
 		t.Fatal(err)
 	}
@@ -398,8 +405,15 @@ func (panicDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, err
 	panic("决定来源崩溃")
 }
 
+// 预期中的 panic 堆栈写进测试缓冲（收尾修复 c），只在测试失败时打印，不打到 stderr 盖住别的失败。
 func TestDeciderPanicDoesNotStopServer(t *testing.T) {
-	env := startServer(t, panicDecider{}, nil)
+	logs := &logBuf{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("守护进程日志:\n%s", logs.String())
+		}
+	})
+	env := startServerLog(t, panicDecider{}, nil, logs)
 	conn, err := net.Dial("unix", env.cfg.SocketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -415,6 +429,11 @@ func TestDeciderPanicDoesNotStopServer(t *testing.T) {
 	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(env.repo, "git status")), &resp)
 	if resp.Decision != "allow" {
 		t.Fatalf("panic 之后服务应正常: %+v", resp)
+	}
+	// 日志在 recover 里写，晚于连接关闭与请求出表：轮询等它
+	waitFor(t, func() bool { return strings.Contains(logs.String(), "处理连接时 panic: 决定来源崩溃") })
+	if !strings.Contains(logs.String(), "goroutine") {
+		t.Fatalf("panic 的堆栈应记进守护进程日志:\n%s", logs.String())
 	}
 }
 
