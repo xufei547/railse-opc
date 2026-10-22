@@ -31,6 +31,8 @@ railse hub run --listen 127.0.0.1:8787
    rm ck.txt   # 里面是登录会话
    ```
 
+   （密码里有 `"` 或 `\` 时要按 JSON 转义；有 jq 时可用 `jq -n --arg p "$PW" '{password:$p}'` 生成请求体。）
+
    忘了也不会丢：守护进程第一次用 hub 规则覆盖不是 hub 下发的 `rules.yaml` 之前，先把它原样备份为同目录的 `rules.local-<UTC 时间>.yaml`（0600），`agent.log` 记一条“已备份为 …”，之后把备份文件按上面的方法导入即可。只备份这一次，之后的 `rules.yaml` 都是 hub 的缓存。
 3. 机器上：`railse agent enroll --hub https://hub.example.com --token <接入码> [--name 名字] [--force]`。名字默认主机名。`--hub` 只收 `http://`、`https://`，不能带 `user:pass`、`?` 查询或 `#` 片段；接入请求不跟随重定向；`http://` 且不是本机地址时警告明文传输密钥。本机已有不是 hub 下发的 `rules.yaml` 时，成功后提示“首次连上 hub 时本机 rules.yaml 会被 hub 规则覆盖（会自动备份），如有手写规则请先导入”。
 4. 重启 `railse agent run`。日志出现“已连接 hub”即接上。
