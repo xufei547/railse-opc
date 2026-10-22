@@ -4,12 +4,22 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/railse/railse-opc/internal/policy"
 )
+
+// ensureDefaults 导入内置规则并检查错误。
+func ensureDefaults(t *testing.T, s *Store) {
+	t.Helper()
+	if _, err := s.EnsureDefaultRules(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestEnsureDefaultRulesAndRuleSet(t *testing.T) {
 	s := openTemp(t)
@@ -17,8 +27,8 @@ func TestEnsureDefaultRulesAndRuleSet(t *testing.T) {
 	if err != nil || v != 1 {
 		t.Fatalf("EnsureDefaultRules = %d, %v", v, err)
 	}
-	if v2, _ := s.EnsureDefaultRules(); v2 != 1 {
-		t.Fatalf("已有规则时不应重复导入: %d", v2)
+	if v2, err := s.EnsureDefaultRules(); err != nil || v2 != 1 {
+		t.Fatalf("已有规则时不应重复导入: %d, %v", v2, err)
 	}
 	rs, v3, err := s.RuleSet()
 	if err != nil || v3 != 1 || len(rs.Rules) != 2 {
@@ -31,8 +41,8 @@ func TestEnsureDefaultRulesAndRuleSet(t *testing.T) {
 
 func TestInsertToggleDeleteRules(t *testing.T) {
 	s := openTemp(t)
-	s.EnsureDefaultRules()
-	r := policy.Rule{ID: "builtin-readonly", Source: policy.SourceUser, Match: policy.Match{Payload: policy.PayloadShell, CommandPrefix: "git push origin"}, Action: policy.ActionAllow}
+	ensureDefaults(t, s)
+	r := policy.Rule{ID: "builtin-readonly", Source: policy.SourceUser, Match: policy.Match{Payload: policy.PayloadShell, CommandPrefix: "git push origin"}, Action: policy.ActionAllow, CreatedFrom: "req-1"}
 	id, v, err := s.InsertRule(r)
 	if err != nil || id != "builtin-readonly-2" || v != 2 {
 		t.Fatalf("InsertRule = %q v=%d %v", id, v, err)
@@ -52,7 +62,7 @@ func TestInsertToggleDeleteRules(t *testing.T) {
 		t.Fatalf("禁用应写进 Enabled: %+v", found)
 	}
 	rows, _ := s.ListRules()
-	if len(rows) != 3 || rows[2].Source != "user" || rows[2].Enabled {
+	if len(rows) != 3 || rows[2].Source != "user" || rows[2].Enabled || rows[2].CreatedFrom != "req-1" || rows[0].CreatedFrom != "" {
 		t.Fatalf("ListRules = %+v", rows)
 	}
 	if err := s.RecordHit(id); err != nil {
@@ -72,7 +82,7 @@ func TestInsertToggleDeleteRules(t *testing.T) {
 
 func TestInsertRuleRejectsInvalid(t *testing.T) {
 	s := openTemp(t)
-	s.EnsureDefaultRules()
+	ensureDefaults(t, s)
 	bad := policy.Rule{ID: "learned-x", Source: policy.SourceLearned, Match: policy.Match{Payload: policy.PayloadShell, CommandPrefix: "git push"}, Action: policy.ActionAllow}
 	if _, _, err := s.InsertRule(bad); err == nil || !strings.Contains(err.Error(), "learned") {
 		t.Fatalf("不合法的 learned 规则应被拒: %v", err)
@@ -84,7 +94,7 @@ func TestInsertRuleRejectsInvalid(t *testing.T) {
 
 func TestReplaceRules(t *testing.T) {
 	s := openTemp(t)
-	s.EnsureDefaultRules()
+	ensureDefaults(t, s)
 	rs, err := policy.ParseRuleSet([]byte("version: 1\nrules:\n  - id: only\n    source: user\n    scope: global\n    match: {risk: read}\n    action: allow\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +120,7 @@ func TestRuleWritesRejectWithoutBump(t *testing.T) {
 	if v, err := s.RulesVersion(); err != nil || v != 0 {
 		t.Fatalf("空库版本 = %d, %v", v, err)
 	}
-	s.EnsureDefaultRules()
+	ensureDefaults(t, s)
 	if _, err := s.ReplaceRules(policy.RuleSet{Version: 1, Rules: []policy.Rule{userRule("a"), userRule("a")}}); err == nil {
 		t.Fatal("id 重复的规则集应被拒")
 	}
@@ -162,32 +172,43 @@ func TestRuleEnabledColumnIsTruth(t *testing.T) {
 	}
 }
 
-// 同一事务里入库的规则 created_at 可能相同，列出顺序仍按入库顺序，不按 id 字典序。
+// 列出顺序按入库顺序（rowid），不按 id 字典序，也不依赖墙钟：created_at 相同或倒退（时钟回拨）都不影响。
 func TestListRulesKeepsInsertOrder(t *testing.T) {
 	s := openTemp(t)
-	if _, err := s.ReplaceRules(policy.RuleSet{Version: 1, Rules: []policy.Rule{userRule("zeta"), userRule("alpha"), userRule("mid")}}); err != nil {
+	if _, err := s.ReplaceRules(policy.RuleSet{Version: 1, Rules: []policy.Rule{userRule("zeta"), userRule("alpha")}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("UPDATE rules SET created_at = ?", Now()); err != nil {
+	if _, _, err := s.InsertRule(userRule("mid")); err != nil {
 		t.Fatal(err)
 	}
-	rs, _, err := s.RuleSet()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var ids []string
-	for _, r := range rs.Rules {
-		ids = append(ids, r.ID)
-	}
-	if strings.Join(ids, ",") != "zeta,alpha,mid" {
-		t.Fatalf("顺序 = %v", ids)
+	now := time.Now()
+	for _, c := range []struct{ name, zeta, alpha, mid string }{
+		{"相同", Now(), Now(), Now()},
+		{"倒退", FormatTime(now.Add(time.Hour)), FormatTime(now), FormatTime(now.Add(-time.Hour))},
+	} {
+		for id, ts := range map[string]string{"zeta": c.zeta, "alpha": c.alpha, "mid": c.mid} {
+			if _, err := s.db.Exec("UPDATE rules SET created_at = ? WHERE id = ?", ts, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rs, _, err := s.RuleSet()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, r := range rs.Rules {
+			ids = append(ids, r.ID)
+		}
+		if strings.Join(ids, ",") != "zeta,alpha,mid" {
+			t.Fatalf("created_at %s: 顺序 = %v", c.name, ids)
+		}
 	}
 }
 
 // 版本号损坏时报错，不悄悄从 0 重新计数（否则守护进程会误以为已是最新）。
 func TestRulesVersionCorrupt(t *testing.T) {
 	s := openTemp(t)
-	s.EnsureDefaultRules()
+	ensureDefaults(t, s)
 	if err := s.SetSetting("rules_version", "x"); err != nil {
 		t.Fatal(err)
 	}
@@ -337,5 +358,111 @@ func TestEnsureDefaultRulesOnlyWhenUninitialized(t *testing.T) {
 	}
 	if rows, err := s.ListRules(); err != nil || len(rows) != 0 {
 		t.Fatalf("导入空集后不应重新导入: %d, %v", len(rows), err)
+	}
+}
+
+// 存入后经 RuleSet 读回整条规则不变：scope（project、machine）、Risk 指针、command_regex 等匹配字段、created_from，
+// Enabled 来自 enabled 列。ReplaceRules 与 InsertRule 两条入库路径都覆盖。
+func TestRuleRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	read, outward, destructive := policy.RiskRead, policy.RiskOutward, policy.RiskDestructive
+	on, off := true, false
+	want := []policy.Rule{
+		{ID: "proj", Source: policy.SourceUser, Scope: policy.Scope{Project: "~/code/**"},
+			Match: policy.Match{Payload: policy.PayloadShell, Risk: &read, CommandRegex: `^make( |$)`}, Action: policy.ActionAllow, Enabled: &on, CreatedFrom: "req-1"},
+		{ID: "mach", Source: policy.SourceUser, Scope: policy.Scope{Machine: "m1"},
+			Match: policy.Match{Payload: policy.PayloadShell, Risk: &outward, CommandPrefix: "git push origin"}, Action: policy.ActionAllow, Enabled: &off, CreatedFrom: "req-2"},
+		{ID: "mcp", Source: policy.SourceBuiltin,
+			Match: policy.Match{Payload: policy.PayloadMCP, MCPServer: "github", MCPTool: "create_issue"}, Action: policy.ActionAsk, Enabled: &on},
+		{ID: "net", Source: policy.SourceUser,
+			Match: policy.Match{Payload: policy.PayloadNetwork, Domain: "evil.example.com", Risk: &destructive}, Action: policy.ActionDeny, Enabled: &on},
+		{ID: "glob", Source: policy.SourceUser, Scope: policy.Scope{Project: "/srv/app"},
+			Match: policy.Match{Payload: policy.PayloadFileWrite, PathGlob: "**/*.go"}, Action: policy.ActionAllow, Enabled: &off},
+	}
+	if _, err := s.ReplaceRules(policy.RuleSet{Version: policy.RuleSetVersion, Rules: want}); err != nil {
+		t.Fatal(err)
+	}
+	learned := policy.Rule{ID: "learned-npm", Source: policy.SourceLearned, Scope: policy.Scope{Project: "~/code/web"},
+		Match: policy.Match{Payload: policy.PayloadShell, Risk: &read, CommandPrefix: "npm test"}, Action: policy.ActionAllow, CreatedFrom: "req-3"}
+	if _, _, err := s.InsertRule(learned); err != nil {
+		t.Fatal(err)
+	}
+	learned.Enabled = &on // 未给 Enabled 时按启用入库，读回为 &true
+	want = append(want, learned)
+	rs, _, err := s.RuleSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rs.Rules, want) {
+		t.Fatalf("读回的规则与存入的不同:\n得到 %+v\n应为 %+v", rs.Rules, want)
+	}
+	rows, err := s.ListRules()
+	if err != nil || len(rows) != len(want) {
+		t.Fatalf("ListRules = %d 行, %v", len(rows), err)
+	}
+	for i, row := range rows {
+		if row.ID != want[i].ID || row.CreatedFrom != want[i].CreatedFrom || row.Source != string(want[i].Source) {
+			t.Fatalf("第 %d 行 = %+v，应为 id %s、created_from %q", i, row, want[i].ID, want[i].CreatedFrom)
+		}
+	}
+}
+
+// learned 与 builtin 来源的规则不能放行 outward、destructive：两条入库路径都拒绝，不改库、不加版本。
+func TestRulesRejectNonUserElevatedAllow(t *testing.T) {
+	s := openTemp(t)
+	base, err := s.EnsureDefaultRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.ListRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range []policy.Source{policy.SourceLearned, policy.SourceBuiltin} {
+		for _, risk := range []policy.Risk{policy.RiskOutward, policy.RiskDestructive} {
+			r := policy.Rule{ID: "elevated", Source: src, Match: policy.Match{Payload: policy.PayloadShell, Risk: &risk, CommandPrefix: "git push"}, Action: policy.ActionAllow}
+			if _, err := s.ReplaceRules(policy.RuleSet{Version: policy.RuleSetVersion, Rules: []policy.Rule{r}}); err == nil {
+				t.Errorf("ReplaceRules 应拒绝 %s 放行 %s", src, risk)
+			}
+			if _, _, err := s.InsertRule(r); err == nil {
+				t.Errorf("InsertRule 应拒绝 %s 放行 %s", src, risk)
+			}
+		}
+	}
+	after, err := s.ListRules()
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("被拒的写入不应改库: %+v, %v", after, err)
+	}
+	if v, err := s.RulesVersion(); err != nil || v != base {
+		t.Fatalf("被拒的写入不应加版本: %d, %v", v, err)
+	}
+}
+
+// 库里的规则 YAML 读回时严格解码并整套校验：拼错的键或不合法的规则报错，不会悄悄放宽成更宽的规则。
+func TestRuleSetRejectsBadStoredYAML(t *testing.T) {
+	cases := map[string]string{
+		// 非严格解码会丢掉拼错的 comand_prefix，变成放行全部只读命令
+		"未知字段":               "id: only\nsource: user\nscope: global\nmatch:\n  risk: read\n  comand_prefix: git status\naction: allow\n",
+		"顶层未知字段":             "id: only\nsource: user\nscope: global\nmatch:\n  risk: read\naction: allow\nextra: 1\n",
+		"learned 放行 outward": "id: only\nsource: learned\nscope: global\nmatch:\n  payload: shell\n  risk: outward\n  command_prefix: git push\naction: allow\n",
+		"空 match":            "id: only\nsource: user\nscope: global\naction: allow\n",
+		"空 YAML":             "",
+	}
+	for name, y := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := openTemp(t)
+			if _, err := s.ReplaceRules(policy.RuleSet{Version: policy.RuleSetVersion, Rules: []policy.Rule{userRule("only")}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec("UPDATE rules SET yaml = ? WHERE id = 'only'", y); err != nil {
+				t.Fatal(err)
+			}
+			if rs, _, err := s.RuleSet(); err == nil {
+				t.Fatalf("RuleSet 应报错，得到 %+v", rs.Rules)
+			}
+			if _, _, err := s.InsertRule(userRule("other")); err == nil {
+				t.Fatal("InsertRule 读整套时也应报错")
+			}
+		})
 	}
 }

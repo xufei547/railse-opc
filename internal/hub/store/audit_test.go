@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -13,7 +14,9 @@ func TestAuditInsertAndList(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s.InsertAudit(AuditEvent{Actor: "system", Action: "other"})
+	if err := s.InsertAudit(AuditEvent{Actor: "system", Action: "other"}); err != nil {
+		t.Fatal(err)
+	}
 	all, err := s.ListAudit(10, "")
 	if err != nil || len(all) != 4 || all[0].Action != "other" || all[0].TS == "" {
 		t.Fatalf("ListAudit = %+v, %v", all, err)
@@ -80,5 +83,31 @@ func TestAuditEventJSON(t *testing.T) {
 	want := `{"id":7,"ts":"t","machine_id":"m","actor":"a","request_id":"r","action":"x","detail":"{}"}`
 	if got := string(b); got != want {
 		t.Fatalf("JSON = %s", got)
+	}
+}
+
+// 按请求查审计走 (request_id, id) 索引，不扫全表、不另排序。
+func TestListAuditByRequestUsesIndex(t *testing.T) {
+	s := openTemp(t)
+	rows, err := s.db.Query("EXPLAIN QUERY PLAN SELECT id, ts, machine_id, actor, request_id, action, detail FROM audit_events WHERE request_id = ? ORDER BY id DESC LIMIT ?", "r1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(plan, "; ")
+	if !strings.Contains(got, "USING INDEX audit_request") || strings.Contains(got, "TEMP B-TREE") {
+		t.Fatalf("查询计划 = %s", got)
 	}
 }

@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
   detail     TEXT NOT NULL DEFAULT ''    -- JSON
 );
 CREATE INDEX IF NOT EXISTS audit_ts ON audit_events (ts);
+CREATE INDEX IF NOT EXISTS audit_request ON audit_events (request_id, id);
 
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   id         TEXT PRIMARY KEY,
