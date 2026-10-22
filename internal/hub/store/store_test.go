@@ -77,6 +77,11 @@ func TestOpenMigratesAndSetsPerms(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA busy_timeout").Scan(&busy); err != nil || busy != 5000 {
 		t.Fatalf("busy_timeout = %d, %v", busy, err)
 	}
+	// 终审 M7：删改的内容（如清空的 webhook 回调令牌）用零覆盖，不残留在空闲页里
+	var secure int
+	if err := s.db.QueryRow("PRAGMA secure_delete").Scan(&secure); err != nil || secure != 1 {
+		t.Fatalf("secure_delete = %d, %v", secure, err)
+	}
 	for _, table := range []string{"settings", "machines", "enroll_tokens", "client_sessions", "sessions", "requests", "rules", "audit_events", "push_subscriptions"} {
 		var n int
 		if err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&n); err != nil || n != 1 {

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -787,7 +788,7 @@ func TestHubEndedPendingNotifiesAgent(t *testing.T) {
 	}
 	c.send(skewed("x1", "s1"))
 	waitFor(t, "x1 登记", func() bool { _, err := h.st.GetRequest("x1"); return err == nil })
-	h.srv.expireDue(time.Now())
+	h.srv.expireDue(context.Background(), time.Now())
 	wantEnded("过期扫描", "x1")
 	c.send(skewed("x2", "s2"))
 	waitFor(t, "x2 登记", func() bool { _, err := h.st.GetRequest("x2"); return err == nil })
@@ -929,17 +930,58 @@ func TestHubExpiry(t *testing.T) {
 		t.Fatalf("e1 审计: %v", acts)
 	}
 
-	h.srv.expireDue(time.Now())
+	h.srv.expireDue(context.Background(), time.Now())
 	if e2, e3 := getReq(t, h.st, "e2"), getReq(t, h.st, "e3"); e2.State != "pending" || e3.State != "expired" || e3.DecidedBy != "timeout" {
 		t.Fatalf("e2=%+v e3=%+v", e2, e3)
 	}
 	waitBroadcast(t, sub, "request_updated", "e3", nil)
-	h.srv.expireDue(time.Now().Add(2 * time.Hour))
+	h.srv.expireDue(context.Background(), time.Now().Add(2*time.Hour))
 	if e2 := getReq(t, h.st, "e2"); e2.State != "expired" {
 		t.Fatalf("e2 = %+v", e2)
 	}
 	if acts := auditActions(t, h.st, "e3"); countOf(acts, "expired") != 1 {
 		t.Fatalf("e3 审计: %v", acts)
+	}
+}
+
+// 终审 M9：过期扫描看 ctx：关停（ctx 已结束）时不再逐条处理，剩下的留给下次扫描（hub 重启后启动时那一次）。
+func TestExpireDueStopsOnContext(t *testing.T) {
+	h := newTestHub(t)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	past := store.FormatTime(time.Now().Add(-time.Second))
+	for _, id := range []string{"q1", "q2", "q3"} {
+		insertReq(t, h.st, store.Request{ID: id, MachineID: m.ID, State: "pending", ExpiresAt: &past})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.srv.expireDue(ctx, time.Now())
+	if n, _ := h.st.CountPending(); n != 3 {
+		t.Fatalf("ctx 已结束时不应再过期请求，pending 剩 %d", n)
+	}
+	h.srv.expireDue(context.Background(), time.Now())
+	if n, _ := h.st.CountPending(); n != 0 {
+		t.Fatalf("下次扫描应补上，pending 剩 %d", n)
+	}
+}
+
+// 终审 M5：守护进程审计条目里的备注（note）也先全文脱敏再截到 1000 字符，与 Decide 的备注上限一致。
+func TestAuditEntryNoteClamped(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	note := "password=hunter22x " + strings.Repeat("备", 1500)
+	c.send(auditFrame(t, agent.AuditEntry{TS: time.Now(), RequestID: "n1", Kind: "permission", Session: proto.Session{Tool: "claude", CLISessionID: "s1"},
+		ToolName: "Bash", State: "approved", DecidedBy: "user", Note: note}))
+	waitFor(t, "n1 的审计", func() bool { es, _ := h.st.ListAudit(10, "n1"); return len(es) == 1 })
+	es, _ := h.st.ListAudit(10, "n1")
+	var e agent.AuditEntry
+	if err := json.Unmarshal([]byte(es[0].Detail), &e); err != nil {
+		t.Fatal(err)
+	}
+	if n := utf8.RuneCountInString(e.Note); n != 1000 || strings.Contains(e.Note, "hunter22x") || !strings.HasPrefix(e.Note, "password=<redacted> ") {
+		t.Fatalf("备注应脱敏并截到 1000 字符: %d %q…", n, e.Note[:40])
 	}
 }
 

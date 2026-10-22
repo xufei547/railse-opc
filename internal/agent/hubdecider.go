@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/railse/railse-opc/internal/hub/wire"
@@ -59,7 +60,13 @@ type HubDecider struct {
 	Client *HubClient
 	Grace  time.Duration // 等连接、断线后等重连的上限，取 Config.HubGrace（设计文档 3.2 的 30 秒）；≤0 表示不等
 	Log    *log.Logger
+	// notices 记在后台发的送达回执（见 settle），Wait 等它们结束。含 WaitGroup，HubDecider 不得复制。
+	notices sync.WaitGroup
 }
+
+// Wait 等后台的送达回执发完（每条至多 hubNoticeTimeout）。只在不会再有新决定时调用（守护进程在审批服务停下之后、
+// 关日志之前；测试结束时），不留 goroutine。
+func (d *HubDecider) Wait() { d.notices.Wait() }
 
 func unreachable(reason, note string) Outcome {
 	return Outcome{Action: "passthrough", Reason: reason, DecidedBy: hubUnreachable, Note: note}
@@ -142,7 +149,8 @@ func (d *HubDecider) wait(ctx context.Context, id string, ch <-chan wire.Decisio
 	}
 }
 
-// settle 把 hub 的决定换成给钩子的结论，并在是真决定时报送达（最多等 hubNoticeTimeout，报不出去只记日志）。
+// settle 把 hub 的决定换成给钩子的结论，并在是真决定时在后台报送达（最多等 hubNoticeTimeout，报不出去只记日志）：
+// 写锁被大审计帧占着时回执可能要等，不能让钩子跟着等（完成标准 4 要求决定后 1 秒内答复）。
 // 只认 allow、deny：钩子拿固定文案，用户备注只进 Note，DecidedBy 经 hubDecidedBy 过滤。其余任何动作（含 hub 拒收
 // 这条请求时 HubClient 合成的 hub_error 决定、空串）一律交回终端，hub 给的原因只进 Note。
 func (d *HubDecider) settle(id string, dec wire.Decision) Outcome {
@@ -158,11 +166,15 @@ func (d *HubDecider) settle(id string, dec wire.Decision) Outcome {
 		return unreachable(reasonNoDecision, clipText(dec.Reason, hubErrorReasonMax))
 	}
 	out := Outcome{Action: dec.Action, Reason: reason, RuleID: clipText(dec.RuleID, ruleIDMax), DecidedBy: hubDecidedBy(dec.DecidedBy), Note: clipText(dec.Reason, noteMax)}
-	nctx, cancel := context.WithTimeout(context.Background(), hubNoticeTimeout)
-	defer cancel()
-	if err := d.Client.SendDelivered(nctx, id); err != nil {
-		d.logf("报告请求 %q 已送达失败: %v", id, err)
-	}
+	d.notices.Add(1)
+	go func() {
+		defer d.notices.Done()
+		nctx, cancel := context.WithTimeout(context.Background(), hubNoticeTimeout)
+		defer cancel()
+		if err := d.Client.SendDelivered(nctx, id); err != nil {
+			d.logf("报告请求 %q 已送达失败: %v", id, err)
+		}
+	}()
 	return out
 }
 

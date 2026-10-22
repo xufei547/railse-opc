@@ -21,9 +21,9 @@ import (
 	"github.com/railse/railse-opc/internal/hub/store"
 )
 
-// ErrShutdownTimeout 表示 Run 关停时没在时限内等到全部 WebSocket 处理（/ws/agent、/ws/client）或 webhook 回调退出。
+// ErrShutdownTimeout 表示 Run 关停时没在时限内等到全部在途请求、WebSocket 处理（/ws/agent、/ws/client）或 webhook 回调退出。
 // Run 仍尽力收尾后才返回它；那些还在跑的可能继续碰存储，调用方不宜随即关库（进程即将退出时直接退出即可）。
-var ErrShutdownTimeout = errors.New("hub 关停超时：仍有 WebSocket 处理或 webhook 回调没有退出")
+var ErrShutdownTimeout = errors.New("hub 关停超时：仍有请求处理、WebSocket 处理或 webhook 回调没有退出")
 
 // ErrListen 表示 Run 没能开始监听（端口被占、地址无效等）：什么都还没开始跑，调用方可以照常关库。
 var ErrListen = errors.New("hub 监听失败")
@@ -224,8 +224,8 @@ func (s *Server) Handler() http.Handler { return s.mux }
 // （见 stopCallbacks）。截止时间被前面的步骤耗尽时，回调仍有 callbackStopGrace 的收尾宽限，总关停不超过
 // shutdownTimeout + callbackStopGrace。返回 nil 时 WebSocket 处理与回调都已退出，调用方可以关库；没能开始监听时立即返回
 // 满足 errors.Is(err, ErrListen) 的错误（什么都没开始跑，也可以关库）；服务自己出错结束时返回那个错误；
-// 有没等到退出的，收尾完照样返回，错误满足 errors.Is(err, ErrShutdownTimeout)。
-// （HTTP 收尾超时被强制断开的普通请求不在其列：它们碰到已关的库只会得到错误。）
+// 有没等到退出的（含 HTTP 收尾超时被强制断开的普通请求：断开连接不会停下它们的处理），收尾完照样返回，
+// 错误满足 errors.Is(err, ErrShutdownTimeout)。
 func (s *Server) Run(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
@@ -279,24 +279,27 @@ func (s *Server) serve(parent context.Context, ln net.Listener) error {
 }
 
 // shutdownHTTP 停止接纳新的 WebSocket handler、断开守护进程，等在途请求到 ctx 结束（超时就强制断开），
-// 再在同一截止前等 WebSocket handler 全部退出。截止前没等到它们全部退出时返回 false。
+// 再在同一截止前等 WebSocket handler 全部退出。在途请求没处理完（被强制断开的连接上处理仍在跑，可能碰存储），
+// 或截止前没等到 WebSocket handler 全部退出时返回 false。
 func (s *Server) shutdownHTTP(ctx context.Context, hs *http.Server) bool {
 	wsIdle := s.ws.shutdown() // 先停止接纳新的 WebSocket handler
 	s.agents.closeAll()
+	clean := true
 	if err := hs.Shutdown(ctx); err != nil {
 		s.log.Printf("hub 关停超时，强制断开: %v", err)
 		hs.Close()
+		clean = false
 	}
 	// Shutdown 不管已劫持的 WebSocket 连接：它们的 handler 经 BaseContext 看到取消后自行退出，这里等到它们都退出
 	// 截止已到（HTTP 收尾耗尽了它）而 handler 也都已退出时，两个分支同时就绪：先看 handler，免得随机误报超时
 	select {
 	case <-wsIdle:
-		return true
+		return clean
 	default:
 	}
 	select {
 	case <-wsIdle:
-		return true
+		return clean
 	case <-ctx.Done():
 		s.log.Printf("hub 关停超时，仍有 %d 个 WebSocket 连接的处理未退出", s.ws.count())
 		return false

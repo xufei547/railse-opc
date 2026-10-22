@@ -334,8 +334,11 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 	if machine != nil {
 		// 决定来源与审计转发都要在 Listen 之前装好
 		client = agent.NewHubClient(cfg, *machine, rules, srv.Pending(), srv.SetHubPaused, logger)
-		srv.SetDecider(&agent.HubDecider{Client: client, Grace: cfg.HubGrace, Log: logger})
+		decider := &agent.HubDecider{Client: client, Grace: cfg.HubGrace, Log: logger}
+		srv.SetDecider(decider)
 		srv.SetAuditSink(client)
+		// 送达回执在后台发：在审批服务停下（下面登记的 srv.Close，后登记先执行）之后、关审计与日志之前等它们发完
+		defer decider.Wait()
 	}
 	if err := srv.Listen(); err != nil {
 		return err

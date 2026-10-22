@@ -413,11 +413,11 @@ func TestWebhookExpiryCallsBack(t *testing.T) {
 	if r.ExpiresAt == nil || *r.ExpiresAt < store.FormatTime(before.Add(time.Minute)) || *r.ExpiresAt > store.FormatTime(time.Now().Add(time.Minute)) {
 		t.Fatalf("expires_in 60 应一分钟后过期: %v", r.ExpiresAt)
 	}
-	h.srv.expireDue(time.Now().Add(30 * time.Second))
+	h.srv.expireDue(context.Background(), time.Now().Add(30*time.Second))
 	if r := getReq(t, h.st, id); r.State != "pending" {
 		t.Fatalf("未到期不应过期: %+v", r)
 	}
-	h.srv.expireDue(time.Now().Add(2 * time.Minute))
+	h.srv.expireDue(context.Background(), time.Now().Add(2*time.Minute))
 	if r := getReq(t, h.st, id); r.State != "expired" {
 		t.Fatalf("应过期: %+v", r)
 	}
@@ -577,7 +577,7 @@ func TestWebhookDecideExpireOnlyOneCallback(t *testing.T) {
 
 	// 先过期再决定：决定回 ErrNotPending，不再回调
 	id1 := ingest(t, h, tok, body)
-	h.srv.expireDue(time.Now().Add(25 * time.Hour))
+	h.srv.expireDue(context.Background(), time.Now().Add(25*time.Hour))
 	settle("过期回调", id1)
 	if _, err := h.srv.Decide(DecideInput{RequestID: id1, Action: "allow"}); !errors.Is(err, store.ErrNotPending) {
 		t.Fatalf("已过期的请求再决定应 ErrNotPending: %v", err)
@@ -593,7 +593,7 @@ func TestWebhookDecideExpireOnlyOneCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	settle("决定回调", id2)
-	h.srv.expireDue(time.Now().Add(25 * time.Hour))
+	h.srv.expireDue(context.Background(), time.Now().Add(25*time.Hour))
 	settle("扫描之后", id2)
 	if calls := callsFor(id2); len(calls) != 1 || calls[0].Body["decision"] != "allow" || len(callbackAudits(t, h.st, id2)) != 1 {
 		t.Fatalf("先决定：来源应只收到一次决定回调: %+v", calls)
@@ -660,6 +660,7 @@ func TestWebhookRequestIsolatedFromMachines(t *testing.T) {
 
 // 关停时前面的 HTTP 收尾（一个不理会取消的慢请求）把共用截止时间耗尽：取消回调后仍给 callbackStopGrace 收尾，
 // Run 返回时回调已退出、令牌已清、审计标 aborted；总关停不超过 shutdownTimeout + callbackStopGrace。
+// 被强制断开的慢请求还在处理，Run 返回 ErrShutdownTimeout（终审 M11）。
 func TestWebhookCallbackGraceAfterSlowShutdown(t *testing.T) {
 	old := shutdownTimeout
 	shutdownTimeout = 100 * time.Millisecond
@@ -725,8 +726,8 @@ func TestWebhookCallbackGraceAfterSlowShutdown(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("Run 返回 %v", err)
+		if !errors.Is(err, ErrShutdownTimeout) {
+			t.Fatalf("慢请求被强制断开时 Run 应返回 ErrShutdownTimeout，得到 %v", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("取消后 Run 未返回")

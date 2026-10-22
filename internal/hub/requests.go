@@ -125,7 +125,7 @@ func cleanSession(sess proto.Session) proto.Session {
 	return sess
 }
 
-// cleanEntry 给守护进程的审计条目兜底：载荷再脱敏，理由与消息跑 redact.Text，各字段截断。
+// cleanEntry 给守护进程的审计条目兜底：载荷再脱敏，理由、消息与备注跑 redact.Text（先全文脱敏再截断），各字段截断。
 func cleanEntry(e agent.AuditEntry) agent.AuditEntry {
 	e.RequestID = truncate(e.RequestID, maxRequestIDLen)
 	e.Kind = truncate(e.Kind, maxFieldLen)
@@ -142,6 +142,7 @@ func cleanEntry(e agent.AuditEntry) agent.AuditEntry {
 	e.DecidedBy = truncate(e.DecidedBy, maxFieldLen)
 	e.Reason = redactText(e.Reason, maxTextLen)
 	e.Message = redactText(e.Message, maxTextLen)
+	e.Note = redactText(e.Note, maxTextLen) // 与 Decide 的备注上限一致
 	return e
 }
 
@@ -566,14 +567,18 @@ func (s *Server) settleExpired(r store.Request) {
 }
 
 // expireDue 把 expires_at 已到的 pending 改成 expired/timeout，审计并广播（webhook 请求还回调来源）：hub 自己执行过期，
-// 守护进程掉线或崩溃时 pending 也不会一直挂着。
-func (s *Server) expireDue(now time.Time) {
+// 守护进程掉线或崩溃时 pending 也不会一直挂着。每条之前看一眼 ctx：关停时立即返回，剩下的留给下次扫描（重启后启动时那次），
+// hub 停机很久后重启又立刻关停时也不会因逐条处理拖过关停时限。
+func (s *Server) expireDue(ctx context.Context, now time.Time) {
 	due, err := s.store.ExpiredPending(now)
 	if err != nil {
 		s.log.Printf("查过期请求: %v", err)
 		return
 	}
 	for _, r := range due {
+		if ctx.Err() != nil {
+			return
+		}
 		err := s.store.SetRequestState(r.ID, "expired", "timeout", "hub 判定过期", "")
 		if errors.Is(err, store.ErrNotPending) {
 			continue
@@ -588,7 +593,7 @@ func (s *Server) expireDue(now time.Time) {
 
 // expireLoop 启动时扫一次，之后每 expireSweepInterval 扫一次，ctx 结束时返回。
 func (s *Server) expireLoop(ctx context.Context) {
-	s.expireDue(time.Now())
+	s.expireDue(ctx, time.Now())
 	t := time.NewTicker(expireSweepInterval)
 	defer t.Stop()
 	for {
@@ -596,7 +601,7 @@ func (s *Server) expireLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			s.expireDue(now)
+			s.expireDue(ctx, now)
 		}
 	}
 }

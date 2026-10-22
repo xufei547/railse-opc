@@ -305,7 +305,7 @@ func runHubServe(ctx context.Context, cfg hub.Config, foreground bool, stderr io
 	err = serveHub(ctx, srv)
 	switch {
 	case errors.Is(err, hub.ErrListen):
-		logger.Printf("监听失败: %v", err)
+		logger.Printf("%v", err) // 错误自带“hub 监听失败”与地址
 		return err
 	case errors.Is(err, hub.ErrShutdownTimeout):
 		closeStore = false

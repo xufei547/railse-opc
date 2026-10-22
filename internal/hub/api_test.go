@@ -1369,6 +1369,69 @@ func TestRunWaitsForWebSocketHandlers(t *testing.T) {
 	}
 }
 
+// 终审 M11：普通 HTTP 请求没在关停时限内处理完（hs.Shutdown 超时、强制断开）也算没收尾干净：Run 返回 ErrShutdownTimeout，
+// 调用方据此不关库（那个处理还可能碰存储）。
+func TestRunReportsHTTPShutdownTimeout(t *testing.T) {
+	old := shutdownTimeout
+	shutdownTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { shutdownTimeout = old })
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := DefaultConfig(dir)
+	cfg.Listen = "127.0.0.1:0"
+	var logs syncBuf
+	srv, err := New(cfg, st, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, entered := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	srv.mux.HandleFunc("GET /test/slow", func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release // 不看请求的 ctx：模拟处理得慢的普通请求
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	const prefix = "hub 监听 "
+	waitFor(t, "Run 开始监听", func() bool { return strings.Contains(logs.String(), prefix) })
+	line := logs.String()
+	addr := strings.TrimSpace(strings.SplitN(line[strings.Index(line, prefix)+len(prefix):], "\n", 2)[0])
+	go func() {
+		if resp, err := http.Get("http://" + addr + "/test/slow"); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("慢请求没有开始处理")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrShutdownTimeout) {
+			t.Fatalf("普通请求没处理完时 Run 应返回 ErrShutdownTimeout，得到 %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("取消后 Run 未返回")
+	}
+	if !strings.Contains(logs.String(), "强制断开") {
+		t.Fatalf("应记日志: %s", logs.String())
+	}
+}
+
 // 修复轮 1：WebSocket 处理没在关停时限内退出时，Run 仍尽力收尾（停过期扫描、停回调），之后返回 ErrShutdownTimeout，
 // 调用方据此不关库（那个处理还可能碰存储）。
 func TestRunReportsShutdownTimeout(t *testing.T) {

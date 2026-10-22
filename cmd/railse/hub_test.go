@@ -509,11 +509,12 @@ func TestHubRunServeShutdownTimeout(t *testing.T) {
 		err  error
 		logs []string // 日志应含
 		not  string   // 日志不应含
+		once string   // 非空时日志里恰好出现一次（不重复错误自带的文案）
 	}{
-		{"关停超时", fmt.Errorf("收尾: %w", hub.ErrShutdownTimeout), []string{"关停超时", "不关数据库"}, "hub 已停止"},
-		{"服务出错", errors.New("accept: 监听器坏了"), []string{"监听器坏了", "不关数据库"}, "hub 已停止"},
-		{"正常结束", nil, []string{"hub 已停止"}, "不关数据库"},
-		{"监听失败", fmt.Errorf("%w: listen tcp 127.0.0.1:1: 端口被占", hub.ErrListen), []string{"监听失败", "端口被占"}, "不关数据库"},
+		{"关停超时", fmt.Errorf("收尾: %w", hub.ErrShutdownTimeout), []string{"关停超时", "不关数据库"}, "hub 已停止", ""},
+		{"服务出错", errors.New("accept: 监听器坏了"), []string{"监听器坏了", "不关数据库"}, "hub 已停止", ""},
+		{"正常结束", nil, []string{"hub 已停止"}, "不关数据库", ""},
+		{"监听失败", fmt.Errorf("%w: listen tcp 127.0.0.1:1: 端口被占", hub.ErrListen), []string{"hub 监听失败: listen tcp", "端口被占"}, "不关数据库", "监听失败"},
 	} {
 		var opened *store.Store
 		openHubStore = func(path string) (*store.Store, error) {
@@ -538,6 +539,9 @@ func TestHubRunServeShutdownTimeout(t *testing.T) {
 		}
 		if strings.Contains(string(b), c.not) {
 			t.Fatalf("%s: 日志不应含 %q:\n%s", c.name, c.not, b)
+		}
+		if c.once != "" && strings.Count(string(b), c.once) != 1 {
+			t.Fatalf("%s: 日志里 %q 应只出现一次:\n%s", c.name, c.once, b)
 		}
 		// 库是否还开着：开着时能写，关了写会报错
 		if opened == nil {

@@ -14,10 +14,10 @@ read -s PW; printf '%s\n' "$PW" | railse hub password; unset PW   # 不回显的
 railse hub run --listen 127.0.0.1:8787
 ```
 
-- 数据目录取 `--dir`，否则 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；目录 0700，`hub.db`（SQLite，WAL 模式，`-wal`、`-shm` 沿用 0600）与 `hub.log` 都是 0600，已有的文件启动时收紧。
+- 数据目录取 `--dir`，否则 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；目录 0700，`hub.db`（SQLite，WAL 模式，`-wal`、`-shm` 沿用 0600；开 `secure_delete`，删改掉的内容如清空的回调令牌用零覆盖）与 `hub.log` 都是 0600，已有的文件启动时收紧。
 - `railse hub run` 的标志：`--listen`（默认 `127.0.0.1:8787`）、`--secure-cookies`（cookie 加 Secure，hub 在 TLS 反向代理后面时打开）、`--trusted-proxy <CIDR 或 IP>`（可重复或逗号分隔，见“部署与反向代理”）、`--foreground`（日志同时写到 stderr）。子命令不认的标志会报错退出 2。
 - 没设密码也能启动，日志提示“还没有设置网页密码”，网页登录回 503。换密码会让所有已登录的网页立即失效。
-- 收到 SIGINT、SIGTERM 后 5 秒内退出：断开守护进程、等长连接处理与 webhook 回调收尾；等不到它们退出时退出码 1，日志写“不关数据库”。
+- 收到 SIGINT、SIGTERM 后 5 秒内退出：断开守护进程、等在途请求、长连接处理与 webhook 回调收尾；等不到它们退出时（含被强制断开、处理还没结束的普通请求）退出码 1，日志写“不关数据库”。
 - `railse hub webhook-token` 生成 webhook 来源令牌，明文只显示这一次，再生成一次旧的就失效。
 
 ## 接入一台机器
@@ -144,7 +144,7 @@ server {
 | 守护进程日志“拒绝了握手…协议版本不一致” | 升级守护进程与 hub 中较旧的一方 |
 | 请求不进收件箱、立即交回终端 | 看 `railse agent status` 是否暂停；看 `agent.log` 是否连着 hub；Gemini 的请求本来就不进 |
 | `railse hub password` 回显密码 | 用 `read -s PW; printf '%s\n' "$PW" \| railse hub password` |
-| hub 退出码 1、日志“不关数据库” | 关停时有长连接处理或回调没在时限内退出，或服务出错结束；直接重启即可 |
+| hub 退出码 1、日志“不关数据库” | 关停时有在途请求、长连接处理或回调没在时限内退出，或服务出错结束；直接重启即可 |
 | `railse hub run` 启动即退出 1、日志“监听失败” | 端口被占或 `--listen` 地址无效，换个地址 |
 
 日志：`hub.log` 里有“hub 监听 …”、“可信代理: …”、“机器 … 超过 … 没有 pong，断开”、“webhook 请求 … 回调 … 失败 3 次，放弃”、“hub 已停止”。守护进程的 `agent.log` 里有“接入 hub …”、“已连接 hub …，规则版本 N”、“与 hub … 的连接结束: …，N 后重连”、“规则更新到版本 N”、“与 hub 断线超过 30s，请求 … 交回终端”。`GET /api/status` 的 `machines[].online` 看各机器是否连着；`GET /api/requests/{id}` 的 `audit` 看一条请求经历了什么。

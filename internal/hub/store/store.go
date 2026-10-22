@@ -31,8 +31,9 @@ type Store struct {
 }
 
 // dsnQuery 是 modernc.org/sqlite 的连接参数：_busy_timeout 最先应用；
-// _txlock=immediate 让事务以 BEGIN IMMEDIATE 开始，跨进程（如 railse hub token）写同一库时先拿写锁。
-const dsnQuery = "_busy_timeout=5000&_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+// _txlock=immediate 让事务以 BEGIN IMMEDIATE 开始，跨进程（如 railse hub token）写同一库时先拿写锁；
+// secure_delete 让删改掉的内容用零覆盖，清空的 webhook 回调令牌之类不残留在空闲页里。
+const dsnQuery = "_busy_timeout=5000&_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=secure_delete(1)"
 
 // Open 打开或创建数据库，设 WAL 与 busy_timeout，跑迁移。
 // 主库文件在交给 SQLite 之前就建好并收紧为 0600，SQLite 建 -wal、-shm 时沿用主库权限。

@@ -298,7 +298,9 @@ func TestHubDeciderNoticesUseShortTimeout(t *testing.T) {
 	setVar(t, &hubWriteTimeout, 30*time.Second)
 	setVar(t, &hubNoticeTimeout, 200*time.Millisecond)
 	setHubTimings(t, []time.Duration{time.Minute}, 0, 0, 0) // 断开后不重连
+	// 终审 M4：送达回执在后台发，不阻塞答复钩子；后台仍受 hubNoticeTimeout 约束，Wait 等它结束（不留 goroutine）。
 	t.Run("delivered", func(t *testing.T) {
+		setVar(t, &hubNoticeTimeout, time.Second)
 		f := newFakeHub(t, 0, recordUntilThenStall(t, wire.TPending))
 		tc := startTestClient(t, f)
 		tc.waitConnected(t)
@@ -313,11 +315,15 @@ func TestHubDeciderNoticesUseShortTimeout(t *testing.T) {
 			if r.err != nil || r.out.Action != "allow" {
 				t.Fatalf("结论 = %+v %v", r.out, r.err)
 			}
+			if el := time.Since(start); el > 500*time.Millisecond {
+				t.Fatalf("答复钩子不应等送达回执（hubNoticeTimeout 1s）: %s", el)
+			}
 		case <-time.After(5 * time.Second):
-			t.Fatal("送达回执写不出去时应很快放弃，不等 hubWriteTimeout")
+			t.Fatal("送达回执写不出去时不应卡住答复")
 		}
-		if el := time.Since(start); el < 150*time.Millisecond {
-			t.Fatalf("应等满 hubNoticeTimeout 才放弃: %s", el)
+		d.Wait()
+		if el := time.Since(start); el < 800*time.Millisecond || el > 5*time.Second {
+			t.Fatalf("后台回执应等满 hubNoticeTimeout 才放弃: %s", el)
 		}
 		if !strings.Contains(tc.logs.String(), `报告请求 "n1" 已送达失败`) {
 			t.Fatalf("应记日志: %s", tc.logs.String())
