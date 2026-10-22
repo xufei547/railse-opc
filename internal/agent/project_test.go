@@ -1,0 +1,94 @@
+package agent
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestFindProjectRoot(t *testing.T) {
+	base := shortTempDir(t)
+	repo := filepath.Join(base, "repo")
+	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
+	os.MkdirAll(filepath.Join(repo, "src", "pkg"), 0o755)
+	wt := filepath.Join(base, "wt")
+	os.MkdirAll(wt, 0o755)
+	os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: /elsewhere\n"), 0o644)
+	plain := filepath.Join(base, "plain", "deep")
+	os.MkdirAll(plain, 0o755)
+
+	resolved := func(p string) string { r, _ := filepath.EvalSymlinks(p); return r }
+	cases := []struct{ cwd, want string }{
+		{filepath.Join(repo, "src", "pkg"), resolved(repo)},
+		{repo, resolved(repo)},
+		{wt, resolved(wt)},
+		{plain, ""},
+		{filepath.Join(base, "missing"), ""},
+	}
+	for _, c := range cases {
+		if got := FindProjectRoot(c.cwd); got != c.want {
+			t.Errorf("FindProjectRoot(%q) = %q, 想要 %q", c.cwd, got, c.want)
+		}
+	}
+	if got := CleanCwd(filepath.Join(repo, "src", "..", "src")); got != resolved(filepath.Join(repo, "src")) {
+		t.Errorf("CleanCwd = %q", got)
+	}
+}
+
+func TestFindProjectRootSkipsHome(t *testing.T) {
+	base := shortTempDir(t)
+	t.Setenv("HOME", base)
+	os.MkdirAll(filepath.Join(base, ".git"), 0o755)
+	os.MkdirAll(filepath.Join(base, "sub"), 0o755)
+	repo := filepath.Join(base, "repo")
+	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
+	os.MkdirAll(filepath.Join(repo, "src"), 0o755)
+
+	if got := FindProjectRoot(filepath.Join(base, "sub")); got != "" {
+		t.Errorf("家目录含 .git 时不应成为项目根，得到 %q", got)
+	}
+	if got := FindProjectRoot(base); got != "" {
+		t.Errorf("cwd 就是家目录时不应成为项目根，得到 %q", got)
+	}
+	want, _ := filepath.EvalSymlinks(repo)
+	if got := FindProjectRoot(filepath.Join(repo, "src")); got != want {
+		t.Errorf("家目录下的仓库 = %q, 想要 %q", got, want)
+	}
+}
+
+func TestFindProjectRootSkipsHomeUnresolvedCwd(t *testing.T) {
+	base := shortTempDir(t)
+	t.Setenv("HOME", base)
+	os.MkdirAll(filepath.Join(base, ".git"), 0o755)
+	if got := FindProjectRoot(filepath.Join(base, "gone")); got != "" {
+		t.Errorf("cwd 不存在时也不应把家目录当项目根，得到 %q", got)
+	}
+}
+
+func TestTooBroadRoot(t *testing.T) {
+	if !tooBroad("/") {
+		t.Error(`tooBroad("/") 应为真`)
+	}
+}
+
+func TestFindProjectRootSkipsHomeAncestors(t *testing.T) {
+	// /Users/.git 这类家目录的祖先比家目录还宽，同样不能当项目根
+	base := shortTempDir(t)
+	home := filepath.Join(base, "u")
+	os.MkdirAll(filepath.Join(home, "sub"), 0o755)
+	os.MkdirAll(filepath.Join(base, ".git"), 0o755)
+	t.Setenv("HOME", home)
+	if got := FindProjectRoot(filepath.Join(home, "sub")); got != "" {
+		t.Errorf("家目录的祖先含 .git 时不应成为项目根，得到 %q", got)
+	}
+	if got := FindProjectRoot(filepath.Join(base, "gone", "x")); got != "" {
+		t.Errorf("cwd 不存在时也不应把家目录的祖先当项目根，得到 %q", got)
+	}
+	repo := filepath.Join(home, "repo")
+	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
+	os.MkdirAll(filepath.Join(repo, "src"), 0o755)
+	want, _ := filepath.EvalSymlinks(repo)
+	if got := FindProjectRoot(filepath.Join(repo, "src")); got != want {
+		t.Errorf("家目录下的仓库 = %q, 想要 %q", got, want)
+	}
+}
