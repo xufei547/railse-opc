@@ -117,9 +117,15 @@ func outboundKind(frame any) (string, bool) {
 	return want, got == want
 }
 
-// send 把帧排进机器的发送队列，从不阻塞。不在下发白名单里的帧、未连接、连接已关闭、编码失败返回 false；
-// 队列满说明对端读不动，记日志、断开它（重连后由 hello 对齐、补发）并返回 false。
-func (h *agentHub) send(machineID string, frame any) bool {
+// send 把帧排进机器当前连接的发送队列，从不阻塞。不在下发白名单里的帧、未连接、连接已关闭、编码失败返回 false；
+// 队列满说明对端读不动，记日志、断开它（重连后由 hello 对齐、补发）并返回 false。返回 true 只表示入队，不表示送达。
+func (h *agentHub) send(machineID string, frame any) bool { return h.enqueue(machineID, nil, frame) }
+
+// sendTo 同 send，但只发给 c：c 已不是其机器的当前连接（被替换、已断开）时返回 false，帧不会落到新连接上。
+func (h *agentHub) sendTo(c *agentConn, frame any) bool { return h.enqueue(c.machine.ID, c, frame) }
+
+// enqueue 是 send 与 sendTo 的共同实现；want 非 nil 时要求机器的当前连接就是 want。
+func (h *agentHub) enqueue(machineID string, want *agentConn, frame any) bool {
 	if _, ok := outboundKind(frame); !ok {
 		h.log.Printf("拒绝下发 %T 帧给机器 %s：不在 hub 允许下发的种类里", frame, machineID)
 		return false
@@ -132,7 +138,7 @@ func (h *agentHub) send(machineID string, frame any) bool {
 	h.mu.Lock()
 	c := h.conns[machineID]
 	h.mu.Unlock()
-	if c == nil || c.isClosed() {
+	if c == nil || c.isClosed() || (want != nil && c != want) {
 		return false
 	}
 	select {

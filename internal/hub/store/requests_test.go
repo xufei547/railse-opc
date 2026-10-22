@@ -401,7 +401,8 @@ func TestFindResendKeyAndWindow(t *testing.T) {
 	}
 }
 
-// 守护进程来源的写入不能把请求迁回 pending，也不能写成 recorded 或空状态。
+// 守护进程来源的写入只能写 cancelled、expired、passthrough：不能迁回 pending，也不能写成 recorded、空状态，
+// 或冒充用户与规则的决定（approved、denied、auto_*）。
 func TestAgentWritesRejectNonFinalState(t *testing.T) {
 	s := openTemp(t)
 	m, _ := s.CreateMachine("m", RandomToken(), "/h")
@@ -414,7 +415,7 @@ func TestAgentWritesRejectNonFinalState(t *testing.T) {
 	if err := s.SetRequestState("c", "cancelled", DecidedByAgentRestart, "", ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"pending", "recorded", ""} {
+	for _, bad := range []string{"pending", "recorded", "", "approved", "denied", "auto_allowed", "auto_denied", "weird"} {
 		if err := s.SetMachineRequestState(m.ID, "p", bad, "agent", "", ""); !errors.Is(err, ErrInvalidState) {
 			t.Errorf("SetMachineRequestState(%q) = %v，应 ErrInvalidState", bad, err)
 		}

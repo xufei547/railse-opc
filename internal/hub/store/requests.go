@@ -16,7 +16,7 @@ import (
 // ErrNotPending 表示请求已经不是待处理状态。
 var ErrNotPending = errors.New("请求已不是待处理状态")
 
-// ErrInvalidState 表示守护进程来源的写入给了非终态（pending、recorded 或空串）。
+// ErrInvalidState 表示守护进程来源的写入给了不允许的状态（只允许 cancelled、expired、passthrough）。
 var ErrInvalidState = errors.New("目标状态不是可写入的终态")
 
 // decided_by 的取值里由存储层判断的几个。
@@ -218,7 +218,7 @@ func (s *Store) SetRequestState(id, state, decidedBy, note, ruleID string) error
 
 // SetMachineRequestState 同 SetRequestState，但只改属于 machineID 的请求；不存在、属于别的机器或非 pending
 // 都返回 ErrNotPending。供守护进程发来的 cancel/expired 帧用（hub 不信任守护进程报的请求 id）。
-// state 为 pending、recorded 或空串时返回 ErrInvalidState。
+// state 不是 cancelled、expired、passthrough 时返回 ErrInvalidState。
 func (s *Store) SetMachineRequestState(machineID, id, state, decidedBy, note, ruleID string) error {
 	if err := checkAgentState(state); err != nil {
 		return err
@@ -226,13 +226,14 @@ func (s *Store) SetMachineRequestState(machineID, id, state, decidedBy, note, ru
 	return oneRowOrNotPending(s.db.Exec(setStateSQL+" AND machine_id = ?", state, decidedBy, note, ruleID, Now(), id, machineID))
 }
 
-// checkAgentState 拒绝守护进程来源写入里的非终态。
+// checkAgentState 是守护进程来源写入的状态白名单：只有本机终态 cancelled、expired、passthrough。
+// 守护进程不能把请求迁回 pending、写成 recorded，也不能冒充用户或规则的决定（approved、denied、auto_*）。
 func checkAgentState(state string) error {
 	switch state {
-	case "", "pending", "recorded":
-		return fmt.Errorf("%w: %q", ErrInvalidState, state)
+	case "cancelled", "expired", "passthrough":
+		return nil
 	}
-	return nil
+	return fmt.Errorf("%w: %q", ErrInvalidState, state)
 }
 
 // oneRowOrNotPending 把“恰好更新一行”之外的结果转成 ErrNotPending。
@@ -253,7 +254,7 @@ func oneRowOrNotPending(res sql.Result, err error) error {
 // ApplyAgentFinal 用守护进程审计里的本机终态覆盖 hub 状态，写 decided_at，返回是否更新了。
 // 本机对钩子发生了什么是唯一真相，所以除 pending 外，也覆盖重连对齐时标的 cancelled/agent_restart；
 // 其他终态（用户或规则的决定、去重取消等）不动。只改属于 machineID 的请求。
-// state 为 pending、recorded 或空串时返回 ErrInvalidState（否则会把 cancelled/agent_restart 复活成 pending）。
+// state 不是 cancelled、expired、passthrough 时返回 ErrInvalidState（例如 pending 会把 cancelled/agent_restart 复活）。
 func (s *Store) ApplyAgentFinal(machineID, id, state, decidedBy, note, ruleID string) (bool, error) {
 	if err := checkAgentState(state); err != nil {
 		return false, err

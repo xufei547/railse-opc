@@ -1,10 +1,12 @@
 package hub
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +92,19 @@ func insertReq(t *testing.T, st *store.Store, r store.Request) {
 		r.DecidedAt = &now
 	}
 	if err := st.InsertRequest(r); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// execDB 用另一条连接对 hub 的库执行 SQL（测试里装触发器制造写入失败）。
+func execDB(t *testing.T, h *testHub, stmt string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(h.dir, "hub.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(stmt); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -293,6 +308,12 @@ func TestAgentFramesScopedToMachine(t *testing.T) {
 			t.Errorf("机器 b 的帧不应改动 r1: %+v", f)
 		}
 	})
+	kind, raw := b.recv(5 * time.Second)
+	var e wire.Error
+	wire.Unmarshal(raw, &e)
+	if kind != wire.TError || e.RequestID != "r1" {
+		t.Fatalf("别的机器的同 id 应回 Error: %s %+v", kind, e)
+	}
 	r1, r2 := getReq(t, h.st, "r1"), getReq(t, h.st, "r2")
 	if r1.MachineID != idA || r1.State != "pending" || r1.Payload.Command != "a" {
 		t.Fatalf("r1 不应被机器 b 改动: %+v", r1)
@@ -354,6 +375,13 @@ func TestAgentHelloAlign(t *testing.T) {
 	insertReq(t, h.st, store.Request{ID: "d2", MachineID: m.ID, State: "denied", DecidedBy: "user"})
 	insertReq(t, h.st, store.Request{ID: "d3", MachineID: m.ID, State: "approved", DecidedBy: "user", DeliveredAt: &delivered})
 	insertReq(t, h.st, store.Request{ID: "o1", MachineID: other.ID, State: "pending"})
+	// 守护进程自己报的、或挂在别的机器上的 undeliverable 行不算数
+	for _, forged := range []store.AuditEvent{{MachineID: m.ID, Actor: "agent", RequestID: "d2", Action: "undeliverable"},
+		{MachineID: other.ID, Actor: "system", RequestID: "d2", Action: "undeliverable"}} {
+		if err := h.st.InsertAudit(forged); err != nil {
+			t.Fatal(err)
+		}
+	}
 	c := newFakeConn(m.ID, 16)
 	h.srv.agents.register(c)
 	sub, stop := h.srv.clients.subscribe()
@@ -374,8 +402,8 @@ func TestAgentHelloAlign(t *testing.T) {
 	if err := wire.Unmarshal(<-c.out, &d); err != nil || d.T != wire.TDecision || d.RequestID != "d1" || d.Action != "allow" || d.Reason != "好" || d.DecidedBy != "user" {
 		t.Fatalf("补发的决定: %+v, %v", d, err)
 	}
-	if acts := auditActions(t, h.st, "d2"); countOf(acts, "undeliverable") != 1 {
-		t.Fatalf("d2 应记一次 undeliverable: %v", acts)
+	if n := systemUndeliverable(t, h.st, m.ID, "d2"); n != 1 {
+		t.Fatalf("d2 应记一次 undeliverable, 得到 %d", n)
 	}
 	if d2 := getReq(t, h.st, "d2"); d2.DeliveredAt != nil || d2.State != "denied" {
 		t.Fatalf("undeliverable 不标送达: %+v", d2)
@@ -389,9 +417,25 @@ func TestAgentHelloAlign(t *testing.T) {
 	if len(c.out) != 1 {
 		t.Fatalf("再次对齐仍只补发 d1, 队列 %d 帧", len(c.out))
 	}
-	if acts := auditActions(t, h.st, "d2"); countOf(acts, "undeliverable") != 1 {
-		t.Fatalf("undeliverable 同一请求只记一次: %v", acts)
+	if n := systemUndeliverable(t, h.st, m.ID, "d2"); n != 1 {
+		t.Fatalf("undeliverable 同一请求只记一次, 得到 %d", n)
 	}
+}
+
+// systemUndeliverable 数 hub 自己（actor system、该机器）给请求记的 undeliverable。
+func systemUndeliverable(t *testing.T, st *store.Store, machineID, id string) int {
+	t.Helper()
+	events, err := st.ListAudit(0, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range events {
+		if e.Action == "undeliverable" && e.Actor == "system" && e.MachineID == machineID {
+			n++
+		}
+	}
+	return n
 }
 
 // 旧连接（已被替换或已断开）的对齐不执行，不会覆盖新连接的对齐结果。
@@ -608,7 +652,7 @@ func TestPendingRejected(t *testing.T) {
 		t.Fatalf("应回 Error: %s %+v", kind, e)
 	}
 	long := strings.Repeat("x", 200)
-	for _, bad := range []string{"", long} {
+	for _, bad := range []string{"", long, "r 1", "r1\n伪造的日志行", "../r1", "r1\x00"} {
 		c.send(pendingFrame(bad, "s1", "t1", "ls"))
 		kind, b = c.recv(5 * time.Second)
 		e = wire.Error{}
@@ -625,8 +669,8 @@ func TestPendingRejected(t *testing.T) {
 	}
 }
 
-// 落库失败（这里关掉存储）回带 request_id 的 Error 帧，守护进程据此按 hub_unreachable 交回终端。
-func TestPendingStoreErrorRepliesError(t *testing.T) {
+// 查重时读库失败（这里关掉存储）回带 request_id 的 Error 帧，守护进程据此按 hub_unreachable 交回终端。
+func TestPendingLookupErrorRepliesError(t *testing.T) {
 	h, logs := quietHub(t)
 	id, secret := enrollMachine(t, h, "mac")
 	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
@@ -814,5 +858,191 @@ func TestClientHubBroadcast(t *testing.T) {
 	h.broadcast("x", 2)
 	if len(slow) != cap(slow) {
 		t.Fatal("取消订阅后不应再收到")
+	}
+}
+
+// 插入新请求失败（触发器让 r2 插不进去）：回带 request_id 的 Error 帧；与它同键的旧请求不被顶掉，仍是 pending。
+func TestPendingInsertFailureKeepsOld(t *testing.T) {
+	h, logs := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	c.send(pendingFrame("r1", "s1", "t1", "touch a"))
+	waitFor(t, "r1 登记", func() bool { n, _ := h.st.CountPending(); return n == 1 })
+	execDB(t, h, `CREATE TRIGGER no_r2 BEFORE INSERT ON requests WHEN NEW.id = 'r2' BEGIN SELECT RAISE(ABORT, 'no insert'); END`)
+	c.send(pendingFrame("r2", "s1", "t1", "touch a")) // 与 r1 同键，插入成功本会顶掉 r1
+	kind, b := c.recv(5 * time.Second)
+	var e wire.Error
+	wire.Unmarshal(b, &e)
+	if kind != wire.TError || e.RequestID != "r2" || e.Message != "登记失败" {
+		t.Fatalf("插入失败应回 Error: %s %+v", kind, e)
+	}
+	if r1 := getReq(t, h.st, "r1"); r1.State != "pending" || r1.DecidedBy != "" {
+		t.Fatalf("新请求没登记上，旧请求不应被顶掉: %+v", r1)
+	}
+	if _, err := h.st.GetRequest("r2"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("r2 不应存在: %v", err)
+	}
+	if !strings.Contains(logs.String(), `"r2"`) {
+		t.Fatalf("应记日志: %q", logs.String())
+	}
+}
+
+// 守护进程再次送来 hub 已有的 id：仍 pending 只广播；已决定（未送达或已送达）直接再发决定；其他终态回 Error。
+func TestDuplicatePendingReplies(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	m, _ := h.st.GetMachine(id)
+	insertReq(t, h.st, store.Request{ID: "d1", MachineID: id, State: "approved", DecidedBy: "user", DecisionNote: "行"})
+	delivered := store.Now()
+	insertReq(t, h.st, store.Request{ID: "d2", MachineID: id, State: "denied", DecidedBy: "user", DeliveredAt: &delivered})
+	insertReq(t, h.st, store.Request{ID: "x1", MachineID: id, State: "cancelled", DecidedBy: "terminal"})
+	insertReq(t, h.st, store.Request{ID: "x2", MachineID: id, State: "expired", DecidedBy: "timeout"})
+	// hello 持有全部，d1 会在对齐时补发一次；之后重发 pending 时再各带一次
+	held := []wire.PendingSummary{{RequestID: "d1"}, {RequestID: "d2"}, {RequestID: "x1"}, {RequestID: "x2"}}
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: m.ID, Pending: held})
+	defer c.close()
+	c.recv(5 * time.Second) // welcome
+	recvDecision := func(want, action string) {
+		t.Helper()
+		kind, b := c.recv(5 * time.Second)
+		var d wire.Decision
+		wire.Unmarshal(b, &d)
+		if kind != wire.TDecision || d.RequestID != want || d.Action != action {
+			t.Fatalf("应收到 %s 的决定 %s: %s %+v", want, action, kind, d)
+		}
+	}
+	recvError := func(want string) {
+		t.Helper()
+		kind, b := c.recv(5 * time.Second)
+		var e wire.Error
+		wire.Unmarshal(b, &e)
+		if kind != wire.TError || e.RequestID != want {
+			t.Fatalf("应收到 %s 的 Error: %s %+v", want, kind, e)
+		}
+	}
+	recvDecision("d1", "allow") // 对齐补发
+	for _, x := range []string{"d1", "d2", "x1", "x2"} {
+		c.send(pendingFrame(x, "s1", "t1", "echo "+x))
+	}
+	recvDecision("d1", "allow")
+	recvDecision("d2", "deny")
+	recvError("x1")
+	recvError("x2")
+	if d1 := getReq(t, h.st, "d1"); d1.State != "approved" || d1.DeliveredAt != nil {
+		t.Fatalf("再发决定不改状态、不标送达: %+v", d1)
+	}
+}
+
+// 审计条目指向别的机器的请求：审计行不挂到那条请求上（request_id 置空，detail 保留原值），也不动它；汇总记日志。
+func TestAuditForeignRequestID(t *testing.T) {
+	h, logs := quietHub(t)
+	idA, _ := enrollMachine(t, h, "a")
+	idB, secretB := enrollMachine(t, h, "b")
+	insertReq(t, h.st, store.Request{ID: "r1", MachineID: idA, State: "pending"})
+	b := dialAgent(t, h, secretB, wire.Hello{Proto: wire.Proto, MachineID: idB})
+	defer b.close()
+	b.recv(5 * time.Second)
+	sess := proto.Session{Tool: "claude", CLISessionID: "s1"}
+	b.send(auditFrame(t,
+		agent.AuditEntry{TS: time.Now(), RequestID: "r1", Kind: "permission", Session: sess, State: "expired", DecidedBy: "timeout"},
+		agent.AuditEntry{TS: time.Now(), RequestID: "rb", Kind: "permission", Session: sess, State: "auto_allowed", RuleID: "builtin-readonly"},
+	))
+	waitFor(t, "rb 历史行", func() bool { _, err := h.st.GetRequest("rb"); return err == nil })
+	if acts := auditActions(t, h.st, "r1"); len(acts) != 0 {
+		t.Fatalf("别的机器的审计不应挂到 r1: %v", acts)
+	}
+	events, _ := h.st.ListAudit(10, "")
+	var foreign *store.AuditEvent
+	for i, e := range events {
+		if e.MachineID == idB && e.Action == "expired" {
+			foreign = &events[i]
+		}
+	}
+	if foreign == nil || foreign.RequestID != "" || !strings.Contains(foreign.Detail, `"request_id":"r1"`) {
+		t.Fatalf("审计行应置空 request_id、detail 保留原值: %+v", foreign)
+	}
+	if r1 := getReq(t, h.st, "r1"); r1.State != "pending" {
+		t.Fatalf("r1 不应被改动: %+v", r1)
+	}
+	if acts := auditActions(t, h.st, "rb"); len(acts) != 1 {
+		t.Fatalf("本机器的请求照常挂审计: %v", acts)
+	}
+	if !strings.Contains(logs.String(), "别的机器") {
+		t.Fatalf("应记日志: %q", logs.String())
+	}
+}
+
+// 守护进程重发同一批审计：question/done 用确定性 id，只登记一行。
+func TestAuditEventsDedup(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	sess := proto.Session{Tool: "claude", CLISessionID: "s1"}
+	ts := time.Now().Add(-time.Minute)
+	batch := auditFrame(t,
+		agent.AuditEntry{TS: ts, Kind: "done", Session: sess, State: "recorded", Message: "完成"},
+		agent.AuditEntry{TS: ts, Kind: "question", Session: sess, State: "recorded", Message: "要继续吗"},
+	)
+	c.send(batch)
+	c.send(batch)
+	c.send(auditFrame(t, agent.AuditEntry{TS: ts, Kind: "done", Session: sess, State: "recorded", Message: "标记"}))
+	waitFor(t, "标记行", func() bool { rs, _ := h.st.ListRequests("recorded", 10); return len(rs) >= 3 })
+	rs, _ := h.st.ListRequests("recorded", 10)
+	if len(rs) != 3 {
+		t.Fatalf("重发的批次不应重复登记, 得到 %d 行: %+v", len(rs), rs)
+	}
+	for _, r := range rs {
+		if len(r.ID) != 32 || strings.Trim(r.ID, "0123456789abcdef") != "" {
+			t.Fatalf("id 应为 32 个十六进制字符: %q", r.ID)
+		}
+	}
+}
+
+// 送达对账：守护进程本机审计里的 approved/denied 与 hub 行一致且 hub 未记送达时补记送达时间，不改状态；
+// 不一致或别的机器的不记。
+func TestAuditReconcilesDelivery(t *testing.T) {
+	h, logs := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	idB, _ := enrollMachine(t, h, "b")
+	insertReq(t, h.st, store.Request{ID: "d1", MachineID: id, State: "approved", DecidedBy: "user"})
+	insertReq(t, h.st, store.Request{ID: "d2", MachineID: id, State: "denied", DecidedBy: "user"})
+	insertReq(t, h.st, store.Request{ID: "d3", MachineID: idB, State: "approved", DecidedBy: "user"})
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id, Pending: []wire.PendingSummary{{RequestID: "d1"}, {RequestID: "d2"}}})
+	defer c.close()
+	c.recv(5 * time.Second) // welcome；随后是对齐补发的 d1、d2，这里不读
+	sess := proto.Session{Tool: "claude", CLISessionID: "s1"}
+	c.send(auditFrame(t,
+		agent.AuditEntry{TS: time.Now(), RequestID: "d2", Kind: "permission", Session: sess, State: "approved", DecidedBy: "user"},
+		agent.AuditEntry{TS: time.Now(), RequestID: "d3", Kind: "permission", Session: sess, State: "approved", DecidedBy: "user"},
+		agent.AuditEntry{TS: time.Now(), RequestID: "d1", Kind: "permission", Session: sess, State: "approved", DecidedBy: "user"},
+	))
+	waitFor(t, "d1 补记送达", func() bool { r, _ := h.st.GetRequest("d1"); return r.DeliveredAt != nil })
+	if d1 := getReq(t, h.st, "d1"); d1.State != "approved" || d1.DecidedBy != "user" {
+		t.Fatalf("对账不改状态: %+v", d1)
+	}
+	if d2 := getReq(t, h.st, "d2"); d2.DeliveredAt != nil {
+		t.Fatalf("状态不一致不记送达: %+v", d2)
+	}
+	if d3 := getReq(t, h.st, "d3"); d3.DeliveredAt != nil {
+		t.Fatalf("别的机器的请求不记送达: %+v", d3)
+	}
+	if !strings.Contains(logs.String(), "别的机器") {
+		t.Fatalf("指向别的机器的条目应汇总记日志: %q", logs.String())
+	}
+}
+
+// redactText 先截（留余量）再脱敏再截：跨截断点的凭据仍被整体抹掉，不会留下不够长、漏过裸 token 规则的半截。
+func TestRedactTextStraddlingCut(t *testing.T) {
+	in := strings.Repeat("a", 989) + " ghp_ABCDEFGHIJKLMNOPQRST tail"
+	out := redactText(in, 1000)
+	if utf8.RuneCountInString(out) != 1000 || strings.Contains(out, "ABCDEF") {
+		t.Fatalf("跨截断点的 token 不应漏出: %q", out[980:])
+	}
+	if got := redactText("mysql --password hunter22", 1000); got != "mysql --password <redacted>" {
+		t.Fatalf("短文本照常脱敏: %q", got)
 	}
 }

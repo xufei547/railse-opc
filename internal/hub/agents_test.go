@@ -512,7 +512,8 @@ func TestAgentWSAcceptsLargeFrame(t *testing.T) {
 	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
 	defer c.close()
 	c.recv(5 * time.Second) // welcome
-	frame := wire.Audit{T: wire.TAudit, Entries: []json.RawMessage{json.RawMessage(`"` + strings.Repeat("x", wire.MaxFrame-100) + `"`)}}
+	entry := `{"ts":"2026-01-02T00:00:00Z","kind":"control","state":"recorded","message":"` + strings.Repeat("x", wire.MaxFrame-200) + `"}`
+	frame := wire.Audit{T: wire.TAudit, Entries: []json.RawMessage{json.RawMessage(entry)}}
 	b, err := wire.Marshal(frame)
 	if err != nil || len(b) <= wire.MaxFrame-200 {
 		t.Fatalf("测试帧应接近 MaxFrame: %d %v", len(b), err)
@@ -710,5 +711,29 @@ func TestWelcomeFramePaused(t *testing.T) {
 		if err != nil || wire.Unmarshal(b, &w) != nil || w.T != wire.TWelcome || w.RulesVersion != 3 || w.Paused != c.paused {
 			t.Fatalf("%s: welcome = %+v, %v", name, w, err)
 		}
+	}
+}
+
+// sendTo 只发给仍是该机器当前连接的那一条：被替换、已关闭、未登记的连接都返回 false；下发白名单照旧。
+func TestAgentHubSendTo(t *testing.T) {
+	var logs syncBuf
+	h := newAgentHub(log.New(&logs, "", 0))
+	old, cur := newFakeConn("m1", 4), newFakeConn("m1", 4)
+	h.register(old)
+	if !h.sendTo(old, wire.Ping{T: wire.TPing}) || len(old.out) != 1 {
+		t.Fatal("当前连接应能发")
+	}
+	h.register(cur) // 替换并关掉 old
+	if h.sendTo(old, wire.Ping{T: wire.TPing}) || len(old.out) != 1 || len(cur.out) != 0 {
+		t.Fatal("被替换的连接不应收帧，帧也不应落到新连接")
+	}
+	if h.sendTo(newFakeConn("m1", 4), wire.Ping{T: wire.TPing}) || len(cur.out) != 0 {
+		t.Fatal("未登记的连接不应发")
+	}
+	if h.sendTo(cur, wire.Hello{T: wire.THello}) || len(cur.out) != 0 {
+		t.Fatal("白名单外的帧不应发")
+	}
+	if !h.sendTo(cur, wire.Decision{T: wire.TDecision, RequestID: "r", Action: "allow"}) || len(cur.out) != 1 {
+		t.Fatal("当前连接应能发决定")
 	}
 }
