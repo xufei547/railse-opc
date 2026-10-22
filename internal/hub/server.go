@@ -21,6 +21,10 @@ import (
 	"github.com/railse/railse-opc/internal/hub/store"
 )
 
+// ErrShutdownTimeout 表示 Run 关停时没在时限内等到全部 WebSocket 处理（/ws/agent、/ws/client）或 webhook 回调退出。
+// Run 仍尽力收尾后才返回它；那些还在跑的可能继续碰存储，调用方不宜随即关库（进程即将退出时直接退出即可）。
+var ErrShutdownTimeout = errors.New("hub 关停超时：仍有 WebSocket 处理或 webhook 回调没有退出")
+
 // Config 是 hub 的配置。
 type Config struct {
 	Dir           string
@@ -215,7 +219,8 @@ func (s *Server) Handler() http.Handler { return s.mux }
 // 关停的各步共用一个截止时间（shutdownTimeout）：先等在途请求，超时就强制断开；再等 WebSocket handler
 // （/ws/agent、/ws/client）全部退出；然后停下过期扫描；最后取消在跑的 webhook 回调并等它们退出（见 stopCallbacks）。
 // 截止时间被前面的步骤耗尽时，回调仍有 callbackStopGrace 的收尾宽限，总关停不超过 shutdownTimeout + callbackStopGrace。
-// 正常关停时 Run 返回后不再有 handler 或回调碰存储，调用方可以关库。
+// 返回 nil 时 WebSocket 处理与回调都已退出，调用方可以关库；有没等到退出的，收尾完照样返回，错误满足
+// errors.Is(err, ErrShutdownTimeout)。（HTTP 收尾超时被强制断开的普通请求不在其列：它们碰到已关的库只会得到错误。）
 func (s *Server) Run(ctx context.Context) error {
 	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
@@ -245,19 +250,25 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
+	clean := true
 	if !serveEnded {
-		s.shutdownHTTP(shutdownCtx, hs)
+		clean = s.shutdownHTTP(shutdownCtx, hs)
 	}
 	// 过期扫描先停（它会给过期的 webhook 请求发起回调），再停回调
 	stopSweep()
 	<-sweepDone
-	s.stopCallbacks(shutdownCtx)
+	if !s.stopCallbacks(shutdownCtx) {
+		clean = false
+	}
+	if !clean {
+		return errors.Join(runErr, ErrShutdownTimeout)
+	}
 	return runErr
 }
 
 // shutdownHTTP 停止接纳新的 WebSocket handler、断开守护进程，等在途请求到 ctx 结束（超时就强制断开），
-// 再在同一截止前等 WebSocket handler 全部退出。
-func (s *Server) shutdownHTTP(ctx context.Context, hs *http.Server) {
+// 再在同一截止前等 WebSocket handler 全部退出。截止前没等到它们全部退出时返回 false。
+func (s *Server) shutdownHTTP(ctx context.Context, hs *http.Server) bool {
 	wsIdle := s.ws.shutdown() // 先停止接纳新的 WebSocket handler
 	s.agents.closeAll()
 	if err := hs.Shutdown(ctx); err != nil {
@@ -265,10 +276,18 @@ func (s *Server) shutdownHTTP(ctx context.Context, hs *http.Server) {
 		hs.Close()
 	}
 	// Shutdown 不管已劫持的 WebSocket 连接：它们的 handler 经 BaseContext 看到取消后自行退出，这里等到它们都退出
+	// 截止已到（HTTP 收尾耗尽了它）而 handler 也都已退出时，两个分支同时就绪：先看 handler，免得随机误报超时
 	select {
 	case <-wsIdle:
+		return true
+	default:
+	}
+	select {
+	case <-wsIdle:
+		return true
 	case <-ctx.Done():
 		s.log.Printf("hub 关停超时，仍有 %d 个 WebSocket 连接的处理未退出", s.ws.count())
+		return false
 	}
 }
 

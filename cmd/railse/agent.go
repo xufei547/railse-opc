@@ -18,10 +18,10 @@ import (
 	"syscall"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/hookclient"
+	"github.com/railse/railse-opc/internal/hub"
 	"github.com/railse/railse-opc/internal/proto"
 )
 
@@ -30,13 +30,30 @@ const agentUsage = `用法:
   railse agent status|pause|resume|reload [--dir 目录]
   railse agent enroll --hub URL --token 接入码 [--name 名字] [--dir 目录] [--force]   接入 hub，写 machine.json`
 
-// runAgent 处理 agent 子命令：run 跑守护进程，其余经 socket 发本机管理命令。
+// agentRunContext 给 agent run 的运行期：SIGINT、SIGTERM 时取消。是变量只为测试能替换。
+var agentRunContext = func() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+}
+
+// agentFlags 是各 agent 子命令认的标志。
+var agentFlags = map[string][]string{
+	"run":    {"dir", "foreground"},
+	"status": {"dir"}, "pause": {"dir"}, "resume": {"dir"}, "reload": {"dir"},
+	"enroll": {"dir", "hub", "token", "name", "force"},
+}
+
+// runAgent 处理 agent 子命令：run 跑守护进程，enroll 接入 hub，其余经 socket 发本机管理命令。
 func runAgent(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, agentUsage)
 		return 2
 	}
-	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
+	allowed, ok := agentFlags[args[0]]
+	if !ok {
+		fmt.Fprintf(stderr, "未知的 agent 子命令 %q\n\n%s\n", args[0], agentUsage)
+		return 2
+	}
+	fs := flag.NewFlagSet("agent "+args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dir := fs.String("dir", "", "配置目录，默认 $RAILSE_HOME 或 ~/.railse")
 	foreground := fs.Bool("foreground", false, "日志同时写到 stderr")
@@ -49,6 +66,10 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintf(stderr, "多余的参数 %q\n%s\n", fs.Args(), agentUsage)
+		return 2
+	}
+	if bad := foreignFlags(fs, allowed); bad != "" {
+		fmt.Fprintf(stderr, "railse agent %s 不认 %s\n%s\n", args[0], bad, agentUsage)
 		return 2
 	}
 	var cfg agent.Config
@@ -64,7 +85,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "run":
-		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		ctx, stop := agentRunContext()
 		defer stop()
 		if err := runAgentServe(ctx, cfg, *foreground, stderr); err != nil {
 			fmt.Fprintln(stderr, err)
@@ -98,10 +119,8 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
-	default:
-		fmt.Fprintf(stderr, "未知的 agent 子命令 %q\n\n%s\n", args[0], agentUsage)
-		return 2
 	}
+	return 2 // 到不了：子命令已在开头核对过
 }
 
 // pausedLine 显示总开关的生效值；暂停时在括号里注明来源：本机（local）、hub，或两者都有。
@@ -123,7 +142,6 @@ func pausedLine(st *proto.Status) string {
 const (
 	enrollTimeout  = 15 * time.Second // 接入请求的总上限
 	enrollReplyMax = 64 << 10         // 读 hub 答复的字节上限
-	machineNameMax = 128              // 名字的字节上限，与 hub 一致
 	hubTextMax     = 200              // 转述 hub 报错文案的字符上限
 )
 
@@ -217,19 +235,13 @@ func isLoopbackHost(host string) bool {
 	return err == nil && a.Unmap().IsLoopback()
 }
 
-// checkDisplayName 按 hub 的口径检查名字（机器名、hub 发来的机器 id）：至多 machineNameMax 字节，合法 UTF-8，
-// 不含控制字符与不可见的格式字符（放行 ZWNJ、ZWJ）。
+// checkDisplayName 按 hub 接入时的口径检查名字（机器名、hub 发来的机器 id）：至多 hub.MaxNameLen 字节，且 hub.ValidName。
 func checkDisplayName(s string) error {
-	if len(s) > machineNameMax {
-		return fmt.Errorf("至多 %d 字节", machineNameMax)
+	if len(s) > hub.MaxNameLen {
+		return fmt.Errorf("至多 %d 字节", hub.MaxNameLen)
 	}
-	if !utf8.ValidString(s) {
-		return errors.New("必须是合法 UTF-8")
-	}
-	for _, c := range s {
-		if unicode.IsControl(c) || (unicode.Is(unicode.Cf, c) && c != 0x200c && c != 0x200d) {
-			return errors.New("不能含控制字符或不可见的格式字符")
-		}
+	if !hub.ValidName(s) {
+		return errors.New("必须是合法 UTF-8，且不能含控制字符或不可见的格式字符")
 	}
 	return nil
 }

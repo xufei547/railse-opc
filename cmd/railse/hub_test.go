@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -17,9 +19,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/hub"
 	"github.com/railse/railse-opc/internal/hub/store"
 )
+
+// cancelledHubRun 让 hub run 的运行期一开始就已取消：即使误把它跑起来，也会立刻关停而不是挂住测试。
+func cancelledHubRun(t *testing.T) {
+	t.Helper()
+	old := hubRunContext
+	hubRunContext = func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, cancel
+	}
+	t.Cleanup(func() { hubRunContext = old })
+}
+
+// cancelledAgentRun 同上，给 agent run。
+func cancelledAgentRun(t *testing.T) {
+	t.Helper()
+	old := agentRunContext
+	agentRunContext = func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, cancel
+	}
+	t.Cleanup(func() { agentRunContext = old })
+}
 
 // lockedBuf 是并发安全的日志缓冲。
 type lockedBuf struct {
@@ -176,11 +203,15 @@ func fieldAfter(t *testing.T, text, prefix string) string {
 
 func TestHubTokenRejectsBadTTL(t *testing.T) {
 	dir := filepath.Join(tempDir(t), "hub")
-	for _, ttl := range []string{"0s", "-1m"} {
+	for _, ttl := range []string{"0s", "-1m", "24h1s", "48h"} {
 		var out, errOut bytes.Buffer
 		if code := runHub([]string{"token", "--dir", dir, "--ttl", ttl}, nil, &out, &errOut); code != 2 || out.String() != "" {
 			t.Fatalf("--ttl %s 应拒绝: %d %q %q", ttl, code, out.String(), errOut.String())
 		}
+	}
+	var out, errOut bytes.Buffer
+	if code := runHub([]string{"token", "--dir", dir, "--ttl", "24h"}, nil, &out, &errOut); code != 0 || !strings.Contains(out.String(), "有效期: 24h0m0s") {
+		t.Fatalf("--ttl 24h 应接受: %d %q %q", code, out.String(), errOut.String())
 	}
 }
 
@@ -303,14 +334,172 @@ func TestHubTrustedProxyFlag(t *testing.T) {
 	if p.String() == "" {
 		t.Fatal("String 不应为空")
 	}
+	cancelledHubRun(t)
 	for _, bad := range []string{"0.0.0.0/0", "::/0", "::ffff:0.0.0.0/96", "::ffff:0:0/80", "nonsense", "10.0.0.0/33", "fe80::1%en0", "10.0.0.1,", ""} {
 		var q proxyFlag
 		if err := q.Set(bad); err == nil {
 			t.Fatalf("%q 应拒绝", bad)
 		}
 		var out, errOut bytes.Buffer
-		if code := runHub([]string{"token", "--dir", tempDir(t), "--trusted-proxy", bad}, nil, &out, &errOut); code != 2 || out.String() != "" {
+		if code := runHub([]string{"run", "--dir", tempDir(t), "--listen", "127.0.0.1:0", "--trusted-proxy", bad}, nil, &out, &errOut); code != 2 || out.String() != "" {
 			t.Fatalf("%q 应退出 2: %d %q", bad, code, errOut.String())
 		}
+	}
+}
+
+// 修复轮 1：子命令共用一个标志集，出现当前子命令不认的标志时退出 2 并点名，什么都不做。
+func TestCommandsRejectForeignFlags(t *testing.T) {
+	cancelledHubRun(t)
+	cancelledAgentRun(t)
+	for _, c := range []struct {
+		args []string
+		flag string
+	}{
+		{[]string{"agent", "run", "--hub", "http://127.0.0.1:1"}, "--hub"},
+		{[]string{"agent", "status", "--force"}, "--force"},
+		{[]string{"agent", "pause", "--token", "t"}, "--token"},
+		{[]string{"agent", "reload", "--name", "n"}, "--name"},
+		{[]string{"agent", "enroll", "--hub", "http://127.0.0.1:1", "--token", "t", "--foreground"}, "--foreground"},
+		{[]string{"hub", "token", "--trusted-proxy", "10.0.0.1"}, "--trusted-proxy"},
+		{[]string{"hub", "password", "--ttl", "1m"}, "--ttl"},
+		{[]string{"hub", "webhook-token", "--listen", "127.0.0.1:1"}, "--listen"},
+		{[]string{"hub", "token", "--secure-cookies"}, "--secure-cookies"},
+		{[]string{"hub", "run", "--ttl", "1m"}, "--ttl"},
+		{[]string{"hub", "password", "--foreground"}, "--foreground"},
+	} {
+		dir := filepath.Join(tempDir(t), "d")
+		var out, errOut bytes.Buffer
+		code := run(append(c.args, "--dir", dir), &out, &errOut)
+		if code != 2 || !strings.Contains(errOut.String(), c.flag) || out.String() != "" {
+			t.Fatalf("%v: 应退出 2 并点名 %s: %d %q %q", c.args, c.flag, code, out.String(), errOut.String())
+		}
+		if _, err := os.Stat(dir); err == nil {
+			t.Fatalf("%v: 被拒时不应建目录", c.args)
+		}
+	}
+}
+
+// 修复轮 1：hub run 的 --trusted-proxy 确实进了 hub 的配置——日志可见，经可信代理来的请求按 X-Forwarded-For 分别限速；
+// 有守护进程连着时取消 hub run，5 秒内退出 0，守护进程照常运行。
+func TestHubRunCommand(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "hub")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	old := hubRunContext
+	hubRunContext = func() (context.Context, context.CancelFunc) { return ctx, cancel }
+	t.Cleanup(func() { hubRunContext = old })
+	addr := freeAddr(t)
+	base := "http://" + addr
+	var out, errOut lockedBuf
+	done := make(chan int, 1)
+	go func() {
+		done <- runHub([]string{"run", "--dir", dir, "--listen", addr, "--trusted-proxy", "10.0.0.0/8", "--trusted-proxy", "127.0.0.1"}, nil, &out, &errOut)
+	}()
+	waitUntil(t, func() bool {
+		resp, err := http.Get(base + "/api/status")
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusUnauthorized
+	})
+	if b, _ := os.ReadFile(filepath.Join(dir, "hub.log")); !strings.Contains(string(b), "可信代理: 10.0.0.0/8,127.0.0.1/32") {
+		t.Fatalf("日志应列出可信代理:\n%s", b)
+	}
+	enroll := func(xff string) int {
+		t.Helper()
+		req, _ := http.NewRequest("POST", base+"/api/enroll", strings.NewReader(`{"token":"bad","name":"x"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", xff)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for i := 0; i < 5; i++ {
+		if c := enroll("203.0.113.7"); c != http.StatusUnauthorized {
+			t.Fatalf("第 %d 次: %d", i+1, c)
+		}
+	}
+	if c := enroll("203.0.113.7"); c != http.StatusTooManyRequests {
+		t.Fatalf("同一来源第 6 次应限速: %d", c)
+	}
+	if c := enroll("203.0.113.8"); c != http.StatusUnauthorized {
+		t.Fatalf("可信代理后面的另一个来源不应受限: %d", c)
+	}
+	// 接一台守护进程上来
+	var tokOut, tokErr bytes.Buffer
+	if code := runHub([]string{"token", "--dir", dir}, nil, &tokOut, &tokErr); code != 0 {
+		t.Fatalf("token: %d %s", code, tokErr.String())
+	}
+	cfgDir := filepath.Join(tempDir(t), "h")
+	var eOut, eErr bytes.Buffer
+	if code := run([]string{"agent", "enroll", "--dir", cfgDir, "--hub", base, "--token", fieldAfter(t, tokOut.String(), "接入码: ")}, &eOut, &eErr); code != 0 {
+		t.Fatalf("enroll: %d %s", code, eErr.String())
+	}
+	cfg := agent.ConfigIn(cfgDir)
+	serveAgent(t, cfg)
+	waitUntil(t, func() bool {
+		b, _ := os.ReadFile(cfg.LogPath)
+		return strings.Contains(string(b), "已连接 hub")
+	})
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("hub run 应退出 0: %d %q", code, errOut.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("有守护进程连着时，hub run 没有在取消后 5 秒内退出")
+	}
+	var sOut, sErr bytes.Buffer
+	if code := run([]string{"agent", "status", "--dir", cfgDir}, &sOut, &sErr); code != 0 {
+		t.Fatalf("hub 停了守护进程应照常服务: %d %q", code, sErr.String())
+	}
+}
+
+// 修复轮 1：数据目录先看 $RAILSE_HUB_HOME，否则 ~/.railse-hub。HOME 指向临时目录，绝不碰真实家目录。
+func TestDefaultHubDir(t *testing.T) {
+	home := tempDir(t)
+	t.Setenv("HOME", home)
+	t.Setenv("RAILSE_HUB_HOME", "")
+	if d, err := defaultHubDir(); err != nil || d != filepath.Join(home, ".railse-hub") {
+		t.Fatalf("没有 $RAILSE_HUB_HOME 时应为 ~/.railse-hub: %q %v", d, err)
+	}
+	custom := filepath.Join(tempDir(t), "custom")
+	t.Setenv("RAILSE_HUB_HOME", custom)
+	if d, err := defaultHubDir(); err != nil || d != custom {
+		t.Fatalf("应取 $RAILSE_HUB_HOME: %q %v", d, err)
+	}
+	var out, errOut bytes.Buffer
+	if code := runHub([]string{"token"}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("token: %d %s", code, errOut.String())
+	}
+	if fi, err := os.Stat(custom); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("数据目录应建在 $RAILSE_HUB_HOME 且为 0700: %v %v", fi, err)
+	}
+	if _, err := os.Stat(filepath.Join(custom, "hub.db")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".railse-hub")); err == nil {
+		t.Fatal("有 $RAILSE_HUB_HOME 时不应用家目录")
+	}
+}
+
+// 修复轮 1：hub 关停超时（还有处理或回调没退出）时 runHubServe 不关库、记日志并把错误交上去。
+func TestHubRunServeShutdownTimeout(t *testing.T) {
+	old := serveHub
+	serveHub = func(context.Context, *hub.Server) error { return fmt.Errorf("收尾: %w", hub.ErrShutdownTimeout) }
+	t.Cleanup(func() { serveHub = old })
+	dir := filepath.Join(tempDir(t), "hub")
+	err := runHubServe(context.Background(), hub.DefaultConfig(dir), false, os.Stderr)
+	if !errors.Is(err, hub.ErrShutdownTimeout) {
+		t.Fatalf("应交上关停超时: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "hub.log"))
+	if !strings.Contains(string(b), "不关数据库") || strings.Contains(string(b), "hub 已停止") {
+		t.Fatalf("日志:\n%s", b)
 	}
 }

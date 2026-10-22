@@ -519,26 +519,31 @@ func writeFrame(ctx context.Context, conn *websocket.Conn, v any) error {
 }
 
 // writeRaw 写一帧，最多等 hubWriteTimeout（ctx 更早结束时以 ctx 为准）。超时分两种：写帧中途超时，库会关闭连接，
-// 读循环随之结束；还在等写锁（另一帧正写着）时超时，库不关连接，连接仍会被当作连着——调用方必须自己关掉它
-// （sendRaw、审计上报循环都这么做；会话里的写失败直接结束会话，由 session 的 defer 关）。
+// 读循环随之结束；还在等写锁（另一帧正写着）时超时，库不关连接，连接仍会被当作连着——要按断线处理的调用方必须
+// 自己关掉它（SendPending、审计上报循环都这么做；会话里的写失败直接结束会话，由 session 的 defer 关）。
+// 回执（送达、取消、过期）例外：写不出去只报错、不关连接，见 sendNotice。
 func writeRaw(ctx context.Context, conn *websocket.Conn, b []byte) error {
 	wctx, cancel := context.WithTimeout(ctx, hubWriteTimeout)
 	defer cancel()
 	return conn.Write(wctx, websocket.MessageText, b)
 }
 
-// send 编码并发出一帧，写的上限取 ctx 与 hubWriteTimeout 中较早的。编码错误原样返回（不是连接问题）；
-// 未连接或写连接失败返回包着 ErrHubDisconnected 的错误（写失败时 sendRaw 关掉这条连接，读循环随之结束，
-// 重连后 pending 会随对齐重发）。
-func (h *HubClient) send(ctx context.Context, v any) error {
+// sendNotice 编码并发出一帧回执（送达、取消、过期），写的上限取 ctx 与 hubWriteTimeout 中较早的。编码错误原样返回；
+// 未连接返回 ErrHubDisconnected。写不出去（多半是另一帧正写着、等写锁超时）只返回错误、不关连接：回执只是通知，
+// 发不出去重连对齐会补上；为它断开整条连接会打断正在写的大帧，并让所有在途请求进入断线宽限。
+// （写帧中途超时时库会自己关连接，那是连接本身出了问题。）
+func (h *HubClient) sendNotice(ctx context.Context, v any) error {
 	b, err := wire.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return h.sendRaw(ctx, b)
+	return h.sendRaw(ctx, b, false)
 }
 
-func (h *HubClient) sendRaw(ctx context.Context, b []byte) error {
+// sendRaw 发出编好的一帧。未连接返回 ErrHubDisconnected。closeOnFail 为真时写失败就关掉这条连接并返回包着
+// ErrHubDisconnected 的错误：等写锁超时时库不会自己关，连接还会被当作连着；关掉后读循环随之结束、状态变为断开，
+// 调用方按 ErrHubDisconnected 等重连才成立（重连后 pending 会随对齐重发）。closeOnFail 为假时只返回写错误。
+func (h *HubClient) sendRaw(ctx context.Context, b []byte, closeOnFail bool) error {
 	h.mu.Lock()
 	conn := h.conn
 	h.mu.Unlock()
@@ -546,8 +551,9 @@ func (h *HubClient) sendRaw(ctx context.Context, b []byte) error {
 		return ErrHubDisconnected
 	}
 	if err := writeRaw(ctx, conn, b); err != nil {
-		// 写失败就关掉这条连接：等写锁超时时库不会自己关，连接还会被当作连着。关掉后读循环随之结束、状态变为断开，
-		// 调用方按 ErrHubDisconnected 等重连才成立。
+		if !closeOnFail {
+			return fmt.Errorf("没写出去（连接保留）: %w", err)
+		}
 		conn.CloseNow()
 		return fmt.Errorf("%w: %v", ErrHubDisconnected, err)
 	}
@@ -573,22 +579,22 @@ func (h *HubClient) SendPending(pr PendingRequest) error {
 	if err != nil {
 		return fmt.Errorf("请求 %q 无法送往 hub: %w", pr.ID, err)
 	}
-	return h.sendRaw(context.Background(), b)
+	return h.sendRaw(context.Background(), b, true)
 }
 
-// SendCancel 告诉 hub 钩子已消失。写的上限取 ctx 与 hubWriteTimeout 中较早的（下同）。
+// SendCancel 告诉 hub 钩子已消失。写的上限取 ctx 与 hubWriteTimeout 中较早的；写不出去不关连接（见 sendNotice，下同）。
 func (h *HubClient) SendCancel(ctx context.Context, id, reason string) error {
-	return h.send(ctx, wire.Cancel{T: wire.TCancel, RequestID: id, Reason: reason})
+	return h.sendNotice(ctx, wire.Cancel{T: wire.TCancel, RequestID: id, Reason: reason})
 }
 
 // SendExpired 告诉 hub 本机等待已过期。
 func (h *HubClient) SendExpired(ctx context.Context, id string) error {
-	return h.send(ctx, wire.Expired{T: wire.TExpired, RequestID: id})
+	return h.sendNotice(ctx, wire.Expired{T: wire.TExpired, RequestID: id})
 }
 
 // SendDelivered 告诉 hub 决定已交给钩子。
 func (h *HubClient) SendDelivered(ctx context.Context, id string) error {
-	return h.send(ctx, wire.Delivered{T: wire.TDelivered, RequestID: id})
+	return h.sendNotice(ctx, wire.Delivered{T: wire.TDelivered, RequestID: id})
 }
 
 // Await 登记一个等待者；决定到达时从返回的通道读到（只投递第一个，重复的丢弃）。

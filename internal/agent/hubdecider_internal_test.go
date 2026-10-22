@@ -390,3 +390,43 @@ func TestHubAuditLockTimeoutDisconnects(t *testing.T) {
 		t.Fatalf("没发出去的审计应留在队里: %v", q)
 	}
 }
+
+// 修复轮 1：回执只是通知，等写锁超时只报错、不关连接——不打断正在写的大帧，也不让在途请求进入断线宽限。
+// “等锁超时就断开”只留给 SendPending 与审计上报。
+func TestHubNoticeLockTimeoutKeepsConnection(t *testing.T) {
+	setHubTimings(t, []time.Duration{time.Minute}, 0, 0, 0) // 断开后不重连：连接若被关，下面立刻看得出
+	f := newFakeHub(t, 0, recordUntilThenStall(t, ""))
+	tc := startTestClient(t, f)
+	tc.waitConnected(t)
+	holdWriteLock(t, tc.c)
+	_, changed := tc.c.ConnState()
+	for name, send := range map[string]func(ctx context.Context) error{
+		"delivered": func(ctx context.Context) error { return tc.c.SendDelivered(ctx, "x") },
+		"cancel":    func(ctx context.Context) error { return tc.c.SendCancel(ctx, "x", "terminal") },
+		"expired":   func(ctx context.Context) error { return tc.c.SendExpired(ctx, "x") },
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err := send(ctx)
+		cancel()
+		if err == nil || errors.Is(err, ErrHubDisconnected) {
+			t.Fatalf("%s: 等锁超时应报错，但不是断线: %v", name, err)
+		}
+	}
+	select {
+	case <-changed:
+		t.Fatal("回执超时不应断开连接")
+	default:
+	}
+	if !tc.c.Connected() {
+		t.Fatal("连接应仍在")
+	}
+	// 大帧仍占着写锁、没被打断：探针照样拿不到锁
+	tc.c.mu.Lock()
+	conn := tc.c.conn
+	tc.c.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"t":"probe"}`)); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("大帧应仍在写: %v", err)
+	}
+}

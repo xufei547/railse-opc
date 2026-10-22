@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1310,4 +1311,77 @@ func TestRunWaitsForWebSocketHandlers(t *testing.T) {
 	if n, live := exited.Load(), srv.ws.count(); n != 2 || live != 0 {
 		t.Fatalf("Run 返回时 handler 应都已退出: 已退出 %d, 仍在跑 %d", n, live)
 	}
+}
+
+// 修复轮 1：WebSocket 处理没在关停时限内退出时，Run 仍尽力收尾（停过期扫描、停回调），之后返回 ErrShutdownTimeout，
+// 调用方据此不关库（那个处理还可能碰存储）。
+func TestRunReportsShutdownTimeout(t *testing.T) {
+	old := shutdownTimeout
+	shutdownTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { shutdownTimeout = old })
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := DefaultConfig(dir)
+	cfg.Listen = "127.0.0.1:0"
+	var logs syncBuf
+	srv, err := New(cfg, st, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo) // 后登记先执行：关库之前先放 handler 走
+	srv.beforeWSExit = func() { <-release }
+	secret := store.RandomToken()
+	m, err := st.CreateMachine("m", secret, "/h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	const prefix = "hub 监听 "
+	waitFor(t, "Run 开始监听", func() bool { return strings.Contains(logs.String(), prefix) })
+	line := logs.String()
+	addr := strings.TrimSpace(strings.SplitN(line[strings.Index(line, prefix)+len(prefix):], "\n", 2)[0])
+	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dcancel()
+	agentConn, _, err := websocket.Dial(dctx, "ws://"+addr+"/ws/agent", &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + secret}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agentConn.CloseNow()
+	agentConn.SetReadLimit(wire.MaxFrame)
+	ac := &agentClient{conn: agentConn, t: t}
+	ac.send(wire.Hello{T: wire.THello, Proto: wire.Proto, MachineID: m.ID})
+	if kind, _ := ac.recv(5 * time.Second); kind != wire.TWelcome {
+		t.Fatalf("应先收到 welcome, 得到 %s", kind)
+	}
+	readFrames(t, agentConn)
+	waitFor(t, "handler 在跑", func() bool { return srv.ws.count() == 1 })
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrShutdownTimeout) {
+			t.Fatalf("handler 没退出时 Run 应返回 ErrShutdownTimeout: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("取消后 Run 未返回")
+	}
+	if el := time.Since(start); el > shutdownTimeout+callbackStopGrace+2*time.Second {
+		t.Fatalf("关停超时也应在时限内返回: %s", el)
+	}
+	letGo()
+	waitFor(t, "handler 退出", func() bool { return srv.ws.count() == 0 })
 }

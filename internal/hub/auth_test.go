@@ -451,7 +451,7 @@ func TestEnrollRejectsBadInput(t *testing.T) {
 }
 
 // 接入审计的 detail 是合法 JSON，名字里的引号、反斜杠、非 ASCII（含 %q 会转成 \U 的不可打印字符）原样往返。
-// \U000F0000 是私用区字符（Co）：不可打印，但不是 validName 拒绝的控制或格式字符。
+// \U000F0000 是私用区字符（Co）：不可打印，但不是 ValidName 拒绝的控制或格式字符。
 func TestEnrollAuditDetail(t *testing.T) {
 	h := newTestHub(t)
 	tok, err := h.st.CreateEnrollToken(10 * time.Minute)
@@ -734,7 +734,7 @@ func TestEnrollRejectsBadName(t *testing.T) {
 	}
 }
 
-// validName（机器名与 webhook 标题共用）拒绝非法 UTF-8、C0、DEL、C1 控制字符和 unicode.Cf 格式字符（ZWNJ、ZWJ 除外），
+// ValidName（机器名与 webhook 标题共用）拒绝非法 UTF-8、C0、DEL、C1 控制字符和 unicode.Cf 格式字符（ZWNJ、ZWJ 除外），
 // 其余可显示的字符（含中文、emoji 与 ZWJ 组合、带 ZWNJ 的波斯语、不换行空格）照常接受。
 func TestValidName(t *testing.T) {
 	bad := map[string]string{
@@ -746,13 +746,13 @@ func TestValidName(t *testing.T) {
 		"非法 UTF-8": "mac\xff",
 	}
 	for name, s := range bad {
-		if validName(s) {
+		if ValidName(s) {
 			t.Errorf("%s（%q）应拒绝", name, s)
 		}
 	}
 	for _, s := range []string{"工作站 mac", "MacBook-Pro.local", "发布周报 🚀", "a\u00a0b", "a\u200ab", "a\u2065b",
 		"👨\u200d👩\u200d👧", "می\u200cخواهم", "क्\u200dष"} {
-		if !validName(s) {
+		if !ValidName(s) {
 			t.Errorf("%q 应接受", s)
 		}
 	}

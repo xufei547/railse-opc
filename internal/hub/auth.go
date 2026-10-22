@@ -33,7 +33,6 @@ const (
 	enrollTokenTTL = 10 * time.Minute
 	loginBodyMax   = 4 << 10
 	enrollBodyMax  = 16 << 10
-	maxNameLen     = 128  // 字节
 	maxHomeDirLen  = 4096 // 字节
 	sweepEvery     = time.Minute
 	// argonConcurrency 是同时进行的登录密码校验上限（每次 64 MiB），loginVerifyWait 是等名额的上限。
@@ -334,11 +333,11 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "需要 token 与 name")
 		return
 	}
-	if len(body.Name) > maxNameLen || len(body.HomeDir) > maxHomeDirLen {
-		writeErr(w, http.StatusBadRequest, fmt.Sprintf("name 至多 %d 字节，home_dir 至多 %d 字节", maxNameLen, maxHomeDirLen))
+	if len(body.Name) > MaxNameLen || len(body.HomeDir) > maxHomeDirLen {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("name 至多 %d 字节，home_dir 至多 %d 字节", MaxNameLen, maxHomeDirLen))
 		return
 	}
-	if !validName(body.Name) {
+	if !ValidName(body.Name) {
 		writeErr(w, http.StatusBadRequest, "name 必须是合法 UTF-8，且不能含控制字符或不可见的格式字符")
 		return
 	}
@@ -359,12 +358,15 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"machine_id": m.ID, "secret": secret})
 }
 
-// validName 报告名字（机器名、webhook 标题）能否安全显示：合法 UTF-8，不含控制字符（C0、DEL、C1），
-// 也不含格式字符（unicode.Cf：bidi 覆盖与隔离、LRM/RLM、U+061C、零宽空格、U+2060–U+2064、软连字符、U+180E、BOM 等）——
+// MaxNameLen 是机器名的字节上限（接入时检查；railse agent enroll 先挡一道）。
+const MaxNameLen = 128
+
+// ValidName 报告名字（机器名、webhook 标题）能否安全显示，不管长度（由调用方按各自上限检查）：合法 UTF-8，
+// 不含控制字符（C0、DEL、C1），也不含格式字符（unicode.Cf：bidi 覆盖与隔离、LRM/RLM、U+061C、零宽空格、U+2060–U+2064、软连字符、U+180E、BOM 等）——
 // 它们不可见，却能让名字在网页、终端里显示成另一个样子。
 // 取舍：放行 U+200C、U+200D（ZWNJ、ZWJ），组合 emoji（👨‍👩‍👧）与波斯语、印地语等文字的正确拼写需要它们，
 // 单独出现也只影响字形连写，不改变显示顺序。代价是 Cf 里的 emoji 标签字符（U+E0020–U+E007F）被拒，英格兰等地区旗帜用不了。
-func validName(s string) bool {
+func ValidName(s string) bool {
 	if !utf8.ValidString(s) {
 		return false
 	}

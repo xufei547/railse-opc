@@ -30,6 +30,25 @@ const hubUsage = `用法:
   反向代理须追加 X-Forwarded-For（nginx: proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for）
   并传原 Host（proxy_set_header Host $host）`
 
+// 以下两个是变量只为测试能替换：hub run 的运行期（SIGINT、SIGTERM 时取消），与跑 hub 的那一步。
+var (
+	hubRunContext = func() (context.Context, context.CancelFunc) {
+		return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	}
+	serveHub = func(ctx context.Context, srv *hub.Server) error { return srv.Run(ctx) }
+)
+
+// hubFlags 是各 hub 子命令认的标志。
+var hubFlags = map[string][]string{
+	"run":           {"dir", "listen", "secure-cookies", "foreground", "trusted-proxy"},
+	"password":      {"dir"},
+	"token":         {"dir", "ttl"},
+	"webhook-token": {"dir"},
+}
+
+// maxEnrollTTL 是接入码有效期的上限：接入码一旦泄露，有效期越长越危险。
+const maxEnrollTTL = 24 * time.Hour
+
 // maxPasswordBytes 是网页密码的字节上限：登录请求体限 4 KiB，留足 JSON 转义的余量，免得设了登不上。
 const maxPasswordBytes = 1024
 
@@ -115,9 +134,8 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	sub := args[0]
-	switch sub {
-	case "run", "password", "token", "webhook-token":
-	default:
+	allowed, ok := hubFlags[sub]
+	if !ok {
 		fmt.Fprintf(stderr, "未知的 hub 子命令 %q\n\n%s\n", sub, hubUsage)
 		return 2
 	}
@@ -137,8 +155,12 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "多余的参数 %q\n%s\n", fs.Args(), hubUsage)
 		return 2
 	}
-	if *ttl <= 0 {
-		fmt.Fprintf(stderr, "--ttl 必须为正，得到 %s\n", *ttl)
+	if bad := foreignFlags(fs, allowed); bad != "" {
+		fmt.Fprintf(stderr, "railse hub %s 不认 %s\n%s\n", sub, bad, hubUsage)
+		return 2
+	}
+	if *ttl <= 0 || *ttl > maxEnrollTTL {
+		fmt.Fprintf(stderr, "--ttl 应在 0 到 %s 之间（不含 0），得到 %s\n", maxEnrollTTL, *ttl)
 		return 2
 	}
 	d := *dir
@@ -161,7 +183,7 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfg.SecureCookies = *secure
 	cfg.TrustedProxies = proxies
 	if sub == "run" {
-		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		ctx, stop := hubRunContext()
 		defer stop()
 		if err := runHubServe(ctx, cfg, *foreground, stderr); err != nil {
 			fmt.Fprintln(stderr, err)
@@ -258,7 +280,12 @@ func runHubServe(ctx context.Context, cfg hub.Config, foreground bool, stderr io
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	closeStore := true
+	defer func() {
+		if closeStore {
+			st.Close()
+		}
+	}()
 	srv, err := hub.New(cfg, st, logger)
 	if err != nil {
 		return err
@@ -271,8 +298,15 @@ func runHubServe(ctx context.Context, cfg hub.Config, foreground bool, stderr io
 		p := proxyFlag(cfg.TrustedProxies)
 		logger.Printf("可信代理: %s", p.String())
 	}
-	// Run 正常返回时已等完在跑的 WebSocket 处理与回调，随后关库是安全的。
-	if err := srv.Run(ctx); err != nil {
+	// Run 返回 nil 时在跑的 WebSocket 处理与 webhook 回调都已退出，随后关库是安全的；没在时限内等到它们退出时返回
+	// ErrShutdownTimeout，那些还可能碰存储，就不关库（进程随即退出）。
+	err = serveHub(ctx, srv)
+	if errors.Is(err, hub.ErrShutdownTimeout) {
+		closeStore = false
+		logger.Printf("hub 关停超时：仍有连接处理或回调没退出，不关数据库，进程随即退出")
+		return err
+	}
+	if err != nil {
 		return err
 	}
 	logger.Printf("hub 已停止")
