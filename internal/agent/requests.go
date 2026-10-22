@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"sort"
 	"sync"
 	"time"
 
@@ -16,16 +17,21 @@ type Outcome struct {
 	Action    string // allow、deny、passthrough
 	Reason    string
 	RuleID    string
-	DecidedBy string // user、no_hub、timeout…
+	DecidedBy string // user、no_hub、hub_unreachable、timeout…
+	// Note 是用户在手机上写的备注，只进审计，永远不写回钩子（不交给适配器和模型）。
+	Note string
 }
 
-// PendingRequest 是等待外部决定的请求。
+// PendingRequest 是等待外部决定的请求。Redacted 是脱敏后的载荷，上报 hub 用它。
 type PendingRequest struct {
-	ID       string
-	Req      proto.Request
-	Risk     policy.Risk
-	Created  time.Time
-	Deadline time.Time
+	ID           string
+	Req          proto.Request
+	Risk         policy.Risk
+	ProjectRoot  string
+	Redacted     policy.Payload
+	EngineReason string
+	Created      time.Time
+	Deadline     time.Time
 }
 
 // Decider 在引擎答 ask 之后给出最终结论。ctx 取消表示钩子已消失或守护进程正在停止，到期表示过期。
@@ -70,6 +76,18 @@ func (p *Pending) Count() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.m)
+}
+
+// List 返回按创建时间排序的副本，重连时上报 hub 用。
+func (p *Pending) List() []PendingRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]PendingRequest, 0, len(p.m))
+	for _, pr := range p.m {
+		out = append(out, *pr)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Created.Before(out[j].Created) })
+	return out
 }
 
 // HasSession 判断某个 CLI 会话是否有未完成的审批，用于压掉随后的 question 事件。

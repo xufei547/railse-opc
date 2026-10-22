@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
+// state 是 state.json。Paused 是本机 railse agent pause/resume 的开关，HubPaused 是 hub 下发的总开关；
+// 两者分开存，生效值取或。第 2 份计划写的旧文件没有 hub_paused，按 false 读。
 type state struct {
-	Paused bool `json:"paused"`
+	Paused    bool `json:"paused"`
+	HubPaused bool `json:"hub_paused"`
 }
 
 // loadState 读 state.json。文件不存在时返回零值（未暂停）。
@@ -29,32 +31,11 @@ func loadState(path string) (state, error) {
 	return st, nil
 }
 
-// saveState 先写同目录的临时文件（0600）再 rename，中途失败或崩溃不会留下截断的 state.json。
+// saveState 原子写入（见 writeFileAtomic），中途失败或崩溃不会留下截断的 state.json。
 func saveState(path string, st state) error {
 	b, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	_, err = f.Write(b)
-	if err == nil {
-		err = f.Chmod(0o600) // CreateTemp 已是 0600，这里再明确一次
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(tmp, path)
-	}
-	if err != nil {
-		os.Remove(tmp)
-	}
-	return err
+	return writeFileAtomic(path, b)
 }

@@ -23,6 +23,7 @@ type AuditEntry struct {
 	State     string          `json:"state"`            // auto_allowed、auto_denied、passthrough、cancelled、expired、recorded、suppressed
 	RuleID    string          `json:"rule_id,omitempty"`
 	Reason    string          `json:"reason,omitempty"`
+	Note      string          `json:"note,omitempty"` // 用户在手机上的备注，只进审计，不回给钩子
 	DecidedBy string          `json:"decided_by,omitempty"`
 	Message   string          `json:"message,omitempty"`
 }

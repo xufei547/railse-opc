@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/railse/railse-opc/internal/policy"
@@ -24,6 +25,17 @@ const maxSocketPath = 100
 // errHookGone 是钩子连接断开时取消请求 ctx 的原因，用来和守护进程关停区分开。
 var errHookGone = errors.New("钩子连接已断开")
 
+// hubUnreachable 是 Decider 在 hub 连不上（HubGrace 内没重连上）时填的 DecidedBy。
+// 这时钩子收 passthrough，本机审计记 expired（设计 3.2：等待作废，不是“根本没去等”）。
+const hubUnreachable = "hub_unreachable"
+
+// AuditSink 接收每条审计的副本（hub 上报用）。Forward 在处理请求的路径上同步调用，必须不阻塞：
+// 实现只把条目放进自己的队列就返回，发送在别的 goroutine 里做。
+type AuditSink interface{ Forward(e AuditEntry) }
+
+// sinkBox 让接口值能放进 atomic.Pointer。
+type sinkBox struct{ sink AuditSink }
+
 // Server 监听 Unix socket，一次连接处理一条消息。
 type Server struct {
 	cfg     Config
@@ -34,7 +46,14 @@ type Server struct {
 	log     *log.Logger
 	ln      net.Listener
 	start   time.Time
-	wg      sync.WaitGroup // 进行中的连接
+	wg      sync.WaitGroup          // 进行中的连接
+	sink    atomic.Pointer[sinkBox] // 审计转发目标，nil 表示只写本地；可在 Serve 运行中替换
+
+	// 暂停分开存：本机 pause/resume 与 hub 下发的总开关，生效值取或交给 rules。
+	// pauseMu 同时串行化 state.json 的写入，两个字段总是一起写。
+	pauseMu     sync.Mutex
+	localPaused bool
+	hubPaused   bool
 
 	mu      sync.Mutex
 	closed  bool
@@ -46,6 +65,21 @@ type Server struct {
 func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Logger) *Server {
 	return &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now()}
 }
+
+// SetAuditSink 设置审计转发目标；nil 表示只写本地。可在 Serve 运行中随时调用。
+func (s *Server) SetAuditSink(sink AuditSink) {
+	if sink == nil {
+		s.sink.Store(nil)
+		return
+	}
+	s.sink.Store(&sinkBox{sink: sink})
+}
+
+// Pending 返回未完成请求表，hub 客户端重连时枚举用。只能在 Listen 之前调用（不加锁）。
+func (s *Server) Pending() *Pending { return s.pending }
+
+// SetDecider 换决定来源（装 hub 客户端用）。只能在 Listen 之前调用（不加锁）。
+func (s *Server) SetDecider(d Decider) { s.decider = d }
 
 // Listen 建 socket。上次崩溃留下的无人监听的 socket 文件会被替换；已有守护进程在监听时报错；
 // 路径上是普通文件、符号链接等非 socket 时不删，报错。
@@ -227,7 +261,7 @@ func (s *Server) evaluate(req proto.Request) (policy.Decision, policy.Context) {
 // handlePermission 是审批主路径：引擎能定就定，定不了交给 Decider。
 func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.Response {
 	id := NewID()
-	d, _ := s.evaluate(req)
+	d, pctx := s.evaluate(req)
 	redacted := redact.Payload(req.Payload)
 	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "permission", Session: req.Session, ToolName: req.ToolName, Payload: &redacted, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason}
 	resp := proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason}
@@ -245,19 +279,21 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 			resp.Decision, resp.Reason = "passthrough", entry.Reason
 			break
 		}
-		return s.waitDecision(ctx, id, req, d, entry)
+		return s.waitDecision(ctx, id, req, d, pctx.ProjectRoot, redacted, entry)
 	}
 	s.writeAudit(entry)
 	return resp
 }
 
 // waitDecision 登记未完成请求并等 Decider，期限取配置与请求两者中较短的。
-func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request, d policy.Decision, entry AuditEntry) proto.Response {
+// projectRoot、redacted 与引擎理由随请求登记，hub 客户端上报时只用脱敏后的载荷。
+func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request, d policy.Decision, projectRoot string, redacted policy.Payload, entry AuditEntry) proto.Response {
 	wait := s.cfg.Deadline
 	if req.DeadlineSeconds > 0 && time.Duration(req.DeadlineSeconds)*time.Second < wait {
 		wait = time.Duration(req.DeadlineSeconds) * time.Second
 	}
-	pr := &PendingRequest{ID: id, Req: req, Risk: d.Risk, Created: time.Now(), Deadline: time.Now().Add(wait)}
+	now := time.Now()
+	pr := &PendingRequest{ID: id, Req: req, Risk: d.Risk, ProjectRoot: projectRoot, Redacted: redacted, EngineReason: d.Reason, Created: now, Deadline: now.Add(wait)}
 	s.pending.Add(pr)
 	defer s.pending.Remove(id)
 	dctx, cancel := context.WithDeadline(ctx, pr.Deadline)
@@ -281,15 +317,20 @@ func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request,
 		resp.Decision, resp.Reason = "passthrough", "决定来源出错，交回终端处理"
 	default:
 		action := out.Action
-		if action != "allow" && action != "deny" {
-			action = "passthrough" // 空的或不认识的结论按不作决定处理，钩子总能收到答复
+		unreachable := out.DecidedBy == hubUnreachable
+		if (action != "allow" && action != "deny") || unreachable {
+			// 空的或不认识的结论按不作决定处理，钩子总能收到答复；hub 不可达时不可能有决定，只能交回终端。
+			action = "passthrough"
 		}
+		// 备注只进审计，不写进 resp：钩子与模型看不到手机上的自由文本。
 		resp.Decision, resp.Reason, resp.RuleID = action, out.Reason, out.RuleID
-		entry.Action, entry.DecidedBy, entry.Reason, entry.RuleID = action, out.DecidedBy, out.Reason, out.RuleID
-		switch action {
-		case "allow":
+		entry.Action, entry.DecidedBy, entry.Reason, entry.RuleID, entry.Note = action, out.DecidedBy, out.Reason, out.RuleID, out.Note
+		switch {
+		case unreachable:
+			entry.State = "expired"
+		case action == "allow":
 			entry.State = "approved"
-		case "deny":
+		case action == "deny":
 			entry.State = "denied"
 		default:
 			entry.State = "passthrough"
@@ -299,9 +340,13 @@ func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request,
 	return resp
 }
 
+// writeAudit 写本地审计，再把副本交给转发目标（若有）。本地写失败也照样转发。
 func (s *Server) writeAudit(e AuditEntry) {
 	if err := s.audit.Write(e); err != nil {
 		s.log.Printf("写审计: %v", err)
+	}
+	if b := s.sink.Load(); b != nil {
+		b.sink.Forward(e)
 	}
 }
 
@@ -322,20 +367,18 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 	ok := proto.ControlReply{V: proto.Version, OK: true}
 	switch c.Op {
 	case "status":
-		ok.Status = &proto.Status{Paused: s.rules.Paused(), Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String()}
+		s.pauseMu.Lock()
+		paused, local, hub := s.rules.Paused(), s.localPaused, s.hubPaused
+		s.pauseMu.Unlock()
+		ok.Status = &proto.Status{Paused: paused, LocalPaused: local, HubPaused: hub, Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String()}
 		return ok
 	case "pause", "resume":
-		// 顺序保证过渡期间运行中的守护进程总处在更保守的一边：暂停先改内存立即生效再落盘，
-		// 恢复先落盘再改内存。落盘失败也照样切换并写审计，只是回复 OK:false 说明重启后不会保留。
+		// 只改本机这一侧；hub 暂停时本机 resume 不会解除生效的暂停。
+		// 落盘失败也照样切换并写审计，只是回复 OK:false 说明重启后不会保留。
 		pause := c.Op == "pause"
-		var err error
-		if pause {
-			s.rules.SetPaused(true)
-			err = saveState(s.cfg.StatePath, state{Paused: true})
-		} else {
-			err = saveState(s.cfg.StatePath, state{Paused: false})
-			s.rules.SetPaused(false)
-		}
+		s.pauseMu.Lock()
+		err := s.setPauseLocked(pause, s.hubPaused)
+		s.pauseMu.Unlock()
 		entry := AuditEntry{TS: time.Now(), Kind: "control", State: "recorded", Message: c.Op}
 		if err != nil {
 			done := "已恢复"
@@ -360,10 +403,56 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 	}
 }
 
-// LoadState 从 state.json 恢复暂停状态，启动时调用。状态文件读不了或损坏时按暂停启动并返回错误，
-// 调用方记日志即可，不必退出。
+// SetHubPaused 设置 hub 下发的总开关（hub 客户端收到 welcome、paused 帧时调用）。只改 hub 这一侧，
+// 本机的 pause/resume 不受影响，生效值取两者的或。值没变时什么都不做；变化时写 state.json
+// 和审计（kind control，decided_by hub）。落盘失败也照样切换并写审计，返回错误说明重启后不会保留。
+func (s *Server) SetHubPaused(p bool) error {
+	s.pauseMu.Lock()
+	if s.hubPaused == p {
+		s.pauseMu.Unlock()
+		return nil
+	}
+	err := s.setPauseLocked(s.localPaused, p)
+	s.pauseMu.Unlock()
+	op, done := "resume", "hub 总开关已恢复"
+	if p {
+		op, done = "pause", "hub 总开关已暂停"
+	}
+	entry := AuditEntry{TS: time.Now(), Kind: "control", State: "recorded", Message: op, DecidedBy: "hub"}
+	if err != nil {
+		err = fmt.Errorf("%s，但未能持久化: %w", done, err)
+		entry.Reason = err.Error()
+		s.log.Printf("写状态文件: %v", err)
+	}
+	s.writeAudit(entry)
+	return err
+}
+
+// setPauseLocked 把两个开关改成 local、hub，生效值（两者取或）交给引擎，并把两者一起原子写进 state.json。
+// 顺序保证过渡期间运行中的守护进程总处在更保守的一边：生效值为暂停时先改内存立即生效再落盘，
+// 解除暂停时先落盘再改内存。落盘失败也照样切换，错误交调用方说明。调用方持有 pauseMu。
+func (s *Server) setPauseLocked(local, hub bool) error {
+	st := state{Paused: local, HubPaused: hub}
+	if local || hub {
+		s.applyPauseLocked(local, hub)
+		return saveState(s.cfg.StatePath, st)
+	}
+	err := saveState(s.cfg.StatePath, st)
+	s.applyPauseLocked(local, hub)
+	return err
+}
+
+func (s *Server) applyPauseLocked(local, hub bool) {
+	s.localPaused, s.hubPaused = local, hub
+	s.rules.SetPaused(local || hub)
+}
+
+// LoadState 从 state.json 恢复本机与 hub 两个暂停开关，启动时调用（要在 hub 客户端开始收帧之前）。
+// 状态文件读不了或损坏时按本机暂停启动并返回错误，调用方记日志即可，不必退出。
 func (s *Server) LoadState() error {
 	st, err := loadState(s.cfg.StatePath)
-	s.rules.SetPaused(st.Paused)
+	s.pauseMu.Lock()
+	s.applyPauseLocked(st.Paused, st.HubPaused)
+	s.pauseMu.Unlock()
 	return err
 }

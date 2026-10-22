@@ -72,14 +72,16 @@ type Control struct {
 	Op   string `json:"op"` // status、pause、resume、reload
 }
 
-// Status 是守护进程状态。
+// Status 是守护进程状态。Paused 是生效值（本机暂停或 hub 暂停），LocalPaused、HubPaused 说明来源。
 type Status struct {
-	Paused    bool   `json:"paused"`
-	Rules     int    `json:"rules"`
-	Pending   int    `json:"pending"`
-	MachineID string `json:"machine_id"`
-	RulesPath string `json:"rules_path"`
-	Uptime    string `json:"uptime"`
+	Paused      bool   `json:"paused"`
+	LocalPaused bool   `json:"local_paused"`
+	HubPaused   bool   `json:"hub_paused"`
+	Rules       int    `json:"rules"`
+	Pending     int    `json:"pending"`
+	MachineID   string `json:"machine_id"`
+	RulesPath   string `json:"rules_path"`
+	Uptime      string `json:"uptime"`
 }
 
 // ControlReply 是管理命令的答复。
