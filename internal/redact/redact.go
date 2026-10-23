@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"strings"
 
 	"github.com/railse/railse-opc/internal/policy"
 )
@@ -87,12 +88,17 @@ func compile(bare string, open bool) []rule {
 }
 
 var (
-	// shellRules 用于命令行：值只在空白、引号、反斜杠处停。排除反斜杠是为了处理 JSON 原文时
+	// shellRules 用于命令行：裸值在空白、引号、反斜杠和 shell 元字符处停。排除反斜杠是为了处理 JSON 原文时
 	// 不吞掉 \" 转义，结果仍是合法 JSON。
-	// 有意不在 ; | & < > ( ) 和反引号处截断：它们在双引号和 heredoc 里是普通字符，强密码常含这些符号，
-	// 截断会漏掉后半截（如 "POSTGRES_PASSWORD=Xy7&kP(2)q"）。策略引擎用的是原文，脱敏只影响展示，
-	// 宁可连带抹掉紧贴的命令（password=abc;rm -rf / 显示为 password=<redacted> -rf /），不要改回去。
-	shellRules = compile(`[^\s'"\\]+`, false)
+	// ; | & < > ( ) 反引号 $ 在 shell 里本来就结束一个裸词（$ 开始展开，字面密码不可能未加引号地含它），
+	// 所以到这里停不会多漏秘密；引号括住的值由 quoted 整段抹，引号括住整个 KEY=值 时由 redactLiteral 按 literalRules 处理，
+	// heredoc 正文由 splitHeredocs 切出来单独按 textRules 处理。
+	// 一直抹到空白的旧做法会把 X_TOKEN=a;curl …|sh 的后半截命令藏起来，而手机上看到的就是审批依据（第 3 份终审 I4）。
+	// 反引号不能写进原始字符串，单独拼进去。
+	shellRules = compile(`[^\s'"\\;|&<>()`+"`"+`$]+`, false)
+	// literalRules 用于命令行里元字符是普通字符的片段（引号里、整行注释，见 redactLiteral）：值只在空白、引号、反斜杠处停，
+	// 免得引号括住整个 KEY=值 时（"POSTGRES_PASSWORD=Xy7&kP(2)q"）强密码只抹掉前半截。
+	literalRules = compile(`[^\s'"\\]+`, false)
 	// textRules 用于路径和 JSON 字符串叶子：没有 shell 语义，值一直抹到空白或引号，
 	// 免得含 & ( ; | 等符号的强密码只抹掉前半截。它们不会被截断，引号严格成对。
 	textRules = compile(`[^\s'"]+`, false)
@@ -111,9 +117,168 @@ func redact(s string, rules []rule) string {
 	return out
 }
 
-// String 按命令行语境返回脱敏后的副本。
+// String 按命令行语境返回脱敏后的副本。heredoc 正文没有 shell 词法，按普通文本语境处理。
 func String(s string) string {
-	return redact(s, shellRules)
+	segs := splitHeredocs(s)
+	if len(segs) == 1 && !segs[0].heredoc {
+		return redactShell(s)
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, seg := range segs {
+		if seg.heredoc {
+			b.WriteString(redact(seg.text, textRules))
+		} else {
+			b.WriteString(redactShell(seg.text))
+		}
+	}
+	return b.String()
+}
+
+// redactShell 按命令行规则脱敏一段 shell 文本（不含 heredoc 正文）：先把元字符是普通字符的片段按 literalRules 处理，
+// 再整段按 shellRules 处理。
+func redactShell(s string) string {
+	return redact(redactLiteral(s), shellRules)
+}
+
+// shellLexeme 依次认出会改变“元字符算不算普通字符”的记号：引号外的反斜杠转义、$'…'（认 \ 转义）、'…'、
+// "…"（认 \ 转义）、词首 # 开始的注释（到行尾）。引号必须成对，未闭合的不算。只用来找引号片段，不是完整的 shell 词法。
+var shellLexeme = regexp.MustCompile(`\\[\s\S]|\$'(?:[^'\\]|\\[\s\S])*'|'[^']*'|"(?:[^"\\]|\\[\s\S])*"|(?:^|[\s;&|()<>])#[^\n]*`)
+
+// redactLiteral 把引号里的文本和整行注释按 literalRules 脱敏：那里的 ; | & ( ) 是普通字符，不结束值。
+//   - 双引号里的 $( ) 和反引号是会执行的命令替换，里面还能嵌套引号，按成对引号切出的片段从这里起可能错配
+//     （echo "$(echo ")"; X=a;curl …|sh; echo "(")" 里中间那段其实是命令），所以遇到这样的双引号片段，它和之后的片段
+//     都不再整段抹，只按 shellRules 在元字符处停（代价是之后引号里的强密码可能只抹掉前半截）。
+//   - 注释照样认出来，免得注释里的 ' 跟后面的引号错配；只有独占一行的注释整段抹，跟在命令后面的注释只按 shellRules 处理，
+//     免得把看着像注释其实不是的 #（${x// #/}）后面的命令藏起来。
+func redactLiteral(s string) string {
+	locs := shellLexeme.FindAllStringIndex(s, -1)
+	var b strings.Builder
+	last := 0
+	for _, loc := range locs {
+		start, end := loc[0], loc[1]
+		switch tok := s[start:end]; tok[0] {
+		case '\\': // 引号外的转义：\" \' 不开始引号
+			continue
+		case '\'':
+			start, end = start+1, end-1
+		case '$': // $'…'
+			start, end = start+2, end-1
+		case '"':
+			if strings.Contains(tok, "$(") || strings.Contains(tok, "`") {
+				b.WriteString(s[last:])
+				return b.String()
+			}
+			start, end = start+1, end-1
+		default: // 注释，前面可能带一个分隔字符
+			hash := start + strings.IndexByte(tok, '#')
+			if !wholeLine(s, hash) {
+				continue
+			}
+			start = hash
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(redact(s[start:end], literalRules))
+		last = end
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// wholeLine 判断 s[i] 前面同一行里是否只有空格和制表符。
+func wholeLine(s string, i int) bool {
+	lineStart := strings.LastIndexByte(s[:i], '\n') + 1
+	return strings.Trim(s[lineStart:i], " \t") == ""
+}
+
+// segment 是命令文本里的一段：shell 词法部分，或 heredoc 正文。
+type segment struct {
+	text    string
+	heredoc bool
+}
+
+// heredocStart 匹配 << 或 <<- 后的分隔词：可带单引号、双引号或反斜杠（都表示正文不展开，与脱敏无关）。
+// here-string（<<<）和算术里的左移不是 heredoc，由 isHeredoc 排除。
+var heredocStart = regexp.MustCompile(`<<(-?)[ \t]*(?:'([^']+)'|"([^"]+)"|\\?([^\s'"<>|&;]+))`)
+
+// isHeredoc 判断 line[i:] 处匹配到的 << 是不是 heredoc 起点。排除三种形似的写法：
+//   - here-string：<<< 的后两个字符也能匹配上，所以前一个或后一个字符是 < 的不算；
+//   - 算术里的左移：同一行里前面有 (( 、两者之间没有 ))、后面还有 ))，即 $(( 1<<2 ))、(( x <<= 2 ))；
+//   - 脱敏结果里的 <<redacted>：< 紧跟被抹掉的裸 token（cat <ghp_…），hub 对已脱敏的载荷再跑一次时结果不能变。
+//
+// 不跟踪引号：引号里的 <<（echo "a<<b"）也当起点。错认的代价是后面几行按文本语境抹到空白（多抹），
+// 漏认则是 heredoc 正文里的强密码只抹掉前半截（漏秘密），所以宁可错认。
+func isHeredoc(line string, i int) bool {
+	if i > 0 && line[i-1] == '<' || i+2 < len(line) && line[i+2] == '<' {
+		return false
+	}
+	if strings.HasPrefix(line[i+1:], placeholder) {
+		return false
+	}
+	open := strings.LastIndex(line[:i], "((")
+	if open < 0 || strings.Contains(line[open:i], "))") {
+		return true
+	}
+	return !strings.Contains(line[i:], "))")
+}
+
+// splitHeredocs 把 heredoc 正文从命令文本里切出来。起点所在的那一行属于 shell 段；正文从下一行开始，
+// 到单独一行的分隔词为止（<<- 时允许前导制表符）；分隔词那一行又属于 shell 段。找不到结束行时正文到文本末尾。
+// 同一行有多个 heredoc 时按出现顺序依次读取正文（bash 的规则）。各段按顺序拼起来就是原文，相邻的 shell 段已合并。
+func splitHeredocs(s string) []segment {
+	var segs []segment
+	shellStart, pos := 0, 0 // 当前 shell 段的起点；下一行的起点
+	for {
+		nl := strings.IndexByte(s[pos:], '\n')
+		if nl < 0 {
+			break // 最后一行没有换行，后面没有正文可读
+		}
+		line := s[pos : pos+nl+1]
+		pos += nl + 1
+		for _, m := range heredocStart.FindAllStringSubmatchIndex(line, -1) {
+			if !isHeredoc(line, m[0]) {
+				continue
+			}
+			var word string
+			for g := 2; g <= 4; g++ {
+				if m[2*g] >= 0 {
+					word = line[m[2*g]:m[2*g+1]]
+				}
+			}
+			// 找不到结束行时 end 是 len(s)，外层循环随即结束
+			if end := heredocEnd(s, pos, word, m[3] > m[2]); end > pos {
+				segs = append(segs, segment{text: s[shellStart:pos]}, segment{text: s[pos:end], heredoc: true})
+				shellStart, pos = end, end
+			}
+		}
+	}
+	if shellStart < len(s) {
+		segs = append(segs, segment{text: s[shellStart:]})
+	}
+	return segs
+}
+
+// heredocEnd 从 s[pos:] 起找 heredoc 的结束行（strip 为 true 时即 <<-，允许前导制表符），返回正文的终点，
+// 即结束行的起点；找不到时返回 len(s)。
+func heredocEnd(s string, pos int, word string, strip bool) int {
+	for pos < len(s) {
+		line, next := s[pos:], len(s)
+		if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+			line, next = line[:nl], pos+nl+1
+		}
+		check := strings.TrimSuffix(line, "\r")
+		if strip {
+			check = strings.TrimLeft(check, "\t")
+		}
+		if check == word {
+			return pos
+		}
+		pos = next
+	}
+	return len(s)
 }
 
 // Text 按普通文本语境返回脱敏后的副本，规则与 DiffPreview 相同：值一直抹到空白或引号；文本可能被截断，
