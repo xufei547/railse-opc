@@ -22,11 +22,12 @@ const schemaVersion = 2
 // migrations 是逐版本升级的 SQL，键是升级后的版本号。改 schema.sql 时必须同时加一条迁移并提高 schemaVersion：
 // 已有库只跑迁移，不再执行 schema.sql。
 var migrations = map[int]string{
-	// 2：push_subscriptions 的 endpoint 唯一，加 user_agent 与 failures。旧库里重复的端点按 created_at 只留最早的一条。
+	// 2：push_subscriptions 的 endpoint 唯一，加 user_agent、failures 与 first_failed_at。旧库里重复的端点按 created_at 只留最早的一条。
+	// 建出的表必须与 schema.sql 的一致（TestMigratedPushSchemaMatchesFresh 核对）。
 	2: `
 CREATE TABLE push_subscriptions_v2 (
   id TEXT PRIMARY KEY, endpoint TEXT NOT NULL UNIQUE, keys TEXT NOT NULL, user_agent TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL, last_ok_at TEXT, failures INTEGER NOT NULL DEFAULT 0);
+  created_at TEXT NOT NULL, last_ok_at TEXT, failures INTEGER NOT NULL DEFAULT 0, first_failed_at TEXT);
 INSERT OR IGNORE INTO push_subscriptions_v2(id, endpoint, keys, created_at, last_ok_at)
   SELECT id, endpoint, keys, created_at, last_ok_at FROM push_subscriptions ORDER BY created_at;
 DROP TABLE push_subscriptions;

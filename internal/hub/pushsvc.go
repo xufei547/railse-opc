@@ -24,12 +24,14 @@ const (
 	// vapidSetting 是 settings 里 VAPID 私钥的键：32 字节标量的 base64url（无补位），明文（设计 5.3 例外），永不经接口返回。
 	vapidSetting    = "vapid_private"
 	pushQueueSize   = 256 // 推送队列满了就丢，记日志
-	pushMaxFailures = 5   // 连续这么多次计数的失败就删订阅
-	pushTitleLen    = 80  // 通知标题的字符上限
-	pushSummaryLen  = 160 // permission 正文里“工具名: 载荷摘要”的字符上限
-	pushRiskLen     = 32  // permission 正文里风险的字符上限
-	pushBodyLen     = 200 // 通知正文的字符上限
-	pushTTL         = 24 * time.Hour
+	pushMaxFailures = 5   // 删订阅要连续失败至少这么多次（计数的失败，见 sendOne）……
+	// pushFailureSpan ……且这一轮的第一次失败已过去这么久：几秒、几小时的推送服务故障或 hub 断网不会删光好订阅。
+	pushFailureSpan = 24 * time.Hour
+	pushTitleLen    = 80             // 通知标题的字符上限
+	pushSummaryLen  = 160            // permission 正文里“工具名: 载荷摘要”的字符上限
+	pushRiskLen     = 32             // permission 正文里风险的字符上限
+	pushBodyLen     = 200            // 通知正文的字符上限
+	pushTTL         = 24 * time.Hour // 投递 TTL 的上限；有期限的请求用剩下的期限（pushTTLFor）
 	pushTestTTL     = time.Minute
 	// pushQuestionMaxAge：事件时间早于此刻这么久的 question 不推（守护进程重连后补发的旧审计批次，见 pushWorthy）。
 	pushQuestionMaxAge     = 2 * time.Minute
@@ -122,7 +124,8 @@ type pushService struct {
 	// （10 秒超时、不跟随重定向），测试换成信任假端点证书的客户端。
 	client      *push.Client
 	queue       chan store.Request
-	sendTimeout time.Duration // 每次发送的时限，测试可缩短
+	sendTimeout time.Duration    // 每次发送的时限，测试可缩短
+	now         func() time.Time // 失败计时与 TTL 用的时钟，测试可拨
 	cancel      context.CancelFunc
 	done        chan struct{} // 工作协程退出时关闭；没起工作协程时一开始就是关的
 
@@ -141,7 +144,7 @@ func newPushService(s *Server) (*pushService, error) {
 		return nil, err
 	}
 	p := &pushService{s: s, enabled: s.cfg.PublicURL != "", client: &push.Client{VAPID: v, Subject: s.cfg.PublicURL},
-		queue: make(chan store.Request, pushQueueSize), sendTimeout: defaultPushSendTimeout, done: make(chan struct{}),
+		queue: make(chan store.Request, pushQueueSize), sendTimeout: defaultPushSendTimeout, now: time.Now, done: make(chan struct{}),
 		keySum: sha256.Sum256([]byte(raw)), vapid: v}
 	if !p.enabled {
 		close(p.done)
@@ -282,7 +285,7 @@ func (p *pushService) deliver(ctx context.Context, r store.Request) {
 		p.s.log.Printf("组请求 %s 的推送载荷: %v", clip(r.ID), err)
 		return
 	}
-	o := push.Options{TTL: pushTTL, Urgency: "high"}
+	o := push.Options{TTL: pushTTLFor(r, p.now()), Urgency: "high"}
 	if push.ValidTopic(r.ID) {
 		o.Topic = r.ID // 同一请求的未投递推送被替换
 	}
@@ -304,6 +307,19 @@ func (p *pushService) deliver(ctx context.Context, r store.Request) {
 	p.s.audit(r.MachineID, "system", r.ID, "push_sent", map[string]int{"sent": sent, "gone": gone, "failed": failed})
 }
 
+// pushTTLFor 是一条请求的投递 TTL：请求剩下的期限（expires_at − now，舍去不足 1 秒的零头），至多 pushTTL、至少 1 秒
+// （过期后才送到的通知没有用；push 包要求 TTL 至少 1 秒）。没有期限（question）或期限读不出时用 pushTTL。
+func pushTTLFor(r store.Request, now time.Time) time.Duration {
+	if r.ExpiresAt == nil {
+		return pushTTL
+	}
+	exp, err := time.Parse(time.RFC3339Nano, *r.ExpiresAt)
+	if err != nil {
+		return pushTTL
+	}
+	return min(pushTTL, max(exp.Sub(now).Truncate(time.Second), time.Second))
+}
+
 // pushOutcome 是推给一条订阅的结果。
 type pushOutcome int
 
@@ -318,7 +334,8 @@ const (
 //   - 404、410（push.ErrGone）：立即删；库里的密钥解析不了：删；
 //   - 本地错误（push.ErrLocal：载荷过大、Topic 不合法、签名出错等）、调用方 ctx 已取消（hub 关停、测试推送的请求断开）、
 //     413、429：只记日志、不计失败——问题不在订阅；
-//   - 其余（连不上、超时、5xx、其他 4xx）：MarkPushFailure，连续 pushMaxFailures 次时在同一事务里删。
+//   - 其余（连不上、超时、5xx、其他 4xx）：MarkPushFailure 计一次；连续失败至少 pushMaxFailures 次、且这一轮的第一次失败
+//     已过 pushFailureSpan 时在同一事务里删（只看次数的话，一阵短暂故障就能删光所有好订阅）。
 //
 // 删订阅都审计 push_subscription_removed {"id","origin","reason"}。日志只记订阅 id、端点的源与原因（含 StatusError.Reason），
 // 不记端点路径与密钥；返回的错误文本同样不带端点地址（仍可 errors.Is 判断）。调用方不得持有 sendMu。
@@ -361,14 +378,14 @@ func (p *pushService) sendOne(ctx context.Context, sub store.PushSubscription, m
 		p.s.log.Printf("推送到 %s（订阅 %s）被拒，不计失败: %v", origin, sub.ID, err)
 		return pushFailed, err
 	}
-	n, removed, merr := p.s.store.MarkPushFailure(sub.Endpoint, pushMaxFailures)
+	n, removed, merr := p.s.store.MarkPushFailure(sub.Endpoint, p.now(), store.PushFailureRule{Count: pushMaxFailures, Span: pushFailureSpan})
 	if merr != nil {
 		p.s.log.Printf("推送到 %s（订阅 %s）失败: %v；记失败次数出错: %v", origin, sub.ID, err, merr)
 		return pushFailed, err
 	}
 	p.s.log.Printf("推送到 %s（订阅 %s）失败（连续第 %d 次）: %v", origin, sub.ID, n, err)
 	if removed {
-		p.s.log.Printf("推送订阅 %s（%s）连续失败 %d 次，删除", sub.ID, origin, n)
+		p.s.log.Printf("推送订阅 %s（%s）连续失败 %d 次、已超过 %s，删除", sub.ID, origin, n, pushFailureSpan)
 		p.s.audit("", "system", "", "push_subscription_removed", map[string]string{"id": sub.ID, "origin": origin, "reason": "failures"})
 		return pushGone, err
 	}
@@ -472,18 +489,35 @@ func payloadSummary(pl policy.Payload) string {
 }
 
 // clean 把 s 并成一行并截到至多 n 个字符：控制字符与各种空白（含换行、U+2028）当空白，连续的并成一个空格，去掉首尾空白；
-// 不可见的格式字符（双向覆盖等，ZWNJ、ZWJ 除外，与 ValidName 同一规则）去掉，免得通知文字被伪装。先粗截再处理，超长输入不白费功夫。
+// 不可见的格式字符（零宽空格、双向覆盖等，ZWNJ、ZWJ 除外，与 ValidName 同一规则）去掉，免得通知文字被伪装。
+// 先规整再截断：边走边数，凑够 n 个字符就停，开头塞满空白或零宽字符的命令照样显示出真正的内容；截断处不留尾随空格。
 func clean(s string, n int) string {
-	s = strings.Map(func(c rune) rune {
+	var b strings.Builder
+	count, space := 0, false
+	for _, c := range s { // 非法 UTF-8 按 U+FFFD 读出，输出总是合法 UTF-8
 		switch {
-		case unicode.IsControl(c):
-			return ' '
+		case unicode.IsControl(c) || unicode.IsSpace(c):
+			space = count > 0
+			continue
 		case unicode.Is(unicode.Cf, c) && c != 0x200c && c != 0x200d:
-			return -1
+			continue
 		}
-		return c
-	}, truncate(s, 4*n))
-	return truncate(strings.Join(strings.Fields(s), " "), n)
+		need := 1
+		if space {
+			need = 2
+		}
+		if count+need > n {
+			break
+		}
+		if space {
+			b.WriteByte(' ')
+			count++
+			space = false
+		}
+		b.WriteRune(c)
+		count++
+	}
+	return b.String()
 }
 
 func joinNonEmpty(sep string, parts ...string) string {

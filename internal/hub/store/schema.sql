@@ -99,5 +99,6 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   user_agent TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   last_ok_at TEXT,
-  failures   INTEGER NOT NULL DEFAULT 0  -- 连续失败次数，成功归零
+  failures   INTEGER NOT NULL DEFAULT 0, -- 连续失败次数，成功与重新订阅时归零
+  first_failed_at TEXT                   -- 这一轮连续失败的第一次失败时刻，成功与重新订阅时清空
 );

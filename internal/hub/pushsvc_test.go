@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -72,11 +73,38 @@ func (f *fakePushEndpoint) header(i int) http.Header {
 	return f.got[i]
 }
 
+// testClock 是推送服务的可拨时钟：真实时间加一个可原子调整的偏移（工作协程与测试协程同时读写）。
+type testClock struct{ off atomic.Int64 }
+
+func (c *testClock) now() time.Time          { return time.Now().Add(time.Duration(c.off.Load())) }
+func (c *testClock) advance(d time.Duration) { c.off.Add(int64(d)) }
+
 // pushHub 起一个启用推送的 hub（--public-url https://hub.example.com），推送客户端信任假端点的证书；返回 hub 与登录 cookie。
 func pushHub(t *testing.T, f *fakePushEndpoint) (*testHub, *http.Cookie) {
 	t.Helper()
-	h := newTestHubWith(t, func(c *Config) { c.PublicURL = "https://hub.example.com" }, func(s *Server) { s.push.client.HTTP = f.srv.Client() })
-	return h, loggedIn(t, h)
+	h, ck, _ := pushHubClock(t, f)
+	return h, ck
+}
+
+// pushHubClock 同 pushHub，另给推送服务装上可拨的时钟并返回它。
+func pushHubClock(t *testing.T, f *fakePushEndpoint) (*testHub, *http.Cookie, *testClock) {
+	t.Helper()
+	clk := &testClock{}
+	h := newTestHubWith(t, func(c *Config) { c.PublicURL = "https://hub.example.com" }, func(s *Server) {
+		s.push.client.HTTP = f.srv.Client()
+		s.push.now = clk.now
+	})
+	return h, loggedIn(t, h), clk
+}
+
+// ttlHeader 取第 i 次推送的 TTL 头（秒）。
+func ttlHeader(t *testing.T, f *fakePushEndpoint, i int) int {
+	t.Helper()
+	var n int
+	if _, err := fmt.Sscan(f.header(i).Get("TTL"), &n); err != nil {
+		t.Fatalf("TTL 头: %v", err)
+	}
+	return n
 }
 
 // subKeys 是一条测试订阅的浏览器侧密钥（base64url），查泄露用。
@@ -256,7 +284,7 @@ func TestPushDisabledWithoutPublicURL(t *testing.T) {
 
 func TestPushOnNewRequestAndCleanup(t *testing.T) {
 	f := newFakePushEndpoint(t)
-	h, ck := pushHub(t, f)
+	h, ck, clk := pushHubClock(t, f)
 	body, _ := subscribeJSON(t, f.srv.URL+"/p/one")
 	subscribe(t, h, ck, body)
 	id, secret := enrollMachine(t, h, "mac")
@@ -264,7 +292,8 @@ func TestPushOnNewRequestAndCleanup(t *testing.T) {
 	defer c.close()
 	c.send(pendingFrame("r1", "s1", "t1", "git push origin main"))
 	waitFor(t, "新请求触发推送", func() bool { return f.count() == 1 })
-	if hd := f.header(0); hd.Get("Topic") != "r1" || hd.Get("Urgency") != "high" || hd.Get("TTL") != "86400" {
+	// TTL 是请求剩下的期限（pendingFrame 的期限是 86390 秒），不超过 24 小时
+	if hd, ttl := f.header(0), ttlHeader(t, f, 0); hd.Get("Topic") != "r1" || hd.Get("Urgency") != "high" || ttl < 86380 || ttl > 86390 {
 		t.Fatalf("投递参数: %v", hd)
 	}
 	waitFor(t, "审计 push_sent", func() bool {
@@ -281,18 +310,25 @@ func TestPushOnNewRequestAndCleanup(t *testing.T) {
 	c.send(pendingFrame("r2", "s1", "t2", "git push origin main"))
 	waitFor(t, "410 后删订阅", func() bool { n, _ := h.st.CountPushSubscriptions(); return n == 0 })
 	waitFor(t, "审计 gone", func() bool { return hasAudit(h, "push_subscription_removed", `"reason":"gone"`) })
-	// 连续失败 5 次：订阅删除
+	// 几秒内连续失败 5 次：只计数，订阅留着（短暂故障不删）
 	f.status.Store(500)
 	subscribe(t, h, ck, body)
 	for i := 3; i <= 7; i++ {
 		c.send(pendingFrame(fmt.Sprintf("r%d", i), "s1", fmt.Sprintf("t%d", i), "git push origin main"))
 	}
-	waitFor(t, "5 次失败后删订阅", func() bool { n, _ := h.st.CountPushSubscriptions(); return n == 0 })
+	waitFor(t, "r7 推完", func() bool { return hasAuditFor(h, "r7", "push_sent") })
+	if sub, err := h.st.GetPushSubscription(f.srv.URL + "/p/one"); err != nil || sub.Failures != 5 {
+		t.Fatalf("5 次快速失败后订阅应留着: %+v %v", sub, err)
+	}
+	// 24 小时后又失败一次：连续失败 ≥ 5 次且跨度满 24 小时，删
+	clk.advance(24 * time.Hour)
+	c.send(pendingFrame("r8", "s1", "t8", "git push origin main"))
+	waitFor(t, "跨度满 24 小时后删订阅", func() bool { n, _ := h.st.CountPushSubscriptions(); return n == 0 })
 	waitFor(t, "审计 failures", func() bool { return hasAudit(h, "push_subscription_removed", `"reason":"failures"`) })
 	// done 不推送
 	f.status.Store(201)
 	subscribe(t, h, ck, body)
-	waitFor(t, "r7 推完", func() bool { return hasAuditFor(h, "r7", "push_sent") })
+	waitFor(t, "r8 推完", func() bool { return hasAuditFor(h, "r8", "push_sent") })
 	before := f.count()
 	c.send(auditFrame(t, agentEntry("done", "s1", "DONE")))
 	waitFor(t, "done 入库", func() bool { rs, _ := h.st.ListRequests("recorded", 10); return len(rs) == 1 })
@@ -804,5 +840,162 @@ func TestConfigPublicURL(t *testing.T) {
 		if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "public-url") {
 			t.Fatalf("validate %q: %v", u, err)
 		}
+	}
+}
+
+// 推送服务短暂故障（几秒内连着 503）不删好订阅；中间成功一次就从头数；只有连续失败 ≥ 5 次且跨度满 24 小时才删。
+func TestPushFailuresNeedDaySpan(t *testing.T) {
+	f := newFakePushEndpoint(t)
+	h, ck, clk := pushHubClock(t, f)
+	a, _ := subscribeJSON(t, f.srv.URL+"/p/a")
+	b, _ := subscribeJSON(t, f.srv.URL+"/p/b")
+	subscribe(t, h, ck, a)
+	subscribe(t, h, ck, b)
+	failures := func(ep string) int {
+		t.Helper()
+		s, err := h.st.GetPushSubscription(f.srv.URL + ep)
+		if err != nil {
+			return -1
+		}
+		return s.Failures
+	}
+	n := 0
+	push := func() {
+		t.Helper()
+		n++
+		id := fmt.Sprintf("w%d", n)
+		h.srv.announceNew(store.Request{ID: id, Kind: "webhook", Title: "x", CreatedAt: store.Now()})
+		waitFor(t, id+" 推完", func() bool { return hasAuditFor(h, id, "push_sent") })
+	}
+	f.status.Store(503)
+	for i := 0; i < 6; i++ {
+		push()
+	}
+	if failures("/p/a") != 6 || failures("/p/b") != 6 {
+		t.Fatalf("几秒内 6 次 503 不应删订阅: %d %d", failures("/p/a"), failures("/p/b"))
+	}
+	// 成功一次：两条都归零
+	f.status.Store(201)
+	push()
+	if failures("/p/a") != 0 || failures("/p/b") != 0 {
+		t.Fatalf("成功后应归零: %d %d", failures("/p/a"), failures("/p/b"))
+	}
+	// 再失败 4 次，跨过 24 小时：次数不足 5，不删
+	f.status.Store(503)
+	for i := 0; i < 4; i++ {
+		push()
+		clk.advance(8 * time.Hour)
+	}
+	if failures("/p/a") != 4 {
+		t.Fatalf("不足 5 次不应删: %d", failures("/p/a"))
+	}
+	// 第 5 次：这一轮从 32 小时前开始，删
+	push()
+	if failures("/p/a") != -1 || failures("/p/b") != -1 {
+		t.Fatal("连续失败 5 次且跨度满 24 小时应删")
+	}
+	if !hasAudit(h, "push_subscription_removed", `"reason":"failures"`) {
+		t.Fatal("应审计 failures")
+	}
+}
+
+// 投递 TTL 是请求剩下的期限，至多 24 小时、至少 1 秒；没有期限（question）是 24 小时。
+func TestPushTTLFollowsExpiry(t *testing.T) {
+	now := time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *string { s := store.FormatTime(now.Add(d)); return &s }
+	bad := "not a time"
+	for _, c := range []struct {
+		name    string
+		expires *string
+		want    time.Duration
+	}{
+		{"没有期限", nil, 24 * time.Hour},
+		{"10 分钟后", at(10 * time.Minute), 10 * time.Minute},
+		{"带零头", at(10*time.Minute + 700*time.Millisecond), 10 * time.Minute},
+		{"48 小时后", at(48 * time.Hour), 24 * time.Hour},
+		{"已过期", at(-time.Minute), time.Second},
+		{"不到 1 秒", at(300 * time.Millisecond), time.Second},
+		{"格式坏", &bad, 24 * time.Hour},
+	} {
+		if got := pushTTLFor(store.Request{ExpiresAt: c.expires}, now); got != c.want {
+			t.Fatalf("%s: %v，应为 %v", c.name, got, c.want)
+		}
+	}
+
+	f := newFakePushEndpoint(t)
+	h, ck := pushHub(t, f)
+	tok := store.RandomToken()
+	if err := h.st.SetSetting("webhook_token_hash", store.HashToken(tok)); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := subscribeJSON(t, f.srv.URL+"/p/one")
+	subscribe(t, h, ck, body)
+	ingest(t, h, tok, map[string]any{"title": "部署", "callback_url": "https://n8n.example/cb", "expires_in": 600})
+	waitFor(t, "webhook 推送", func() bool { return f.count() == 1 })
+	if ttl := ttlHeader(t, f, 0); ttl < 590 || ttl > 600 {
+		t.Fatalf("webhook 的 TTL 应是剩下的期限: %d", ttl)
+	}
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{MachineID: id, Proto: wire.Proto, HomeDir: "/home/u"})
+	defer c.close()
+	c.send(auditFrame(t, agentEntry("question", "s1", "继续吗")))
+	waitFor(t, "question 推送", func() bool { return f.count() == 2 })
+	if ttl := ttlHeader(t, f, 1); ttl != 86400 {
+		t.Fatalf("question 没有期限，TTL 应为 24 小时: %d", ttl)
+	}
+}
+
+// Run 没能开始监听（ErrListen）时也停下 New 里起的推送工作协程，调用方随后可以照常关库。
+func TestRunListenFailureStopsPushWorker(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := DefaultConfig(dir)
+	cfg.Listen = busy.Addr().String()
+	cfg.PublicURL = "https://hub.example.com"
+	srv, err := New(cfg, st, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Run(context.Background()); !errors.Is(err, ErrListen) {
+		t.Fatalf("端口被占应返回 ErrListen: %v", err)
+	}
+	select {
+	case <-srv.push.done:
+	default:
+		t.Fatal("ErrListen 时推送工作协程应已退出")
+	}
+}
+
+// 摘要先去掉空白与零宽字符再截断：命令前面塞满 U+200B 或空白，摘要照样显示真正的命令。
+func TestPushMessageZeroWidthPadding(t *testing.T) {
+	r := store.Request{ID: "r1", Kind: "permission", ToolName: "Bash", Risk: "destructive",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: strings.Repeat("\u200b", 640) + strings.Repeat(" \t\n", 700) + "rm -rf ~/x"}}
+	b, err := pushMessage(r, "mac", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]string
+	if err := json.Unmarshal(b, &m); err != nil || m["body"] != "Bash: rm -rf ~/x · 风险 destructive" {
+		t.Fatalf("摘要: %q %v", m["body"], err)
+	}
+	// 截断后不留尾随空格
+	if got := clean("abcd efgh", 5); got != "abcd" {
+		t.Fatalf("clean = %q", got)
+	}
+	if got := clean("  a\u200b\u200bb  \n c ", 10); got != "ab c" {
+		t.Fatalf("clean = %q", got)
 	}
 }

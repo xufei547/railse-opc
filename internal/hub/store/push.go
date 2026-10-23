@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // PushSubscription 是一条 Web Push 订阅。P256dh、Auth 是浏览器给的 base64url 串，明文存（设计 5.3 例外）：
@@ -18,6 +19,8 @@ type PushSubscription struct {
 	CreatedAt string
 	LastOkAt  *string
 	Failures  int
+	// FirstFailedAt 是这一轮连续失败的第一次失败时刻（timeLayout），没有在失败时为 nil。
+	FirstFailedAt *string
 	// Broken 表示 keys 列解不开（迁移来的旧行、手改的库）：P256dh、Auth 为空。这样的行照样列出、不让整个列表失败，
 	// 由调用方记日志并删掉。
 	Broken bool
@@ -28,9 +31,9 @@ type pushKeys struct {
 	Auth   string `json:"auth"`
 }
 
-const pushCols = "id, endpoint, keys, user_agent, created_at, last_ok_at, failures"
+const pushCols = "id, endpoint, keys, user_agent, created_at, last_ok_at, failures, first_failed_at"
 
-// UpsertPushSubscription 按端点登记或更新订阅：同一端点重新订阅时换 keys 与 UA，连续失败归零，id、created_at 不变。
+// UpsertPushSubscription 按端点登记或更新订阅：同一端点重新订阅时换 keys 与 UA，连续失败与 first_failed_at 归零，id、created_at 不变。
 // 一条语句写入并扫回写进去的行（RETURNING）：不会在写与读之间被别处删掉而返回 ErrNotFound。
 func (s *Store) UpsertPushSubscription(endpoint, p256dh, auth, userAgent string) (PushSubscription, error) {
 	if endpoint == "" || p256dh == "" || auth == "" {
@@ -41,7 +44,7 @@ func (s *Store) UpsertPushSubscription(endpoint, p256dh, auth, userAgent string)
 		return PushSubscription{}, err
 	}
 	p, err := scanPush(s.db.QueryRow(`INSERT INTO push_subscriptions(id, endpoint, keys, user_agent, created_at) VALUES(?, ?, ?, ?, ?)
-		ON CONFLICT(endpoint) DO UPDATE SET keys = excluded.keys, user_agent = excluded.user_agent, failures = 0
+		ON CONFLICT(endpoint) DO UPDATE SET keys = excluded.keys, user_agent = excluded.user_agent, failures = 0, first_failed_at = NULL
 		RETURNING `+pushCols, NewID(), endpoint, string(keys), userAgent, Now()))
 	if err != nil {
 		return PushSubscription{}, fmt.Errorf("登记推送订阅: %w", err)
@@ -53,7 +56,7 @@ func (s *Store) UpsertPushSubscription(endpoint, p256dh, auth, userAgent string)
 func scanPush(row interface{ Scan(...any) error }) (PushSubscription, error) {
 	var p PushSubscription
 	var keys string
-	if err := row.Scan(&p.ID, &p.Endpoint, &keys, &p.UserAgent, &p.CreatedAt, &p.LastOkAt, &p.Failures); err != nil {
+	if err := row.Scan(&p.ID, &p.Endpoint, &keys, &p.UserAgent, &p.CreatedAt, &p.LastOkAt, &p.Failures, &p.FirstFailedAt); err != nil {
 		return PushSubscription{}, err
 	}
 	var k pushKeys
@@ -102,32 +105,42 @@ func (s *Store) DeletePushSubscription(endpoint string) (bool, error) {
 	return n > 0, err
 }
 
-// MarkPushOK 记一次成功：last_ok_at 更新，连续失败归零。
+// MarkPushOK 记一次成功：last_ok_at 更新，连续失败与 first_failed_at 归零。
 func (s *Store) MarkPushOK(endpoint string) error {
-	_, err := s.db.Exec("UPDATE push_subscriptions SET last_ok_at = ?, failures = 0 WHERE endpoint = ?", Now(), endpoint)
+	_, err := s.db.Exec("UPDATE push_subscriptions SET last_ok_at = ?, failures = 0, first_failed_at = NULL WHERE endpoint = ?", Now(), endpoint)
 	return err
 }
 
-// MarkPushFailure 连续失败加一，返回新值；新值达到 limit（limit > 0）时在同一事务里删掉这条订阅，removed 为 true。
-// 端点不存在时返回 0、false。同一事务里先加后删：用户在两次失败之间重新订阅（failures 归零）后，
-// 不会因为之前数到的次数把刚登记的订阅删掉。
-func (s *Store) MarkPushFailure(endpoint string, limit int) (failures int, removed bool, err error) {
+// PushFailureRule 是因失败删订阅的门槛：连续失败至少 Count 次，且这一轮的第一次失败距这次失败至少 Span。
+// Count ≤ 0 表示只计数、不删。只看次数会让几秒的推送服务故障（一串 503、hub 断网、时钟跳变）删光所有好订阅。
+type PushFailureRule struct {
+	Count int
+	Span  time.Duration
+}
+
+// MarkPushFailure 在时刻 now 记一次失败：连续失败加一，这一轮的第一次失败时记 first_failed_at = now；返回新的次数。
+// 次数达到 rule.Count 且 first_failed_at 不晚于 now − rule.Span 时，在同一事务里删掉这条订阅，removed 为 true。
+// 端点不存在时返回 0、false。加计数与删除在同一事务里、删除带条件：用户在两次失败之间重新订阅（次数与 first_failed_at 归零）后，
+// 之前数到的不会把刚登记的订阅删掉。
+func (s *Store) MarkPushFailure(endpoint string, now time.Time, rule PushFailureRule) (failures int, removed bool, err error) {
 	err = s.Tx(func(tx *sql.Tx) error {
-		err := tx.QueryRow("UPDATE push_subscriptions SET failures = failures + 1 WHERE endpoint = ? RETURNING failures", endpoint).Scan(&failures)
+		err := tx.QueryRow("UPDATE push_subscriptions SET failures = failures + 1, first_failed_at = COALESCE(first_failed_at, ?) WHERE endpoint = ? RETURNING failures",
+			fmtTime(now), endpoint).Scan(&failures)
 		if errors.Is(err, sql.ErrNoRows) {
 			failures = 0
 			return nil
 		}
+		if err != nil || rule.Count <= 0 {
+			return err
+		}
+		res, err := tx.Exec("DELETE FROM push_subscriptions WHERE endpoint = ? AND failures >= ? AND first_failed_at <= ?",
+			endpoint, rule.Count, fmtTime(now.Add(-rule.Span)))
 		if err != nil {
 			return err
 		}
-		if limit > 0 && failures >= limit {
-			if _, err := tx.Exec("DELETE FROM push_subscriptions WHERE endpoint = ?", endpoint); err != nil {
-				return err
-			}
-			removed = true
-		}
-		return nil
+		n, err := res.RowsAffected()
+		removed = n > 0
+		return err
 	})
 	if err != nil {
 		return 0, false, err

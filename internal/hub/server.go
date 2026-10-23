@@ -242,12 +242,16 @@ func (s *Server) Handler() http.Handler { return s.mux }
 // 再等 WebSocket handler（/ws/agent、/ws/client）全部退出；然后停下过期扫描；最后同时取消在跑的 webhook 回调与推送工作协程
 // 并等它们退出（见 stopBackground）。截止时间被前面的步骤耗尽时，它们仍有 callbackStopGrace 的收尾宽限，总关停不超过
 // shutdownTimeout + callbackStopGrace。返回 nil 时 WebSocket 处理、回调与推送都已退出，调用方可以关库；没能开始监听时立即返回
-// 满足 errors.Is(err, ErrListen) 的错误（什么都没开始跑，也可以关库）；服务自己出错结束时返回那个错误；
+// 满足 errors.Is(err, ErrListen) 的错误（服务没开始，New 里起的推送工作协程也已停下，可以关库）；服务自己出错结束时返回那个错误；
 // 有没等到退出的（含 HTTP 收尾超时被强制断开的普通请求：断开连接不会停下它们的处理；开着却没有处理在跑的连接不算），
 // 收尾完照样返回，错误满足 errors.Is(err, ErrShutdownTimeout)。
 func (s *Server) Run(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
+		// 推送工作协程在 New 里就起了：没开始服务也要停下它，调用方随后照常关库。此时没有请求在跑，也就没有回调，立即返回
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		s.stopBackground(ctx)
+		cancel()
 		return fmt.Errorf("%w: %w", ErrListen, err) // net 的错误已带地址
 	}
 	return s.serve(ctx, ln)

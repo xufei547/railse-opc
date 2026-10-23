@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestPushSubscriptionLifecycle(t *testing.T) {
@@ -13,10 +14,10 @@ func TestPushSubscriptionLifecycle(t *testing.T) {
 	if err != nil || sub.ID == "" || sub.Endpoint != "https://web.push.apple.com/abc" || sub.Failures != 0 {
 		t.Fatalf("upsert: %+v %v", sub, err)
 	}
-	if n, removed, _ := s.MarkPushFailure(sub.Endpoint, 5); n != 1 || removed {
+	if n, removed, _ := s.MarkPushFailure(sub.Endpoint, time.Now(), testRule); n != 1 || removed {
 		t.Fatalf("failures = %d removed=%v", n, removed)
 	}
-	if n, removed, _ := s.MarkPushFailure(sub.Endpoint, 5); n != 2 || removed {
+	if n, removed, _ := s.MarkPushFailure(sub.Endpoint, time.Now(), testRule); n != 2 || removed {
 		t.Fatalf("failures = %d removed=%v", n, removed)
 	}
 	// 同一端点重新订阅：换 keys、failures 归零、id 不变
@@ -24,7 +25,7 @@ func TestPushSubscriptionLifecycle(t *testing.T) {
 	if err != nil || again.ID != sub.ID || again.P256dh != "p2" || again.Auth != "a2" || again.Failures != 0 || again.UserAgent != "ua2" {
 		t.Fatalf("重新订阅: %+v %v", again, err)
 	}
-	s.MarkPushFailure(sub.Endpoint, 5)
+	s.MarkPushFailure(sub.Endpoint, time.Now(), testRule)
 	if err := s.MarkPushOK(sub.Endpoint); err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +50,7 @@ func TestPushSubscriptionLifecycle(t *testing.T) {
 	if _, err := s.GetPushSubscription(sub.Endpoint); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("删后应 ErrNotFound: %v", err)
 	}
-	if n, removed, err := s.MarkPushFailure(sub.Endpoint, 5); err != nil || n != 0 || removed {
+	if n, removed, err := s.MarkPushFailure(sub.Endpoint, time.Now(), testRule); err != nil || n != 0 || removed {
 		t.Fatalf("不存在的端点 MarkPushFailure = %d, %v, %v", n, removed, err)
 	}
 	if _, err := s.UpsertPushSubscription("", "p", "a", ""); err == nil {
@@ -70,7 +71,7 @@ func TestUpsertPushSubscriptionReturnsRow(t *testing.T) {
 	if err := s.MarkPushOK(first.Endpoint); err != nil {
 		t.Fatal(err)
 	}
-	s.MarkPushFailure(first.Endpoint, 5)
+	s.MarkPushFailure(first.Endpoint, time.Now(), testRule)
 	again, err := s.UpsertPushSubscription(first.Endpoint, "p2", "a2", "ua2")
 	if err != nil || again.ID != first.ID || again.CreatedAt != first.CreatedAt || again.LastOkAt == nil ||
 		again.P256dh != "p2" || again.Auth != "a2" || again.UserAgent != "ua2" || again.Failures != 0 || again.Broken {
@@ -86,38 +87,100 @@ func TestUpsertPushSubscriptionReturnsRow(t *testing.T) {
 	}
 }
 
-// 连续失败达到上限时 MarkPushFailure 在同一事务里删掉订阅；没达到不删。用户在两次失败之间重新订阅（failures 归零），
-// 之后的失败从 1 重新数，不会删掉刚登记的订阅。
-func TestMarkPushFailureRemovesAtLimit(t *testing.T) {
+// testRule 是 hub 用的删订阅门槛：连续 5 次，且这一轮第一次失败已过 24 小时。
+var testRule = PushFailureRule{Count: 5, Span: 24 * time.Hour}
+
+// 删订阅要同时满足：连续失败至少 5 次，且这一轮第一次失败（first_failed_at）距这次失败至少 24 小时。
+// 几秒内连着 5 次失败（推送服务或 hub 短暂故障）不删；计数与删除在同一事务里，删除带条件。
+func TestMarkPushFailureNeedsCountAndSpan(t *testing.T) {
 	s := openTemp(t)
+	t0 := time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)
 	sub, _ := s.UpsertPushSubscription("https://push.example/a", "p", "a", "")
-	for i := 1; i <= 4; i++ {
-		if n, removed, err := s.MarkPushFailure(sub.Endpoint, 5); err != nil || n != i || removed {
+	first := func() string {
+		t.Helper()
+		got, err := s.GetPushSubscription(sub.Endpoint)
+		if err != nil {
+			t.Fatalf("订阅不应被删: %v", err)
+		}
+		if got.FirstFailedAt == nil {
+			return ""
+		}
+		return *got.FirstFailedAt
+	}
+	// 几秒内 5 次：计到 5，不删；first_failed_at 是第一次失败的时刻
+	for i := 1; i <= 5; i++ {
+		n, removed, err := s.MarkPushFailure(sub.Endpoint, t0.Add(time.Duration(i-1)*time.Second), testRule)
+		if err != nil || n != i || removed {
 			t.Fatalf("第 %d 次: %d %v %v", i, n, removed, err)
 		}
 	}
-	// 用户此刻重新订阅：failures 归零
+	if first() != FormatTime(t0) {
+		t.Fatalf("first_failed_at = %q", first())
+	}
+	// 跨度差 1 秒不到 24 小时：仍不删
+	if n, removed, _ := s.MarkPushFailure(sub.Endpoint, t0.Add(24*time.Hour-time.Second), testRule); n != 6 || removed {
+		t.Fatalf("跨度不足 24 小时不应删: %d %v", n, removed)
+	}
+	// 跨度满 24 小时：删
+	if n, removed, err := s.MarkPushFailure(sub.Endpoint, t0.Add(24*time.Hour), testRule); err != nil || n != 7 || !removed {
+		t.Fatalf("满 5 次且跨度满 24 小时应删: %d %v %v", n, removed, err)
+	}
+	if _, err := s.GetPushSubscription(sub.Endpoint); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("应已删除: %v", err)
+	}
+
+	// 正好第 5 次时跨度满 24 小时：删
+	sub, _ = s.UpsertPushSubscription("https://push.example/b", "p", "a", "")
+	for i, at := range []time.Duration{0, time.Hour, 2 * time.Hour, 3 * time.Hour} {
+		if _, removed, _ := s.MarkPushFailure(sub.Endpoint, t0.Add(at), testRule); removed {
+			t.Fatalf("第 %d 次不应删", i+1)
+		}
+	}
+	if n, removed, _ := s.MarkPushFailure(sub.Endpoint, t0.Add(24*time.Hour), testRule); n != 5 || !removed {
+		t.Fatalf("第 5 次、跨度 24 小时应删: %d %v", n, removed)
+	}
+
+	// 跨度够但次数不足 5：不删
+	sub, _ = s.UpsertPushSubscription("https://push.example/c", "p", "a", "")
+	for i := 0; i < 4; i++ {
+		if _, removed, _ := s.MarkPushFailure(sub.Endpoint, t0.Add(time.Duration(i)*16*time.Hour), testRule); removed {
+			t.Fatal("不足 5 次不应删")
+		}
+	}
+
+	// 中间成功一次：次数与 first_failed_at 都归零，之后重新起算
+	if err := s.MarkPushOK(sub.Endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetPushSubscription(sub.Endpoint); got.Failures != 0 || got.FirstFailedAt != nil {
+		t.Fatalf("成功后应归零: %+v", got)
+	}
+	t1 := t0.Add(100 * time.Hour)
+	for i := 1; i <= 5; i++ {
+		if n, removed, _ := s.MarkPushFailure(sub.Endpoint, t1.Add(time.Duration(i)*time.Second), testRule); n != i || removed {
+			t.Fatalf("成功之后第 %d 次: %d %v", i, n, removed)
+		}
+	}
+	if first() != FormatTime(t1.Add(time.Second)) {
+		t.Fatalf("成功之后 first_failed_at 应重新起算: %q", first())
+	}
+
+	// 重新订阅同样归零：之前数到的次数与时刻不会把刚登记的订阅删掉
 	if _, err := s.UpsertPushSubscription(sub.Endpoint, "p2", "a2", ""); err != nil {
 		t.Fatal(err)
 	}
-	if n, removed, _ := s.MarkPushFailure(sub.Endpoint, 5); n != 1 || removed {
-		t.Fatalf("重新订阅后应从 1 数起: %d %v", n, removed)
+	if got, _ := s.GetPushSubscription(sub.Endpoint); got.Failures != 0 || got.FirstFailedAt != nil {
+		t.Fatalf("重新订阅后应归零: %+v", got)
 	}
-	for i := 2; i <= 4; i++ {
-		s.MarkPushFailure(sub.Endpoint, 5)
+	if n, removed, _ := s.MarkPushFailure(sub.Endpoint, t1.Add(48*time.Hour), testRule); n != 1 || removed {
+		t.Fatalf("重新订阅后从 1 数起: %d %v", n, removed)
 	}
-	n, removed, err := s.MarkPushFailure(sub.Endpoint, 5)
-	if err != nil || n != 5 || !removed {
-		t.Fatalf("第 5 次应删: %d %v %v", n, removed, err)
-	}
-	if _, err := s.GetPushSubscription(sub.Endpoint); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("达到上限后应已删除: %v", err)
-	}
-	// limit ≤ 0 时只计数不删
-	s.UpsertPushSubscription(sub.Endpoint, "p", "a", "")
+
+	// Count ≤ 0：只计数不删
+	sub, _ = s.UpsertPushSubscription("https://push.example/d", "p", "a", "")
 	for i := 0; i < 7; i++ {
-		if _, removed, _ := s.MarkPushFailure(sub.Endpoint, 0); removed {
-			t.Fatal("limit 0 不应删")
+		if _, removed, _ := s.MarkPushFailure(sub.Endpoint, t0.Add(time.Duration(i)*24*time.Hour), PushFailureRule{}); removed {
+			t.Fatal("Count 0 不应删")
 		}
 	}
 }

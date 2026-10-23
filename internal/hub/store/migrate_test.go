@@ -2,7 +2,10 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -110,5 +113,81 @@ func TestFreshDBIsV2(t *testing.T) {
 	var n int
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('push_subscriptions') WHERE name = 'failures'").Scan(&n); err != nil || n != 1 {
 		t.Fatalf("新库应有 failures 列: %d %v", n, err)
+	}
+}
+
+// pushSchema 描述 push_subscriptions 的列（pragma table_info）与索引（pragma index_list + index_info，不比索引名：
+// 迁移里的表是建成 _v2 再改名的，自动索引的名字可能不同）。
+func pushSchema(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	var out []string
+	rows, err := db.Query("SELECT cid, name, type, \"notnull\", COALESCE(dflt_value, 'NULL'), pk FROM pragma_table_info('push_subscriptions') ORDER BY cid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ, dflt string
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, fmt.Sprintf("col %d %s %s notnull=%d default=%s pk=%d", cid, name, typ, notnull, dflt, pk))
+	}
+	rows.Close()
+	type index struct {
+		name                    string
+		unique, partial, origin string
+	}
+	var idx []index
+	rows, err = db.Query("SELECT name, \"unique\", partial, origin FROM pragma_index_list('push_subscriptions')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var x index
+		if err := rows.Scan(&x.name, &x.unique, &x.partial, &x.origin); err != nil {
+			t.Fatal(err)
+		}
+		idx = append(idx, x)
+	}
+	rows.Close()
+	var idxDesc []string
+	for _, x := range idx {
+		var cols []string
+		r, err := db.Query("SELECT name FROM pragma_index_info(?) ORDER BY seqno", x.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for r.Next() {
+			var c string
+			r.Scan(&c)
+			cols = append(cols, c)
+		}
+		r.Close()
+		idxDesc = append(idxDesc, fmt.Sprintf("index (%s) unique=%s partial=%s origin=%s", strings.Join(cols, ","), x.unique, x.partial, x.origin))
+	}
+	slices.Sort(idxDesc)
+	return append(out, idxDesc...)
+}
+
+// 迁移 2 与 schema.sql 建出的 push_subscriptions 必须一模一样：改 schema.sql 时迁移要同步改。
+func TestMigratedPushSchemaMatchesFresh(t *testing.T) {
+	fresh := openTemp(t)
+	path := filepath.Join(tempDir(t), "hub.db")
+	writeRaw(t, path, v1PushSQL)
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	a, b := pushSchema(t, fresh.db), pushSchema(t, migrated.db)
+	if !slices.Equal(a, b) {
+		t.Fatalf("新库与迁移后的库不一致:\n新库:\n%s\n迁移:\n%s", strings.Join(a, "\n"), strings.Join(b, "\n"))
+	}
+	if !slices.ContainsFunc(a, func(s string) bool { return strings.Contains(s, " first_failed_at TEXT notnull=0 default=NULL") }) {
+		t.Fatalf("应有可空的 first_failed_at 列:\n%s", strings.Join(a, "\n"))
+	}
+	if !slices.ContainsFunc(a, func(s string) bool { return strings.HasPrefix(s, "index (endpoint) unique=1") }) {
+		t.Fatalf("应有 endpoint 唯一索引:\n%s", strings.Join(a, "\n"))
 	}
 }
