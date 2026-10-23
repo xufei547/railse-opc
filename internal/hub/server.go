@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/railse/railse-opc/internal/hub/webui"
 )
 
 // ErrShutdownTimeout 表示 Run 关停时没在时限内等到全部在途请求、WebSocket 处理（/ws/agent、/ws/client）、webhook 回调或推送工作协程退出。
@@ -132,6 +133,8 @@ type Server struct {
 	afterCallbackPost func()
 	// push 是 Web Push：VAPID 密钥、发送客户端与推送队列。New 里建，推送启用时工作协程随之起，stopBackground 停。
 	push *pushService
+	// web 托管网页（webui）：s.mux 没有路由的路径都交给它，见 serveRoot。New 里建，测试可在开始服务前换成自己的构建产物。
+	web http.Handler
 }
 
 // tracker 计在跑的后台工作（WebSocket handler、webhook 回调）。shutdown 之后不再接纳新的，并给出全部退出时关闭的通道。
@@ -219,11 +222,13 @@ func New(cfg Config, st *store.Store, logger *log.Logger) (*Server, error) {
 	}
 	s.push = ps
 	s.cbCtx, s.cbCancel = context.WithCancel(context.Background())
+	s.web = webui.Handler(webui.FS())
 	s.routes()
 	return s, nil
 }
 
 // routes 注册认证、接入与守护进程入口，再注册网页用的接口（apiRoutes）；后面的 Task 往里加。
+// 网页（s.web）不挂在 s.mux 上，由根处理器 serveRoot 兜底，见那里。
 func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/logout", sameOrigin(s.handleLogout))
@@ -234,8 +239,41 @@ func (s *Server) routes() {
 	s.pushRoutes()
 }
 
-// Handler 返回根处理器。
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler 返回根处理器（serveRoot）。
+func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serveRoot) }
+
+// serveRoot 是根处理器：s.mux 对这个路径有路由（不论方法）就交给它，方法不对时由它回 405 并带 Allow；没有路由的交给网页：
+// 网页路径回文件或 index.html，/api/、/ws/ 下的回 404 JSON。
+// 不在 s.mux 上挂 "/"：挂了的话方法不对的接口请求（如 GET /api/requests/x/decide）会匹配到 "/"，405 变成 404。
+func (s *Server) serveRoot(w http.ResponseWriter, r *http.Request) {
+	if s.routed(r) {
+		s.mux.ServeHTTP(w, r)
+		return
+	}
+	s.web.ServeHTTP(w, r)
+}
+
+// routeProbeMethods 是 routed 判断“路径有路由、只是方法不对”时试的方法（GET 路由同时匹配 HEAD）。
+var routeProbeMethods = []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions}
+
+// routed 报告 s.mux 对 r 的路径有路由：r 的方法有匹配（含 mux 会重定向到规范路径的写法），或换成别的方法有匹配（mux 会回 405）。
+// 只查不处理：真正的处理仍走 s.mux.ServeHTTP，路径参数（r.PathValue）由它填。
+func (s *Server) routed(r *http.Request) bool {
+	if _, p := s.mux.Handler(r); p != "" {
+		return true
+	}
+	probe := *r
+	for _, m := range routeProbeMethods {
+		if m == r.Method {
+			continue
+		}
+		probe.Method = m
+		if _, p := s.mux.Handler(&probe); p != "" {
+			return true
+		}
+	}
+	return false
+}
 
 // Run 监听直到 ctx 取消，或 HTTP 服务自己出错结束（如监听器坏了）。请求的 context 派生自 ctx，两种情况下都会被取消，
 // 长连接与在途请求都能看到。两种情况走同一套关停，各步共用一个截止时间（shutdownTimeout）：先等在途请求，超时就强制断开；
@@ -263,7 +301,7 @@ func (s *Server) serve(parent context.Context, ln net.Listener) error {
 	// 不取消的话 /ws/client 的 handler 一直挂着，关停等不到它们退出。
 	ctx, cancelRun := context.WithCancel(parent)
 	defer cancelRun()
-	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.countRequests(s.mux), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
+	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.countRequests(s.Handler()), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
 	s.log.Printf("hub 监听 %s", ln.Addr())
 	// 过期扫描随 Run 结束：Run 返回前等它退出，调用方随后关库也不会撞上它

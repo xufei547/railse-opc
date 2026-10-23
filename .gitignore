@@ -4,7 +4,8 @@
 *.out
 .DS_Store
 web/node_modules/
-web/dist/
+internal/hub/webui/dist/*
+!internal/hub/webui/dist/.gitkeep
 .claude/worktrees/
 .superpowers/
 spike/

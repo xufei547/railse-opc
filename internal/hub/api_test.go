@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/railse/railse-opc/internal/hub/webui"
 	"github.com/railse/railse-opc/internal/hub/wire"
 	"github.com/railse/railse-opc/internal/policy"
 	"github.com/railse/railse-opc/internal/proto"
@@ -2072,5 +2074,75 @@ func TestRuleAnchor(t *testing.T) {
 		if got := ruleAnchor(policy.Rule{Match: tc.m}); got != tc.want {
 			t.Fatalf("ruleAnchor(%+v) = %q, 应 %q", tc.m, got, tc.want)
 		}
+	}
+}
+
+func TestRootServesWebUIOrNotBuilt(t *testing.T) {
+	h := newTestHub(t)
+	resp := doReq(t, "GET", h.http.URL+"/r/abc", nil, "", nil)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("根路径: %d", resp.StatusCode)
+	}
+	if resp := doReq(t, "GET", h.http.URL+"/api/nope", nil, "", nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("未知接口应 404: %d", resp.StatusCode)
+	}
+}
+
+// 挂上网页之后：网页路径回页面（单页回退）；/api/、/ws/ 下没有的接口回 404 JSON；路径对、方法不对的接口仍回 405 并带 Allow；
+// 已有接口照常处理。
+func TestWebUIMountKeepsAPIRouting(t *testing.T) {
+	built := fstest.MapFS{
+		"index.html": {Data: []byte("<!doctype html><title>Railse</title>")},
+		"sw.js":      {Data: []byte("self.addEventListener('push',()=>{})")},
+	}
+	h := newTestHubWith(t, nil, func(s *Server) { s.web = webui.Handler(built) })
+
+	for _, path := range []string{"/", "/r/abc", "/rules"} {
+		resp := doReq(t, "GET", h.http.URL+path, nil, "", nil)
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "<title>Railse</title>") {
+			t.Fatalf("%s: %d %q", path, resp.StatusCode, body)
+		}
+		if resp.Header.Get("X-Frame-Options") != "DENY" || !strings.Contains(resp.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+			t.Fatalf("%s 安全头: %v", path, resp.Header)
+		}
+	}
+	if resp := doReq(t, "GET", h.http.URL+"/sw.js", nil, "", nil); resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/javascript") {
+		t.Fatalf("sw.js: %d %v", resp.StatusCode, resp.Header)
+	}
+
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/api/nope"}, {"POST", "/api/nope"}, {"GET", "/ws/nope"}, {"GET", "/api/requests/x/y/z"}, {"GET", "/api"},
+	} {
+		resp := doReq(t, tc.method, h.http.URL+tc.path, nil, "", nil)
+		var e struct{ Error string }
+		decodeBody(t, resp, &e)
+		if resp.StatusCode != http.StatusNotFound || e.Error != "没有这个接口" {
+			t.Fatalf("%s %s: %d %q", tc.method, tc.path, resp.StatusCode, e.Error)
+		}
+	}
+
+	for _, tc := range []struct{ method, path, allow string }{
+		{"GET", "/api/requests/x/decide", "POST"},
+		{"DELETE", "/api/status", "GET, HEAD"},
+		{"POST", "/ws/client", "GET, HEAD"},
+		{"GET", "/api/login", "POST"},
+		{"PUT", "/api/push/subscribe", "DELETE, POST"},
+	} {
+		resp := doReq(t, tc.method, h.http.URL+tc.path, nil, "", nil)
+		if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != tc.allow {
+			t.Fatalf("%s %s 应 405 且 Allow %q: %d %q", tc.method, tc.path, tc.allow, resp.StatusCode, resp.Header.Get("Allow"))
+		}
+	}
+
+	// 已有接口照常处理：没登录回 401；HEAD 走 GET 路由
+	for _, method := range []string{"GET", "HEAD"} {
+		if resp := doReq(t, method, h.http.URL+"/api/status", nil, "", nil); resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s /api/status 未登录应 401: %d", method, resp.StatusCode)
+		}
+	}
+	ck := loggedIn(t, h)
+	if resp := doReq(t, "GET", h.http.URL+"/api/status", nil, "", ck); resp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/status: %d", resp.StatusCode)
 	}
 }
