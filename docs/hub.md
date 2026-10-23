@@ -2,9 +2,9 @@
 
 ## 是什么
 
-`railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（第 4 份计划）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对每条请求只能回答放行（allow）或拒绝（deny），没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、ping、pong、error 七种。
+`railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（PWA，由 hub 同源托管，见“网页”与 [web.md](web.md)）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对每条请求只能回答放行（allow）或拒绝（deny），没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、ping、pong、error 七种。
 
-hub 还能把新请求推到手机（Web Push，见“手机推送”）；不含 TLS、PWA 页面与开机自启（见文末“已知限制”）。
+hub 还托管手机网页（见“网页”），并能把新请求推到手机（Web Push，见“手机推送”）；不含 TLS 与开机自启（见文末“已知限制”）。
 
 ## 启动
 
@@ -20,6 +20,14 @@ railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com
 - 收到 SIGINT、SIGTERM 后 5 秒内退出：断开守护进程、等在途请求、长连接处理、webhook 回调与推送收尾（正在发的推送中止，不计失败）；等不到它们退出时（含被强制断开、处理还没结束的普通请求）退出码 1，日志写“不关数据库”。
 - `railse hub webhook-token` 生成 webhook 来源令牌，明文只显示这一次，再生成一次旧的就失效。
 - `railse hub vapid [--rotate]` 打印推送公钥（库里没有就生成，hub 第一次启动时也会生成）；`--rotate` 换新密钥并在同一事务里删除全部推送订阅，提示所有手机要重新开启通知。在跑的 hub 不用重启：下一次推送、下一次网页取公钥时就从库里读到新密钥。
+
+## 网页
+
+hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 就是收件箱，用 `railse hub password` 设的密码登录。页面、通知与开发方式见 [web.md](web.md)。
+
+- **构建。** 网页的构建产物嵌在二进制里：在仓库里 `make web` 构建网页（产物进 `internal/hub/webui/dist/`，不入库），`make build` 先构建网页再编译 `./railse`。直接 `go build` 出来的二进制没有网页：网页路径回 503 与提示“网页未构建：在仓库里运行 make web 后重新构建 railse”，接口照常可用。
+- **路由。** `/api/`、`/ws/` 之外的路径都归网页：是构建产物里的文件就原样返回（`assets/` 下带哈希的长期缓存，其余 no-cache），别的路径（`/`、`/r/<id>`、`/rules` 等）回 `index.html`，由网页自己路由。HTML 带 CSP（只许同源，不许内联脚本与样式）与 `X-Frame-Options: DENY`。网页和接口同源，不用配置 CORS；hub 不回 CORS 头、写接口校验同源，别的源的网页调不了接口。
+- **推送。** 要手机推送须加 `--public-url https://<hub 域名>`（见“手机推送”）；订阅与主屏幕应用都绑在这个源上，域名从第一天起就定下，不要再换。
 
 ## 接入一台机器
 
@@ -89,6 +97,7 @@ railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com
 | `DELETE /api/push/subscribe` | cookie + 同源 | `{"endpoint"}` → 204，没有这条也 204 |
 | `POST /api/push/check` | cookie + 同源 | `{"endpoint"}` → `{"active":bool}`：hub 还有这条订阅时为 true；false 说明被清掉了（失效、换钥），网页应提示重新开启 |
 | `POST /api/push/test` | cookie + 同源 | `{"endpoint"}` → 同步发一条测试通知（标题 Railse、正文“通知正常”）：成功 204；hub 没有这条订阅 404；推送服务没收下 502（订阅已失效时 hub 已删掉它，文案提示重新开启）；推送停用 503 |
+| `GET /`（及 `/api/`、`/ws/` 以外的一切路径） | 无 | 网页：构建产物里的文件原样返回，其余路径回 `index.html`（单页回退）；只接受 GET、HEAD，其余 405；没构建时 503 提示。`/api/`、`/ws/` 下没有的接口不论方法都回 404 `{"error":"没有这个接口"}`，不回网页 |
 
 请求的 JSON 字段：`id、machine_id、session_id、kind（permission|question|done|webhook）、tool_name、payload（已脱敏）、risk、project_root、engine_reason、state、decided_by、decision_note、rule_id、turn_id、cli_session_id、title、created_at、expires_at、decided_at、delivered_at`；`/api/inbox` 的 `pending` 与 `questions`、`/api/requests`、`/api/requests/{id}` 的 `request`、decide 的返回与 `/ws/client` 推送的请求（统称“请求视图”）还带 `machine_name`（webhook 请求为空）、`project`（项目根的最后一段）与 `has_redacted`（载荷任一字段含脱敏占位符 `<redacted>` 时为 true）。`state` 取 `pending、approved、denied、cancelled、expired、auto_allowed、auto_denied、passthrough、recorded`；`delivered_at` 非空表示决定已交到钩子（或 webhook 回调已成功）。
 
@@ -162,6 +171,7 @@ server {
 
 | 现象 | 原因与处理 |
 | --- | --- |
+| 打开 hub 地址看到“网页未构建”（503） | 二进制是直接 `go build` 的，没有网页构建：在仓库里 `make build`（或先 `make web` 再 `go build`）后换上新二进制 |
 | 网页写操作或 `/ws/client` 得到 403 | 代理没传原 Host，或页面与 hub 不同源。见“部署与反向代理” |
 | 导入规则 415 | `Content-Type` 要是 `application/yaml` 或 `text/yaml` |
 | 登录或接入 429 | 同一来源一分钟内超过 5 次；在代理后面且没配 `--trusted-proxy` 时所有人共用一个来源 |
@@ -183,7 +193,7 @@ server {
 
 ## 已知限制（后续计划，不算未完成）
 
-- TLS/ACME、PWA 页面、开机自启、`railse doctor`、`railse agent status` 显示 hub 连接状态、本机 pause 反向同步到 hub。
+- TLS/ACME、开机自启、`railse doctor`、`railse agent status` 显示 hub 连接状态、本机 pause 反向同步到 hub。
 - 复合命令不能“拒绝并记住”（422），需要手写规则。
 - 吊销机器的瞬间正在登记的请求可能没被取消，按期限过期。
 - hub 重启不恢复关停时正在进行的 webhook 回调，来源需重新提交。
