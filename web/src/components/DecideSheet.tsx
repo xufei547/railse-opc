@@ -7,6 +7,7 @@ import {
   draftShown,
   goneMessage,
   initSheet,
+  isEscape,
   noteHint,
   rememberBlock,
   retryable,
@@ -14,6 +15,7 @@ import {
   sheetReducer,
   type Verdict,
 } from '../decide'
+import { inertSiblings } from '../modal'
 import type { RequestView } from '../types'
 
 interface Props {
@@ -22,8 +24,8 @@ interface Props {
   action: Verdict
   onClose: () => void
   /**
-   * 决定成功时带更新后的请求。这条已经决定不了时（decide 或 propose 回 409、404，或面板开着时它在别处有了结果）
-   * 带 null 与要告诉用户的文案：父组件关面板、显示文案并重新加载。
+   * 决定成功时带更新后的请求。这条已经决定不了时（decide 或 propose 回 409、404，或面板开着时它有了结果）
+   * 带 null 与要告诉用户的文案：父组件关面板、显示结果提示并重新加载。
    */
   onDone: (updated: RequestView | null, message?: string) => void
 }
@@ -35,16 +37,26 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
   const [note, setNote] = useState('')
   const submitting = useRef(false)
   const dialog = useRef<HTMLDivElement>(null)
+  const backdrop = useRef<HTMLDivElement>(null)
   const onDoneRef = useRef(onDone)
   useEffect(() => {
     onDoneRef.current = onDone
   }, [onDone])
 
-  // 打开时把焦点给面板（Esc 可关），背后的页面不跟着滚
+  // 打开时：背后的页面、顶栏、底部导航设为 inert（Tab、Enter 到不了背后的批准、拒绝），焦点给面板（Esc 可关），背后不跟着滚。
+  // 关闭时恢复，焦点还给打开面板的按钮；决定之后那个按钮已经不在了，由页面把焦点给结果提示
   useEffect(() => {
-    dialog.current?.focus()
+    const el = dialog.current
+    const opener = document.activeElement
+    const siblings = el?.parentElement ? Array.from(el.parentElement.children).filter((c): c is HTMLElement => c instanceof HTMLElement) : []
+    const restore = inertSiblings(siblings, [el, backdrop.current].filter((c): c is HTMLDivElement => c !== null))
+    el?.focus()
     document.body.classList.add('sheet-open')
-    return () => document.body.classList.remove('sheet-open')
+    return () => {
+      document.body.classList.remove('sheet-open')
+      restore()
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus({ preventScroll: true })
+    }
   }, [])
 
   // 开着“记住”时按当前 (动作, 范围) 取草案。序号变了（换范围、关掉再开、重试）就重新取；旧回应由 alive 与序号双重丢弃
@@ -69,9 +81,9 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
     // s.action 在面板的一生里不变（换动作时父组件换一个面板），不列进依赖
   }, [remember, seq, scope, request.id])
 
-  // 面板开着时这条在别处有了结果（终端里处理了、过期、机器吊销……）。自己提交中不算：等 decide 的结果
+  // 面板开着时这条有了结果（终端里处理了、过期、机器吊销，或上次提交超时其实已生效……）。自己提交中不算：等 decide 的结果
   useEffect(() => {
-    if (request.state !== 'pending' && !s.busy && !submitting.current) onDoneRef.current(null, goneMessage(request))
+    if (request.state !== 'pending' && !s.busy && !submitting.current) onDoneRef.current(null, goneMessage(request, s.action))
   }, [request, s.busy])
 
   async function confirm() {
@@ -101,7 +113,7 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
 
   return (
     <>
-      <div className="sheet-backdrop" onClick={close} />
+      <div className="sheet-backdrop" onClick={close} ref={backdrop} />
       <div
         className="sheet"
         role="dialog"
@@ -110,7 +122,7 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
         tabIndex={-1}
         ref={dialog}
         onKeyDown={(e) => {
-          if (e.key === 'Escape') close()
+          if (isEscape({ key: e.key, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode })) close()
         }}
       >
         <h2 id="sheet-title">

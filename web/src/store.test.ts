@@ -131,6 +131,30 @@ describe('reduce', () => {
     expect(s.tick).toBe(1)
   })
 
+  it('touched 记下每条请求最近一帧的 tick：一批里连着来的两帧都记得住', () => {
+    let s = loaded()
+    s = reduce(s, frame({ type: 'request_updated', data: req({ id: 'a', state: 'approved' }) }))
+    s = reduce(s, frame({ type: 'request_new', data: req({ id: 'c', created_at: '2026-10-23T10:00:03Z' }) }))
+    expect(s.touched).toEqual({ a: 1, c: 2 })
+    s = reduce(s, frame({ type: 'request_updated', data: req({ id: 'a', state: 'approved', delivered_at: '2026-10-23T10:00:09Z' }) }))
+    expect(s.touched.a).toBe(3)
+    // 全量拉取、坏帧不动它
+    const before = s.touched
+    s = reduce(s, { type: 'loaded', inbox: { pending: [], questions: [] }, status })
+    s = reduce(s, frame({ type: 'request_updated', data: { id: 1 } }))
+    expect(s.touched).toBe(before)
+  })
+
+  it('touched 至多留最近 200 条，挤掉最旧的', () => {
+    let s = loaded()
+    for (let i = 0; i < 205; i++) s = reduce(s, frame({ type: 'request_updated', data: req({ id: `r${i}`, state: 'approved' }) }))
+    expect(Object.keys(s.touched)).toHaveLength(200)
+    expect(s.touched.r0).toBeUndefined()
+    expect(s.touched.r4).toBeUndefined()
+    expect(s.touched.r5).toBe(6)
+    expect(s.touched.r204).toBe(205)
+  })
+
   it('连接状态与错误', () => {
     let s = reduce(initialState, { type: 'connected', connected: true })
     expect(s.connected).toBe(true)

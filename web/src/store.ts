@@ -20,6 +20,11 @@ export interface State {
    * 详情、历史页要同时盯它，断线期间漏掉的变化才会被重拉。
    */
   loads: number
+  /**
+   * 每条请求最近一帧的 tick（request_new、request_updated），至多留最近 touchedMax 条。详情页只在自己那条有帧时重拉：
+   * 一批里连着来的几帧都记得住，不像“最后一帧的 id”那样会被后一帧盖掉。
+   */
+  touched: Record<string, number>
 }
 
 export const initialState: State = {
@@ -34,6 +39,7 @@ export const initialState: State = {
   error: null,
   tick: 0,
   loads: 0,
+  touched: {},
 }
 
 export type Action =
@@ -46,6 +52,18 @@ export type Action =
   | { type: 'connected'; connected: boolean }
   | { type: 'error'; error: string | null }
   | { type: 'frame'; frame: Frame }
+
+export const touchedMax = 200
+
+/** 记下 id 最近一帧的 tick；超过 touchedMax 条时挤掉 tick 最小（最旧）的。 */
+function touch(touched: Record<string, number>, id: string, tick: number): Record<string, number> {
+  const next = { ...touched, [id]: tick }
+  const ids = Object.keys(next)
+  if (ids.length <= touchedMax) return next
+  ids.sort((a, b) => next[a]! - next[b]!)
+  for (const old of ids.slice(0, ids.length - touchedMax)) delete next[old]
+  return next
+}
 
 /** hub 的时间是定宽 UTC 文本，字典序即时间先后。 */
 function byCreated(a: RequestView, b: RequestView) {
@@ -78,7 +96,8 @@ function applyFrame(state: State, frame: Frame): State {
     case 'request_new': {
       if (!isRequestView(frame.data)) return state
       const r = frame.data
-      const next = { ...state, tick: state.tick + 1 }
+      const tick = state.tick + 1
+      const next = { ...state, tick, touched: touch(state.touched, r.id, tick) }
       // 同一会话来了任何新事件（question、done、permission），之前的问题就不再等了
       const questions = state.questions.filter((q) => !sameSession(q, r))
       if (r.kind === 'question') return { ...next, questions: [r, ...questions.filter((q) => q.id !== r.id)] }
@@ -88,7 +107,8 @@ function applyFrame(state: State, frame: Frame): State {
     case 'request_updated': {
       if (!isRequestView(frame.data)) return state
       const r = frame.data
-      const next = { ...state, tick: state.tick + 1 }
+      const tick = state.tick + 1
+      const next = { ...state, tick, touched: touch(state.touched, r.id, tick) }
       if (r.state === 'pending') return { ...next, pending: upsert(state.pending, r) }
       return { ...next, pending: state.pending.filter((x) => x.id !== r.id) }
     }

@@ -6,6 +6,7 @@ import { DecideSheet } from './DecideSheet'
 import { RequestContent } from './Payload'
 import { AuditList, RequestAttrs } from './RequestAttrs'
 import { RequestCard } from './RequestCard'
+import { ResultToast } from './ResultToast'
 
 function req(over: Partial<RequestView> = {}): RequestView {
   return {
@@ -183,5 +184,28 @@ describe('DecideSheet（初始渲染）', () => {
     expect(r).toContain('含被隐藏部分的请求不能记住')
     const ok = renderToStaticMarkup(<DecideSheet request={req()} action="allow" onClose={noop} onDone={noop} />)
     expect(ok).not.toMatch(/<input[^>]*type="checkbox"[^>]*disabled=""/)
+  })
+})
+
+describe('ResultToast', () => {
+  it('成功：绿色、role=status、标题与文案、可关闭；没有内联样式', () => {
+    const html = renderToStaticMarkup(<ResultToast view={{ tone: 'ok', title: '已生效', text: '已批准，决定正在送回 agent' }} onClose={noop} />)
+    expect(html).toMatch(/class="toast banner ok"/)
+    expect(html).toContain('role="status"')
+    expect(html).toContain('aria-live="polite"')
+    expect(html).toContain('<strong class="banner-title">已生效</strong>')
+    expect(html).toContain('已批准，决定正在送回 agent')
+    expect(html).toContain('知道了')
+    expect(html).not.toContain('style=')
+  })
+  it('没有生效：红色、role=alert', () => {
+    const html = renderToStaticMarkup(<ResultToast view={{ tone: 'warn', title: '没有生效', text: '请求已过期' }} onClose={noop} />)
+    expect(html).toMatch(/class="toast banner warn"/)
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('没有生效')
+    expect(html).toContain('请求已过期')
+  })
+  it('页面还有批准、拒绝栏时浮在它上面', () => {
+    expect(renderToStaticMarkup(<ResultToast view={{ tone: 'warn', title: '没有生效', text: 'x' }} onClose={noop} raised />)).toMatch(/class="toast banner warn raised"/)
   })
 })

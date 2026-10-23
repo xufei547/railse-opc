@@ -9,8 +9,10 @@ import {
   draftShown,
   goneMessage,
   initSheet,
+  isEscape,
   keepDecided,
   noteHint,
+  outcomeView,
   rememberBlock,
   retryable,
   scopeOptions,
@@ -288,6 +290,69 @@ describe('结果文案', () => {
   it('打开面板时请求在别处有了结果', () => {
     expect(goneMessage(req({ state: 'cancelled', decided_by: 'terminal' }))).toBe('这条请求在别处有了结果：已取消（终端里处理了）')
     expect(goneMessage(req({ state: 'expired', decided_by: '' }))).toBe('这条请求在别处有了结果：已过期')
+  })
+
+  it('hub 已经采纳了你这次的决定（同样的批准或拒绝，多半是上次提交超时）时不说成“别处”', () => {
+    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }), 'allow')).toBe('你的决定已生效：已批准')
+    expect(goneMessage(req({ state: 'denied', decided_by: 'user', rule_id: 'user-deny-x' }), 'deny')).toBe('你的决定已生效：已拒绝')
+  })
+
+  it('在另一个页面做了相反的决定、或不知道这次要做什么时，照旧说是别处的结果', () => {
+    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }), 'deny')).toBe('这条请求在别处有了结果：已批准（手机上决定）')
+    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }))).toBe('这条请求在别处有了结果：已批准（手机上决定）')
+    expect(goneMessage(req({ state: 'cancelled', decided_by: 'machine_revoked' }), 'allow')).toBe('这条请求在别处有了结果：已取消（机器已吊销）')
+  })
+})
+
+describe('outcomeView：决定结果的提示（固定在底部，始终可见）', () => {
+  const approved = req({ state: 'approved', decided_by: 'user' })
+
+  it('成功：绿色“已生效”，文案随最新数据（送达后变成已送达）', () => {
+    expect(outcomeView({ kind: 'done', request: approved }, approved)).toEqual({ tone: 'ok', title: '已生效', text: '已批准，决定正在送回 agent' })
+    const delivered = { ...approved, delivered_at: '2026-10-23T10:00:05Z' }
+    expect(outcomeView({ kind: 'done', request: approved }, delivered).text).toBe('已批准，已送达 agent')
+    // 当前数据还是旧的 pending（晚到的拉取被 keepDecided 挡住前的一刻）或已不在：用 decide 的返回
+    expect(outcomeView({ kind: 'done', request: approved }, req({ state: 'pending' })).text).toBe('已批准，决定正在送回 agent')
+    expect(outcomeView({ kind: 'done', request: approved }, null).text).toBe('已批准，决定正在送回 agent')
+  })
+
+  it('409 等决定不了：红色“没有生效”，带 hub 的文案', () => {
+    expect(outcomeView({ kind: 'gone', message: '请求已过期' }, req({ state: 'pending' }))).toEqual({ tone: 'warn', title: '没有生效', text: '请求已过期' })
+    expect(outcomeView({ kind: 'gone', message: '机器已吊销，请求已取消' }, req({ state: 'cancelled', decided_by: 'machine_revoked' }))).toEqual({
+      tone: 'warn',
+      title: '没有生效',
+      text: '机器已吊销，请求已取消',
+    })
+    expect(outcomeView({ kind: 'gone', message: '这条请求已不存在' }, null)).toEqual({ tone: 'warn', title: '没有生效', text: '这条请求已不存在' })
+  })
+
+  it('409 但重新拉到的正是你这次的决定（如上次提交超时、其实已生效）：绿色“你的决定已生效”', () => {
+    expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'allow' }, approved)).toEqual({
+      tone: 'ok',
+      title: '你的决定已生效',
+      text: '已批准，决定正在送回 agent',
+    })
+    // 终端里处理掉的不算
+    expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'allow' }, req({ state: 'cancelled', decided_by: 'terminal' })).tone).toBe('warn')
+  })
+
+  it('409 且重新拉到的是另一个页面做的相反决定：红色，说明现在的结果', () => {
+    expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'deny' }, approved)).toEqual({
+      tone: 'warn',
+      title: '没有生效',
+      text: '这条请求在别处有了结果：已批准（手机上决定）',
+    })
+    // 不知道这次要做什么（如面板开着时请求没了）：不认作你的决定
+    expect(outcomeView({ kind: 'gone', message: '这条请求已不存在' }, approved).tone).toBe('warn')
+  })
+})
+
+describe('isEscape', () => {
+  it('Esc 关面板；输入法组字中的 Esc（取消候选）不算', () => {
+    expect(isEscape({ key: 'Escape', isComposing: false, keyCode: 27 })).toBe(true)
+    expect(isEscape({ key: 'Escape', isComposing: true, keyCode: 27 })).toBe(false)
+    expect(isEscape({ key: 'Escape', isComposing: false, keyCode: 229 })).toBe(false)
+    expect(isEscape({ key: 'Enter', isComposing: false, keyCode: 13 })).toBe(false)
   })
 })
 

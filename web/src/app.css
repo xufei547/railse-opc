@@ -82,6 +82,13 @@ textarea.input { min-height: 72px; }
 .banner .btn { min-height: 32px; margin-left: 8px; }
 .banner p { margin: 6px 0 0; }
 .banner .banner-title { display: block; font-size: 16px; }
+/* 决定结果：固定在底部导航之上、让开安全区，载荷再长也看得见 */
+.toast { position: fixed; left: max(var(--gutter), env(safe-area-inset-left)); right: max(var(--gutter), env(safe-area-inset-right)); bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 10px); z-index: 6; margin: 0; display: flex; align-items: center; gap: 8px; border: 1px solid currentColor; box-shadow: 0 4px 16px rgba(0,0,0,0.18); }
+.toast.raised { bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 76px); }
+.toast:focus { outline: none; }
+.toast .toast-body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.toast .btn { flex: none; }
+.page.has-toast { padding-bottom: 120px; }
 /* 含被隐藏部分：必须醒目 */
 .banner.loud { border: 2px solid var(--high); font-size: 15px; padding: 12px 14px; }
 pre.block { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; word-break: break-all; margin: 8px 0; }

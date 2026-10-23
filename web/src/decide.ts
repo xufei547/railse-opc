@@ -180,11 +180,60 @@ export function doneMessage(r: RequestView): string {
   return verb + learned + tail
 }
 
-/** 面板开着时请求在别处有了结果（终端里处理了、过期、机器吊销……）。 */
-export function goneMessage(r: RequestView): string {
+/**
+ * r 是不是用户在手机上做的、与这次要做的（attempted）同样的批准或拒绝：多半就是这次（上次提交超时，其实已经生效）。
+ * 不知道这次要做什么时不认。
+ */
+function sameUserDecision(r: RequestView, attempted?: Verdict): boolean {
+  if (r.decided_by !== 'user' || !attempted) return false
+  return (r.state === 'approved' && attempted === 'allow') || (r.state === 'denied' && attempted === 'deny')
+}
+
+/**
+ * 面板开着时请求有了结果（终端里处理了、过期、机器吊销……）。正是用户这次要做的决定时说“你的决定已生效”，不说成“别处”；
+ * 另一个页面做了相反的决定时仍是“别处”的结果（依据会写“手机上决定”）。
+ */
+export function goneMessage(r: RequestView, attempted?: Verdict): string {
   const state = stateLabel(r.state)
+  if (sameUserDecision(r, attempted)) return `你的决定已生效：${state}`
   const by = decidedByLabel(r)
   return `这条请求在别处有了结果：${state}${by && by !== state ? `（${by}）` : ''}`
+}
+
+/**
+ * 一次决定的结果：成功（带 decide 的返回），或决定不了（409、404、面板开着时有了结果）。决定不了时带要告诉用户的文案，
+ * 以及这次要做的动作（不知道时不带）。
+ */
+export type Outcome = { kind: 'done'; request: RequestView } | { kind: 'gone'; message: string; attempted?: Verdict }
+
+export interface OutcomeView {
+  tone: 'ok' | 'warn'
+  title: string
+  text: string
+}
+
+/**
+ * 结果提示的内容，按当前（重新拉到的）请求算：
+ *   - 成功：绿色“已生效”，送达后文案跟着变成“已送达”；
+ *   - 决定不了：红色“没有生效”，带 hub 的文案（请求已过期、已经处理过、机器已吊销……）；
+ *     重新拉到的正是用户这次要做的批准或拒绝时（提交超时其实已生效，再点得到 409），改成绿色“你的决定已生效”；
+ *     是另一个页面做的相反决定时，说明现在的结果。
+ */
+export function outcomeView(o: Outcome, current: RequestView | null): OutcomeView {
+  if (o.kind === 'done') {
+    const r = current && current.id === o.request.id && current.state !== 'pending' ? current : o.request
+    return { tone: 'ok', title: '已生效', text: doneMessage(r) }
+  }
+  if (current && sameUserDecision(current, o.attempted)) return { tone: 'ok', title: '你的决定已生效', text: doneMessage(current) }
+  if (current && o.attempted && current.decided_by === 'user' && current.state !== 'pending') {
+    return { tone: 'warn', title: '没有生效', text: goneMessage(current, o.attempted) }
+  }
+  return { tone: 'warn', title: '没有生效', text: o.message }
+}
+
+/** 按键是不是要关面板的 Esc。输入法组字时的 Esc 是取消候选（isComposing，或 Safari 的 keyCode 229），不能关面板丢掉备注。 */
+export function isEscape(e: { key: string; isComposing?: boolean; keyCode?: number }): boolean {
+  return e.key === 'Escape' && !e.isComposing && e.keyCode !== 229
 }
 
 export interface Detail {
