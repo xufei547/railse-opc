@@ -338,6 +338,7 @@ type ctx struct {
 	// 之后至多 64 字节（判断命令名，路径多长都行）。超出时 long、baseLong 为 true
 	word, base     []byte
 	long, baseLong bool
+	quoted         bool // 词里有引号、转义或嵌套结构：不是保留字（"case"、/case 都不是 case）
 	cmdPos         bool // 下一个词在命令位置
 	// 包装命令（sudo、env、timeout……）之后：wrap 是包装命令名，wrapArg 表示下一个词是它的选项参数，
 	// wrapPos 是还要跳过的位置参数（timeout 的时长）
@@ -490,6 +491,7 @@ func (c *ctx) addWord(ch byte) {
 
 // addWordText 把引号里的字面内容或嵌套结构的原文算进当前词。
 func (c *ctx) addWordText(s string) {
+	c.quoted = true
 	if len(s) > 64 {
 		c.inWord, c.start, c.long, c.baseLong = true, false, true, true
 		return
@@ -571,21 +573,24 @@ func (c *ctx) endWord() {
 		return
 	}
 	w, long := string(c.word), c.long
-	name := ""
+	name, kw := "", ""
 	if !c.baseLong {
 		name = string(c.base)
 	}
-	c.word, c.base, c.inWord, c.long, c.baseLong, c.here = c.word[:0], c.base[:0], false, false, false, false
+	if !long && !c.quoted {
+		kw = w
+	}
+	c.word, c.base, c.inWord, c.long, c.baseLong, c.here, c.quoted = c.word[:0], c.base[:0], false, false, false, false, false
 	if c.mode != mShell {
 		return
 	}
 	switch {
 	case c.cmdPos:
-		if !long && (reservedWords[w] || isAssign(w)) {
+		if reservedWords[kw] || !long && isAssign(w) {
 			return
 		}
 		c.cmdPos = false
-		c.command(name)
+		c.command(name, kw)
 	case c.wrap != "":
 		switch {
 		case c.wrapArg:
@@ -597,7 +602,7 @@ func (c *ctx) endWord() {
 			c.wrapPos--
 		default:
 			c.wrap = ""
-			c.command(name)
+			c.command(name, kw)
 		}
 	case w == "-exec" || w == "-execdir" || w == "-ok" || w == "-okdir":
 		c.cmdPos = true
@@ -613,8 +618,18 @@ var wrapperArgs = map[string]string{
 	"command": "", "builtin": "", "nohup": "",
 }
 
-// command 按命令位置上的命令名（去掉引号、取路径最后一段）更新状态。
-func (c *ctx) command(name string) {
+// command 按命令位置上的词更新状态：name 是去掉引号、取路径最后一段的命令名，kw 是不带引号与转义的原词（认保留字用）。
+func (c *ctx) command(name, kw string) {
+	switch kw {
+	case "case":
+		c.cases++
+		return
+	case "esac":
+		if c.cases > 0 {
+			c.cases--
+		}
+		return
+	}
 	switch name {
 	case "sh", "bash", "zsh", "dash", "ksh", "$SHELL", "${SHELL}":
 		c.shell = true
@@ -624,12 +639,6 @@ func (c *ctx) command(name string) {
 		c.feed()
 	case "eval":
 		c.eval = true
-	case "case":
-		c.cases++
-	case "esac":
-		if c.cases > 0 {
-			c.cases--
-		}
 	default:
 		if _, ok := wrapperArgs[name]; ok {
 			c.wrap, c.wrapArg, c.wrapPos = name, false, 0
@@ -738,6 +747,7 @@ func (c *ctx) escape() {
 	}
 	sc.i += 2
 	c.addWord(nx)
+	c.quoted = true
 }
 
 // placeholderWord 把 sc.i 处的 <redacted> 当作词的一部分（不是重定向）。
@@ -1175,7 +1185,7 @@ func (c *ctx) singleQuoted() {
 	}
 	c.addWordText(t.slice(i+1, k))
 	sc.i = end
-	c.inWord, c.start = true, false
+	c.inWord, c.start, c.quoted = true, false, true
 }
 
 // ansiQuoted 处理 $'…'：认 \ 转义，里面是字面文本（交给解释器执行的递归按命令行语境处理）。视图里 $ 当左引号，' 是 vMask。
@@ -1211,7 +1221,7 @@ func (c *ctx) ansiQuoted() {
 		c.b.closing(t, k, vCloseSQ)
 	}
 	sc.i = end
-	c.inWord, c.start = true, false
+	c.inWord, c.start, c.quoted = true, false, true
 }
 
 // doubleQuoted 处理双引号（dollar 为 true 时是 $"…"）：命令替换这类嵌套结构递归处理，其余是字面文本，
@@ -1248,7 +1258,7 @@ func (c *ctx) doubleQuoted(dollar bool) {
 		c.b.closing(t, sc.i, vCloseDQ)
 		sc.i++
 	}
-	c.inWord, c.start = true, false
+	c.inWord, c.start, c.quoted = true, false, true
 }
 
 // dqInterior 从 sc.i 起扫描双引号里的内容，停在右引号上（返回 true）或 hi（未闭合，返回 false）。
