@@ -18,7 +18,7 @@
 - 网页与 hub 同源：开发时 Vite 代理 `/api`、`/ws` 到本机 hub 并把 `Origin` 改写成 hub 的源；生产只经 hub 托管。cookie 认证沿用第 3 份（`railse_session`，HttpOnly、SameSite=Lax）。
 - 网页里所有可见文案中文；不引入 UI 组件库、CSS 框架、状态管理库；样式用一个 `app.css` 加 CSS 变量，手机优先，跟随系统深浅色，适配 iOS 安全区（`env(safe-area-inset-*)`）。
 - 推送只在新请求产生时发：`kind` 为 `permission`、`webhook`、`question`；`done` 不推。每条推送的 Service Worker 必须 `showNotification`（iOS 多次静默推送会吊销订阅）。推送载荷 JSON 不超过 3 KiB（Apple 上限 4 KiB），标题、正文截断。
-- 推送端点返回 404 或 410 立即删订阅；其他失败累计，连续 5 次失败删订阅（设计 5.4）。
+- 推送端点返回 404 或 410 立即删订阅；其他失败累计，连续 5 次失败且这一串的第一次失败已在 24 小时前才删订阅（设计 5.4；2026-10-24 执行期细化：短暂故障不能删光所有好订阅，表加 `first_failed_at`，成功清零）。
 - hub 对订阅密钥（`keys.p256dh`、`keys.auth`）与 VAPID 私钥明文存库（设计 5.3 例外），永不经任何接口返回私钥；`GET /api/push/vapid` 只回公钥。
 - 脱敏：shell 语境里不在引号与 heredoc 内的裸值遇到 `;`、`|`、`&`、`<`、`>`、`(`、`)`、反引号、`$` 即停；交给 shell 解释执行的内容（`sh|bash|zsh|dash|ksh -c` 的参数、`eval` 的参数、`ssh` 的引号参数、喂给它们的 heredoc 正文）按 shell 语境递归处理；其余双引号、单引号内与 heredoc 正文照旧抹到空白。`has_redacted` 标记与网页告警保留。（2026-10-23 执行期按审查结论细化。）
 - 每个 Go Task 结束时 `gofmt -l .` 无输出、`go vet ./...` 无错、`go test ./... -race` 全过；每个网页 Task 结束时 `cd web && npm run check`（`tsc --noEmit` 加 `vitest run`）通过且 `npm run build` 成功。测试里的目录用 `os.MkdirTemp("", "rs")`。提交信息用中文。
@@ -5709,7 +5709,7 @@ git commit -m "test(web): Playwright 端到端（登录、批准并记住、拒�
 
 1. `make test` 全过：gofmt、vet、`go test ./... -race`、`npm run check`（tsc 与 vitest）；`make e2e` 的 Playwright 用例通过；Go 侧没有新增依赖；`web/package-lock.json` 入库。
 2. 脱敏（Task 1）：`X_TOKEN=a;curl …|sh` 显示为 `X_TOKEN=<redacted>;curl …|sh`；引号内与 heredoc 正文仍整段抹；原有语料全部通过。
-3. 存储与推送（Task 2、3、5）：v1 库打开即升到 v2 且订阅端点唯一；RFC 8291 附录 A 向量逐字节一致；新 permission/webhook/question 请求推送到所有订阅，`done` 不推；端点 404/410 立即删订阅，连续 5 次失败删订阅；`railse hub vapid` 打印公钥，`--rotate` 换钥并清订阅；没配 `--public-url` 时推送停用且网页说明原因。
+3. 存储与推送（Task 2、3、5）：v1 库打开即升到 v2 且订阅端点唯一；RFC 8291 附录 A 向量逐字节一致；新 permission/webhook/question 请求推送到所有订阅，`done` 不推；端点 404/410 立即删订阅，连续 5 次失败且持续超过 24 小时才删订阅；`railse hub vapid` 打印公钥，`--rotate` 换钥并清订阅；没配 `--public-url` 时推送停用且网页说明原因。
 4. hub 接口（Task 4、5、6）：`/api/inbox` 返回 `pending` 与 `questions`；`propose` 只算不存，`decide` 的 `scope` 生效；`/api/push/*` 五个接口；`/` 托管网页，未知 `/api/*` 回 404，未构建回 503 提示；HTML 带 CSP 与 `X-Frame-Options: DENY`。
 5. 网页（Task 7 到 10）：登录（401 跳转并回到原页）；收件箱按项目分组、“等你回答”区、断线/暂停/未加主屏幕/通知失效横幅；详情展示载荷、`has_redacted` 醒目告警、依据与审计；批准/拒绝带备注；“记住”先看草案（动作、锚点、范围）再保存，项目/全局可切换，记不住时给出文案；历史筛选与依据；规则启停删导入导出、`elevated` 红标；机器吊销；设置里总开关、通知开启/关闭/测试、退出登录；`/ws/client` 断开自动重连，重连与回到前台时全量刷新。
 6. PWA：`manifest.webmanifest`、图标、`display: standalone`；Service Worker 对每条推送 `showNotification`，点通知直达 `/r/<id>`（navigate 与 openWindow 两条路）；`pushsubscriptionchange` 自动重订阅。
