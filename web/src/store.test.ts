@@ -120,6 +120,17 @@ describe('reduce', () => {
     expect(reduce(s, frame({ type: 'hello', data: {} } as unknown as Frame))).toBe(s)
   })
 
+  it('每次全量拉取完成 loads 加一（详情、历史页据此重拉断线期间漏掉的变化）；帧不加 loads、全量拉取不加 tick', () => {
+    let s = loaded()
+    expect(s.loads).toBe(1)
+    expect(s.tick).toBe(0)
+    s = reduce(s, frame({ type: 'request_updated', data: req({ id: 'a', state: 'approved' }) }))
+    expect(s.loads).toBe(1)
+    s = reduce(s, { type: 'loaded', inbox: { pending: [], questions: [] }, status })
+    expect(s.loads).toBe(2)
+    expect(s.tick).toBe(1)
+  })
+
   it('连接状态与错误', () => {
     let s = reduce(initialState, { type: 'connected', connected: true })
     expect(s.connected).toBe(true)
@@ -145,5 +156,21 @@ describe('groupByProject', () => {
       ['webhook', ['4']],
       ['其他', ['5']],
     ])
+  })
+
+  it('组有唯一的 key：项目恰好叫 webhook 或“其他”时不与 webhook 组、无项目组合并', () => {
+    const g = groupByProject([
+      req({ id: '1', project: 'webhook', created_at: '2026-10-23T10:00:01Z' }),
+      req({ id: '2', kind: 'webhook', project: '', machine_name: '', created_at: '2026-10-23T10:00:02Z' }),
+      req({ id: '3', project: '其他', created_at: '2026-10-23T10:00:03Z' }),
+      req({ id: '4', project: '', created_at: '2026-10-23T10:00:04Z' }),
+    ])
+    expect(g.map((x) => [x.project, x.items.map((r) => r.id)])).toEqual([
+      ['webhook', ['1']],
+      ['webhook', ['2']],
+      ['其他', ['3']],
+      ['其他', ['4']],
+    ])
+    expect(new Set(g.map((x) => x.key)).size).toBe(4)
   })
 })

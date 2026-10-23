@@ -15,6 +15,11 @@ export interface State {
   error: string | null
   /** 每处理一帧有效的请求变化就加一；历史页、详情页据此重新拉取。 */
   tick: number
+  /**
+   * 每完成一次全量拉取（连上与重连、回到前台、网络恢复、收到 request_new……）加一。全量拉取不加 tick：
+   * 详情、历史页要同时盯它，断线期间漏掉的变化才会被重拉。
+   */
+  loads: number
 }
 
 export const initialState: State = {
@@ -28,6 +33,7 @@ export const initialState: State = {
   machines: null,
   error: null,
   tick: 0,
+  loads: 0,
 }
 
 export type Action =
@@ -108,6 +114,7 @@ export function reduce(state: State, action: Action): State {
         pending: [...action.inbox.pending].sort(byCreated),
         questions: action.inbox.questions,
         status: action.status,
+        loads: state.loads + 1,
       }
     case 'rules':
       return { ...state, rules: action.rules, rulesStale: false }
@@ -128,16 +135,19 @@ export function reduce(state: State, action: Action): State {
   }
 }
 
-/** 收件箱按项目分组，组内按创建时间升序（等得最久的在前）；没有项目的归到“其他”，webhook 单独一组。 */
-export function groupByProject(list: RequestView[]): { project: string; items: RequestView[] }[] {
-  const groups = new Map<string, RequestView[]>()
+/**
+ * 收件箱按项目分组，组内按创建时间升序（等得最久的在前），组按各自等得最久的那条排序；没有项目的归到“其他”，webhook 单独一组。
+ * project 是组标题；key 唯一（项目恰好叫“webhook”或“其他”时也不与那两组合并），给 React 作 key。
+ */
+export function groupByProject(list: RequestView[]): { key: string; project: string; items: RequestView[] }[] {
+  const groups = new Map<string, { project: string; items: RequestView[] }>()
   for (const r of list) {
-    const key = r.kind === 'webhook' ? 'webhook' : r.project || '其他'
+    const [key, project] = r.kind === 'webhook' ? ['w', 'webhook'] : r.project ? [`p:${r.project}`, r.project] : ['n', '其他']
     const g = groups.get(key)
-    if (g) g.push(r)
-    else groups.set(key, [r])
+    if (g) g.items.push(r)
+    else groups.set(key, { project, items: [r] })
   }
   return [...groups.entries()]
-    .map(([project, items]) => ({ project, items: items.sort(byCreated) }))
+    .map(([key, g]) => ({ key, project: g.project, items: g.items.sort(byCreated) }))
     .sort((a, b) => byCreated(a.items[0]!, b.items[0]!))
 }

@@ -99,3 +99,82 @@ export function decidedByLabel(r: Pick<RequestView, 'decided_by' | 'rule_id' | '
   if (by.startsWith('rule:') || r.rule_id) return `规则 ${r.rule_id || by.slice(5)}`
   return decidedBy[by] ?? (by || (r.state === 'pending' ? '' : stateLabel(r.state)))
 }
+
+/** 截到至多 max 个 UTF-16 单元再加省略号；不把代理对切成半个字符。卡片摘要用它，免得超长命令撑出一大块 DOM。 */
+export function clip(s: string, max: number): string {
+  if (s.length <= max) return s
+  let cut = s.slice(0, max)
+  const last = cut.charCodeAt(cut.length - 1)
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1)
+  return cut + '…'
+}
+
+const pad2 = (n: number) => String(n).padStart(2, '0')
+
+/** 本地时间“10-03 08:05”；不是今年的带年份“2025-01-02 23:59”。解析不了回空串。 */
+export function absoluteTime(iso: string, now: Date = new Date()): string {
+  const t = parseTime(iso)
+  if (Number.isNaN(t)) return ''
+  const d = new Date(t)
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+  const md = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+  return d.getFullYear() === now.getFullYear() ? `${md} ${hm}` : `${d.getFullYear()}-${md} ${hm}`
+}
+
+const auditActions: Record<string, string> = {
+  request_pending: '登记',
+  allow: '批准',
+  deny: '拒绝',
+  rule_learned: '学到规则',
+  rule_learn_rolled_back: '撤销学到的规则',
+  push_sent: '推送到手机',
+  webhook_callback: '回调来源',
+  undeliverable: '决定未送达',
+  cancelled_resend: '被重发顶掉',
+}
+
+/** 审计动作的中文名。hub 结束请求时用状态名作动作（approved、expired……），这些沿用状态文案；不认识的原样。 */
+export function auditLabel(action: string): string {
+  return auditActions[action] ?? stateLabel(action)
+}
+
+const actors: Record<string, string> = { user: '你', agent: '守护进程', system: 'hub' }
+
+export function actorLabel(actor: string): string {
+  return actors[actor] ?? actor
+}
+
+/** 审计 detail（JSON 对象）展开成“k=v k=v”；去掉空串、null 与 false（ok=false 是回调失败，保留）。不是 JSON 时原样。 */
+export function auditDetail(detail: string): string {
+  let d: unknown
+  try {
+    d = JSON.parse(detail)
+  } catch {
+    return detail
+  }
+  if (typeof d !== 'object' || d === null) return ''
+  return Object.entries(d as Record<string, unknown>)
+    .filter(([k, v]) => v !== '' && v !== null && v !== undefined && (v !== false || k === 'ok'))
+    .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
+    .join(' ')
+}
+
+/**
+ * 展示的内容是不是含被脱敏抹掉的部分（不是原文）。hub 的 has_redacted 只看载荷；webhook 的标题、question 的问题文本
+ * 也是脱敏过的，这里再查一下标题里的占位符。
+ */
+export function isRedacted(r: Pick<RequestView, 'has_redacted' | 'title'>): boolean {
+  return r.has_redacted || r.title.includes('<redacted>')
+}
+
+/**
+ * 手机上批准、拒绝之后决定有没有送到：delivered_at 非空是已送达钩子（webhook 是回调成功）；
+ * hub 记过 undeliverable（守护进程已不再持有这条）时是送不到了。其他状态回空串。
+ */
+export function deliveryLabel(r: Pick<RequestView, 'state' | 'kind' | 'delivered_at'>, undeliverable: boolean): string {
+  if (r.state !== 'approved' && r.state !== 'denied') return ''
+  const hook = r.kind === 'webhook'
+  if (r.delivered_at) return hook ? '已回调来源' : '已送达 agent'
+  if (undeliverable) return '决定未送达：agent 已不再等这条（多半已交回终端）'
+  return hook ? '还没回调成功' : '还没送达 agent'
+}
