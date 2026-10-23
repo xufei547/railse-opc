@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,12 +16,14 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func TestClientSend(t *testing.T) {
@@ -403,10 +406,37 @@ func TestDefaultHTTPClient(t *testing.T) {
 
 // 以下是 VAPID 令牌缓存的测试：Apple 要求 JWT 一小时内至多刷新一次。
 
-// fakeClock 是可拨的时钟，并发安全。
+// fakeClock 是可拨的时钟，并发安全。它给出的时间和 time.Now() 一样带单调时钟读数，所以缓存若按单调时钟比较，
+// 测试里也是这样比较，测到的就是生产上的行为：
+//   - Advance：墙钟与单调时钟一起走（正常流逝）；
+//   - JumpWall：只动墙钟——系统睡眠（macOS、Linux 挂起时单调时钟不走）或 NTP 跳变，两个方向都行。
 type fakeClock struct {
 	mu sync.Mutex
 	t  time.Time
+}
+
+func newFakeClock(t *testing.T) *fakeClock {
+	t.Helper()
+	now := time.Now()
+	now = now.Add(-time.Duration(now.Nanosecond())) // 整秒，便于核对 exp；Add 保留单调读数
+	if !hasMono(now) {
+		t.Fatal("time.Now() 应带单调时钟读数")
+	}
+	return &fakeClock{t: now}
+}
+
+func hasMono(t time.Time) bool { return strings.Contains(t.String(), " m=") }
+
+// monoShifted 返回墙钟与 t 相同、单调读数加 d 的时间。time 包没有公开办法让两者脱节，只能改未导出字段 ext：
+// t 带单调读数时 ext 就是单调读数（见 time.Time 的注释）。布局变了就直接报错，不悄悄退化成只有墙钟的测试。
+func monoShifted(t time.Time, d time.Duration) time.Time {
+	f := reflect.ValueOf(&t).Elem().FieldByName("ext")
+	if !hasMono(t) || !f.IsValid() || f.Kind() != reflect.Int64 {
+		panic("time.Time 的内部布局变了，fakeClock 模拟不了单调时钟")
+	}
+	f = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
+	f.SetInt(f.Int() + int64(d))
+	return t
 }
 
 func (c *fakeClock) Now() time.Time {
@@ -415,10 +445,33 @@ func (c *fakeClock) Now() time.Time {
 	return c.t
 }
 
-func (c *fakeClock) Set(t time.Time) {
+func (c *fakeClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.t = t
+	c.t = c.t.Add(d)
+}
+
+func (c *fakeClock) JumpWall(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = monoShifted(c.t.Add(d), -d)
+}
+
+// 假时钟本身：JumpWall 之后墙钟变了、单调时钟没变（Sub 用单调读数），Advance 两者一起变。
+func TestFakeClockSimulatesMonotonic(t *testing.T) {
+	clk := newFakeClock(t)
+	t0 := clk.Now()
+	clk.JumpWall(13 * time.Hour)
+	t1 := clk.Now()
+	if !hasMono(t1) || t1.Sub(t0) != 0 || t1.Unix()-t0.Unix() != 13*3600 || !t1.Equal(t0) {
+		t.Fatalf("睡眠 13 小时：单调差 %v、墙钟差 %d 秒，应为 0 与 46800", t1.Sub(t0), t1.Unix()-t0.Unix())
+	}
+	clk.JumpWall(-20 * time.Hour)
+	clk.Advance(time.Hour)
+	t2 := clk.Now()
+	if t2.Sub(t0) != time.Hour || t2.Unix()-t0.Unix() != -6*3600 {
+		t.Fatalf("单调差 %v、墙钟差 %d 秒，应为 1h 与 -21600", t2.Sub(t0), t2.Unix()-t0.Unix())
+	}
 }
 
 // authTransport 冒充推送服务但不走网络：记下每个请求的 Authorization，一律回 201。端点可以是任意 https 主机。
@@ -460,13 +513,13 @@ func vapidOf(t *testing.T, auth string) (claims vapidClaims, k string) {
 	return claims, k
 }
 
-func newTokenClient(t *testing.T, start time.Time) (*Client, *fakeClock, *authTransport) {
+func newTokenClient(t *testing.T) (*Client, *fakeClock, *authTransport) {
 	t.Helper()
 	v, err := GenerateVAPID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	clk := &fakeClock{t: start}
+	clk := newFakeClock(t)
 	tr := &authTransport{}
 	return &Client{HTTP: &http.Client{Transport: tr}, VAPID: v, Subject: "mailto:push@example.com", now: clk.Now}, clk, tr
 }
@@ -476,7 +529,7 @@ func subFor(t *testing.T, endpoint string) Subscription {
 }
 
 // sendAt 往 endpoint 发一条，返回发出去的 Authorization。顺带核对时效：aud 是端点 origin、k 是当前密钥，
-// exp 离此刻至少 1 小时（推送服务收到时仍有效）、至多 24 小时（RFC 8292 第 2 节）。
+// exp 离此刻（墙钟）至少 1 小时（推送服务收到时仍有效）、至多 24 小时（RFC 8292 第 2 节；Apple 判 BadJwtToken）。
 func sendAt(t *testing.T, c *Client, clk *fakeClock, tr *authTransport, endpoint string) string {
 	t.Helper()
 	n := len(tr.all())
@@ -494,23 +547,29 @@ func sendAt(t *testing.T, c *Client, clk *fakeClock, tr *authTransport, endpoint
 		t.Fatalf("令牌是给 aud %q sub %q k %s 的，应为 %q %q %s", claims.Aud, claims.Sub, k, origin, c.Subject, c.VAPID.PublicKeyB64())
 	}
 	if left := claims.Exp - clk.Now().Unix(); left < 3600 || left > 24*3600 {
-		t.Fatalf("发出去的令牌还剩 %d 秒有效，应在 [1h, 24h] 内", left)
+		t.Fatalf("发出去的令牌还剩 %d 秒有效（%v），应在 [1h, 24h] 内", left, time.Duration(left)*time.Second)
 	}
 	return auth
 }
 
+func expOf(t *testing.T, auth string) int64 {
+	t.Helper()
+	claims, _ := vapidOf(t, auth)
+	return claims.Exp
+}
+
 // 同一来源在窗口内复用同一个令牌（规范化后同 origin 的不同端点也算同一来源）；不同来源各签各的；
-// 签发后满 11 小时（exp − 1 小时）重签；时钟回拨到签发之前也重签，免得 exp 离此刻超过 24 小时。
+// 签发后满 11 小时（exp − 1 小时）重签。
 func TestClientReusesVAPIDTokenPerOrigin(t *testing.T) {
-	t0 := time.Unix(1_800_000_000, 0)
-	c, clk, tr := newTokenClient(t, t0)
+	c, clk, tr := newTokenClient(t)
+	t0 := clk.Now()
 	const apple, apple2, fcm = "https://web.push.apple.com/QAbc", "https://Web.Push.Apple.com:443/QOther", "https://fcm.googleapis.com/fcm/send/x"
 
 	a1 := sendAt(t, c, clk, tr, apple)
-	if claims, _ := vapidOf(t, a1); claims.Exp != t0.Add(12*time.Hour).Unix() {
-		t.Fatalf("exp %d，应为签发时刻 + 12 小时", claims.Exp)
+	if expOf(t, a1) != t0.Add(12*time.Hour).Unix() {
+		t.Fatalf("exp %d，应为签发时刻 + 12 小时", expOf(t, a1))
 	}
-	clk.Set(t0.Add(30 * time.Minute))
+	clk.Advance(30 * time.Minute)
 	if got := sendAt(t, c, clk, tr, apple2); got != a1 {
 		t.Fatal("同一来源 30 分钟后应复用令牌，不该重签")
 	}
@@ -518,43 +577,75 @@ func TestClientReusesVAPIDTokenPerOrigin(t *testing.T) {
 	if f1 == a1 {
 		t.Fatal("不同来源应各用各的令牌")
 	}
-	clk.Set(t0.Add(11*time.Hour - time.Second))
+	clk.Advance(10*time.Hour + 29*time.Minute + 59*time.Second) // t0 + 11h − 1s
 	if got := sendAt(t, c, clk, tr, apple); got != a1 {
 		t.Fatal("签发后不到 11 小时应复用令牌")
 	}
-	clk.Set(t0.Add(11 * time.Hour))
+	clk.Advance(time.Second) // t0 + 11h
 	a2 := sendAt(t, c, clk, tr, apple)
 	if a2 == a1 {
 		t.Fatal("签发满 11 小时（exp − 1 小时）应重签")
 	}
-	if claims, _ := vapidOf(t, a2); claims.Exp != t0.Add(23*time.Hour).Unix() {
-		t.Fatalf("重签的 exp %d，应为此刻 + 12 小时", claims.Exp)
+	if expOf(t, a2) != t0.Add(23*time.Hour).Unix() {
+		t.Fatalf("重签的 exp %d，应为此刻 + 12 小时", expOf(t, a2))
 	}
 	if got := sendAt(t, c, clk, tr, fcm); got != f1 {
 		t.Fatal("fcm 的令牌签于 t0+30min，此刻仍在窗口内，应复用")
 	}
-	clk.Set(t0.Add(-13 * time.Hour)) // 时钟回拨：复用旧令牌会让 exp 离此刻 36 小时，sendAt 会抓到
-	if got := sendAt(t, c, clk, tr, apple); got == a2 {
-		t.Fatal("时钟回拨到签发之前应重签")
+}
+
+// 墙钟单独跳变（系统睡眠时单调时钟不走；NTP 跳变只改墙钟），按令牌自己的 exp 与此刻墙钟判断：
+// 剩余有效期不足 1 小时就重签，exp 离此刻超过 23 小时（离 RFC 8292 的 24 小时留 1 小时余量）也重签，其余照常复用。
+func TestClientVAPIDTokenWallClockJumps(t *testing.T) {
+	c, clk, tr := newTokenClient(t)
+	t0 := clk.Now()
+	const ep = "https://web.push.apple.com/QAbc"
+	a := sendAt(t, c, clk, tr, ep) // exp = t0 + 12h
+
+	// 合上盖子睡了一夜：墙钟走了 13 小时，单调时钟没走。旧令牌已过期，必须重签。
+	clk.JumpWall(13 * time.Hour)
+	b := sendAt(t, c, clk, tr, ep) // sendAt 会抓“已过期”
+	if b == a || expOf(t, b) != t0.Add(25*time.Hour).Unix() {
+		t.Fatalf("睡眠 13 小时后应重签，exp 为此刻 + 12 小时: %d", expOf(t, b))
 	}
-	// 缓存里签好的令牌不随打印 Client 进日志
-	jwt, _, _ := strings.Cut(strings.TrimPrefix(a2, "vapid t="), ", k=")
-	if s := fmt.Sprintf("%v %+v %#v", c, c, struct{ c *Client }{c}); strings.Contains(s, jwt[strings.LastIndexByte(jwt, '.')+1:]) {
-		t.Fatalf("打印 Client 带出了缓存的令牌: %s", s)
+	// 睡到离 exp 只剩 1 小时 + 1 秒：仍可复用；再睡 1 秒（只剩 1 小时）：重签。
+	clk.JumpWall(10*time.Hour + 59*time.Minute + 59*time.Second)
+	if got := sendAt(t, c, clk, tr, ep); got != b {
+		t.Fatal("离 exp 还剩 1 小时 1 秒，应复用")
+	}
+	clk.JumpWall(time.Second)
+	d := sendAt(t, c, clk, tr, ep) // now = t0 + 37h，exp = t0 + 49h
+	if d == b {
+		t.Fatal("离 exp 只剩 1 小时，应重签")
+	}
+	// NTP 往回调 13 小时：exp 离此刻 25 小时，超过 24 小时，Apple 会判 BadJwtToken，必须重签。
+	clk.JumpWall(-13 * time.Hour)
+	e := sendAt(t, c, clk, tr, ep) // sendAt 会抓“超过 24 小时”；now = t0 + 24h，exp = t0 + 36h
+	if e == d {
+		t.Fatal("墙钟回拨 13 小时后应重签")
+	}
+	// 往回调 11 小时：exp 离此刻 23 小时，仍在界内，复用；再往回 1 秒：超过 23 小时，重签。
+	clk.JumpWall(-11 * time.Hour)
+	if got := sendAt(t, c, clk, tr, ep); got != e {
+		t.Fatal("exp 离此刻 23 小时，应复用")
+	}
+	clk.JumpWall(-time.Second)
+	if got := sendAt(t, c, clk, tr, ep); got == e {
+		t.Fatal("exp 离此刻超过 23 小时，应重签")
 	}
 }
 
 // 每 10 分钟往同一来源发一条、连发 48 小时：两次签发至少隔 1 小时（实际 11 小时），一共只签 5 次（0、11、22、33、44 小时）。
 func TestClientVAPIDTokenRefreshRate(t *testing.T) {
-	t0 := time.Unix(1_800_000_000, 0)
-	c, clk, tr := newTokenClient(t, t0)
+	c, clk, tr := newTokenClient(t)
 	var exps []int64
 	last := ""
 	for at := time.Duration(0); at <= 48*time.Hour; at += 10 * time.Minute {
-		clk.Set(t0.Add(at))
+		if at > 0 {
+			clk.Advance(10 * time.Minute)
+		}
 		if auth := sendAt(t, c, clk, tr, "https://web.push.apple.com/QAbc"); auth != last {
-			claims, _ := vapidOf(t, auth)
-			exps = append(exps, claims.Exp)
+			exps = append(exps, expOf(t, auth))
 			last = auth
 		}
 	}
@@ -570,7 +661,7 @@ func TestClientVAPIDTokenRefreshRate(t *testing.T) {
 
 // 换钥（新的 VAPID 值）或换 subject 后立即用新的现签，不复用旧钥或旧 sub 的令牌。
 func TestClientVAPIDTokenFollowsKeyAndSubject(t *testing.T) {
-	c, clk, tr := newTokenClient(t, time.Unix(1_800_000_000, 0))
+	c, clk, tr := newTokenClient(t)
 	const ep = "https://web.push.apple.com/QAbc"
 	a1 := sendAt(t, c, clk, tr, ep)
 	v2, err := GenerateVAPID()
@@ -597,8 +688,7 @@ func TestClientVAPIDTokenFollowsKeyAndSubject(t *testing.T) {
 
 // 并发发送（Task 5 的工作协程与 /api/push/test 的 HTTP 处理同时发）：同一时刻每个来源只签一次；过了窗口每个来源再只签一次。
 func TestClientVAPIDTokenConcurrentSends(t *testing.T) {
-	t0 := time.Unix(1_800_000_000, 0)
-	c, clk, tr := newTokenClient(t, t0)
+	c, clk, tr := newTokenClient(t)
 	endpoints := []string{"https://web.push.apple.com/QAbc", "https://fcm.googleapis.com/fcm/send/x"}
 	subs := []Subscription{subFor(t, endpoints[0]), subFor(t, endpoints[1])}
 	round := func() map[string]map[string]bool {
@@ -623,7 +713,7 @@ func TestClientVAPIDTokenConcurrentSends(t *testing.T) {
 		return byAud
 	}
 	first := round()
-	clk.Set(t0.Add(11 * time.Hour))
+	clk.Advance(11 * time.Hour)
 	second := round()
 	for _, ep := range endpoints {
 		aud, _ := endpointOrigin(ep)
@@ -633,6 +723,137 @@ func TestClientVAPIDTokenConcurrentSends(t *testing.T) {
 		for auth := range second[aud] {
 			if first[aud][auth] {
 				t.Fatalf("%s: 过了窗口应重签", aud)
+			}
+		}
+	}
+}
+
+// 真实时钟下多个协程同时首发（缓存还空着）：每轮只签一个令牌。时钟要在锁里读，否则先读了时钟、后抢到锁的协程
+// 拿着更早的时刻去判断，会把别人刚签的令牌当成“签发在未来”而重签。
+func TestClientVAPIDTokenConcurrentFirstSendRealClock(t *testing.T) {
+	sub := subFor(t, "https://web.push.apple.com/QAbc")
+	for round := range 100 {
+		v, err := GenerateVAPID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tr := &authTransport{}
+		c := &Client{HTTP: &http.Client{Transport: tr}, VAPID: v, Subject: "mailto:push@example.com"}
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Go(func() {
+				if _, err := c.Send(context.Background(), sub, []byte("x"), Options{}); err != nil {
+					t.Errorf("send: %v", err)
+				}
+			})
+		}
+		wg.Wait()
+		distinct := map[string]bool{}
+		for _, a := range tr.all() {
+			distinct[a] = true
+		}
+		if len(distinct) != 1 {
+			t.Fatalf("第 %d 轮：16 个协程同时首发签了 %d 个令牌，应为 1 个", round, len(distinct))
+		}
+	}
+}
+
+// gatedClock 把“先读了时钟、后抢到锁”的交错固定下来：第一次 Now() 取到 t0 后先不返回，等第二个 Send 发完
+// （或 300 毫秒）再返回；之后的调用都返回 t0 + 1 秒。它还记下有没有在 Client 的锁外被调用。
+type gatedClock struct {
+	c       *Client
+	t0      time.Time
+	calls   atomic.Int32
+	entered chan struct{}
+	release chan struct{}
+	outside atomic.Bool
+}
+
+func (g *gatedClock) Now() time.Time {
+	if g.c.mu.TryLock() {
+		g.c.mu.Unlock()
+		g.outside.Store(true)
+	}
+	if g.calls.Add(1) == 1 {
+		close(g.entered)
+		select {
+		case <-g.release:
+		case <-time.After(300 * time.Millisecond):
+		}
+		return g.t0
+	}
+	return g.t0.Add(time.Second)
+}
+
+func TestClientVAPIDTokenClockReadUnderLock(t *testing.T) {
+	c, clk, tr := newTokenClient(t)
+	g := &gatedClock{c: c, t0: clk.Now(), entered: make(chan struct{}), release: make(chan struct{})}
+	c.now = g.Now
+	sub := subFor(t, "https://web.push.apple.com/QAbc")
+	var wg sync.WaitGroup
+	wg.Go(func() { // A：先读时钟
+		if _, err := c.Send(context.Background(), sub, []byte("x"), Options{}); err != nil {
+			t.Errorf("A: %v", err)
+		}
+	})
+	<-g.entered
+	wg.Go(func() { // B：A 读完时钟之后才开始
+		defer close(g.release)
+		if _, err := c.Send(context.Background(), sub, []byte("x"), Options{}); err != nil {
+			t.Errorf("B: %v", err)
+		}
+	})
+	wg.Wait()
+	auths := tr.all()
+	if len(auths) != 2 || auths[0] != auths[1] {
+		t.Fatalf("两个并发首发应共用一个令牌，签了 %d 个", len(map[string]bool{auths[0]: true, auths[len(auths)-1]: true}))
+	}
+	if g.outside.Load() {
+		t.Fatal("时钟应在 Client 的锁里读")
+	}
+}
+
+// 用任何动词打印 Client（指针、嵌在各种字段与容器里）都带不出缓存的令牌。
+// fmt 碰到不支持的动词（%s %q %t %e……）会把深层指针按 %v 解引用一层再打，所以令牌至少要隔两层指针。
+func TestClientFormatHidesCachedToken(t *testing.T) {
+	c, clk, tr := newTokenClient(t)
+	auth := sendAt(t, c, clk, tr, "https://web.push.apple.com/QAbc")
+	jwt, _, _ := strings.Cut(strings.TrimPrefix(auth, "vapid t="), ", k=")
+	sig := jwt[strings.LastIndexByte(jwt, '.')+1:]
+	needles := map[string]string{
+		"JWT": jwt, "签名段": sig,
+		"签名段 hex": hex.EncodeToString([]byte(sig)), "签名段 HEX": strings.ToUpper(hex.EncodeToString([]byte(sig))),
+		"签名段 % x": fmt.Sprintf("% x", sig),
+	}
+	leaks := func(s string) string {
+		for name, n := range needles {
+			if strings.Contains(s, n) {
+				return name
+			}
+		}
+		return ""
+	}
+	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "% x", "%d", "%t", "%e", "%E", "%f", "%g", "%b", "%o", "%O", "%c", "%U", "%p", "%w"}
+	// 对照：令牌只隔一层指针时，%s 会把它打出来，说明下面的检查不是空的。
+	if leaks(fmt.Sprintf(verbs[3], struct{ p *struct{ h string } }{&struct{ h string }{auth}})) == "" {
+		t.Fatal("对照失败：一层指针后的令牌应被 s 动词打出并命中")
+	}
+	values := map[string]any{
+		"指针":        c,
+		"未导出字段":     struct{ c *Client }{c},
+		"导出字段":      struct{ C *Client }{c},
+		"切片":        []*Client{c},
+		"map 值":     map[string]*Client{"c": c},
+		"any 字段":    struct{ x any }{c},
+		"结构体指针":     &struct{ c *Client }{c},
+		"两层未导出字段":   struct{ in struct{ c *Client } }{struct{ c *Client }{c}},
+		"指针的指针":     &c,
+		"未导出字段里的切片": struct{ x []*Client }{[]*Client{c}},
+	}
+	for name, val := range values {
+		for _, verb := range verbs {
+			if s := fmt.Sprintf(verb, val); leaks(s) != "" {
+				t.Errorf("%s 用 %s 打印带出了令牌（%s）: %.300s", name, verb, leaks(s), s)
 			}
 		}
 	}

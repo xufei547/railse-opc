@@ -49,22 +49,32 @@ type Client struct {
 
 	now func() time.Time // 包内测试注入的时钟；nil 时用 time.Now
 
-	mu     sync.Mutex
-	tokens map[tokenKey]*vapidToken // 值是指针：%+v 打印 Client 时只出地址，签好的令牌不进日志
+	mu     sync.Mutex  // 护 tokens，也护读时钟（见 authorization）
+	tokens *tokenCache // 懒建
+}
+
+// tokenCache 存签好的令牌。令牌串离 Client 隔着两层指针（Client.tokens 与 map 的值）：fmt 碰到不支持的动词
+// （%s %q %t %e……）会把深层指针按 %v 解引用一层再打，更深的指针只打地址，所以用任何动词打印 Client 都带不出令牌。
+type tokenCache struct {
+	m map[tokenKey]*vapidToken
 }
 
 // tokenKey 定一个可复用的令牌：同一把密钥（按公钥认）、同一 aud（端点 origin）、同一 sub。
 type tokenKey struct{ k, aud, sub string }
 
+// vapidToken 是一个签好的令牌。时效只拿它自己的 exp 与此刻的墙钟（都是 Unix 秒）比，不存 time.Time：
+// 两个都带单调读数的 time.Time 相比只看单调时钟，而系统睡眠时单调时钟不走（macOS、Linux 挂起），NTP 跳变也只改墙钟；
+// exp 却是墙钟，推送服务也按墙钟验。按单调时钟判断，睡醒后会接着发已过期的令牌。
 type vapidToken struct {
-	header    string    // 整个 Authorization 头
-	signedAt  time.Time // 签发时刻，exp = signedAt + jwtLifetime
-	refreshAt time.Time // 到这一刻就重签：exp − tokenRefreshMargin
+	header string // 整个 Authorization 头
+	exp    int64  // JWT 的 exp，Unix 秒
 }
 
-// fresh 判断令牌此刻还能不能用：已过签发时刻（时钟回拨到签发之前就不用，免得 exp 离此刻超过 24 小时），且没到重签时刻。
-func (t *vapidToken) fresh(now time.Time) bool {
-	return !now.Before(t.signedAt) && now.Before(t.refreshAt)
+// usable 判断令牌在墙钟时刻 now（Unix 秒）能不能发：离 exp 还剩超过 tokenRefreshMargin，
+// 且 exp 离此刻不超过 tokenMaxAhead（墙钟往回调过就可能超）。
+func (t *vapidToken) usable(now int64) bool {
+	left := t.exp - now
+	return left > int64(tokenRefreshMargin/time.Second) && left <= int64(tokenMaxAhead/time.Second)
 }
 
 // Options 是一条推送的投递参数（RFC 8030 第 5.2–5.4 节）。
@@ -81,13 +91,20 @@ const (
 	reasonMax      = 200     // StatusError.Reason 的字符上限
 	maxTopicLen    = 32
 
-	// tokenRefreshMargin：令牌离 exp 不到这么久就重签，保证发出去的令牌至少还有约这么久有效。
-	// 同一 aud 每 jwtLifetime − tokenRefreshMargin（11 小时）签一次。
+	// tokenRefreshMargin：令牌离 exp 不到这么久就重签，保证发出去的令牌至少还有这么久有效。
+	// 墙钟正常走时，同一 aud 每 jwtLifetime − tokenRefreshMargin（11 小时）签一次。
 	tokenRefreshMargin = time.Hour
+	// tokenMaxAhead：复用的令牌 exp 离此刻至多这么久。RFC 8292 第 2 节要求不超过 24 小时（Apple 超过一天判 BadJwtToken），
+	// 留 1 小时余量防对端时钟差。
+	tokenMaxAhead = 24*time.Hour - tokenRefreshMargin
 )
 
-// 编译期检查：重签间隔不短于 1 小时。Apple 的 Web Push 文档：“Don't refresh your JWT more frequently than once per hour.”
-const _ = uint(jwtLifetime - tokenRefreshMargin - time.Hour)
+// 编译期检查：重签间隔不短于 1 小时（Apple 的 Web Push 文档：“Don't refresh your JWT more frequently than once per hour.”）；
+// 刚签的令牌本身可用。
+const (
+	_ = uint(jwtLifetime - tokenRefreshMargin - time.Hour)
+	_ = uint(tokenMaxAhead - jwtLifetime)
+)
 
 var defaultHTTP = &http.Client{
 	Timeout:       defaultTimeout,
@@ -144,34 +161,37 @@ func (c *Client) Send(ctx context.Context, sub Subscription, payload []byte, o O
 	}
 }
 
-// authorization 返回发往 aud 的 Authorization 头。缓存里有同一把钥、同一 aud 与 sub 签的、还没到重签时刻的令牌就复用，
-// 否则现签。Apple 要求 JWT 至多一小时刷新一次；这里同一 aud 约 11 小时才签一次，发出去的令牌离 exp 至少约 1 小时、
-// 至多 12 小时（RFC 8292 第 2 节要求不超过 24 小时）。持锁签名：并发的 Send 对同一 aud 只签一次。
+// authorization 返回用密钥 v、以 subject 为 sub 发往 aud 的 Authorization 头。缓存里有同一把钥、同一 aud 与 sub 签的、
+// 此刻仍可用（usable）的令牌就复用，否则现签。墙钟正常走时同一 aud 约 11 小时签一次（Apple 要求至多一小时一次），
+// 发出去的令牌离 exp 在 (1h, 23h] 内；睡眠或 NTP 跳变后按墙钟重新判断。
+// 时钟在锁里读、持锁签名：并发的 Send 对同一 aud 只签一次，也不会有协程拿着抢锁之前读到的时刻去判断。
 // 签名出错（如 subject 不规范）不缓存，每次都报。
-func (c *Client) authorization(aud string) (string, error) {
+func (c *Client) authorization(v *VAPID, subject, aud string) (string, error) {
+	key := tokenKey{k: v.PublicKeyB64(), aud: aud, sub: subject}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	now := time.Now()
 	if c.now != nil {
 		now = c.now()
 	}
-	key := tokenKey{k: c.VAPID.PublicKeyB64(), aud: aud, sub: c.Subject}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if tok := c.tokens[key]; tok != nil && tok.fresh(now) {
+	wall := now.Unix() // 墙钟；不拿 time.Time 比较，见 vapidToken
+	if c.tokens == nil {
+		c.tokens = &tokenCache{m: make(map[tokenKey]*vapidToken)}
+	}
+	if tok := c.tokens.m[key]; tok != nil && tok.usable(wall) {
 		return tok.header, nil
 	}
-	hdr, err := c.VAPID.Authorization(aud, c.Subject, now)
+	exp := jwtExp(now)
+	hdr, err := v.header(aud, subject, exp)
 	if err != nil {
 		return "", err
 	}
-	if c.tokens == nil {
-		c.tokens = make(map[tokenKey]*vapidToken)
-	}
-	for k, tok := range c.tokens { // 顺手清掉用不上的（过了窗口的、换钥前的），缓存不会越积越多
-		if !tok.fresh(now) {
-			delete(c.tokens, k)
+	for k, tok := range c.tokens.m { // 顺手清掉此刻用不上的（过了窗口的、换钥前的、墙钟跳出界的），缓存不会越积越多
+		if !tok.usable(wall) {
+			delete(c.tokens.m, k)
 		}
 	}
-	c.tokens[key] = &vapidToken{header: hdr, signedAt: now, refreshAt: now.Add(jwtLifetime - tokenRefreshMargin)}
+	c.tokens.m[key] = &vapidToken{header: hdr, exp: exp}
 	return hdr, nil
 }
 
@@ -185,7 +205,8 @@ func (c *Client) httpClient() *http.Client {
 
 // newRequest 校验参数、加密、签名并组好请求。这里的错误都是本地错误。
 func (c *Client) newRequest(ctx context.Context, sub Subscription, payload []byte, o Options) (*http.Request, error) {
-	if c.VAPID == nil {
+	v, subject := c.VAPID, c.Subject // 各读一次：判空、缓存键、签名用的是同一组值
+	if v == nil {
 		return nil, errors.New("没有 VAPID 密钥")
 	}
 	if o.Topic != "" && !ValidTopic(o.Topic) {
@@ -211,7 +232,7 @@ func (c *Client) newRequest(ctx context.Context, sub Subscription, payload []byt
 	if err != nil {
 		return nil, err
 	}
-	auth, err := c.authorization(aud)
+	auth, err := c.authorization(v, subject, aud)
 	if err != nil {
 		return nil, err
 	}

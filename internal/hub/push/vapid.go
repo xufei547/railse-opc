@@ -97,13 +97,21 @@ type vapidClaims struct {
 // 用 endpointOrigin 从端点得到；subject 是 hub 的联系地址，只收 mailto:地址 或 https:// 地址；exp 取 now + 12 小时。
 // 签名是 ES256，JWS 形式的 r‖s 各 32 字节（不是 ASN.1 DER）；各段都是无补位的 base64url。
 func (v *VAPID) Authorization(audience, subject string, now time.Time) (string, error) {
+	return v.header(audience, subject, jwtExp(now))
+}
+
+// jwtExp 是墙钟时刻 now 签发的 JWT 的 exp（Unix 秒）。
+func jwtExp(now time.Time) int64 { return now.Add(jwtLifetime).Unix() }
+
+// header 用给定的 exp（Unix 秒）签发 Authorization 头。Client 的令牌缓存要记下 exp 判断时效，所以由它算好传进来。
+func (v *VAPID) header(audience, subject string, exp int64) (string, error) {
 	if err := checkAudience(audience); err != nil {
 		return "", err
 	}
 	if !validSubject(subject) {
 		return "", fmt.Errorf("VAPID subject 必须是 mailto:地址 或 https:// 地址，得到 %q", subject)
 	}
-	claims, err := json.Marshal(vapidClaims{Aud: audience, Exp: now.Add(jwtLifetime).Unix(), Sub: subject})
+	claims, err := json.Marshal(vapidClaims{Aud: audience, Exp: exp, Sub: subject})
 	if err != nil {
 		return "", err
 	}
