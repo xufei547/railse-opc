@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -47,6 +48,12 @@ type testEnv struct {
 
 func startServer(t *testing.T, decider Decider, mutate func(*Config)) *testEnv {
 	t.Helper()
+	return startServerLog(t, decider, mutate, os.Stderr)
+}
+
+// startServerLog 同 startServer，守护进程的日志写到 w。
+func startServerLog(t *testing.T, decider Decider, mutate func(*Config), w io.Writer) *testEnv {
+	t.Helper()
 	dir := shortTempDir(t)
 	cfg := ConfigIn(filepath.Join(dir, "h"))
 	cfg.HomeDir = filepath.Join(dir, "home")
@@ -65,7 +72,7 @@ func startServer(t *testing.T, decider Decider, mutate func(*Config)) *testEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(cfg, rules, audit, decider, log.New(os.Stderr, "test ", 0))
+	srv := New(cfg, rules, audit, decider, log.New(w, "test ", 0))
 	if err := srv.Listen(); err != nil {
 		t.Fatal(err)
 	}
@@ -398,8 +405,15 @@ func (panicDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, err
 	panic("决定来源崩溃")
 }
 
+// 预期中的 panic 堆栈写进测试缓冲（收尾修复 c），只在测试失败时打印，不打到 stderr 盖住别的失败。
 func TestDeciderPanicDoesNotStopServer(t *testing.T) {
-	env := startServer(t, panicDecider{}, nil)
+	logs := &logBuf{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("守护进程日志:\n%s", logs.String())
+		}
+	})
+	env := startServerLog(t, panicDecider{}, nil, logs)
 	conn, err := net.Dial("unix", env.cfg.SocketPath)
 	if err != nil {
 		t.Fatal(err)
@@ -415,6 +429,11 @@ func TestDeciderPanicDoesNotStopServer(t *testing.T) {
 	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(env.repo, "git status")), &resp)
 	if resp.Decision != "allow" {
 		t.Fatalf("panic 之后服务应正常: %+v", resp)
+	}
+	// 日志在 recover 里写，晚于连接关闭与请求出表：轮询等它
+	waitFor(t, func() bool { return strings.Contains(logs.String(), "处理连接时 panic: 决定来源崩溃") })
+	if !strings.Contains(logs.String(), "goroutine") {
+		t.Fatalf("panic 的堆栈应记进守护进程日志:\n%s", logs.String())
 	}
 }
 
@@ -517,5 +536,95 @@ func TestDenyPathGlobMatchesThroughSymlink(t *testing.T) {
 	}
 	if resp := write(filepath.Join(realProj, "ok.txt")); resp.Decision != "allow" {
 		t.Fatalf("规则之外的项目内写入应放行: %+v", resp)
+	}
+}
+
+// 终审 I2：项目路径经过符号链接（macOS 的 /var → /private/var 同理）时，交给 Decider（上报 hub）与写审计的载荷 Cwd
+// 与项目根同一口径，都是解析链接后的路径。hub 侧“记住”按载荷与项目根重新定级（policy.ProposeRule），
+// 两者口径不一会把项目内的相对路径写入误判成 write_outside，学不了规则。
+func TestReportedPayloadUsesCleanedCwd(t *testing.T) {
+	d := &blockingDecider{release: make(chan struct{}), outcome: Outcome{Action: "allow", DecidedBy: "user"}}
+	env := startServer(t, d, nil)
+	linkProj, realProj := symlinkedProject(t, filepath.Dir(env.repo))
+	if linkProj == realProj {
+		t.Fatal("测试前提：链接写法与真实路径应不同")
+	}
+	// 不放行任何东西，请求才会交给 Decider
+	os.WriteFile(env.cfg.RulesPath, []byte("version: 1\nrules: []\n"), 0o600)
+	if err := env.srv.rules.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	reqs := []proto.Request{permission(linkProj, "mkdir build")}
+	// 载荷没带 cwd 时取会话的 cwd，同样清理
+	noCwd := permission(linkProj, "touch notes.txt")
+	noCwd.Payload.Cwd = ""
+	reqs = append(reqs, noCwd)
+	for _, req := range reqs {
+		conn, err := net.Dial("unix", env.cfg.SocketPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proto.WriteLine(conn, req)
+		waitFor(t, func() bool { return env.srv.pending.Count() == 1 })
+		pr := env.srv.pending.List()[0]
+		if pr.ProjectRoot != realProj || pr.Redacted.Cwd != realProj {
+			t.Fatalf("%q：上报的项目根 %q 与载荷 cwd %q 都应是 %q", req.Payload.Command, pr.ProjectRoot, pr.Redacted.Cwd, realProj)
+		}
+		// hub 的 learnRule 就是拿这两样调 ProposeRule：项目内写入应能学成规则
+		rule, err := policy.ProposeRule(pr.Redacted, policy.Context{ProjectRoot: pr.ProjectRoot, HomeDir: env.cfg.HomeDir}, pr.ID)
+		if err != nil {
+			t.Fatalf("%q 在 hub 侧应能记住: %v", req.Payload.Command, err)
+		}
+		if rule.Match.Risk == nil || *rule.Match.Risk != policy.RiskWriteInProject {
+			t.Fatalf("%q 应按项目内写入记住: %+v", req.Payload.Command, rule.Match)
+		}
+		d.release <- struct{}{}
+		var resp proto.Response
+		json.NewDecoder(conn).Decode(&resp)
+		conn.Close()
+		if resp.Decision != "allow" {
+			t.Fatalf("%q 应得到 allow: %+v", req.Payload.Command, resp)
+		}
+		waitFor(t, func() bool { return env.srv.pending.Count() == 0 })
+	}
+	// 本机审计（也会转发给 hub）里的载荷 cwd 同样是清理后的
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		if e.Payload == nil || e.Payload.Cwd != realProj {
+			t.Fatalf("审计里的载荷 cwd 应是 %q: %+v", realProj, e.Payload)
+		}
+	}
+}
+
+// 终审复审：载荷与会话都没有 cwd 时，上报（交给 Decider）与审计保持空 cwd，不写 CleanCwd("") 得到的 "."。
+// 引擎照旧按清理后的 "." 评估（相对路径，不在任何项目内）。
+func TestReportedPayloadKeepsEmptyCwd(t *testing.T) {
+	d := &blockingDecider{release: make(chan struct{}), outcome: Outcome{Action: "deny", DecidedBy: "user"}}
+	env := startServer(t, d, nil)
+	os.WriteFile(env.cfg.RulesPath, []byte("version: 1\nrules: []\n"), 0o600)
+	if err := env.srv.rules.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	req := permission("", "git push origin main")
+	conn, err := net.Dial("unix", env.cfg.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	proto.WriteLine(conn, req)
+	waitFor(t, func() bool { return env.srv.pending.Count() == 1 })
+	if pr := env.srv.pending.List()[0]; pr.Redacted.Cwd != "" || pr.ProjectRoot != "" {
+		t.Fatalf("没有 cwd 时上报应保持空: cwd %q 项目根 %q", pr.Redacted.Cwd, pr.ProjectRoot)
+	}
+	d.release <- struct{}{}
+	var resp proto.Response
+	json.NewDecoder(conn).Decode(&resp)
+	if resp.Decision != "deny" {
+		t.Fatalf("应得到 deny: %+v", resp)
+	}
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		pb, _ := json.Marshal(e.Payload)
+		if e.Payload == nil || strings.Contains(string(pb), `"cwd"`) {
+			t.Fatalf("审计里的载荷不应带 cwd: %s", pb)
+		}
 	}
 }

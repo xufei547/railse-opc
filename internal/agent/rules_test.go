@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -226,5 +227,86 @@ func TestReloadLogsRewrittenRulePaths(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "deny-rm") || !strings.Contains(buf.String(), "scope.project") {
 		t.Fatalf("改写规则路径应记日志: %q", buf.String())
+	}
+}
+
+// 终审 I3：首次用 hub 规则覆盖本机 rules.yaml（文件头不是“# 由 hub 下发”）前先备份到同目录 rules.local-<UTC 时间>.yaml（0600），
+// 内容与原文件一致，记日志并写明怎么导入；之后的覆盖（文件已是 hub 文件头）不再备份。
+func TestReplaceBacksUpLocalRulesOnce(t *testing.T) {
+	dir := shortTempDir(t)
+	path := filepath.Join(dir, "rules.yaml")
+	local := "# 我手写的规则\nversion: 1\nrules:\n  - id: deny-migrations\n    source: user\n    scope: global\n    match: {payload: file_write, path_glob: \"**/migrations/**\"}\n    action: deny\n"
+	if err := os.WriteFile(path, []byte(local), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	r, err := LoadRulesWithLogger(path, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backups := func() []string {
+		t.Helper()
+		m, err := filepath.Glob(filepath.Join(dir, "rules.local-*.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	for v := 1; v <= 3; v++ {
+		if err := r.Replace(policy.DefaultRuleSet(), v); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(backups()); n != 1 {
+			t.Fatalf("第 %d 次覆盖后应恰有 1 份备份，得到 %d", v, n)
+		}
+	}
+	bk := backups()[0]
+	if !regexp.MustCompile(`^rules\.local-\d{8}T\d{6}Z\.yaml$`).MatchString(filepath.Base(bk)) {
+		t.Fatalf("备份文件名: %s", filepath.Base(bk))
+	}
+	if b, _ := os.ReadFile(bk); string(b) != local {
+		t.Fatalf("备份内容应与原文件一致:\n%s", b)
+	}
+	if st, err := os.Stat(bk); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("备份权限应为 0600: %v %v", st, err)
+	}
+	if b, _ := os.ReadFile(path); !strings.HasPrefix(string(b), "# 由 hub 下发，版本 3。") {
+		t.Fatalf("rules.yaml 应已是 hub 的缓存:\n%s", b)
+	}
+	if out := logs.String(); !strings.Contains(out, bk) || !strings.Contains(out, "/api/rules/import") || strings.Count(out, "已备份") != 1 {
+		t.Fatalf("应记一条备份日志，带备份路径与导入方法: %q", out)
+	}
+
+	// 已是 hub 文件头的缓存（例如重启后）再被覆盖时不备份
+	dir2 := shortTempDir(t)
+	path2 := filepath.Join(dir2, "rules.yaml")
+	b, _ := policy.DefaultRuleSet().Marshal()
+	os.WriteFile(path2, append([]byte(fmt.Sprintf(hubRulesHeader, 5)), b...), 0o600)
+	r2, err := LoadRules(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r2.Replace(policy.DefaultRuleSet(), 6); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := filepath.Glob(filepath.Join(dir2, "rules.local-*")); len(m) != 0 {
+		t.Fatalf("已是 hub 下发的缓存不应备份: %v", m)
+	}
+}
+
+// HasLocalRules 报告 rules.yaml 存在且不是 hub 下发的缓存（railse agent enroll 据此提示先导入）。
+func TestHasLocalRules(t *testing.T) {
+	dir := shortTempDir(t)
+	path := filepath.Join(dir, "rules.yaml")
+	if HasLocalRules(path) {
+		t.Fatal("文件不存在时不算有本机规则")
+	}
+	os.WriteFile(path, []byte("version: 1\nrules: []\n"), 0o600)
+	if !HasLocalRules(path) {
+		t.Fatal("手写的规则文件应算本机规则")
+	}
+	os.WriteFile(path, []byte(fmt.Sprintf(hubRulesHeader, 2)+"version: 1\nrules: []\n"), 0o600)
+	if HasLocalRules(path) {
+		t.Fatal("hub 下发的缓存不算本机规则")
 	}
 }

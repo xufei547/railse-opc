@@ -21,6 +21,10 @@ type Config struct {
 	MachineID  string
 	HomeDir    string
 	Deadline   time.Duration // 单条请求的等待上限
+
+	MachinePath  string        // machine.json：本机在 hub 的身份，不存在表示未接入 hub
+	HubGrace     time.Duration // 请求送到 hub 后断线，最多等这么久重连，超时交回终端
+	AgentVersion string        // 上报 hub 的版本号，由 cmd 注入
 }
 
 // deadline 比各 CLI 的 24 小时钩子超时短 10 秒，见设计文档 3.2。
@@ -55,6 +59,10 @@ func ConfigIn(dir string) Config {
 		MachineID:  host,
 		HomeDir:    home,
 		Deadline:   deadline,
+
+		MachinePath:  filepath.Join(dir, "machine.json"),
+		HubGrace:     30 * time.Second,
+		AgentVersion: "dev",
 	}
 }
 

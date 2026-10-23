@@ -17,7 +17,7 @@
 - 模块路径 `github.com/railse/railse-opc`，`go 1.24`。本计划只允许新增上述三个依赖，版本固定。
 - `internal/policy` 仍不做 IO。hub 调用 `policy.ParseRuleSet`、`NewEngine`、`ProposeRule`、`Validate`，把它们的结果存进 SQLite。
 - hub 的数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`（与守护进程的 `~/.railse` 分开，同一台机器可以两者都跑）；目录 0700，数据库文件 `hub.db` 0600。
-- 守护进程到 hub 的认证：`railse hub token` 生成 10 分钟有效的一次性接入码；`railse agent enroll` 用它换取本机长期密钥，存 `~/.railse/machine.json`（0600）；WebSocket 握手用 `Authorization: Bearer <密钥>`；hub 只存密钥的 SHA-256。
+- 守护进程到 hub 的认证：`railse hub token` 生成 10 分钟有效的一次性接入码；`railse agent enroll` 用它换取本机长期密钥，存 `~/.railse/machine.json`（0600）；WebSocket 握手用 `Authorization: Bearer <密钥>`；hub 只存密钥的 SHA-256。例外：webhook 出站回调令牌明文存储，回调完成或重试用尽后清空（2026-10-22 用户决定 D）。
 - 手机到 hub 的认证：密码用 argon2id（time 1、memory 64 MiB、threads 4、盐 16 字节）；登录成功发 32 字节随机 token，hub 存其 SHA-256，30 天有效，放 `railse_session` cookie（HttpOnly、SameSite=Lax、Path=/；请求经 TLS 时加 Secure）；登录接口每个来源 IP 每分钟最多 5 次。
 - WebSocket 帧为 JSON 文本帧，每帧一个对象，带 `"t"` 字段；单帧最大 1 MiB；hub 每 30 秒 ping，90 秒无 pong 断开；守护进程重连退避 1、2、4、8、16、30 秒。
 - 守护进程上报 hub 的载荷必须先经 `redact.Payload`，事件消息经 `redact.Text`；hub 不信任守护进程送来的任何路径或命令，只存储与展示。
@@ -6079,7 +6079,8 @@ func TestEndToEndHubApproval(t *testing.T) {
 		t.Fatal("钩子没有拿到决定")
 	}
 	waitUntil(t, func() bool { r, _ := h.st.GetRequest(pending[0].ID); return r.State == "approved" && r.DeliveredAt != nil })
-	if !auditHas(t, cfg.AuditPath, `"state":"approved"`, `"decided_by":"user"`, `"reason":"手机批准"`) {
+	// 钩子拿固定文案“已在手机上批准”，备注只在 note（2026-10-22 用户决定 C 修订）
+	if !auditHas(t, cfg.AuditPath, `"state":"approved"`, `"decided_by":"user"`, `"reason":"已在手机上批准"`, `"note":"手机批准"`) {
 		b, _ := os.ReadFile(cfg.AuditPath)
 		t.Fatalf("本机审计应记 approved/user:\n%s", b)
 	}
@@ -6136,7 +6137,7 @@ func TestEndToEndHubApproval(t *testing.T) {
 	}
 }
 
-// hub 不在：守护进程等 HubGrace 后交回终端，审计记 hub_unreachable。
+// hub 不在：守护进程等 HubGrace 后交回终端，本机审计记 state expired、decided_by hub_unreachable。
 func TestEndToEndHubUnreachable(t *testing.T) {
 	dir, _ := os.MkdirTemp("", "rs")
 	t.Cleanup(func() { os.RemoveAll(dir) })
@@ -6162,9 +6163,9 @@ func TestEndToEndHubUnreachable(t *testing.T) {
 	if time.Since(start) > 5*time.Second {
 		t.Fatal("应在 HubGrace 后很快交回")
 	}
-	if !auditHas(t, cfg.AuditPath, `"state":"passthrough"`, `"decided_by":"hub_unreachable"`) {
+	if !auditHas(t, cfg.AuditPath, `"state":"expired"`, `"decided_by":"hub_unreachable"`) {
 		b, _ := os.ReadFile(cfg.AuditPath)
-		t.Fatalf("审计应记 hub_unreachable:\n%s", b)
+		t.Fatalf("审计应记 expired/hub_unreachable:\n%s", b)
 	}
 }
 ```
@@ -6186,7 +6187,7 @@ Expected: 全部 PASS。`TestEndToEndHubApproval` 约 3 到 5 秒（审计批量
    ```
    目录与文件：`~/.railse-hub/`（0700）、`hub.db`（0600，SQLite WAL）、`hub.log`（0600）。TLS 由反向代理（Caddy/nginx）终止，加 `--secure-cookies`；第 5 份计划提供内置 ACME。
 3. **接入一台机器**：hub 上 `railse hub token` → 机器上 `railse agent enroll --hub https://… --token …` → 重启 `railse agent run`。`machine.json` 的内容与权限；吊销：`DELETE /api/machines/{id}`（网页在第 4 份）。
-4. **接入后行为**：规则以 hub 为准，本机 `rules.yaml` 只是缓存（文件头有说明），`railse agent reload` 仍可临时加载本机改动，下次下发会覆盖；总开关以 hub 为准，`railse agent pause` 只在下次重连前有效；连不上 hub 时等 30 秒后交回终端（审计 `hub_unreachable`）；Gemini 的请求永远不进 hub。
+4. **接入后行为**：规则以 hub 为准，本机 `rules.yaml` 只是缓存（文件头有说明），`railse agent reload` 仍可临时加载本机改动，下次下发会覆盖；总开关生效值 = 本机 || hub，`railse agent pause` 只改本机一侧、不会被 hub 覆盖，也不反向同步（2026-10-22 用户决定 E 修订）；连不上 hub 时等 30 秒后交回终端（审计 `hub_unreachable`）；Gemini 的请求永远不进 hub。
 5. **API 一览表**：方法、路径、认证、用途（Task 9、10 的全部路由）；`/ws/client` 帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`；`/api/webhook/approvals` 的 body、回调格式（`POST callback_url`，`Authorization: Bearer <callback_token>`，body `{"id","action","note","decided_at"}`，3 次重试）。
 6. **安全要点**：存的全是哈希（机器密钥、会话 token、webhook 令牌、密码 argon2id）；cookie HttpOnly、SameSite=Lax；登录每 IP 每分钟 5 次；守护进程上报前脱敏；hub 不信任守护进程送来的路径与命令，只展示；`http://` 接入会警告。
 7. **故障排查**：`hub.log` 关键行；`GET /api/status` 的 `machines[].online`；守护进程 `agent.log` 里的“已连接 hub”“hub 连接结束”。
@@ -6230,7 +6231,7 @@ git commit -m "test: hub 与守护进程进程内端到端；docs: hub 说明、
 3. 守护进程：`railse agent enroll` 写出 0600 的 `machine.json`；`railse agent run` 有它时连 hub，没有时行为与第 2 份计划完全一致（`TestAgentServeAndControl`、`TestEndToEndClaudeSamples` 等旧测试不改）。
 4. 审批闭环（`TestEndToEndHubApproval`）：引擎答 ask 的 Claude/Codex 请求进 hub 的 `inbox`；`POST /api/requests/{id}/decide` 后钩子在 1 秒内拿到答复，hub 记 `approved|denied` 与 `delivered_at`；“记住”生成规则并下发到所有在线机器，本机 `rules.yaml` 被覆盖且文件头说明来源；拒绝并记住的规则 `source: user`、`action: deny`。
 5. 断线与重连：守护进程断开期间做出的决定在重连后补发（`TestHubClientReconnectsAndResyncs`）；守护进程重启后 hub 里它不再持有的 pending 变 `cancelled/agent_restart`；Codex 15 分钟内重发同一请求时旧的变 `cancelled/resend`，收件箱只剩一条。
-6. 边界：Gemini 请求不进 hub（`decided_by: gemini`）；连不上 hub 时 `HubGrace` 后交回终端（`decided_by: hub_unreachable`）；钩子消失 → hub `cancelled/terminal`；本机等待过期 → hub `expired/timeout`；hub 暂停 → 所有机器 `paused`，本机 `state.json` 同步。
+6. 边界：Gemini 请求不进 hub（`decided_by: gemini`）；连不上 hub 时 `HubGrace` 后交回终端（本机审计 `state: expired`、`decided_by: hub_unreachable`）；钩子消失 → hub `cancelled/terminal`；本机等待过期 → hub `expired/timeout`；hub 暂停 → 所有机器 `paused`，本机 `state.json` 同步。
 7. 审计：本机每条审计异步上报 hub（`audit_events`），自动决定在 hub 的 `requests` 里有历史行；本机审计与 hub 里的任何记录都不含钩子进程的环境变量（哨兵测试）。
 8. 安全：hub 存的机器密钥、会话 token、webhook 令牌、密码都是哈希；登录限速 5 次/分钟/IP；cookie HttpOnly + SameSite=Lax（TLS 后 Secure）；守护进程上报的载荷已脱敏；hub 对请求只能回 allow/deny；`http://` 接入打印警告。
 9. webhook：`POST /api/webhook/approvals` 用来源令牌创建 `kind: webhook` 的 pending；决定后回调 `callback_url`，失败重试 3 次并审计。
@@ -6263,6 +6264,6 @@ git commit -m "test: hub 与守护进程进程内端到端；docs: hub 说明、
 
 **已知取舍**
 - `railse hub password` 从标准输入读，终端下会回显；无回显方式写在文档里，不引入 `golang.org/x/term`。
-- 本机 `railse agent pause` 在接入 hub 后只到下次 `welcome`/`paused` 帧为止，不反向同步；第 4 份计划的网页提供 hub 侧暂停。
+- 本机 `railse agent pause` 在接入 hub 后只改本机一侧，生效值 = 本机 || hub，不会被 `welcome`/`paused` 帧覆盖，也不反向同步；第 4 份计划的网页提供 hub 侧暂停（2026-10-22 用户决定 E 修订）。
 - 守护进程重启后，hub 里它不再持有的 pending 全部按 `agent_restart` 取消，而不是让钩子重新等待：钩子进程早已随守护进程的 socket 关闭而得到 passthrough 或退出。
 - `TestHubRunServesAndStops` 用先占后放的端口，有极小的端口竞争概率；失败时重跑即可，不为此给 `Run` 加回调。
