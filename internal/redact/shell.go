@@ -46,10 +46,11 @@ const (
 )
 
 // maxDepth 是嵌套结构的层数上限，超过的不再展开（开头的字符当普通字符），免得对抗输入把递归压得太深。
-// maxRec 是递归进交给解释器的双引号参数的层数上限：找右引号要先空跑一遍，层数不设限会退化成平方级；
-// 超过的按普通双引号处理。
+// maxRec 是“去掉一层转义再扫描”的层数上限（交给解释器的双引号参数、反引号内容、喂给 shell 的 heredoc 正文）：
+// 每层都要复制一遍文本，双引号参数还要先空跑一遍找右引号，层数不设限会退化成平方级。超过的不去转义，
+// 双引号参数按普通双引号处理，其余直接按原文扫描。
 const (
-	maxDepth = 500
+	maxDepth = 64
 	maxRec   = 4
 )
 
@@ -381,7 +382,7 @@ func (c *ctx) run() {
 		blank := c.blank
 		c.blank = false
 		sc.flip = c.flipped()
-		if (ch == '\'' || ch == '"') && sc.flip {
+		if (ch == '\'' || ch == '"') && (sc.flip || c.oldArith()) {
 			c.wordChar()
 			continue
 		}
@@ -655,6 +656,10 @@ func (c *ctx) recArgs() bool {
 // 之后 bash 3.2 与 bash 5 看到的引号配对相反，引号与注释都当普通字符，整段按命令处理。
 func (c *ctx) flipped() bool { return c.flip || c.ambig && c.inDQ }
 
+// oldArith 报告本层是不是 $[…]：里面不认引号。bash 3.2 截取 $(…) 时不认其中的 $[…]，引号在那里另有配对；
+// ((…))、$((…)) 里的引号 bash 照常配对。
+func (c *ctx) oldArith() bool { return c.mode == mArith && c.closer == ']' }
+
 // restOfLine 把从当前位置到行尾（不含换行）当一层限定在本行内的命令处理。
 func (c *ctx) restOfLine() {
 	sc, t := c.sc, c.sc.t
@@ -728,9 +733,9 @@ func (c *ctx) placeholderWord() {
 	sc, t := c.sc, c.sc.t
 	for k := 0; k < len(placeholder); k++ {
 		c.b.char(t, sc.i, viewByte(t.at(sc.i)))
+		c.addWord(t.at(sc.i))
 		sc.i++
 	}
-	c.inWord, c.start = true, false
 }
 
 // redirect 处理引号外的 < 和 >：进程替换 <(…)、here-string <<<、heredoc <<、占位符、普通重定向。
@@ -902,10 +907,10 @@ func (c *ctx) bodies() {
 		sc.i = start
 		switch {
 		case bodyEnd == start:
-		case shell && !h.quoted:
+		case shell && !h.quoted && sc.rec < maxRec && hasBackslash(t, start, bodyEnd):
 			// 分隔词不带引号：外层 shell 先展开正文（\\ \$ \` 去掉反斜杠、\ 加换行去掉），shell 读到的是展开后的文本
 			if u := t.unquote(start, bodyEnd, bodyEscapes); u != nil {
-				sub := &scanner{t: u, dry: sc.dry, depth: sc.depth + 1, rec: sc.rec, flip: sc.flip}
+				sub := &scanner{t: u, dry: sc.dry, depth: sc.depth + 1, rec: sc.rec + 1, flip: sc.flip}
 				c.b.nest(sub.context(u.n(), mShell, 0))
 			} else {
 				c.b.nest(t.slice(start, bodyEnd))
@@ -950,6 +955,14 @@ func (h *heredoc) closes(t *text, pos, e int) bool {
 		n--
 	}
 	return n == len(h.delim) && t.has(pos, h.delim)
+}
+
+// hasBackslash 判断逻辑区间 [lo, hi) 里有没有反斜杠。
+func hasBackslash(t *text, lo, hi int) bool {
+	if t.ch == nil {
+		return strings.IndexByte(t.raw[lo:hi], '\\') >= 0
+	}
+	return bytes.IndexByte(t.ch[lo:hi], '\\') >= 0
 }
 
 // oddBackslashes 判断逻辑行 [pos, e) 是否以奇数个反斜杠结尾（续行）。
@@ -1038,14 +1051,17 @@ func (c *ctx) paren1() bool {
 	sc, t := c.sc, c.sc.t
 	switch c.mode {
 	case mShell, mArray:
-		if c.inWord && !c.long && len(c.word) > 0 && c.word[len(c.word)-1] == '=' && isAssign(string(c.word)) && sc.depth < maxDepth {
-			if sc.i+1 < c.hi && t.at(sc.i+1) == '(' {
-				// NAME=(( 是语法错误：bash 3.2 丢掉这一行余下的部分，从下一行接着执行
+		if c.inWord && !c.long && sc.depth < maxDepth {
+			w := string(c.word)
+			// NAME=((、NAME=x(( 是语法错误：bash 3.2 丢掉这一行余下的部分，从下一行接着执行
+			if sc.i+1 < c.hi && t.at(sc.i+1) == '(' && isAssign(w) {
 				c.restOfLine()
 				return true
 			}
-			c.nestDone(sc.nestedText(c.hi, 1, mArray, ')', 1))
-			return true
+			if strings.HasSuffix(w, "=") && isAssign(w) {
+				c.nestDone(sc.nestedText(c.hi, 1, mArray, ')', 1))
+				return true
+			}
 		}
 		c.endWord()
 		if c.cmdPos && sc.i+1 < c.hi && t.at(sc.i+1) == '(' && sc.depth < maxDepth {
@@ -1076,13 +1092,13 @@ func (c *ctx) dollar(top bool) bool {
 	}
 	switch t.at(i + 1) {
 	case '\'':
-		if !top || c.flipped() {
+		if !top || c.flipped() || c.oldArith() {
 			return false
 		}
 		c.ansiQuoted()
 		return true
 	case '"':
-		if !top || c.flipped() {
+		if !top || c.flipped() || c.oldArith() {
 			return false
 		}
 		c.doubleQuoted(true)
@@ -1172,22 +1188,34 @@ func (c *ctx) backtick() {
 }
 
 // backtickText 处理 sc.i 处的反引号命令替换：内容到下一个未转义的反引号为止（不管其中的引号，与 bash 一致），
-// 按命令行语境递归脱敏，返回整段。
+// 按命令行语境递归脱敏，返回整段。内容里的 \\ \$ \` 先去掉反斜杠（bash 先这样处理再解析），里层看到的是去掉之后的文本。
 func (sc *scanner) backtickText(hi int) string {
 	t := sc.t
 	start := sc.i
 	k := start + 1
+	esc := false
 	for k < hi && t.at(k) != '`' {
 		if t.at(k) == '\\' {
 			k++
+			esc = true
 		}
 		k++
 	}
 	k = min(k, hi)
-	sc.i = start + 1
-	sc.depth++
-	inner := sc.context(k, mShell, 0)
-	sc.depth--
+	var inner string
+	var u *text
+	if esc && sc.rec < maxRec {
+		u = t.unquote(start+1, k, bodyEscapes)
+	}
+	if u != nil {
+		sub := &scanner{t: u, dry: sc.dry, depth: sc.depth + 1, rec: sc.rec + 1, flip: sc.flip}
+		inner = sub.context(u.n(), mShell, 0)
+	} else {
+		sc.i = start + 1
+		sc.depth++
+		inner = sc.context(k, mShell, 0)
+		sc.depth--
+	}
 	sc.i = k
 	if sc.i < hi {
 		sc.i++
