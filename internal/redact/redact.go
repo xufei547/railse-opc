@@ -65,6 +65,9 @@ type quoting struct {
 	urlPass  string // URL userinfo 的密码
 	excluded string // 视图专用字节，所有值字符类都排除（文本语境为空）
 	ph       string // 已经抹过的占位符
+	// word：值是整个词，引号段与值字符可以相连（"password":、'a'"b"），免得第一次只抹引号那段、第二次再连带后面的字符
+	// （hub 二次脱敏结果要不变）。会被截断的文本不用
+	word bool
 }
 
 // textQuoting 是路径、文本、URL 等不经视图的语境：引号就是原文里的引号。open 为 true 时（只用于会被截断的文本）
@@ -86,33 +89,43 @@ func textQuoting(open bool) quoting {
 
 // compile 用给定的“不带引号的值”字符类编译一套文本语境的规则。几种语境只在值到哪里为止上不同。
 func compile(bare string, open bool) []rule {
-	return build(bare, textQuoting(open))
+	q := textQuoting(open)
+	// 会被截断的文本不连：右引号丢了的值本来就抹到末尾，再连会把后面的引号也当成值的一部分
+	q.word = !open
+	return build(bare, q)
 }
 
-// build 编译一套规则。顺序很重要：先处理带键名的形式，再处理裸 token。
-// 值的位置上已经是占位符时只认占位符本身，不连带后面的字符：hub 会对守护进程脱敏过的载荷再跑一次，
-// 第二次的结果必须不变（password=<redacted>: 不能变成 password=<redacted>，mysql -p<redacted> 也不能让规则跳到后面的 -p）。
+// build 编译一套规则。顺序很重要：先处理带键名的形式，再处理裸 token。bare 必须是 [^…]+ 形式的字符类。
+//
+// 值的位置上已经是占位符、且后面紧跟值字符类以外的字符（空白、引号……）或文本结尾时，只认占位符本身（连同那个字符原样
+// 放回，见 ${phend}）：hub 会对守护进程脱敏过的载荷再跑一次，mysql -p<redacted> -pX 不能让规则跳到后面的 -p。
+// 占位符后面还连着值字符时照原来的字符类整段抹，免得 password=<redacted>RealSecret 漏出后半截。
 func build(bare string, q quoting) []rule {
-	bare = `(?:` + q.ph + `|` + bare + `)`
-	value := `(?:` + q.quoted + `|` + bare + `)`
+	stop := `[` + bare[2:len(bare)-2] + `]` // 值字符类以外的字符
+	phOnly := q.ph + `(?P<phend>` + stop + `|$)`
+	value := `(?:` + q.quoted + `|(?:` + phOnly + `|(?:` + q.ph + `)?` + bare + `))`
+	if q.word {
+		value = `(?:` + phOnly + `|(?:` + q.quoted + `|(?:` + q.ph + `)?` + bare + `)(?:` + q.quoted + `|` + bare + `)*)`
+	}
+	bare = `(?:` + phOnly + `|(?:` + q.ph + `)?` + bare + `)`
 	x := q.excluded
 	return []rule{
 		// Authorization: Bearer xxx / Authorization: Basic xxx
-		{re: regexp.MustCompile(`(?i)(authorization:\s*)(bearer|basic|token)?\s*` + bare), repl: "${1}" + placeholder, need: ":"},
+		{re: regexp.MustCompile(`(?i)(authorization:\s*)(bearer|basic|token)?\s*` + bare), repl: "${1}" + placeholder + "${phend}", need: ":"},
 		// 不跟在 Authorization: 后面的 Bearer xxx
-		{re: regexp.MustCompile(`(?i)\b(bearer\s+)` + bare), repl: "${1}" + placeholder, need: "bB"},
+		{re: regexp.MustCompile(`(?i)\b(bearer\s+)` + bare), repl: "${1}" + placeholder + "${phend}", need: "bB"},
 		// --token xxx、--password "xxx"、--api-key 'xxx'
-		{re: regexp.MustCompile(`(?i)(--?(token|password|passwd|api[-_]?key|secret|auth)\s+)` + value), repl: "${1}" + placeholder, need: "-"},
+		{re: regexp.MustCompile(`(?i)(--?(token|password|passwd|api[-_]?key|secret|auth)\s+)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
 		// token=xxx、DB2_PASSWORD="xxx"、--env=DB_PASSWORD=xxx、+API_KEY=xxx、:_authToken=xxx、MYSQL_PWD=xxx。
 		// 不设左边界：key 的前缀字符类会吸收键名前缀，${1} 只含键名本身。
-		{re: regexp.MustCompile(`(?i)(` + key + `=)` + value), repl: "${1}" + placeholder, need: "="},
+		{re: regexp.MustCompile(`(?i)(` + key + `=)` + value), repl: "${1}" + placeholder + "${phend}", need: "="},
 		// JSON 带引号的敏感键："password": "xxx"、"api_key": 123、"auth_token": true。值换成 "<redacted>"，JSON 仍合法；
 		// open 时字符串值没有右引号（被截断）也抹到文本末尾。YAML 的裸键（password: xxx）不认
 		{re: regexp.MustCompile(`(?i)("` + key + q.keyEnd + `\s*:\s*)(?:` + q.jsonStr + `|-?[0-9][0-9.eE+-]*|true|false)`),
 			repl: "${1}\"" + placeholder + "\"", vrepl: "${1}\"" + viewPlaceholder + string(rune(vCloseDQ)), need: ":"},
 		// X-API-Key: xxx、PRIVATE-TOKEN: xxx、X-Auth-Token:xxx 这类请求头（Authorization 见上）。头名要带连字符，
 		// 免得误抹代码里的 apiKey: config.key、YAML 里的 max_tokens: 10
-		{re: regexp.MustCompile(`(?i)\b((?:[a-z0-9]+-)*(?:api-key|[a-z0-9]+-token|[a-z0-9]+-secret)[ \t]*:[ \t]*)` + value), repl: "${1}" + placeholder, need: ":"},
+		{re: regexp.MustCompile(`(?i)\b((?:[a-z0-9]+-)*(?:api-key|[a-z0-9]+-token|[a-z0-9]+-secret)[ \t]*:[ \t]*)` + value), repl: "${1}" + placeholder + "${phend}", need: ":"},
 		// URL 里的 user:pass@（任意 scheme）：用户名留着，只抹密码。密码里的 @ 算在密码里（取 / ? # 之前最后一个 @）
 		{re: regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://` + q.urlUser + `:)` + q.urlPass + `@`), repl: "${1}" + placeholder + "@", need: ":"},
 		// curl 的 -u/--user、-U/--proxy-user 的 user:pass（-u、-U 可以在组合短选项末尾，如 -sSu）：用户名与引号留着，
@@ -120,9 +133,9 @@ func build(bare string, q quoting) []rule {
 		{re: regexp.MustCompile(`(\bcurl\b` + q.sameCmd + `\s(?:-[A-Za-z]*[uU]\s*|--user\s+|--proxy-user\s+))` +
 			`(?:` + q.sqUser + q.sqPass + q.sqEnd + `|` + q.dqUser + q.dqPass + q.dqEnd +
 			`|(\\"[^'":\s\\` + x + `]*:)(?:[^"\\` + x + `]|\\[^"` + x + `])*` + q.jqEnd + `|` + q.user + bare + `)`),
-			repl: "${1}${2}${4}${6}${8}" + placeholder + "${3}${5}${7}", need: "-"},
+			repl: "${1}${2}${4}${6}${8}" + placeholder + "${phend}${3}${5}${7}", need: "-"},
 		// mysql 系命令紧贴 -p 的密码（-pxxx、-p'xxx'）。-p 单独出现时 mysql 提示输入密码、后面的是库名；-P 是端口：都不动
-		{re: regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + q.sameCmd + `\s-p)` + value), repl: "${1}" + placeholder, need: "-"},
+		{re: regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + q.sameCmd + `\s-p)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
 		// 裸 token：GitHub、OpenAI、Slack、AWS
 		{re: regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), repl: placeholder, need: "_-A"},
 	}

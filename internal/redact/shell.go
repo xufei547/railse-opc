@@ -71,6 +71,7 @@ var viewRules = func() []rule {
 		urlPass:  "[^\\s/?#'\"\\\\;|&<>()`$" + x + "]+",
 		excluded: x,
 		ph:       `[<\x13\x14]redacted>`, // 原文里的、本层插入的、引号里已抹过的占位符
+		word:     true,
 	}
 	rules := build("[^\\s'\"\\\\;|&<>()`$"+x+"]+", q)
 	for i := range rules {
@@ -196,12 +197,12 @@ func (b *builder) char(t *text, i int, rep byte) {
 	}
 }
 
-// closing 同 char，但 rep 放在最后一个字节（右引号）。
+// closing 同 char，但 rep 放在最后一个字节（右引号）；前面的字节（\" 的反斜杠）是 vLit，不算进前面的裸值。
 func (b *builder) closing(t *text, i int, rep byte) {
 	s := t.slice(i, i+1)
 	b.orig = append(b.orig, s...)
 	for k := 1; k < len(s); k++ {
-		b.view = append(b.view, vMask)
+		b.view = append(b.view, vLit)
 	}
 	b.view = append(b.view, rep)
 }
@@ -349,9 +350,16 @@ type ctx struct {
 	start  bool // 下一个字符在词首（# 在这里开始注释）
 	blank  bool // 上一个字符是空白、换行，或在本层开头
 	inWord bool
-	word   []byte
-	long   bool
-	cmdPos bool // 下一个词在命令位置
+	// 当前词去掉引号与转义后的文本：word 是开头至多 64 字节（判断 VAR=值、-c 类选项、保留字），base 是最后一个 /
+	// 之后至多 64 字节（判断命令名，路径多长都行）。超出时 long、baseLong 为 true
+	word, base     []byte
+	long, baseLong bool
+	cmdPos         bool // 下一个词在命令位置
+	// 包装命令（sudo、env、timeout……）之后：wrap 是包装命令名，wrapArg 表示下一个词是它的选项参数，
+	// wrapPos 是还要跳过的位置参数（timeout 的时长）
+	wrap    string
+	wrapArg bool
+	wrapPos int
 	// 当前简单命令里见过的词：shell 名、-c 类选项、eval、ssh；feeds 表示本条命令把输入交给 shell 或 ssh
 	shell, cflag, eval, ssh, feeds bool
 	here                           bool       // 当前词是喂给 shell 或 ssh 的 here-string
@@ -504,6 +512,25 @@ func (c *ctx) addWord(ch byte) {
 	} else {
 		c.long = true
 	}
+	switch {
+	case ch == '/':
+		c.base, c.baseLong = c.base[:0], false
+	case len(c.base) < 64:
+		c.base = append(c.base, ch)
+	default:
+		c.baseLong = true
+	}
+}
+
+// addWordText 把引号里的字面内容或嵌套结构的原文算进当前词。
+func (c *ctx) addWordText(s string) {
+	if len(s) > 64 {
+		c.inWord, c.start, c.long, c.baseLong = true, false, true, true
+		return
+	}
+	for i := 0; i < len(s); i++ {
+		c.addWord(s[i])
+	}
 }
 
 // space 追加空白：词到此结束。
@@ -524,10 +551,10 @@ func (c *ctx) op(n int) {
 	c.start = true
 }
 
-// nestDone 追加一个嵌套结构的文本，它是当前词的一部分。
+// nestDone 追加一个嵌套结构的文本，它是当前词的一部分（${SHELL} 这类参数展开可以是命令名）。
 func (c *ctx) nestDone(s string) {
 	c.b.nest(s)
-	c.inWord, c.start = true, false
+	c.addWordText(s)
 }
 
 // operator 处理 ; & | 及其组合。管道 | 和 |& 把下一段接在同一条管道里；&> 是重定向，不结束命令。
@@ -560,6 +587,7 @@ func (c *ctx) operator(ch byte) {
 // endCmd 结束当前简单命令。pipeEnd 为 false 时只是进入同一条管道的下一段。
 func (c *ctx) endCmd(pipeEnd bool) {
 	c.shell, c.cflag, c.eval, c.ssh, c.feeds, c.here = false, false, false, false, false, false
+	c.wrap, c.wrapArg, c.wrapPos = "", false, 0
 	c.cmdPos, c.start = true, true
 	if pipeEnd {
 		c.pipe = c.pipe[:0]
@@ -570,22 +598,59 @@ func (c *ctx) endCmd(pipeEnd bool) {
 var reservedWords = map[string]bool{"!": true, "{": true, "if": true, "then": true, "else": true, "elif": true,
 	"do": true, "while": true, "until": true, "time": true}
 
-// endWord 结束当前词，按词的内容更新命令状态。
+// endWord 结束当前词，按词的内容更新命令状态。只有命令位置上的词才当命令名认：命令开头、VAR=值 之后、
+// 包装命令及其选项之后、find 的 -exec 之后。参数里出现的 bash、eval、ssh 不算（echo ssh '…'）。
 func (c *ctx) endWord() {
 	if !c.inWord {
 		return
 	}
 	w, long := string(c.word), c.long
-	c.word, c.inWord, c.long, c.here = c.word[:0], false, false, false
+	name := ""
+	if !c.baseLong {
+		name = string(c.base)
+	}
+	c.word, c.base, c.inWord, c.long, c.baseLong, c.here = c.word[:0], c.base[:0], false, false, false, false
 	if c.mode != mShell {
 		return
 	}
-	if long {
+	switch {
+	case c.cmdPos:
+		if !long && (reservedWords[w] || isAssign(w)) {
+			return
+		}
 		c.cmdPos = false
-		return
+		c.command(name)
+	case c.wrap != "":
+		switch {
+		case c.wrapArg:
+			c.wrapArg = false
+		case len(w) > 1 && w[0] == '-':
+			c.wrapArg = len(w) == 2 && strings.IndexByte(wrapperArgs[c.wrap], w[1]) >= 0
+		case c.wrap == "env" && isAssign(w):
+		case c.wrapPos > 0:
+			c.wrapPos--
+		default:
+			c.wrap = ""
+			c.command(name)
+		}
+	case w == "-exec" || w == "-execdir" || w == "-ok" || w == "-okdir":
+		c.cmdPos = true
+	case c.shell && !long && isCFlag(w):
+		c.cflag = true
 	}
-	switch w[strings.LastIndexByte(w, '/')+1:] {
-	case "sh", "bash", "zsh", "dash", "ksh":
+}
+
+// wrapperArgs 是包装命令的短选项里带参数的那些（sudo -u root bash）。只列常见的；认不出时把参数当命令名，
+// 结果是不当解释器、引号里的值整段抹，这是可接受的失败方向。
+var wrapperArgs = map[string]string{
+	"sudo": "ughpCDRTUrt", "env": "uCS", "xargs": "InPLdEsa", "nice": "n", "timeout": "sk", "exec": "a",
+	"command": "", "builtin": "", "nohup": "",
+}
+
+// command 按命令位置上的命令名（去掉引号、取路径最后一段）更新状态。
+func (c *ctx) command(name string) {
+	switch name {
+	case "sh", "bash", "zsh", "dash", "ksh", "$SHELL", "${SHELL}":
 		c.shell = true
 		c.feed()
 	case "ssh":
@@ -594,19 +659,19 @@ func (c *ctx) endWord() {
 	case "eval":
 		c.eval = true
 	case "case":
-		if c.cmdPos {
-			c.cases++
-		}
+		c.cases++
 	case "esac":
-		if c.cmdPos && c.cases > 0 {
+		if c.cases > 0 {
 			c.cases--
 		}
 	default:
-		if c.shell && isCFlag(w) {
-			c.cflag = true
+		if _, ok := wrapperArgs[name]; ok {
+			c.wrap, c.wrapArg, c.wrapPos = name, false, 0
+			if name == "timeout" {
+				c.wrapPos = 1
+			}
 		}
 	}
-	c.cmdPos = c.cmdPos && (reservedWords[w] || isAssign(w))
 }
 
 // feed 标记本条命令把输入交给 shell 或 ssh：当前管道里已登记的 heredoc 正文都是喂给它的。
@@ -718,12 +783,19 @@ func (c *ctx) escape() {
 		c.placeholderWord()
 		return
 	}
-	c.b.char(t, i, vMask)
-	v := nx
-	if isViewByte(nx) || strings.IndexByte(" \t\r\n'\"\\;|&<>()`$", nx) >= 0 {
-		v = vMask
+	meta := isViewByte(nx) || strings.IndexByte(" \t\r\n'\"\\;|&<>()`$", nx) >= 0
+	if meta && c.recArgs() {
+		// 交给 eval、sh -c、ssh 的参数：外层去掉反斜杠后 \; 就是命令分隔符，值在这里停，后面的命令露出来
+		c.b.char(t, i, '\\')
+		c.b.char(t, i+1, viewByte(nx))
+	} else {
+		c.b.char(t, i, vMask)
+		v := nx
+		if meta {
+			v = vMask
+		}
+		c.b.char(t, i+1, v)
 	}
-	c.b.char(t, i+1, v)
 	sc.i += 2
 	c.addWord(nx)
 }
@@ -1249,9 +1321,7 @@ func (c *ctx) singleQuoted() {
 	if k < c.hi {
 		c.b.closing(t, k, vCloseSQ)
 	}
-	for p := i + 1; p < k && len(c.word) < 64; p++ {
-		c.word = append(c.word, t.at(p))
-	}
+	c.addWordText(t.slice(i+1, k))
 	sc.i = end
 	c.inWord, c.start = true, false
 }
@@ -1284,6 +1354,7 @@ func (c *ctx) ansiQuoted() {
 	c.b.char(t, i, '\'')
 	c.b.char(t, i+1, vMask)
 	c.b.literal(sc.lit(t.slice(i+2, k), literalRules))
+	c.addWordText(t.slice(i+2, k))
 	if k < c.hi {
 		c.b.closing(t, k, vCloseSQ)
 	}
@@ -1335,6 +1406,7 @@ func (c *ctx) dqInterior() bool {
 	flush := func() {
 		if sc.i > piece {
 			c.b.literal(sc.lit(t.slice(piece, sc.i), literalRules))
+			c.addWordText(t.slice(piece, sc.i))
 		}
 	}
 	for sc.i < c.hi {
@@ -1348,7 +1420,9 @@ func (c *ctx) dqInterior() bool {
 		case '`':
 			if sc.depth < maxDepth {
 				flush()
-				c.b.nest(sc.backtickText(c.hi))
+				bt := sc.backtickText(c.hi)
+				c.b.nest(bt)
+				c.addWordText(bt)
 				piece = sc.i
 				continue
 			}
@@ -1359,6 +1433,7 @@ func (c *ctx) dqInterior() bool {
 				s, _ := sc.dollarText(c.hi)
 				sc.inDQ = false
 				c.b.nest(s)
+				c.addWordText(s)
 				piece = sc.i
 				continue
 			}
