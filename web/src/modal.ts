@@ -19,3 +19,11 @@ export function inertSiblings<T extends Inertable>(siblings: Iterable<T>, keep: 
     for (const [el, was] of changed) el.inert = was
   }
 }
+
+/**
+ * 页面底部要给固定的结果提示留出的高度：从提示的上沿到底部导航的上沿（页面内容在导航之上结束），向上取整，不为负。
+ * 窄屏、文案长时提示会变高，固定的留白不够，最后一行会压在提示下面。
+ */
+export function toastSpace(navTop: number, toastTop: number): number {
+  return Math.max(0, Math.ceil(navTop - toastTop))
+}

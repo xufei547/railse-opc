@@ -13,6 +13,12 @@
   --low-bg: #dcfce7;
   --mid-bg: #fef3c7;
   --high-bg: #fee2e2;
+  /* 文字色：--low/--mid/--high 也是底色（拒绝按钮、角标是白字压在 --high 上），深色模式不能直接调亮它们，
+     所以横幅、提示、标签、错误文字另用这组；对比度由 contrast.test.ts 按 WCAG AA 检查 */
+  --low-fg: #15803d;
+  --mid-fg: #b45309;
+  --high-fg: #b91c1c;
+  --plain-fg: #4b5563;
   --radius: 12px;
   --gutter: 16px;
   --nav-h: 56px;
@@ -28,6 +34,10 @@
     --low-bg: #0f2e1a;
     --mid-bg: #3a2a08;
     --high-bg: #3b0f0f;
+    --low-fg: #4ade80;
+    --mid-fg: #fbbf24;
+    --high-fg: #f87171;
+    --plain-fg: #9ca3af;
   }
 }
 * { box-sizing: border-box; }
@@ -50,10 +60,10 @@ button { font: inherit; }
 .card .time { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .card .cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
 .tag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; line-height: 18px; white-space: nowrap; }
-.tag.low { background: var(--low-bg); color: var(--low); }
-.tag.mid { background: var(--mid-bg); color: var(--mid); }
-.tag.high { background: var(--high-bg); color: var(--high); }
-.tag.plain { background: var(--line); color: var(--muted); }
+.tag.low { background: var(--low-bg); color: var(--low-fg); }
+.tag.mid { background: var(--mid-bg); color: var(--mid-fg); }
+.tag.high { background: var(--high-bg); color: var(--high-fg); }
+.tag.plain { background: var(--line); color: var(--plain-fg); }
 .group-title { margin: 14px 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; overflow-wrap: anywhere; }
 .group-title .count { margin-left: 6px; font-weight: 400; }
 .section-title { margin: 18px 0 2px; font-size: 16px; }
@@ -76,9 +86,9 @@ button { font: inherit; }
 .input, textarea.input { width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--fg); font: inherit; }
 textarea.input { min-height: 72px; }
 .banner { padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-size: 14px; }
-.banner.warn { background: var(--high-bg); color: var(--high); }
-.banner.info { background: var(--mid-bg); color: var(--mid); }
-.banner.ok { background: var(--low-bg); color: var(--low); }
+.banner.warn { background: var(--high-bg); color: var(--high-fg); }
+.banner.info { background: var(--mid-bg); color: var(--mid-fg); }
+.banner.ok { background: var(--low-bg); color: var(--low-fg); }
 .banner .btn { min-height: 32px; margin-left: 8px; }
 .banner p { margin: 6px 0 0; }
 .banner .banner-title { display: block; font-size: 16px; }
@@ -87,10 +97,11 @@ textarea.input { min-height: 72px; }
 .toast.raised { bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 76px); }
 .toast:focus { outline: none; }
 .toast .toast-body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.toast .btn { flex: none; }
-.page.has-toast { padding-bottom: 120px; }
+.toast .btn { flex: none; min-height: 44px; }
+/* 留白跟着结果提示的实际高度走（ResultToast 量出从提示上沿到导航上沿的距离写进 --toast-space），量不到时取保守的 200px */
+.page.has-toast { padding-bottom: calc(var(--toast-space, 200px) + 12px); }
 /* 含被隐藏部分：必须醒目 */
-.banner.loud { border: 2px solid var(--high); font-size: 15px; padding: 12px 14px; }
+.banner.loud { border: 2px solid var(--high-fg); font-size: 15px; padding: 12px 14px; }
 pre.block { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; word-break: break-all; margin: 8px 0; }
 dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; margin: 8px 0; font-size: 14px; }
 dl.kv dt { color: var(--muted); }
@@ -123,6 +134,6 @@ code.mono { word-break: break-all; }
 .seg button:disabled { opacity: 0.5; }
 .login { max-width: 360px; margin: 15vh auto 0; padding: 0 var(--gutter); }
 .login h1 { text-align: center; }
-.error { color: var(--high); font-size: 14px; margin: 8px 0; }
+.error { color: var(--high-fg); font-size: 14px; margin: 8px 0; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .dot.on { background: var(--low); }
