@@ -179,6 +179,17 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
+// SetSettingIfAbsent 只在没有该键时写入，返回是否真的写了。两个进程同时首次写同一个键时只有一个写成；
+// 调用方随后再读一次，拿到的就是写成的那个值。
+func (s *Store) SetSettingIfAbsent(key, value string) (bool, error) {
+	res, err := s.db.Exec("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO NOTHING", key, value)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // Tx 在一个事务（BEGIN IMMEDIATE）里跑 fn：fn 返回 nil 就提交，返回错误或 panic 就回滚，
 // panic 回滚后继续向上抛。回滚失败的错误与 fn 的错误一起返回。
 // 单连接：回调里只能用 tx，不得调用 s.db 或其他 Store 方法，否则自锁永久挂死；
