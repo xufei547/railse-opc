@@ -519,10 +519,20 @@ func (c *ctx) op(n int) {
 	c.start = true
 }
 
-// nestDone 追加一个嵌套结构的文本，它是当前词的一部分（${SHELL} 这类参数展开可以是命令名）。
+// nestDone 追加一个嵌套结构的文本，它是当前词的一部分。
 func (c *ctx) nestDone(s string) {
 	c.b.nest(s)
-	c.addWordText(s)
+	c.addWordNest(s)
+}
+
+// addWordNest 把嵌套结构算进当前词：展开的结果不知道，不算进命令名（${x:-}sh 按 sh 认），只有 ${SHELL} 记成 $SHELL。
+func (c *ctx) addWordNest(s string) {
+	c.inWord, c.start, c.quoted = true, false, true
+	if s == "${SHELL}" {
+		for i := 0; i < len("$SHELL"); i++ {
+			c.base = append(c.base, "$SHELL"[i])
+		}
+	}
 }
 
 // operator 处理 ; & | 及其组合。管道 | 和 |& 把下一段接在同一条管道里；&> 是重定向，不结束命令。
@@ -638,7 +648,9 @@ func (c *ctx) command(name, kw string) {
 		c.ssh = true
 		c.feed()
 	case "eval":
+		// eval 的参数会执行，本身也是一条命令：下一个词按命令名认（eval sh <<E 的正文喂给 sh）
 		c.eval = true
+		c.wrap, c.wrapArg, c.wrapPos = "eval", false, 0
 	default:
 		if _, ok := wrapperArgs[name]; ok {
 			c.wrap, c.wrapArg, c.wrapPos = name, false, 0
@@ -1175,7 +1187,8 @@ func (c *ctx) singleQuoted() {
 		inner := sc.context(k, mShell, 0)
 		sc.depth--
 		sc.i = end
-		c.nestDone(t.slice(i, i+1) + inner + t.slice(k, end))
+		c.b.nest(t.slice(i, i+1) + inner + t.slice(k, end))
+		c.addWordText(t.slice(i+1, k))
 		return
 	}
 	c.b.char(t, i, '\'')
@@ -1210,7 +1223,8 @@ func (c *ctx) ansiQuoted() {
 		inner := sc.context(k, mShell, 0)
 		sc.depth--
 		sc.i = end
-		c.nestDone(t.slice(i, i+2) + inner + t.slice(k, end))
+		c.b.nest(t.slice(i, i+2) + inner + t.slice(k, end))
+		c.addWordText(t.slice(i+2, k))
 		return
 	}
 	c.b.char(t, i, '\'')
@@ -1245,7 +1259,8 @@ func (c *ctx) doubleQuoted(dollar bool) {
 				end = k + 1
 			}
 			sc.i = end
-			c.nestDone(t.slice(i, i+open) + inner + t.slice(k, end))
+			c.b.nest(t.slice(i, i+open) + inner + t.slice(k, end))
+			c.addWordText(t.slice(i+open, k))
 			return
 		}
 	}
@@ -1284,7 +1299,7 @@ func (c *ctx) dqInterior() bool {
 				flush()
 				bt := sc.backtickText(c.hi)
 				c.b.nest(bt)
-				c.addWordText(bt)
+				c.addWordNest(bt)
 				piece = sc.i
 				continue
 			}
@@ -1293,7 +1308,7 @@ func (c *ctx) dqInterior() bool {
 				flush()
 				s, _ := sc.dollarText(c.hi)
 				c.b.nest(s)
-				c.addWordText(s)
+				c.addWordNest(s)
 				piece = sc.i
 				continue
 			}
