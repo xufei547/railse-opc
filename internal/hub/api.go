@@ -144,8 +144,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	for _, m := range machines {
 		ms = append(ms, map[string]any{"id": m.ID, "name": m.Name, "online": s.agents.connected(m.ID), "last_seen": m.LastSeen, "revoked": m.Revoked})
 	}
+	subs, err := s.store.CountPushSubscriptions()
+	if err != nil {
+		s.log.Printf("统计推送订阅: %v", err) // 不影响其余状态，按 0 回
+		subs = 0
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"paused": paused, "pending": pending, "rules_version": version, "machines": ms,
-		"uptime": time.Since(s.start).Round(time.Second).String()})
+		"uptime": time.Since(s.start).Round(time.Second).String(), "push_enabled": s.push.enabled, "push_subscriptions": subs})
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, paused bool) {

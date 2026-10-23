@@ -265,7 +265,7 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 		}
 	}
 	s.audit(m.ID, "agent", r.ID, "request_pending", map[string]string{"risk": r.Risk, "tool": r.ToolName})
-	s.clients.broadcast("request_new", s.view(r))
+	s.announceNew(r)
 }
 
 // pendingAgain 处理守护进程从连接 c 再次送来的、hub 已有的请求 id（重连后重发）。回的 Error 帧只发给 c
@@ -721,7 +721,8 @@ func eventID(machineID string, e agent.AuditEntry, detail []byte) string {
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
-// recordEvent 把 question/done 存成一行 recorded（第 4 份的收件箱靠它列出谁在等回答），刷新会话并广播 request_new。
+// recordEvent 把 question/done 存成一行 recorded（第 4 份的收件箱靠它列出谁在等回答），刷新会话并广播 request_new
+// （新 question 还推到手机，见 announceNew）。
 // e 已经过 cleanEntry：Message 已脱敏。同一条目再来（批次重发，含两条连接并发处理同一批）时该行已存在，静默跳过。
 func (s *Server) recordEvent(m store.Machine, e agent.AuditEntry, ts time.Time, detail []byte) {
 	r := store.Request{ID: eventID(m.ID, e, detail), MachineID: m.ID, SessionID: s.upsertSession(m.ID, e.Session, ""), Kind: e.Kind, ToolName: e.ToolName,
@@ -732,7 +733,7 @@ func (s *Server) recordEvent(m store.Machine, e agent.AuditEntry, ts time.Time, 
 		return
 	}
 	if inserted {
-		s.clients.broadcast("request_new", s.view(r))
+		s.announceNew(r)
 	}
 }
 

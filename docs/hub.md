@@ -4,21 +4,22 @@
 
 `railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（第 4 份计划）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对每条请求只能回答放行（allow）或拒绝（deny），没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、ping、pong、error 七种。
 
-本计划不含 TLS、Web Push、PWA 页面与开机自启（见文末“已知限制”）。
+hub 还能把新请求推到手机（Web Push，见“手机推送”）；不含 TLS、PWA 页面与开机自启（见文末“已知限制”）。
 
 ## 启动
 
 ```bash
 railse hub password        # 从标准输入读一行设为网页登录密码（至少 8 个字符），终端下会回显
 read -s PW; printf '%s\n' "$PW" | railse hub password; unset PW   # 不回显的写法
-railse hub run --listen 127.0.0.1:8787
+railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com
 ```
 
 - 数据目录取 `--dir`，否则 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；目录 0700，`hub.db`（SQLite，WAL 模式，`-wal`、`-shm` 沿用 0600；开 `secure_delete`，删改掉的内容如清空的回调令牌用零覆盖）与 `hub.log` 都是 0600，已有的文件启动时收紧。
-- `railse hub run` 的标志：`--listen`（默认 `127.0.0.1:8787`）、`--secure-cookies`（cookie 加 Secure，hub 在 TLS 反向代理后面时打开）、`--trusted-proxy <CIDR 或 IP>`（可重复或逗号分隔，见“部署与反向代理”）、`--foreground`（日志同时写到 stderr）。子命令不认的标志会报错退出 2。
+- `railse hub run` 的标志：`--listen`（默认 `127.0.0.1:8787`）、`--secure-cookies`（cookie 加 Secure，hub 在 TLS 反向代理后面时打开）、`--trusted-proxy <CIDR 或 IP>`（可重复或逗号分隔，见“部署与反向代理”）、`--public-url https://host[:port]`（hub 对外的 https 源，设了才启用手机推送，见“手机推送”）、`--foreground`（日志同时写到 stderr）。子命令不认的标志会报错退出 2；`--public-url` 不是 https 源（`http://`、带路径或结尾的 `/`、查询、片段、用户信息）也退出 2，localhost 也要 https。
 - 没设密码也能启动，日志提示“还没有设置网页密码”，网页登录回 503。换密码会让所有已登录的网页立即失效。
-- 收到 SIGINT、SIGTERM 后 5 秒内退出：断开守护进程、等在途请求、长连接处理与 webhook 回调收尾；等不到它们退出时（含被强制断开、处理还没结束的普通请求）退出码 1，日志写“不关数据库”。
+- 收到 SIGINT、SIGTERM 后 5 秒内退出：断开守护进程、等在途请求、长连接处理、webhook 回调与推送收尾（正在发的推送中止，不计失败）；等不到它们退出时（含被强制断开、处理还没结束的普通请求）退出码 1，日志写“不关数据库”。
 - `railse hub webhook-token` 生成 webhook 来源令牌，明文只显示这一次，再生成一次旧的就失效。
+- `railse hub vapid [--rotate]` 打印推送公钥（库里没有就生成，hub 第一次启动时也会生成）；`--rotate` 换新密钥并在同一事务里删除全部推送订阅，提示所有手机要重新开启通知。在跑的 hub 不用重启：下一次推送、下一次网页取公钥时就从库里读到新密钥。
 
 ## 接入一台机器
 
@@ -68,7 +69,7 @@ railse hub run --listen 127.0.0.1:8787
 | `POST /api/enroll` | 接入码（每 IP 每分钟 5 次） | `{"token","name","home_dir"}` → `{"machine_id","secret"}`；接入码无效或过期 401 |
 | `GET /ws/agent` | Bearer 机器密钥 | 守护进程的 WebSocket；密钥无效或已吊销 401 |
 | `POST /api/webhook/approvals` | Bearer 来源令牌 | 见下文 webhook；没配令牌 503，令牌不对 401 |
-| `GET /api/status` | cookie | `{"paused","pending","rules_version","machines":[{"id","name","online","last_seen","revoked"}],"uptime"}` |
+| `GET /api/status` | cookie | `{"paused","pending","rules_version","machines":[{"id","name","online","last_seen","revoked"}],"uptime","push_enabled","push_subscriptions"}`：`push_enabled` 是否配了 `--public-url`，`push_subscriptions` 订阅条数 |
 | `POST /api/pause`、`/api/resume` | cookie + 同源 | 改 hub 总开关并下发 → 204 |
 | `GET /api/inbox` | cookie | `{"pending":[…],"questions":[…]}`，都是请求视图、按创建时间倒序，没有时是空数组：`pending` 是全部待审批（至多 500 条）；`questions` 是最近 24 小时还在等回答的 `question`（至多 100 条），同一会话之后有了任何新事件（`done`、新的 `permission` 或 `question`）就不再列出，没有会话 id 的一直列到滑出 24 小时 |
 | `GET /api/requests?state=&limit=` | cookie | 按创建时间倒序；`state` 为空表示全部，`limit` 默认 50、最大 500 |
@@ -83,6 +84,11 @@ railse hub run --listen 127.0.0.1:8787
 | `GET /api/machines` | cookie | 每台 `id、name、online、last_seen、agent_version、enrolled_at、revoked` |
 | `DELETE /api/machines/{id}` | cookie + 同源 | 吊销 → 204；没有 404 |
 | `GET /ws/client` | cookie + 同源 | 网页的推送通道，见下 |
+| `GET /api/push/vapid` | cookie | `{"enabled","public_key","reason"}`：启用时 `public_key` 是 VAPID 公钥（base64url，87 个字符，给 `applicationServerKey`）、`reason` 为空；没配 `--public-url` 时 `enabled: false`、`public_key` 为空、`reason` 说明原因。每次从库里读，换过钥就是新的 |
+| `POST /api/push/subscribe` | cookie + 同源 | 请求体是浏览器 `PushSubscription.toJSON()` 原样（`{"endpoint","keys":{"p256dh","auth"}}`，多余字段忽略）→ 204；同一端点再登记是更新（换密钥、失败归零）。端点须是 https、至多 2048 字节，`p256dh` 须是 P-256 曲线上的点，`auth` 须 16 字节，否则 400；推送停用 503 |
+| `DELETE /api/push/subscribe` | cookie + 同源 | `{"endpoint"}` → 204，没有这条也 204 |
+| `POST /api/push/check` | cookie + 同源 | `{"endpoint"}` → `{"active":bool}`：hub 还有这条订阅时为 true；false 说明被清掉了（失效、换钥），网页应提示重新开启 |
+| `POST /api/push/test` | cookie + 同源 | `{"endpoint"}` → 同步发一条测试通知（标题 Railse、正文“通知正常”）：成功 204；hub 没有这条订阅 404；推送服务没收下 502（订阅已失效时 hub 已删掉它，文案提示重新开启）；推送停用 503 |
 
 请求的 JSON 字段：`id、machine_id、session_id、kind（permission|question|done|webhook）、tool_name、payload（已脱敏）、risk、project_root、engine_reason、state、decided_by、decision_note、rule_id、turn_id、cli_session_id、title、created_at、expires_at、decided_at、delivered_at`；`/api/inbox` 的 `pending` 与 `questions`、`/api/requests`、`/api/requests/{id}` 的 `request`、decide 的返回与 `/ws/client` 推送的请求（统称“请求视图”）还带 `machine_name`（webhook 请求为空）、`project`（项目根的最后一段）与 `has_redacted`（载荷任一字段含脱敏占位符 `<redacted>` 时为 true）。`state` 取 `pending、approved、denied、cancelled、expired、auto_allowed、auto_denied、passthrough、recorded`；`delivered_at` 非空表示决定已交到钩子（或 webhook 回调已成功）。
 
@@ -105,6 +111,16 @@ railse hub run --listen 127.0.0.1:8787
 
 `title` 必填、至多 200 字符、不能含控制字符或不可见的格式字符；`callback_url` 必填、只收 http/https；`callback_token` 至多 512 字节、只能是可见 ASCII；`expires_in` 可选，1 到 86400 秒，默认 24 小时。返回 `{"id"}`，请求以 `kind: webhook` 进收件箱（标题与描述先脱敏）。决定后 hub 回调：`POST callback_url`，头 `Authorization: Bearer <callback_token>`（给了令牌才带），body `{"id","decision":"allow|deny","note"}`；hub 判过期时回调 `decision: deny`、`note: expired`。每次超时 10 秒，最多 3 次、间隔 2 秒，不跟随重定向，只认 2xx；每次回调（成功或放弃）记审计 `webhook_callback`，只记回调地址的 scheme://host。hub 关停时正在进行的回调中止，重启后不恢复（令牌已清空，需来源重新提交）。
 
+## 手机推送（Web Push）
+
+配了 `--public-url` 才启用。它必须是 hub 对外的 https 源（`https://host[:port]`，与手机打开网页的地址同源），也用作 VAPID 签名的 `sub`（Apple 对不规范的 `sub` 回 `BadJwtToken`）。订阅与主屏幕应用都绑在这个源上，域名定下后不要再换。
+
+- **什么时候推。** 只在新请求产生时推：新登记的待审批（`permission`）、webhook 请求，以及新的 `question`（Agent 在等你回答）。`done` 不推。守护进程断线重连后补发的旧审计里的 `question`（事件时间早于此刻 2 分钟以上）照样进收件箱，但不推，免得一下子弹出一串过时的通知。推送不影响请求主流程：在队列里排队（至多 256 条，满了丢弃并记日志），由一个后台协程逐条发给全部订阅。
+- **推什么。** 明文载荷 `{"id","kind","title","body","url":"/r/<id>"}`，编码后不超过 3 KiB（Apple 上限 4 KiB）：标题至多 80 个字符、正文至多 200 个字符，控制字符与换行并成空格，转义后仍超就继续截正文。permission 的标题是“机器名 · 项目”（没有项目时只有机器名），正文“工具名: 载荷摘要 · 风险 <risk>”（摘要取命令、路径、URL 或 `服务/工具`，至多 160 个字符）；question 的标题是“机器名 · 项目：等你回答”，正文是问题；webhook 的标题是“webhook”，正文是来源给的标题。投递参数：`TTL` 24 小时、`Urgency: high`、`Topic` 为请求 id（只在 id 是 1 到 32 个 base64url 字符时带，同一请求的未投递推送被替换）。
+- **失败怎么算。** 推送服务回 2xx 算成功，连续失败归零；回 404 或 410 说明订阅已失效，立即删。下面这些只记日志、不计失败（问题不在订阅）：hub 本地出错（载荷、签名等）、hub 关停或测试推送的请求断开时被取消、413、429。其余失败（连不上、超时、5xx、其他 4xx 如 401/403）记一次，同一订阅连续 5 次就删（计数与删除在同一事务里：你在两次失败之间重新开启通知，不会被之前的计数误删）。库里密钥解不开的订阅推送时直接删。
+- **换钥。** `railse hub vapid --rotate` 生成新密钥并删除全部订阅（旧订阅对着旧公钥，新密钥签的推送会被拒），所有手机都要在网页里重新开启通知。在跑的 hub 不用重启，下一次推送或网页取公钥时就用新密钥。私钥疑似泄露时换钥。
+- **审计。** 每条请求推完记 `push_sent`（actor `system`，`{"sent","gone","failed"}`；没有订阅时不记）；删订阅记 `push_subscription_removed`（`{"id","origin","reason"}`，`reason` 是 `gone`、`failures` 或 `invalid`）；网页登记、删除、测试分别记 `push_subscribed`、`push_unsubscribed`、`push_test`。审计与日志只记推送端点的 scheme://host，不记完整端点。
+
 ## 安全要点
 
 - **只存哈希。** 机器密钥、登录会话 token、webhook 来源令牌、接入码存 SHA-256；网页密码用 argon2id（time 1、memory 64 MiB、threads 4、盐 16 字节）。**例外**：webhook 的出站回调令牌（`callback_token`）回调时要原样带上，明文存在 `requests.callback`，回调成功、3 次重试用尽或因关停中止后立即清空（用户决定 D）。
@@ -113,6 +129,7 @@ railse hub run --listen 127.0.0.1:8787
 - **hub 的权力被限死。** 对请求只能回 allow 或 deny，没有向机器下发命令的通道。“记住”永远不会生成放行 `outward`、`destructive`（以及 `unknown`、`write_outside`）的规则，`learned` 来源的这类放行在导入时也被拒绝。网页导入的 `user` 规则可以放行 `outward`、`destructive`（用户决定 B）：这类规则在 `/api/rules` 标 `elevated: true`，导入时审计 `rules_imported` 带上它们的 id，从停用改为启用时审计 `rule_enabled_elevated`。
 - **数据最小化。** 守护进程上报前对载荷与事件文本脱敏，hub 收到后再脱敏一次并截断各字段；hub 不信任守护进程送来的路径与命令，只存储与展示。审计里不含钩子进程的环境变量。
 - **明文接入会警告。** `railse agent enroll --hub http://…`（非本机地址）提示明文传输密钥。
+- **推送密钥明文存库（设计 5.3 例外）。** VAPID 私钥（settings 的 `vapid_private`）与订阅的 `keys.p256dh`、`keys.auth` 发推送时要用原值，明文存在 `hub.db`；它们与签好的 VAPID 令牌永不经任何接口、日志或审计出现：`/api/push/vapid` 只回公钥，`railse hub vapid` 只打印公钥。推送端点的路径本身也是凭据的一部分，日志与审计只记它的 scheme://host。订阅只有登录的用户能登记，端点只校验是 https，不限制内网地址。
 
 ## 部署与反向代理
 
@@ -156,12 +173,18 @@ server {
 | `railse hub password` 回显密码 | 用 `read -s PW; printf '%s\n' "$PW" \| railse hub password` |
 | hub 退出码 1、日志“不关数据库” | 关停时有在途请求、长连接处理或回调没在时限内退出，或服务出错结束；直接重启即可 |
 | `railse hub run` 启动即退出 1、日志“监听失败” | 端口被占或 `--listen` 地址无效，换个地址 |
+| `railse hub run` 退出 2、提示 public-url | `--public-url` 要写成 `https://hub.example.com`（不带路径、结尾的 `/`、查询），http 不行 |
+| 网页说推送停用、`/api/push/vapid` 的 `enabled` 为 false | hub 没加 `--public-url` |
+| 收不到推送 | 看 `GET /api/requests/{id}` 的审计：没有 `push_sent` 是没有订阅、推送停用、或是事件时间太旧的 question；`push_sent` 里 `failed` 不为 0 时看 `hub.log` 的“推送到 … 失败”（带推送服务给的原因，如 `BadJwtToken`）；有 `push_subscription_removed` 说明订阅已失效被删，在网页里重新开启通知 |
+| 启动报“库里的 VAPID 密钥损坏” | `railse hub vapid --rotate` 换新密钥（所有手机重新开启通知） |
+| 换钥之后手机收不到 | 换钥删了全部订阅，每台手机都要在网页里重新开启通知 |
 
-日志：`hub.log` 里有“hub 监听 …”、“可信代理: …”、“机器 … 超过 … 没有 pong，断开”、“webhook 请求 … 回调 … 失败 3 次，放弃”、“hub 已停止”。守护进程的 `agent.log` 里有“接入 hub …”、“已连接 hub …，规则版本 N”、“与 hub … 的连接结束: …，N 后重连”、“规则更新到版本 N”、“与 hub 断线超过 30s，请求 … 交回终端”。`GET /api/status` 的 `machines[].online` 看各机器是否连着；`GET /api/requests/{id}` 的 `audit` 看一条请求经历了什么。
+日志：`hub.log` 里有“hub 监听 …”、“Web Push 已启用，对外源 …”（或“没有配置 --public-url，Web Push 停用”）、“推送到 https://… 失败（连续第 N 次）: …”、“推送订阅 … 已失效，删除”、“VAPID 密钥已换新”、“可信代理: …”、“机器 … 超过 … 没有 pong，断开”、“webhook 请求 … 回调 … 失败 3 次，放弃”、“hub 已停止”。守护进程的 `agent.log` 里有“接入 hub …”、“已连接 hub …，规则版本 N”、“与 hub … 的连接结束: …，N 后重连”、“规则更新到版本 N”、“与 hub 断线超过 30s，请求 … 交回终端”。`GET /api/status` 的 `machines[].online` 看各机器是否连着；`GET /api/requests/{id}` 的 `audit` 看一条请求经历了什么。
 
 ## 已知限制（后续计划，不算未完成）
 
-- TLS/ACME、Web Push、PWA 页面、开机自启、`railse doctor`、`railse agent status` 显示 hub 连接状态、本机 pause 反向同步到 hub。
+- TLS/ACME、PWA 页面、开机自启、`railse doctor`、`railse agent status` 显示 hub 连接状态、本机 pause 反向同步到 hub。
 - 复合命令不能“拒绝并记住”（422），需要手写规则。
 - 吊销机器的瞬间正在登记的请求可能没被取消，按期限过期。
 - hub 重启不恢复关停时正在进行的 webhook 回调，来源需重新提交。
+- 推送队列在内存里：hub 重启时还没发出的推送丢失，队列满（256 条）时新的推送丢弃（请求本身照常进收件箱）。

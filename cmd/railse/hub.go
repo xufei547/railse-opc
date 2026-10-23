@@ -21,11 +21,14 @@ import (
 )
 
 const hubUsage = `用法:
-  railse hub run [--dir 目录] [--listen 地址] [--secure-cookies] [--trusted-proxy 地址] [--foreground]   启动 hub（前台运行）
+  railse hub run [--dir 目录] [--listen 地址] [--secure-cookies] [--trusted-proxy 地址] [--public-url https://hub.example.com] [--foreground]
+                                              启动 hub（前台运行）
   railse hub password [--dir 目录]            从标准输入读一行设为网页登录密码（至少 8 个字符）
   railse hub token [--dir 目录] [--ttl 10m]   生成一次性接入码，给 railse agent enroll 用
   railse hub webhook-token [--dir 目录]       生成 webhook 来源令牌（明文只显示这一次）
+  railse hub vapid [--dir 目录] [--rotate]    打印推送公钥；--rotate 换新密钥并删除全部推送订阅（所有手机要重新开启通知）
   目录默认 $RAILSE_HUB_HOME，否则 ~/.railse-hub
+  --public-url 是 hub 对外的 https 源（不带路径），设了才启用手机推送（Web Push）；域名定下后不要再换
   --trusted-proxy 可重复或逗号分隔（CIDR 或单个 IP）：只有来自这些地址的连接才看 X-Forwarded-For。
   反向代理须追加 X-Forwarded-For（nginx: proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for）
   并传原 Host（proxy_set_header Host $host）`
@@ -41,10 +44,11 @@ var (
 
 // hubFlags 是各 hub 子命令认的标志。
 var hubFlags = map[string][]string{
-	"run":           {"dir", "listen", "secure-cookies", "foreground", "trusted-proxy"},
+	"run":           {"dir", "listen", "secure-cookies", "foreground", "trusted-proxy", "public-url"},
 	"password":      {"dir"},
 	"token":         {"dir", "ttl"},
 	"webhook-token": {"dir"},
+	"vapid":         {"dir", "rotate"},
 }
 
 // maxEnrollTTL 是接入码有效期的上限：接入码一旦泄露，有效期越长越危险。
@@ -147,6 +151,8 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	secure := fs.Bool("secure-cookies", false, "cookie 加 Secure（hub 在 TLS 反向代理后面时打开）")
 	foreground := fs.Bool("foreground", false, "日志同时写到 stderr")
 	ttl := fs.Duration("ttl", 10*time.Minute, "接入码有效期")
+	publicURL := fs.String("public-url", "", "hub 对外的 https 源，如 https://hub.example.com；不设则停用推送")
+	rotate := fs.Bool("rotate", false, "换新的 VAPID 密钥并删除全部推送订阅")
 	var proxies proxyFlag
 	fs.Var(&proxies, "trusted-proxy", "可信反向代理的地址（CIDR 或单个 IP），可重复或逗号分隔")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -163,6 +169,12 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *ttl <= 0 || *ttl > maxEnrollTTL {
 		fmt.Fprintf(stderr, "--ttl 应在 0 到 %s 之间（不含 0），得到 %s\n", maxEnrollTTL, *ttl)
 		return 2
+	}
+	if *publicURL != "" {
+		if err := hub.CheckPublicURL(*publicURL); err != nil {
+			fmt.Fprintf(stderr, "--%v\n", err)
+			return 2
+		}
 	}
 	d := *dir
 	if d == "" {
@@ -183,6 +195,7 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	cfg.SecureCookies = *secure
 	cfg.TrustedProxies = proxies
+	cfg.PublicURL = *publicURL
 	if sub == "run" {
 		ctx, stop := hubRunContext()
 		defer stop()
@@ -229,7 +242,30 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "令牌: %s\n来源调用 POST /api/webhook/approvals 时带 Authorization: Bearer <令牌>；hub 只存哈希，丢了就重新生成（旧令牌随之失效）。\n", tok)
+	case "vapid":
+		return runHubVapid(st, *rotate, stdout, stderr)
 	}
+	return 0
+}
+
+// runHubVapid 打印推送公钥（没有就生成）；rotate 时换新密钥并删除全部订阅。只打印公钥，私钥只在库里。
+// 在跑的 hub 下一次推送或网页取公钥时从库里读到新密钥，不用重启。
+func runHubVapid(st *store.Store, rotate bool, stdout, stderr io.Writer) int {
+	if !rotate {
+		v, err := hub.LoadOrCreateVAPID(st)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "公钥: %s\n", v.PublicKeyB64())
+		return 0
+	}
+	v, removed, err := hub.RotateVAPID(st)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "公钥: %s\n已换新密钥，删除了 %d 条推送订阅；所有手机要在网页设置里重新开启通知。在跑的 hub 不用重启，下一次推送起用新密钥。\n", v.PublicKeyB64(), removed)
 	return 0
 }
 
@@ -295,6 +331,11 @@ func runHubServe(ctx context.Context, cfg hub.Config, foreground bool, stderr io
 		logger.Printf("还没有设置网页密码，网页登录会得到 503；运行 railse hub password 设置")
 	}
 	logger.Printf("数据目录 %s，版本 %s", cfg.Dir, version)
+	if cfg.PublicURL != "" {
+		logger.Printf("Web Push 已启用，对外源 %s", cfg.PublicURL)
+	} else {
+		logger.Printf("没有配置 --public-url，Web Push 停用")
+	}
 	if len(cfg.TrustedProxies) > 0 {
 		p := proxyFlag(cfg.TrustedProxies)
 		logger.Printf("可信代理: %s", p.String())

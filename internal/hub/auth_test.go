@@ -60,9 +60,9 @@ func newTestHubWith(t *testing.T, mod func(*Config), srvMod func(*Server)) *test
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		hs.Close()
-		// 先停回调（取消并等后台回调退出），再关库：回调不会在测试结束后还碰存储
+		// 先停后台工作（取消并等回调与推送工作协程退出），再关库：它们不会在测试结束后还碰存储
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		srv.stopCallbacks(ctx)
+		srv.stopBackground(ctx)
 		cancel()
 		st.Close()
 		if t.Failed() {

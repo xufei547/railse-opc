@@ -557,3 +557,58 @@ func TestHubRunServeShutdownTimeout(t *testing.T) {
 		}
 	}
 }
+
+func TestHubVapidPrintsAndRotates(t *testing.T) {
+	cancelledHubRun(t)
+	dir := filepath.Join(tempDir(t), "hub")
+	var out, errOut bytes.Buffer
+	if code := runHub([]string{"vapid", "--dir", dir}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("vapid: %d %s", code, errOut.String())
+	}
+	key := fieldAfter(t, out.String(), "公钥: ")
+	if len(key) != 87 {
+		t.Fatalf("公钥长度 %d", len(key))
+	}
+	out.Reset()
+	runHub([]string{"vapid", "--dir", dir}, nil, &out, &errOut)
+	if fieldAfter(t, out.String(), "公钥: ") != key {
+		t.Fatal("不加 --rotate 公钥应不变")
+	}
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.UpsertPushSubscription("https://web.push.apple.com/x", "p", "a", ""); err != nil {
+		t.Fatal(err)
+	}
+	priv, _, _ := st.GetSetting("vapid_private")
+	out.Reset()
+	if code := runHub([]string{"vapid", "--dir", dir, "--rotate"}, nil, &out, &errOut); code != 0 || fieldAfter(t, out.String(), "公钥: ") == key ||
+		!strings.Contains(out.String(), "重新开启通知") || !strings.Contains(out.String(), "删除了 1 条") {
+		t.Fatalf("rotate: %d %q", code, out.String())
+	}
+	if n, _ := st.CountPushSubscriptions(); n != 0 {
+		t.Fatalf("rotate 应删全部订阅: %d", n)
+	}
+	if strings.Contains(out.String()+errOut.String(), priv) {
+		t.Fatal("输出里不能有私钥")
+	}
+	if code := runHub([]string{"vapid", "--dir", dir, "--listen", "127.0.0.1:0"}, nil, &out, &errOut); code != 2 {
+		t.Fatalf("vapid 不认 --listen: %d", code)
+	}
+	for _, bad := range []string{"hub.example.com", "http://hub.example.com", "https://hub.example.com/app", "https://hub.example.com?x=1"} {
+		errOut.Reset()
+		if code := runHub([]string{"run", "--dir", dir, "--listen", "127.0.0.1:0", "--public-url", bad}, nil, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "public-url") {
+			t.Fatalf("坏 --public-url %q 应退出 2: %d %q", bad, code, errOut.String())
+		}
+	}
+	errOut.Reset()
+	if code := runHub([]string{"run", "--dir", dir, "--listen", "127.0.0.1:0", "--public-url", "https://hub.example.com"}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("合法 --public-url: %d %q", code, errOut.String())
+	}
+	logText, _ := os.ReadFile(filepath.Join(dir, "hub.log"))
+	if !strings.Contains(string(logText), "Web Push 已启用") || !strings.Contains(string(logText), "https://hub.example.com") {
+		t.Fatalf("日志应说明推送已启用: %s", logText)
+	}
+}
