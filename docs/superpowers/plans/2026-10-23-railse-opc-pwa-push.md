@@ -5750,3 +5750,4 @@ git commit -m "test(web): Playwright 端到端（登录、批准并记住、拒�
 - 前台时 WebSocket 与推送会提醒两次（iOS 要求每条推送都显示通知），用请求 id 作 tag 让通知中心只留一条。
 - 开发代理把 `Origin` 改写成 hub 的源以通过同源校验，只在本机开发用。
 - `pushsubscriptionchange` 里 Service Worker 用 cookie 登记新订阅，cookie 过期时登记失败，下次打开网页会看到“通知已失效”横幅重新开启。
+- 脱敏（Task 1 执行期定下的边界，2026-10-23）：shell 扫描器只识别所列外壳（`sh|bash|zsh|dash|ksh -c`、`eval`、`ssh`）与基本的引号、heredoc、`$(…)` 配对，不模拟 bash 3.2 的解析分歧与语法错误恢复。残余风险：针对 bash 3.2 解析怪癖构造的命令、先写脚本再执行（`cat <<EOF > s.sh … && bash s.sh`）、`echo '…' | sh`、`bash -c "$(printf …)"`、heredoc 分隔词本身是 token 时不抹，都可能藏住后半截命令，靠 `has_redacted` 告警兜底；`sshpass -p`、`curl -u admin:'pw'` 这类规则缺口留终审分流。
