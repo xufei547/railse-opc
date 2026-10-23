@@ -73,19 +73,27 @@ export function StoreProvider({ children, onUnauthorized }: { children: ReactNod
     })
     void reloader()
     live.start()
-    const wake = () => {
-      live.wake()
+    if (document.visibilityState === 'hidden') live.hidden()
+    // 回到前台：后台久了重建连接（可能已半死），否则只在等退避时立即重连；都全量重拉一次
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        live.hidden()
+        return
+      }
+      live.visible()
       void reloader()
     }
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') wake()
+    // 网络恢复（含切换网络）：旧连接多半已经不通，直接换一条
+    const onOnline = () => {
+      live.recycle()
+      void reloader()
     }
-    document.addEventListener('visibilitychange', onVisible)
-    window.addEventListener('online', wake)
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('online', onOnline)
     return () => {
       live.stop()
-      document.removeEventListener('visibilitychange', onVisible)
-      window.removeEventListener('online', wake)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('online', onOnline)
     }
   }, [reloader])
 

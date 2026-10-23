@@ -15,12 +15,20 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
   unauthorized = fn
 }
 
+/** 一次请求（含读完响应体）的时限。网络黑洞时 fetch 可能一直不回，首屏会卡在“正在连接 hub…”。 */
+export const requestTimeoutMs = 15_000
+const importTimeoutMs = 75_000 // 导入规则的请求体至多 1 MiB，慢网络上要多给些时间
+
+const timeoutMsg = '请求超时：hub 没有响应，请检查网络'
+
 interface Options {
   body?: unknown
   contentType?: string
   raw?: BodyInit
   /** 401 时不调登录失效回调（登录接口的 401 是密码不对，不是登录失效）。 */
   noUnauthorizedHandler?: boolean
+  /** 时限（毫秒），默认 requestTimeoutMs。 */
+  timeoutMs?: number
 }
 
 export async function request<T>(method: string, path: string, opts: Options = {}): Promise<T> {
@@ -33,29 +41,38 @@ export async function request<T>(method: string, path: string, opts: Options = {
     body = JSON.stringify(opts.body)
     headers['Content-Type'] = 'application/json'
   }
-  let resp: Response
+  // 用 AbortController + setTimeout 而不是 AbortSignal.timeout：iOS 16 之前没有后者。中止同时打断读响应体。
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? requestTimeoutMs)
   try {
-    resp = await fetch(path, { method, headers, body, credentials: 'same-origin' })
-  } catch {
-    // fetch 只在网络层失败时 reject（断网、hub 没开、被代理掐断），浏览器给的是英文的 TypeError
-    throw new ApiError(0, '连不上 hub，请检查网络')
-  }
-  if (resp.status === 204) return undefined as T
-  if (!resp.ok) {
-    let msg = `请求失败（${resp.status}）`
+    let resp: Response
     try {
-      const j = (await resp.json()) as { error?: unknown }
-      if (typeof j?.error === 'string' && j.error) msg = j.error
+      resp = await fetch(path, { method, headers, body, credentials: 'same-origin', signal: ctrl.signal })
     } catch {
-      // 不是 JSON，用默认文案
+      if (ctrl.signal.aborted) throw new ApiError(0, timeoutMsg)
+      // fetch 只在网络层失败时 reject（断网、hub 没开、被代理掐断），浏览器给的是英文的 TypeError
+      throw new ApiError(0, '连不上 hub，请检查网络')
     }
-    if (resp.status === 401 && !opts.noUnauthorizedHandler) unauthorized?.()
-    throw new ApiError(resp.status, msg)
-  }
-  try {
-    return (await resp.json()) as T
-  } catch {
-    throw new ApiError(resp.status, `hub 的响应不是 JSON（${resp.status}）`)
+    if (resp.status === 204) return undefined as T
+    if (!resp.ok) {
+      let msg = `请求失败（${resp.status}）`
+      try {
+        const j = (await resp.json()) as { error?: unknown }
+        if (typeof j?.error === 'string' && j.error) msg = j.error
+      } catch {
+        // 不是 JSON（或读到一半超时），用默认文案
+      }
+      if (resp.status === 401 && !opts.noUnauthorizedHandler) unauthorized?.()
+      throw new ApiError(resp.status, msg)
+    }
+    try {
+      return (await resp.json()) as T
+    } catch {
+      if (ctrl.signal.aborted) throw new ApiError(0, timeoutMsg)
+      throw new ApiError(resp.status, `hub 的响应不是 JSON（${resp.status}）`)
+    }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -78,7 +95,8 @@ export const hub = {
   rules: () => get<Rule[]>('/api/rules'),
   setRuleEnabled: (id: string, enabled: boolean) => patch<void>(`/api/rules/${enc(id)}`, { enabled }),
   deleteRule: (id: string) => del<void>(`/api/rules/${enc(id)}`),
-  importRules: (yaml: string) => request<{ version: number }>('POST', '/api/rules/import', { raw: yaml, contentType: 'application/yaml' }),
+  importRules: (yaml: string) =>
+    request<{ version: number }>('POST', '/api/rules/import', { raw: yaml, contentType: 'application/yaml', timeoutMs: importTimeoutMs }),
   exportRulesURL: '/api/rules/export',
   machines: () => get<Machine[]>('/api/machines'),
   revokeMachine: (id: string) => del<void>(`/api/machines/${enc(id)}`),

@@ -83,6 +83,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
 .list-item { display: flex; align-items: center; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .list-item .grow { flex: 1; min-width: 0; }
 .list-item .sub { color: var(--muted); font-size: 13px; word-break: break-all; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .seg button { border: 0; background: var(--card); color: var(--fg); padding: 8px 14px; min-height: 40px; }

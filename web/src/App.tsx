@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { BrowserRouter, NavLink, Route, Routes, useNavigate } from 'react-router'
 import { ApiError, hub, setUnauthorizedHandler } from './api'
-import { loginPath } from './auth'
+import { createLoginRedirect } from './auth'
 import { StoreProvider, useStore } from './StoreProvider'
 import { Login } from './pages/Login'
 import { Inbox } from './pages/Inbox'
@@ -23,9 +23,13 @@ function RequireAuth({ children }: { children: ReactNode }) {
   useEffect(() => {
     navigateRef.current = navigate
   }, [navigate])
-  const toLogin = useCallback(() => {
-    navigateRef.current(loginPath(window.location.pathname + window.location.search), { replace: true })
-  }, [])
+  // 幂等：并发的几个 401 会连着调它，已经在登录页（next 已带上）时什么也不做
+  const [toLogin] = useState(() =>
+    createLoginRedirect(
+      () => window.location.pathname + window.location.search,
+      (to) => navigateRef.current(to, { replace: true }),
+    ),
+  )
 
   useEffect(() => {
     let alive = true

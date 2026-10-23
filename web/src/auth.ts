@@ -32,3 +32,16 @@ export function safeNext(next: string | null): string {
   if (!path.startsWith('/') || path.startsWith('//') || isLogin(path)) return '/'
   return path
 }
+
+/**
+ * 生成“跳登录页”的函数：从调用时的地址算 next；已经在登录页时什么也不做。
+ * 必须幂等：并发的两个 401（如 inbox 与 status 一起拉）会连着调两次，第一次已把地址换成 /login?next=…，
+ * 而 React 还没来得及卸载外壳、清掉回调；第二次若照算就成了不带 next 的 /login，登录后回不到原处。
+ */
+export function createLoginRedirect(getLocation: () => string, navigate: (to: string) => void): () => void {
+  return () => {
+    const current = getLocation()
+    if (isLogin(current)) return
+    navigate(loginPath(current))
+  }
+}

@@ -30,9 +30,20 @@ export function Login() {
   return (
     <form className="login" onSubmit={submit}>
       <h1>Railse</h1>
+      {/* hub 只有一个密码、没有用户名；放一个固定值的隐藏用户名字段，iOS 钥匙串与浏览器密码管理器才会保存、填充这个密码 */}
+      <input
+        className="visually-hidden"
+        type="text"
+        name="username"
+        autoComplete="username"
+        value="railse"
+        readOnly
+        tabIndex={-1}
+        aria-hidden="true"
+      />
       <label className="field">
         <span>密码</span>
-        <input className="input" type="password" autoComplete="current-password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
+        <input className="input" type="password" name="password" autoComplete="current-password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
       </label>
       {error && <div className="error" role="alert">{error}</div>}
       <button className="btn primary block" type="submit" disabled={busy || password === ''}>

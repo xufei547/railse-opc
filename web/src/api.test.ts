@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, hub, request, setUnauthorizedHandler } from './api'
+import { ApiError, hub, request, requestTimeoutMs, setUnauthorizedHandler } from './api'
 
 type Call = { url: string; init: RequestInit }
 function stubFetch(status: number, body: unknown, calls: Call[] = []) {
@@ -13,9 +13,22 @@ function stubFetch(status: number, body: unknown, calls: Call[] = []) {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   setUnauthorizedHandler(null)
 })
+
+/** 像真的 fetch 一样：一直不回，直到 signal 中止时以 AbortError reject。 */
+function stubHangingFetch() {
+  const fetchMock = vi.fn(
+    (_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')))
+      }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
 
 describe('request', () => {
   it('发 JSON 并解析响应', async () => {
@@ -111,6 +124,62 @@ describe('request', () => {
     expect(err).toBeInstanceOf(ApiError)
     expect((err as ApiError).status).toBe(0)
     expect((err as ApiError).message).toBe('连不上 hub，请检查网络')
+  })
+
+  it('请求超时（网络黑洞）时中止并抛中文 ApiError，而不是一直挂着', async () => {
+    vi.useFakeTimers()
+    const fetchMock = stubHangingFetch()
+    const p = hub.status().catch((e: unknown) => e)
+    await vi.advanceTimersByTimeAsync(requestTimeoutMs - 1)
+    expect(fetchMock.mock.calls[0]?.[1].signal?.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    const err = await p
+    expect(requestTimeoutMs).toBe(15_000)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).status).toBe(0)
+    expect((err as ApiError).message).toBe('请求超时：hub 没有响应，请检查网络')
+  })
+
+  it('响应体迟迟读不完也算超时', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      const body = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('{"pending":'))
+          init.signal?.addEventListener('abort', () => c.error(new DOMException('The operation was aborted.', 'AbortError')))
+        },
+      })
+      return new Response(body, { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }))
+    const p = hub.inbox().catch((e: unknown) => e)
+    await vi.advanceTimersByTimeAsync(requestTimeoutMs)
+    const err = await p
+    expect((err as ApiError).message).toBe('请求超时：hub 没有响应，请检查网络')
+  })
+
+  it('请求完成后清掉超时定时器', async () => {
+    vi.useFakeTimers()
+    stubFetch(200, { pending: [], questions: [] })
+    await hub.inbox()
+    stubFetch(204, undefined)
+    await hub.pause()
+    stubFetch(500, { error: 'x' })
+    await hub.status().catch(() => undefined)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('导入规则（至多 1 MiB）的超时更长', async () => {
+    vi.useFakeTimers()
+    stubHangingFetch()
+    const p = hub.importRules('version: 1\nrules: []\n').catch((e: unknown) => e)
+    let settled = false
+    void p.then(() => {
+      settled = true
+    })
+    await vi.advanceTimersByTimeAsync(requestTimeoutMs)
+    expect(settled).toBe(false)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(((await p) as ApiError).message).toBe('请求超时：hub 没有响应，请检查网络')
   })
 
   it('401 先调登录失效回调', async () => {
