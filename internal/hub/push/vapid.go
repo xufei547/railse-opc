@@ -17,27 +17,28 @@ import (
 )
 
 // VAPID 是 hub 的推送签名密钥（RFC 8292），P-256。私钥明文存库，是设计 5.3 的例外；它不经任何接口返回。
+//
+// 私钥只以指针 priv 存着，不另存字节切片：VAPID 按值嵌在别的类型的未导出字段里时，fmt 不调 Format，
+// 而是反射打印各字段，切片会原样打出，深层指针只打地址。所以任何格式化路径都打不出私钥标量。
 type VAPID struct {
 	priv *ecdsa.PrivateKey
-	raw  []byte // 32 字节私钥标量
 	pub  []byte // 65 字节未压缩公钥点
 }
 
 // jwtLifetime 是 JWT 的有效期。RFC 8292 第 2 节要求 exp 不超过请求时刻 24 小时。
 const jwtLifetime = 12 * time.Hour
 
-// newVAPID 把私钥与它的两种编码一起存下：Go 1.25 起 (*ecdsa.PrivateKey).Bytes 与 (*ecdsa.PublicKey).Bytes 会返回错误，
-// 在构造时处理一次，Raw/PublicKey 就不必再有错误分支。
+// newVAPID 存下私钥与公钥编码。Go 1.25 起 (*ecdsa.PrivateKey).Bytes 与 (*ecdsa.PublicKey).Bytes 会返回错误，
+// 在构造时各调一次：公钥编码存下，私钥只验证能编码（不存字节，见 VAPID 的注释），Raw 就不会再出错。
 func newVAPID(priv *ecdsa.PrivateKey) (*VAPID, error) {
-	raw, err := priv.Bytes()
-	if err != nil {
+	if _, err := priv.Bytes(); err != nil {
 		return nil, fmt.Errorf("VAPID 私钥编码: %w", err)
 	}
 	pub, err := priv.PublicKey.Bytes()
 	if err != nil {
 		return nil, fmt.Errorf("VAPID 公钥编码: %w", err)
 	}
-	return &VAPID{priv: priv, raw: raw, pub: pub}, nil
+	return &VAPID{priv: priv, pub: pub}, nil
 }
 
 // GenerateVAPID 生成新密钥。
@@ -61,8 +62,14 @@ func ParseVAPID(raw []byte) (*VAPID, error) {
 	return newVAPID(priv)
 }
 
-// Raw 返回 32 字节私钥标量（拷贝），存库用。
-func (v *VAPID) Raw() []byte { return bytes.Clone(v.raw) }
+// Raw 返回 32 字节私钥标量（拷贝），存库用。每次现编码：(*ecdsa.PrivateKey).Bytes 返回的是标准库缓存里的切片，必须拷贝。
+func (v *VAPID) Raw() []byte {
+	raw, err := v.priv.Bytes()
+	if err != nil {
+		panic("push: VAPID 私钥编码失败") // newVAPID 已验证过能编码，走不到这里
+	}
+	return bytes.Clone(raw)
+}
 
 // PublicKey 返回 65 字节未压缩公钥点（拷贝）。
 func (v *VAPID) PublicKey() []byte { return bytes.Clone(v.pub) }

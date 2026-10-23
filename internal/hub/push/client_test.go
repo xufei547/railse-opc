@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdh"
+	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -326,6 +331,309 @@ func TestEndpointOrigin(t *testing.T) {
 	for _, in := range []string{"http://push.example.net/p", "https:///p", "push.example.net/p", "https://u@push.example.net/p", "://"} {
 		if _, err := endpointOrigin(in); err == nil {
 			t.Errorf("%q 应拒绝", in)
+		}
+	}
+}
+
+// TTL 按整秒发。0 < TTL < 1s 会发成 `TTL: 0`，Apple 回 BadTtl（400），所以和负数一样是本地错误，端点不被访问；
+// 1 秒以上的零头舍去；零仍是 24 小时。
+func TestClientTTL(t *testing.T) {
+	rec := newRecorder(t)
+	c, sub, _ := testClient(t, rec)
+	for _, ttl := range []time.Duration{1, 500 * time.Millisecond, time.Second - 1} {
+		code, err := c.Send(context.Background(), sub, []byte("x"), Options{TTL: ttl})
+		if code != 0 || !errors.Is(err, ErrLocal) {
+			t.Errorf("TTL %v: 应为本地错误，得到 %d %v", ttl, code, err)
+		}
+	}
+	if n := len(rec.all()); n != 0 {
+		t.Fatalf("TTL 不足 1 秒时端点不应被访问，收到 %d 个请求", n)
+	}
+	for _, tc := range []struct {
+		ttl  time.Duration
+		want string
+	}{{time.Second, "1"}, {1999 * time.Millisecond, "1"}, {time.Minute, "60"}, {0, "86400"}} {
+		if _, err := c.Send(context.Background(), sub, []byte("x"), Options{TTL: tc.ttl}); err != nil {
+			t.Fatalf("TTL %v: %v", tc.ttl, err)
+		}
+		reqs := rec.all()
+		if got := reqs[len(reqs)-1].header.Get("TTL"); got != tc.want {
+			t.Errorf("TTL %v: 发出 %q，想要 %q", tc.ttl, got, tc.want)
+		}
+	}
+}
+
+// Client.HTTP 为 nil 时用包内默认客户端：10 秒超时，不跟随任何重定向（原样回 3xx，重定向目标一次也不访问）。
+func TestDefaultHTTPClient(t *testing.T) {
+	if (&Client{}).httpClient() != defaultHTTP {
+		t.Fatal("HTTP 为 nil 时应用包内默认客户端")
+	}
+	custom := &http.Client{}
+	if (&Client{HTTP: custom}).httpClient() != custom {
+		t.Fatal("给了 HTTP 就用调用方的客户端")
+	}
+	if defaultHTTP.Timeout != 10*time.Second {
+		t.Fatalf("默认客户端应有 10 秒超时，得到 %v", defaultHTTP.Timeout)
+	}
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/target" {
+			hits.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		code, _ := strconv.Atoi(r.URL.Query().Get("code"))
+		http.Redirect(w, r, "/target", code)
+	}))
+	defer srv.Close()
+	for _, code := range []int{301, 302, 303, 307, 308} {
+		resp, err := defaultHTTP.Post(srv.URL+"/p?code="+strconv.Itoa(code), "application/octet-stream", strings.NewReader("x"))
+		if err != nil {
+			t.Fatalf("%d: %v", code, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != code {
+			t.Errorf("%d: 默认客户端不应跟随重定向，得到 %d", code, resp.StatusCode)
+		}
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("重定向目标被访问了 %d 次", n)
+	}
+}
+
+// 以下是 VAPID 令牌缓存的测试：Apple 要求 JWT 一小时内至多刷新一次。
+
+// fakeClock 是可拨的时钟，并发安全。
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = t
+}
+
+// authTransport 冒充推送服务但不走网络：记下每个请求的 Authorization，一律回 201。端点可以是任意 https 主机。
+type authTransport struct {
+	mu    sync.Mutex
+	auths []string
+}
+
+func (a *authTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	io.Copy(io.Discard, r.Body)
+	r.Body.Close()
+	a.mu.Lock()
+	a.auths = append(a.auths, r.Header.Get("Authorization"))
+	a.mu.Unlock()
+	return &http.Response{StatusCode: http.StatusCreated, Body: http.NoBody, Header: http.Header{}, Request: r}, nil
+}
+
+func (a *authTransport) all() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.auths...)
+}
+
+// vapidOf 拆出 Authorization 头里 JWT 的 claims 与 k。
+func vapidOf(t *testing.T, auth string) (claims vapidClaims, k string) {
+	t.Helper()
+	jwt, k, ok := strings.Cut(strings.TrimPrefix(auth, "vapid t="), ", k=")
+	parts := strings.Split(jwt, ".")
+	if !ok || len(parts) != 3 {
+		t.Fatalf("Authorization: %q", auth)
+	}
+	cb, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err == nil {
+		err = json.Unmarshal(cb, &claims)
+	}
+	if err != nil {
+		t.Fatalf("claims: %v", err)
+	}
+	return claims, k
+}
+
+func newTokenClient(t *testing.T, start time.Time) (*Client, *fakeClock, *authTransport) {
+	t.Helper()
+	v, err := GenerateVAPID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := &fakeClock{t: start}
+	tr := &authTransport{}
+	return &Client{HTTP: &http.Client{Transport: tr}, VAPID: v, Subject: "mailto:push@example.com", now: clk.Now}, clk, tr
+}
+
+func subFor(t *testing.T, endpoint string) Subscription {
+	return Subscription{Endpoint: endpoint, P256dh: mustKey(t).PublicKey().Bytes(), Auth: make([]byte, 16)}
+}
+
+// sendAt 往 endpoint 发一条，返回发出去的 Authorization。顺带核对时效：aud 是端点 origin、k 是当前密钥，
+// exp 离此刻至少 1 小时（推送服务收到时仍有效）、至多 24 小时（RFC 8292 第 2 节）。
+func sendAt(t *testing.T, c *Client, clk *fakeClock, tr *authTransport, endpoint string) string {
+	t.Helper()
+	n := len(tr.all())
+	if code, err := c.Send(context.Background(), subFor(t, endpoint), []byte("x"), Options{}); err != nil || code != 201 {
+		t.Fatalf("send %s: %d %v", endpoint, code, err)
+	}
+	auths := tr.all()
+	if len(auths) != n+1 {
+		t.Fatalf("请求数 %d，应为 %d", len(auths), n+1)
+	}
+	auth := auths[n]
+	claims, k := vapidOf(t, auth)
+	origin, _ := endpointOrigin(endpoint)
+	if claims.Aud != origin || claims.Sub != c.Subject || k != c.VAPID.PublicKeyB64() {
+		t.Fatalf("令牌是给 aud %q sub %q k %s 的，应为 %q %q %s", claims.Aud, claims.Sub, k, origin, c.Subject, c.VAPID.PublicKeyB64())
+	}
+	if left := claims.Exp - clk.Now().Unix(); left < 3600 || left > 24*3600 {
+		t.Fatalf("发出去的令牌还剩 %d 秒有效，应在 [1h, 24h] 内", left)
+	}
+	return auth
+}
+
+// 同一来源在窗口内复用同一个令牌（规范化后同 origin 的不同端点也算同一来源）；不同来源各签各的；
+// 签发后满 11 小时（exp − 1 小时）重签；时钟回拨到签发之前也重签，免得 exp 离此刻超过 24 小时。
+func TestClientReusesVAPIDTokenPerOrigin(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	c, clk, tr := newTokenClient(t, t0)
+	const apple, apple2, fcm = "https://web.push.apple.com/QAbc", "https://Web.Push.Apple.com:443/QOther", "https://fcm.googleapis.com/fcm/send/x"
+
+	a1 := sendAt(t, c, clk, tr, apple)
+	if claims, _ := vapidOf(t, a1); claims.Exp != t0.Add(12*time.Hour).Unix() {
+		t.Fatalf("exp %d，应为签发时刻 + 12 小时", claims.Exp)
+	}
+	clk.Set(t0.Add(30 * time.Minute))
+	if got := sendAt(t, c, clk, tr, apple2); got != a1 {
+		t.Fatal("同一来源 30 分钟后应复用令牌，不该重签")
+	}
+	f1 := sendAt(t, c, clk, tr, fcm)
+	if f1 == a1 {
+		t.Fatal("不同来源应各用各的令牌")
+	}
+	clk.Set(t0.Add(11*time.Hour - time.Second))
+	if got := sendAt(t, c, clk, tr, apple); got != a1 {
+		t.Fatal("签发后不到 11 小时应复用令牌")
+	}
+	clk.Set(t0.Add(11 * time.Hour))
+	a2 := sendAt(t, c, clk, tr, apple)
+	if a2 == a1 {
+		t.Fatal("签发满 11 小时（exp − 1 小时）应重签")
+	}
+	if claims, _ := vapidOf(t, a2); claims.Exp != t0.Add(23*time.Hour).Unix() {
+		t.Fatalf("重签的 exp %d，应为此刻 + 12 小时", claims.Exp)
+	}
+	if got := sendAt(t, c, clk, tr, fcm); got != f1 {
+		t.Fatal("fcm 的令牌签于 t0+30min，此刻仍在窗口内，应复用")
+	}
+	clk.Set(t0.Add(-13 * time.Hour)) // 时钟回拨：复用旧令牌会让 exp 离此刻 36 小时，sendAt 会抓到
+	if got := sendAt(t, c, clk, tr, apple); got == a2 {
+		t.Fatal("时钟回拨到签发之前应重签")
+	}
+	// 缓存里签好的令牌不随打印 Client 进日志
+	jwt, _, _ := strings.Cut(strings.TrimPrefix(a2, "vapid t="), ", k=")
+	if s := fmt.Sprintf("%v %+v %#v", c, c, struct{ c *Client }{c}); strings.Contains(s, jwt[strings.LastIndexByte(jwt, '.')+1:]) {
+		t.Fatalf("打印 Client 带出了缓存的令牌: %s", s)
+	}
+}
+
+// 每 10 分钟往同一来源发一条、连发 48 小时：两次签发至少隔 1 小时（实际 11 小时），一共只签 5 次（0、11、22、33、44 小时）。
+func TestClientVAPIDTokenRefreshRate(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	c, clk, tr := newTokenClient(t, t0)
+	var exps []int64
+	last := ""
+	for at := time.Duration(0); at <= 48*time.Hour; at += 10 * time.Minute {
+		clk.Set(t0.Add(at))
+		if auth := sendAt(t, c, clk, tr, "https://web.push.apple.com/QAbc"); auth != last {
+			claims, _ := vapidOf(t, auth)
+			exps = append(exps, claims.Exp)
+			last = auth
+		}
+	}
+	for i := 1; i < len(exps); i++ {
+		if gap := exps[i] - exps[i-1]; gap < 3600 {
+			t.Fatalf("第 %d 次签发离上一次只隔 %d 秒", i, gap)
+		}
+	}
+	if len(exps) != 5 {
+		t.Fatalf("48 小时里签了 %d 次，应为 5 次", len(exps))
+	}
+}
+
+// 换钥（新的 VAPID 值）或换 subject 后立即用新的现签，不复用旧钥或旧 sub 的令牌。
+func TestClientVAPIDTokenFollowsKeyAndSubject(t *testing.T) {
+	c, clk, tr := newTokenClient(t, time.Unix(1_800_000_000, 0))
+	const ep = "https://web.push.apple.com/QAbc"
+	a1 := sendAt(t, c, clk, tr, ep)
+	v2, err := GenerateVAPID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.VAPID = v2
+	a2 := sendAt(t, c, clk, tr, ep) // sendAt 核对了 k 是新钥
+	if a2 == a1 {
+		t.Fatal("换钥后不应复用旧钥签的令牌")
+	}
+	jwt, _, _ := strings.Cut(strings.TrimPrefix(a2, "vapid t="), ", k=")
+	parts := strings.Split(jwt, ".")
+	sig, _ := base64.RawURLEncoding.DecodeString(parts[2])
+	h := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	if len(sig) != 64 || !ecdsa.Verify(&v2.priv.PublicKey, h[:], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])) {
+		t.Fatal("换钥后的令牌应由新钥签")
+	}
+	c.Subject = "https://hub.example.com"
+	if a3 := sendAt(t, c, clk, tr, ep); a3 == a2 { // sendAt 核对了 sub 是新的
+		t.Fatal("换 subject 后不应复用旧令牌")
+	}
+}
+
+// 并发发送（Task 5 的工作协程与 /api/push/test 的 HTTP 处理同时发）：同一时刻每个来源只签一次；过了窗口每个来源再只签一次。
+func TestClientVAPIDTokenConcurrentSends(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	c, clk, tr := newTokenClient(t, t0)
+	endpoints := []string{"https://web.push.apple.com/QAbc", "https://fcm.googleapis.com/fcm/send/x"}
+	subs := []Subscription{subFor(t, endpoints[0]), subFor(t, endpoints[1])}
+	round := func() map[string]map[string]bool {
+		n := len(tr.all())
+		var wg sync.WaitGroup
+		for i := range 32 {
+			wg.Go(func() {
+				if code, err := c.Send(context.Background(), subs[i%2], []byte("x"), Options{}); err != nil || code != 201 {
+					t.Errorf("send: %d %v", code, err)
+				}
+			})
+		}
+		wg.Wait()
+		byAud := map[string]map[string]bool{}
+		for _, auth := range tr.all()[n:] {
+			claims, _ := vapidOf(t, auth)
+			if byAud[claims.Aud] == nil {
+				byAud[claims.Aud] = map[string]bool{}
+			}
+			byAud[claims.Aud][auth] = true
+		}
+		return byAud
+	}
+	first := round()
+	clk.Set(t0.Add(11 * time.Hour))
+	second := round()
+	for _, ep := range endpoints {
+		aud, _ := endpointOrigin(ep)
+		if len(first[aud]) != 1 || len(second[aud]) != 1 {
+			t.Fatalf("%s: 两轮各签了 %d、%d 个令牌，应各 1 个", aud, len(first[aud]), len(second[aud]))
+		}
+		for auth := range second[aud] {
+			if first[aud][auth] {
+				t.Fatalf("%s: 过了窗口应重签", aud)
+			}
 		}
 	}
 }

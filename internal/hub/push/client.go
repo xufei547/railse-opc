@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -37,16 +38,38 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("推送端点返回 %d: %s", e.Status, e.Reason)
 }
 
-// Client 向推送服务发消息。
+// Client 向推送服务发消息。可以多个协程同时 Send；建好后按指针用，不要拷贝。
+//
+// 签好的 VAPID 令牌按 (密钥, aud, sub) 缓存复用，见 authorization。换钥就是换一个 VAPID 值，
+// 缓存按公钥认，不会拿旧钥签的令牌去发；VAPID、Subject 不要与 Send 同时改。
 type Client struct {
 	HTTP    *http.Client // nil 时用 10 秒超时、不跟随重定向的客户端
 	VAPID   *VAPID
 	Subject string // VAPID 的 sub：hub 的 https 源或 mailto:
+
+	now func() time.Time // 包内测试注入的时钟；nil 时用 time.Now
+
+	mu     sync.Mutex
+	tokens map[tokenKey]*vapidToken // 值是指针：%+v 打印 Client 时只出地址，签好的令牌不进日志
+}
+
+// tokenKey 定一个可复用的令牌：同一把密钥（按公钥认）、同一 aud（端点 origin）、同一 sub。
+type tokenKey struct{ k, aud, sub string }
+
+type vapidToken struct {
+	header    string    // 整个 Authorization 头
+	signedAt  time.Time // 签发时刻，exp = signedAt + jwtLifetime
+	refreshAt time.Time // 到这一刻就重签：exp − tokenRefreshMargin
+}
+
+// fresh 判断令牌此刻还能不能用：已过签发时刻（时钟回拨到签发之前就不用，免得 exp 离此刻超过 24 小时），且没到重签时刻。
+func (t *vapidToken) fresh(now time.Time) bool {
+	return !now.Before(t.signedAt) && now.Before(t.refreshAt)
 }
 
 // Options 是一条推送的投递参数（RFC 8030 第 5.2–5.4 节）。
 type Options struct {
-	TTL     time.Duration // 零为 24 小时；负数是本地错误；按整秒发
+	TTL     time.Duration // 零为 24 小时；负数或不足 1 秒是本地错误（按整秒发会成 TTL: 0，Apple 回 BadTtl）；整秒以下的零头舍去
 	Urgency string        // very-low、low、normal、high；空不发
 	Topic   string        // 1 到 32 个 base64url 字符（ValidTopic）；同 topic 的未投递消息被替换；空不发
 }
@@ -57,7 +80,14 @@ const (
 	respMax        = 4 << 10 // 响应体至多读这么多再关
 	reasonMax      = 200     // StatusError.Reason 的字符上限
 	maxTopicLen    = 32
+
+	// tokenRefreshMargin：令牌离 exp 不到这么久就重签，保证发出去的令牌至少还有约这么久有效。
+	// 同一 aud 每 jwtLifetime − tokenRefreshMargin（11 小时）签一次。
+	tokenRefreshMargin = time.Hour
 )
+
+// 编译期检查：重签间隔不短于 1 小时。Apple 的 Web Push 文档：“Don't refresh your JWT more frequently than once per hour.”
+const _ = uint(jwtLifetime - tokenRefreshMargin - time.Hour)
 
 var defaultHTTP = &http.Client{
 	Timeout:       defaultTimeout,
@@ -98,11 +128,7 @@ func (c *Client) Send(ctx context.Context, sub Subscription, payload []byte, o O
 	if err != nil {
 		return 0, localErr(err)
 	}
-	hc := c.HTTP
-	if hc == nil {
-		hc = defaultHTTP
-	}
-	resp, err := hc.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -118,6 +144,45 @@ func (c *Client) Send(ctx context.Context, sub Subscription, payload []byte, o O
 	}
 }
 
+// authorization 返回发往 aud 的 Authorization 头。缓存里有同一把钥、同一 aud 与 sub 签的、还没到重签时刻的令牌就复用，
+// 否则现签。Apple 要求 JWT 至多一小时刷新一次；这里同一 aud 约 11 小时才签一次，发出去的令牌离 exp 至少约 1 小时、
+// 至多 12 小时（RFC 8292 第 2 节要求不超过 24 小时）。持锁签名：并发的 Send 对同一 aud 只签一次。
+// 签名出错（如 subject 不规范）不缓存，每次都报。
+func (c *Client) authorization(aud string) (string, error) {
+	now := time.Now()
+	if c.now != nil {
+		now = c.now()
+	}
+	key := tokenKey{k: c.VAPID.PublicKeyB64(), aud: aud, sub: c.Subject}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if tok := c.tokens[key]; tok != nil && tok.fresh(now) {
+		return tok.header, nil
+	}
+	hdr, err := c.VAPID.Authorization(aud, c.Subject, now)
+	if err != nil {
+		return "", err
+	}
+	if c.tokens == nil {
+		c.tokens = make(map[tokenKey]*vapidToken)
+	}
+	for k, tok := range c.tokens { // 顺手清掉用不上的（过了窗口的、换钥前的），缓存不会越积越多
+		if !tok.fresh(now) {
+			delete(c.tokens, k)
+		}
+	}
+	c.tokens[key] = &vapidToken{header: hdr, signedAt: now, refreshAt: now.Add(jwtLifetime - tokenRefreshMargin)}
+	return hdr, nil
+}
+
+// httpClient 是 Send 用的 HTTP 客户端：调用方给的，或包内默认的。
+func (c *Client) httpClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return defaultHTTP
+}
+
 // newRequest 校验参数、加密、签名并组好请求。这里的错误都是本地错误。
 func (c *Client) newRequest(ctx context.Context, sub Subscription, payload []byte, o Options) (*http.Request, error) {
 	if c.VAPID == nil {
@@ -129,12 +194,14 @@ func (c *Client) newRequest(ctx context.Context, sub Subscription, payload []byt
 	if o.Urgency != "" && !validUrgency(o.Urgency) {
 		return nil, fmt.Errorf("Urgency 只能是 very-low、low、normal、high，得到 %q", o.Urgency)
 	}
-	if o.TTL < 0 {
-		return nil, errors.New("TTL 不能为负")
-	}
 	ttl := o.TTL
-	if ttl == 0 {
+	switch {
+	case ttl < 0:
+		return nil, errors.New("TTL 不能为负")
+	case ttl == 0:
 		ttl = defaultTTL
+	case ttl < time.Second:
+		return nil, fmt.Errorf("TTL 至少 1 秒（按整秒发，不足 1 秒会成 TTL: 0，Apple 回 BadTtl），得到 %v", ttl)
 	}
 	aud, err := endpointOrigin(sub.Endpoint)
 	if err != nil {
@@ -144,7 +211,7 @@ func (c *Client) newRequest(ctx context.Context, sub Subscription, payload []byt
 	if err != nil {
 		return nil, err
 	}
-	auth, err := c.VAPID.Authorization(aud, c.Subject, time.Now())
+	auth, err := c.authorization(aud)
 	if err != nil {
 		return nil, err
 	}

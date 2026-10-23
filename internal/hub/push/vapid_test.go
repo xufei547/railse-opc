@@ -3,8 +3,11 @@ package push
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -197,16 +200,116 @@ func TestParseVAPIDKnownKey(t *testing.T) {
 	}
 }
 
-// 打印 VAPID 不会把私钥带进日志。
+// 打印 VAPID 不会把私钥带进日志：指针、值，以及按值嵌在未导出字段、切片、map、数组里（这时 fmt 不调 Format，
+// 而是反射打印各字段），各种动词下都不出现私钥字节的任何常见写法。
 func TestVAPIDFormatHidesPrivateKey(t *testing.T) {
 	v, err := ParseVAPID(b64(t, rfcASPrivate))
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw := v.Raw()
-	for _, s := range []string{fmt.Sprint(v), fmt.Sprintf("%+v", v), fmt.Sprintf("%#v", v), fmt.Sprintf("%v", *v), fmt.Sprintf("%+v", *v), fmt.Sprintf("%#v", *v), fmt.Sprintf("%x", v), fmt.Sprintf("%s", v)} {
-		if strings.Contains(s, fmt.Sprint(raw)) || strings.Contains(s, fmt.Sprintf("%x", raw)) || strings.Contains(s, rfcASPrivate) || strings.Contains(s, fmt.Sprintf("%#v", raw)) {
-			t.Fatalf("格式化输出带出了私钥: %s", s)
+	goHex := make([]string, len(raw))
+	for i, b := range raw {
+		goHex[i] = fmt.Sprintf("%#x", b)
+	}
+	// big.Int 内部的 64 位字（低位在前）：万一标量 D 被解引用打印，出来的就是这个样子
+	words := make([]string, len(raw)/8)
+	for i := range words {
+		words[i] = fmt.Sprint(binary.BigEndian.Uint64(raw[len(raw)-8*(i+1):]))
+	}
+	needles := map[string]string{
+		"big.Int":     new(big.Int).SetBytes(raw).String(),
+		"big.Int 内部字": strings.Join(words, " "),
+		"hex":         hex.EncodeToString(raw),
+		"HEX":         strings.ToUpper(hex.EncodeToString(raw)),
+		"% x":         fmt.Sprintf("% x", raw),
+		"% X":         fmt.Sprintf("% X", raw),
+		"base64url":   base64.RawURLEncoding.EncodeToString(raw),
+		"base64url=":  base64.URLEncoding.EncodeToString(raw),
+		"base64":      base64.RawStdEncoding.EncodeToString(raw),
+		"base64=":     base64.StdEncoding.EncodeToString(raw),
+		"十进制字节":       strings.Trim(fmt.Sprint(raw), "[]"),
+		"Go 语法":       strings.Join(goHex, ", "),
+		"原始字节":        string(raw),
+		"%q":          strings.Trim(fmt.Sprintf("%q", raw), `"`),
+	}
+	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "% x", "%d"}
+	leaks := func(s string) string {
+		for name, n := range needles {
+			if strings.Contains(s, n) {
+				return name
+			}
 		}
+		return ""
+	}
+	// 对照：私钥字节若真在某个字段里，每个动词的输出都会被某种写法命中，说明下面的检查不是空的。
+	for _, verb := range verbs {
+		if leaks(fmt.Sprintf(verb, struct{ b []byte }{raw})) == "" {
+			t.Fatalf("对照失败：%s 打印字节字段时没有被任何写法命中", verb)
+		}
+	}
+	if leaks(fmt.Sprintf("%v", struct{ d *big.Int }{new(big.Int).SetBytes(raw)})) != "" ||
+		leaks(fmt.Sprintf("%v", struct{ d big.Int }{*new(big.Int).SetBytes(raw)})) == "" {
+		t.Fatal("对照失败：深层 *big.Int 应只打地址，解引用后的 big.Int 应被“内部字”写法命中")
+	}
+	values := map[string]any{
+		"指针":        v,
+		"值":         *v,
+		"未导出字段（值）":  struct{ x VAPID }{*v},
+		"导出字段（值）":   struct{ X VAPID }{*v},
+		"未导出字段（指针）": struct{ x *VAPID }{v},
+		"两层未导出字段":   struct{ in struct{ x VAPID } }{struct{ x VAPID }{*v}},
+		"切片":        []VAPID{*v},
+		"数组":        [1]VAPID{*v},
+		"map 值":     map[string]VAPID{"k": *v},
+		"any 里的值":   struct{ x any }{*v},
+		"未导出字段里的切片": struct{ x []VAPID }{[]VAPID{*v}},
+	}
+	for name, val := range values {
+		for _, verb := range verbs {
+			if s := fmt.Sprintf(verb, val); leaks(s) != "" {
+				t.Errorf("%s 用 %s 打印带出了私钥（%s 写法）: %s", name, verb, leaks(s), s)
+			}
+		}
+	}
+	if got, want := fmt.Sprint(v), "VAPID{k="+rfcASPublic+"}"; got != want {
+		t.Fatalf("Format: %s，想要 %s", got, want)
+	}
+}
+
+// ES256 的 r、s 各自左补零到 32 字节（RFC 7518 第 3.4 节）。r 或 s 首字节为 0 的签名每次约 1/256 的机会，
+// 这里换着 exp 一直签到 r、s 都碰到过首字节为 0 的情况（有上限），每个签名都必须是 64 字节且验签通过：
+// 不补零的实现会出 63 字节，补错一边的实现验签失败。
+func TestVAPIDSignaturePadsRAndS(t *testing.T) {
+	v, err := ParseVAPID(b64(t, rfcASPrivate))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), v.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Unix(1_800_000_000, 0)
+	var sawR, sawS bool
+	for i := 0; i < 20000 && !(sawR && sawS); i++ {
+		hdr, err := v.Authorization("https://push.example.net", "mailto:push@example.com", base.Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		jwt, _, _ := strings.Cut(strings.TrimPrefix(hdr, "vapid t="), ", k=")
+		parts := strings.Split(jwt, ".")
+		sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+		if err != nil || len(sig) != 64 {
+			t.Fatalf("第 %d 次：签名应为 r‖s 共 64 字节，得到 %d 字节 %v", i, len(sig), err)
+		}
+		h := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+		if !ecdsa.Verify(pub, h[:], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])) {
+			t.Fatalf("第 %d 次：验签失败（r 首字节 %#x，s 首字节 %#x）", i, sig[0], sig[32])
+		}
+		sawR = sawR || sig[0] == 0
+		sawS = sawS || sig[32] == 0
+	}
+	if !sawR || !sawS {
+		t.Fatalf("没碰到首字节为 0 的 r（%v）或 s（%v），补零没有测到", sawR, sawS)
 	}
 }
