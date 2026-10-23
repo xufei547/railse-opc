@@ -40,66 +40,100 @@ const sameCmd = `(?:[^|;&\n'"]|'[^']*'|"[^"]*"|&[^&\n'"]|\\\r?\n)*?`
 var sensitiveKey = regexp.MustCompile(`(?i)^` + key + `$`)
 
 type rule struct {
-	re   *regexp.Regexp
-	repl string
+	re    *regexp.Regexp
+	repl  string
+	vrepl string // 命令行视图里的替换文本（见 shell.go 的 applyView），只有 viewRules 用
+	need  string // 能匹配的文本至少含其中一个字节；不含时跳过这条规则（只为快，不改结果）
 }
 
-// compile 用给定的“不带引号的值”字符类编译一套规则。几种语境只在值到哪里为止上不同；open 为 true 时（只用于会被截断的
-// 文本）引号括起的值没有右引号也认，一直抹到文本末尾，否则引号必须成对。
-// 顺序很重要：先处理带键名的形式，再处理裸 token。
-func compile(bare string, open bool) []rule {
-	q, jsonStr := quoted, `"(?:[^"\\]|\\.)*"`
-	// curl -u 的引号值：右引号单独成组，替换时放回去
-	sqEnd, dqEnd, jqEnd := `(')`, `(")`, `(\\")`
-	if open {
-		q, jsonStr = quotedOpen, `"(?:[^"\\]|\\.)*(?:"|$)`
-		sqEnd, dqEnd, jqEnd = `('|$)`, `("|$)`, `(\\"|$)`
+// quoting 是一种语境里“引号怎么认”的写法。文本语境直接看原文；命令行语境看 shell.go 生成的视图，
+// 视图里右引号换成了专用字节，正则因此只能从真正的左引号配到它自己的右引号，不会把右引号当左引号、跨过中间的命令配对。
+type quoting struct {
+	quoted   string // 引号括起的整段值
+	jsonStr  string // JSON 字符串值
+	keyEnd   string // JSON 键名的右引号
+	sqUser   string // curl -u 单引号值：左引号和用户名
+	sqPass   string // 单引号里的密码
+	sqEnd    string // 单引号值的右引号（单独成组，替换时放回去）
+	dqUser   string
+	dqPass   string
+	dqEnd    string
+	jqEnd    string // JSON 原文里转义过的 \" 值的右引号
+	user     string // curl -u 不带引号的用户名
+	sameCmd  string
+	urlUser  string // URL userinfo 的用户名
+	urlPass  string // URL userinfo 的密码
+	excluded string // 视图专用字节，所有值字符类都排除（文本语境为空）
+	ph       string // 已经抹过的占位符
+}
+
+// textQuoting 是路径、文本、URL 等不经视图的语境：引号就是原文里的引号。open 为 true 时（只用于会被截断的文本）
+// 引号括起的值没有右引号也认，一直抹到文本末尾，否则引号必须成对。
+func textQuoting(open bool) quoting {
+	q := quoting{
+		quoted: quoted, jsonStr: `"(?:[^"\\]|\\.)*"`, keyEnd: `"`,
+		sqUser: `('[^'":\s\\]*:)`, sqPass: `[^']*`, sqEnd: `(')`,
+		dqUser: `("[^'":\s\\]*:)`, dqPass: `(?:[^"\\]|\\.)*`, dqEnd: `(")`,
+		jqEnd: `(\\")`, user: `([^'":\s\\]*:)`, sameCmd: sameCmd,
+		urlUser: `[^/\s:@'"\\]*`, urlPass: `[^\s/?#'"\\]+`, ph: placeholder,
 	}
-	value := `(?:` + q + `|` + bare + `)`
+	if open {
+		q.quoted, q.jsonStr = quotedOpen, `"(?:[^"\\]|\\.)*(?:"|$)`
+		q.sqEnd, q.dqEnd, q.jqEnd = `('|$)`, `("|$)`, `(\\"|$)`
+	}
+	return q
+}
+
+// compile 用给定的“不带引号的值”字符类编译一套文本语境的规则。几种语境只在值到哪里为止上不同。
+func compile(bare string, open bool) []rule {
+	return build(bare, textQuoting(open))
+}
+
+// build 编译一套规则。顺序很重要：先处理带键名的形式，再处理裸 token。
+// 值的位置上已经是占位符时只认占位符本身，不连带后面的字符：hub 会对守护进程脱敏过的载荷再跑一次，
+// 第二次的结果必须不变（password=<redacted>: 不能变成 password=<redacted>，mysql -p<redacted> 也不能让规则跳到后面的 -p）。
+func build(bare string, q quoting) []rule {
+	bare = `(?:` + q.ph + `|` + bare + `)`
+	value := `(?:` + q.quoted + `|` + bare + `)`
+	x := q.excluded
 	return []rule{
 		// Authorization: Bearer xxx / Authorization: Basic xxx
-		{regexp.MustCompile(`(?i)(authorization:\s*)(bearer|basic|token)?\s*` + bare), "${1}" + placeholder},
+		{re: regexp.MustCompile(`(?i)(authorization:\s*)(bearer|basic|token)?\s*` + bare), repl: "${1}" + placeholder, need: ":"},
 		// 不跟在 Authorization: 后面的 Bearer xxx
-		{regexp.MustCompile(`(?i)\b(bearer\s+)` + bare), "${1}" + placeholder},
+		{re: regexp.MustCompile(`(?i)\b(bearer\s+)` + bare), repl: "${1}" + placeholder, need: "bB"},
 		// --token xxx、--password "xxx"、--api-key 'xxx'
-		{regexp.MustCompile(`(?i)(--?(token|password|passwd|api[-_]?key|secret|auth)\s+)` + value), "${1}" + placeholder},
+		{re: regexp.MustCompile(`(?i)(--?(token|password|passwd|api[-_]?key|secret|auth)\s+)` + value), repl: "${1}" + placeholder, need: "-"},
 		// token=xxx、DB2_PASSWORD="xxx"、--env=DB_PASSWORD=xxx、+API_KEY=xxx、:_authToken=xxx、MYSQL_PWD=xxx。
 		// 不设左边界：key 的前缀字符类会吸收键名前缀，${1} 只含键名本身。
-		{regexp.MustCompile(`(?i)(` + key + `=)` + value), "${1}" + placeholder},
+		{re: regexp.MustCompile(`(?i)(` + key + `=)` + value), repl: "${1}" + placeholder, need: "="},
 		// JSON 带引号的敏感键："password": "xxx"、"api_key": 123、"auth_token": true。值换成 "<redacted>"，JSON 仍合法；
 		// open 时字符串值没有右引号（被截断）也抹到文本末尾。YAML 的裸键（password: xxx）不认
-		{regexp.MustCompile(`(?i)("` + key + `"\s*:\s*)(?:` + jsonStr + `|-?[0-9][0-9.eE+-]*|true|false)`), "${1}\"" + placeholder + "\""},
+		{re: regexp.MustCompile(`(?i)("` + key + q.keyEnd + `\s*:\s*)(?:` + q.jsonStr + `|-?[0-9][0-9.eE+-]*|true|false)`),
+			repl: "${1}\"" + placeholder + "\"", vrepl: "${1}\"" + viewPlaceholder + string(rune(vCloseDQ)), need: ":"},
 		// X-API-Key: xxx、PRIVATE-TOKEN: xxx、X-Auth-Token:xxx 这类请求头（Authorization 见上）。头名要带连字符，
 		// 免得误抹代码里的 apiKey: config.key、YAML 里的 max_tokens: 10
-		{regexp.MustCompile(`(?i)\b((?:[a-z0-9]+-)*(?:api-key|[a-z0-9]+-token|[a-z0-9]+-secret)[ \t]*:[ \t]*)` + value), "${1}" + placeholder},
+		{re: regexp.MustCompile(`(?i)\b((?:[a-z0-9]+-)*(?:api-key|[a-z0-9]+-token|[a-z0-9]+-secret)[ \t]*:[ \t]*)` + value), repl: "${1}" + placeholder, need: ":"},
 		// URL 里的 user:pass@（任意 scheme）：用户名留着，只抹密码。密码里的 @ 算在密码里（取 / ? # 之前最后一个 @）
-		{regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@'"\\]*:)[^\s/?#'"\\]+@`), "${1}" + placeholder + "@"},
+		{re: regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://` + q.urlUser + `:)` + q.urlPass + `@`), repl: "${1}" + placeholder + "@", need: ":"},
 		// curl 的 -u/--user、-U/--proxy-user 的 user:pass（-u、-U 可以在组合短选项末尾，如 -sSu）：用户名与引号留着，
 		// 只抹密码；不带冒号的（curl 会提示输入密码）不动。引号值要成对（open 时允许缺右引号），双引号里认转义的 \"
-		{regexp.MustCompile(`(\bcurl\b` + sameCmd + `\s(?:-[A-Za-z]*[uU]\s*|--user\s+|--proxy-user\s+))` +
-			`(?:('[^'":\s\\]*:)[^']*` + sqEnd + `|("[^'":\s\\]*:)(?:[^"\\]|\\.)*` + dqEnd +
-			`|(\\"[^'":\s\\]*:)(?:[^"\\]|\\[^"])*` + jqEnd + `|([^'":\s\\]*:)` + bare + `)`),
-			"${1}${2}${4}${6}${8}" + placeholder + "${3}${5}${7}"},
+		{re: regexp.MustCompile(`(\bcurl\b` + q.sameCmd + `\s(?:-[A-Za-z]*[uU]\s*|--user\s+|--proxy-user\s+))` +
+			`(?:` + q.sqUser + q.sqPass + q.sqEnd + `|` + q.dqUser + q.dqPass + q.dqEnd +
+			`|(\\"[^'":\s\\` + x + `]*:)(?:[^"\\` + x + `]|\\[^"` + x + `])*` + q.jqEnd + `|` + q.user + bare + `)`),
+			repl: "${1}${2}${4}${6}${8}" + placeholder + "${3}${5}${7}", need: "-"},
 		// mysql 系命令紧贴 -p 的密码（-pxxx、-p'xxx'）。-p 单独出现时 mysql 提示输入密码、后面的是库名；-P 是端口：都不动
-		{regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + sameCmd + `\s-p)` + value), "${1}" + placeholder},
+		{re: regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + q.sameCmd + `\s-p)` + value), repl: "${1}" + placeholder, need: "-"},
 		// 裸 token：GitHub、OpenAI、Slack、AWS
-		{regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), placeholder},
+		{re: regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), repl: placeholder, need: "_-A"},
 	}
 }
 
 var (
-	// shellRules 用于命令行：裸值在空白、引号、反斜杠和 shell 元字符处停。排除反斜杠是为了处理 JSON 原文时
+	// literalRules 用于命令行里元字符是普通字符的片段（引号里、注释，见 shell.go）：值只在空白、引号、反斜杠处停，
+	// 免得引号括住整个 KEY=值 时（"POSTGRES_PASSWORD=Xy7&kP(2)q"）强密码只抹掉前半截。排除反斜杠是为了处理 JSON 原文时
 	// 不吞掉 \" 转义，结果仍是合法 JSON。
-	// ; | & < > ( ) 反引号 $ 在 shell 里本来就结束一个裸词（$ 开始展开，字面密码不可能未加引号地含它），
-	// 所以到这里停不会多漏秘密；引号括住的值由 quoted 整段抹，引号括住整个 KEY=值 时由 redactLiteral 按 literalRules 处理，
-	// heredoc 正文由 splitHeredocs 切出来单独按 textRules 处理。
-	// 一直抹到空白的旧做法会把 X_TOKEN=a;curl …|sh 的后半截命令藏起来，而手机上看到的就是审批依据（第 3 份终审 I4）。
-	// 反引号不能写进原始字符串，单独拼进去。
-	shellRules = compile(`[^\s'"\\;|&<>()`+"`"+`$]+`, false)
-	// literalRules 用于命令行里元字符是普通字符的片段（引号里、整行注释，见 redactLiteral）：值只在空白、引号、反斜杠处停，
-	// 免得引号括住整个 KEY=值 时（"POSTGRES_PASSWORD=Xy7&kP(2)q"）强密码只抹掉前半截。
 	literalRules = compile(`[^\s'"\\]+`, false)
-	// textRules 用于路径和 JSON 字符串叶子：没有 shell 语义，值一直抹到空白或引号，
+	// textRules 用于路径、JSON 字符串叶子和 heredoc 正文：没有 shell 语义，值一直抹到空白或引号，
 	// 免得含 & ( ; | 等符号的强密码只抹掉前半截。它们不会被截断，引号严格成对。
 	textRules = compile(`[^\s'"]+`, false)
 	// truncRules 同 textRules，用于会被截断的文本（Text：diff_preview、事件消息）：未闭合的引号抹到末尾，见 quotedOpen。
@@ -112,173 +146,17 @@ var (
 func redact(s string, rules []rule) string {
 	out := s
 	for _, r := range rules {
-		out = r.re.ReplaceAllString(out, r.repl)
+		if strings.ContainsAny(out, r.need) {
+			out = r.re.ReplaceAllString(out, r.repl)
+		}
 	}
 	return out
 }
 
-// String 按命令行语境返回脱敏后的副本。heredoc 正文没有 shell 词法，按普通文本语境处理。
+// String 按命令行语境返回脱敏后的副本，见 shell.go：裸值在 shell 元字符处停；引号里、注释与 heredoc 正文按字面整段抹；
+// 交给 sh -c、eval、ssh 执行的参数和喂给它们的 heredoc 正文按命令行语境递归处理。
 func String(s string) string {
-	segs := splitHeredocs(s)
-	if len(segs) == 1 && !segs[0].heredoc {
-		return redactShell(s)
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, seg := range segs {
-		if seg.heredoc {
-			b.WriteString(redact(seg.text, textRules))
-		} else {
-			b.WriteString(redactShell(seg.text))
-		}
-	}
-	return b.String()
-}
-
-// redactShell 按命令行规则脱敏一段 shell 文本（不含 heredoc 正文）：先把元字符是普通字符的片段按 literalRules 处理，
-// 再整段按 shellRules 处理。
-func redactShell(s string) string {
-	return redact(redactLiteral(s), shellRules)
-}
-
-// shellLexeme 依次认出会改变“元字符算不算普通字符”的记号：引号外的反斜杠转义、$'…'（认 \ 转义）、'…'、
-// "…"（认 \ 转义）、词首 # 开始的注释（到行尾）。引号必须成对，未闭合的不算。只用来找引号片段，不是完整的 shell 词法。
-var shellLexeme = regexp.MustCompile(`\\[\s\S]|\$'(?:[^'\\]|\\[\s\S])*'|'[^']*'|"(?:[^"\\]|\\[\s\S])*"|(?:^|[\s;&|()<>])#[^\n]*`)
-
-// redactLiteral 把引号里的文本和整行注释按 literalRules 脱敏：那里的 ; | & ( ) 是普通字符，不结束值。
-//   - 双引号里的 $( ) 和反引号是会执行的命令替换，里面还能嵌套引号，按成对引号切出的片段从这里起可能错配
-//     （echo "$(echo ")"; X=a;curl …|sh; echo "(")" 里中间那段其实是命令），所以遇到这样的双引号片段，它和之后的片段
-//     都不再整段抹，只按 shellRules 在元字符处停（代价是之后引号里的强密码可能只抹掉前半截）。
-//   - 注释照样认出来，免得注释里的 ' 跟后面的引号错配；只有独占一行的注释整段抹，跟在命令后面的注释只按 shellRules 处理，
-//     免得把看着像注释其实不是的 #（${x// #/}）后面的命令藏起来。
-func redactLiteral(s string) string {
-	locs := shellLexeme.FindAllStringIndex(s, -1)
-	var b strings.Builder
-	last := 0
-	for _, loc := range locs {
-		start, end := loc[0], loc[1]
-		switch tok := s[start:end]; tok[0] {
-		case '\\': // 引号外的转义：\" \' 不开始引号
-			continue
-		case '\'':
-			start, end = start+1, end-1
-		case '$': // $'…'
-			start, end = start+2, end-1
-		case '"':
-			if strings.Contains(tok, "$(") || strings.Contains(tok, "`") {
-				b.WriteString(s[last:])
-				return b.String()
-			}
-			start, end = start+1, end-1
-		default: // 注释，前面可能带一个分隔字符
-			hash := start + strings.IndexByte(tok, '#')
-			if !wholeLine(s, hash) {
-				continue
-			}
-			start = hash
-		}
-		b.WriteString(s[last:start])
-		b.WriteString(redact(s[start:end], literalRules))
-		last = end
-	}
-	if last == 0 {
-		return s
-	}
-	b.WriteString(s[last:])
-	return b.String()
-}
-
-// wholeLine 判断 s[i] 前面同一行里是否只有空格和制表符。
-func wholeLine(s string, i int) bool {
-	lineStart := strings.LastIndexByte(s[:i], '\n') + 1
-	return strings.Trim(s[lineStart:i], " \t") == ""
-}
-
-// segment 是命令文本里的一段：shell 词法部分，或 heredoc 正文。
-type segment struct {
-	text    string
-	heredoc bool
-}
-
-// heredocStart 匹配 << 或 <<- 后的分隔词：可带单引号、双引号或反斜杠（都表示正文不展开，与脱敏无关）。
-// here-string（<<<）和算术里的左移不是 heredoc，由 isHeredoc 排除。
-var heredocStart = regexp.MustCompile(`<<(-?)[ \t]*(?:'([^']+)'|"([^"]+)"|\\?([^\s'"<>|&;]+))`)
-
-// isHeredoc 判断 line[i:] 处匹配到的 << 是不是 heredoc 起点。排除三种形似的写法：
-//   - here-string：<<< 的后两个字符也能匹配上，所以前一个或后一个字符是 < 的不算；
-//   - 算术里的左移：同一行里前面有 (( 、两者之间没有 ))、后面还有 ))，即 $(( 1<<2 ))、(( x <<= 2 ))；
-//   - 脱敏结果里的 <<redacted>：< 紧跟被抹掉的裸 token（cat <ghp_…），hub 对已脱敏的载荷再跑一次时结果不能变。
-//
-// 不跟踪引号：引号里的 <<（echo "a<<b"）也当起点。错认的代价是后面几行按文本语境抹到空白（多抹），
-// 漏认则是 heredoc 正文里的强密码只抹掉前半截（漏秘密），所以宁可错认。
-func isHeredoc(line string, i int) bool {
-	if i > 0 && line[i-1] == '<' || i+2 < len(line) && line[i+2] == '<' {
-		return false
-	}
-	if strings.HasPrefix(line[i+1:], placeholder) {
-		return false
-	}
-	open := strings.LastIndex(line[:i], "((")
-	if open < 0 || strings.Contains(line[open:i], "))") {
-		return true
-	}
-	return !strings.Contains(line[i:], "))")
-}
-
-// splitHeredocs 把 heredoc 正文从命令文本里切出来。起点所在的那一行属于 shell 段；正文从下一行开始，
-// 到单独一行的分隔词为止（<<- 时允许前导制表符）；分隔词那一行又属于 shell 段。找不到结束行时正文到文本末尾。
-// 同一行有多个 heredoc 时按出现顺序依次读取正文（bash 的规则）。各段按顺序拼起来就是原文，相邻的 shell 段已合并。
-func splitHeredocs(s string) []segment {
-	var segs []segment
-	shellStart, pos := 0, 0 // 当前 shell 段的起点；下一行的起点
-	for {
-		nl := strings.IndexByte(s[pos:], '\n')
-		if nl < 0 {
-			break // 最后一行没有换行，后面没有正文可读
-		}
-		line := s[pos : pos+nl+1]
-		pos += nl + 1
-		for _, m := range heredocStart.FindAllStringSubmatchIndex(line, -1) {
-			if !isHeredoc(line, m[0]) {
-				continue
-			}
-			var word string
-			for g := 2; g <= 4; g++ {
-				if m[2*g] >= 0 {
-					word = line[m[2*g]:m[2*g+1]]
-				}
-			}
-			// 找不到结束行时 end 是 len(s)，外层循环随即结束
-			if end := heredocEnd(s, pos, word, m[3] > m[2]); end > pos {
-				segs = append(segs, segment{text: s[shellStart:pos]}, segment{text: s[pos:end], heredoc: true})
-				shellStart, pos = end, end
-			}
-		}
-	}
-	if shellStart < len(s) {
-		segs = append(segs, segment{text: s[shellStart:]})
-	}
-	return segs
-}
-
-// heredocEnd 从 s[pos:] 起找 heredoc 的结束行（strip 为 true 时即 <<-，允许前导制表符），返回正文的终点，
-// 即结束行的起点；找不到时返回 len(s)。
-func heredocEnd(s string, pos int, word string, strip bool) int {
-	for pos < len(s) {
-		line, next := s[pos:], len(s)
-		if nl := strings.IndexByte(line, '\n'); nl >= 0 {
-			line, next = line[:nl], pos+nl+1
-		}
-		check := strings.TrimSuffix(line, "\r")
-		if strip {
-			check = strings.TrimLeft(check, "\t")
-		}
-		if check == word {
-			return pos
-		}
-		pos = next
-	}
-	return len(s)
+	return shellString(s)
 }
 
 // Text 按普通文本语境返回脱敏后的副本，规则与 DiffPreview 相同：值一直抹到空白或引号；文本可能被截断，
