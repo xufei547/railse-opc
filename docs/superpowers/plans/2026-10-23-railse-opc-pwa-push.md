@@ -20,7 +20,7 @@
 - 推送只在新请求产生时发：`kind` 为 `permission`、`webhook`、`question`；`done` 不推。每条推送的 Service Worker 必须 `showNotification`（iOS 多次静默推送会吊销订阅）。推送载荷 JSON 不超过 3 KiB（Apple 上限 4 KiB），标题、正文截断。
 - 推送端点返回 404 或 410 立即删订阅；其他失败累计，连续 5 次失败删订阅（设计 5.4）。
 - hub 对订阅密钥（`keys.p256dh`、`keys.auth`）与 VAPID 私钥明文存库（设计 5.3 例外），永不经任何接口返回私钥；`GET /api/push/vapid` 只回公钥。
-- 脱敏：shell 语境里不在引号与 heredoc 内的裸值遇到 `;`、`|`、`&`、`<`、`>`、`(`、`)`、反引号、`$` 即停；双引号、单引号内与 heredoc 正文照旧抹到空白。`has_redacted` 标记与网页告警保留。
+- 脱敏：shell 语境里不在引号与 heredoc 内的裸值遇到 `;`、`|`、`&`、`<`、`>`、`(`、`)`、反引号、`$` 即停；交给 shell 解释执行的内容（`sh|bash|zsh|dash|ksh -c` 的参数、`eval` 的参数、`ssh` 的引号参数、喂给它们的 heredoc 正文）按 shell 语境递归处理；其余双引号、单引号内与 heredoc 正文照旧抹到空白。`has_redacted` 标记与网页告警保留。（2026-10-23 执行期按审查结论细化。）
 - 每个 Go Task 结束时 `gofmt -l .` 无输出、`go vet ./...` 无错、`go test ./... -race` 全过；每个网页 Task 结束时 `cd web && npm run check`（`tsc --noEmit` 加 `vitest run`）通过且 `npm run build` 成功。测试里的目录用 `os.MkdirTemp("", "rs")`。提交信息用中文。
 - 构建产物目录 `internal/hub/webui/dist/` 不入库（只留 `.gitkeep`）；没构建时 hub 照样启动，网页路径回一页“网页未构建”的提示。
 - 许可证 Apache 2.0。
