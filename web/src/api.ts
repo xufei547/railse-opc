@@ -95,7 +95,8 @@ export const hub = {
   rules: () => get<Rule[]>('/api/rules'),
   setRuleEnabled: (id: string, enabled: boolean) => patch<void>(`/api/rules/${enc(id)}`, { enabled }),
   deleteRule: (id: string) => del<void>(`/api/rules/${enc(id)}`),
-  importRules: (yaml: string) =>
+  /** yaml 可以直接是选中的文件：原样字节发给 hub（不先按 UTF-8 解码再编码），校验与报错都以 hub 为准。 */
+  importRules: (yaml: string | Blob) =>
     request<{ version: number }>('POST', '/api/rules/import', { raw: yaml, contentType: 'application/yaml', timeoutMs: importTimeoutMs }),
   exportRulesURL: '/api/rules/export',
   machines: () => get<Machine[]>('/api/machines'),

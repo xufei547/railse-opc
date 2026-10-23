@@ -71,6 +71,15 @@ describe('request', () => {
     expect(calls[0]?.init.body).toBe('version: 1\nrules: []\n')
   })
 
+  it('导入规则可以直接发选中的文件：原样字节、YAML 类型（不先按 UTF-8 解码再编码）', async () => {
+    const calls = stubFetch(200, { version: 4 })
+    const file = new Blob([new Uint8Array([0x69, 0x64, 0x3a, 0xff])], { type: 'application/octet-stream' })
+    const r = await hub.importRules(file)
+    expect(r.version).toBe(4)
+    expect((calls[0]?.init.headers as Record<string, string>)['Content-Type']).toBe('application/yaml')
+    expect(calls[0]?.init.body).toBe(file)
+  })
+
   it('列请求带 state 与 limit', async () => {
     const calls = stubFetch(200, [])
     await hub.requests('auto_allowed', 20)

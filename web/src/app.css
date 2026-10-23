@@ -7,6 +7,8 @@
   --card: #f9fafb;
   --brand: #1f2a44;
   --brand-fg: #ffffff;
+  /* 品牌色当文字用（当前标签页）：浅色就是 --brand；深色的 --brand 压在 --bg 上只有 2.17 比 1，另取浅一档的同色系 */
+  --brand-text: #1f2a44;
   --low: #15803d;
   --mid: #b45309;
   --high: #b91c1c;
@@ -31,6 +33,7 @@
     --line: #2a2f3a;
     --card: #171a21;
     --brand: #3b4a73;
+    --brand-text: #a5b4fc;
     --low-bg: #0f2e1a;
     --mid-bg: #3a2a08;
     --high-bg: #3b0f0f;
@@ -51,7 +54,7 @@ button { font: inherit; }
 .page { padding: 12px var(--gutter); }
 .nav { position: fixed; left: 0; right: 0; bottom: 0; height: calc(var(--nav-h) + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); display: flex; background: var(--bg); border-top: 1px solid var(--line); z-index: 5; }
 .nav a { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; text-decoration: none; color: var(--muted); font-size: 12px; position: relative; }
-.nav a.active { color: var(--brand); font-weight: 600; }
+.nav a.active { color: var(--brand-text); font-weight: 600; }
 .nav .badge { position: absolute; top: 6px; right: calc(50% - 22px); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--high); color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
 .card { display: block; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; text-decoration: none; color: inherit; }
 .card .row { display: flex; align-items: center; gap: 8px; }
@@ -70,7 +73,7 @@ button { font: inherit; }
 .page > section:first-of-type .section-title { margin-top: 4px; }
 .empty { padding: 40px 0; text-align: center; color: var(--muted); }
 .empty p { margin: 0 0 8px; }
-.btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+.btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; text-decoration: none; }
 .btn.primary { background: var(--brand); color: var(--brand-fg); border-color: var(--brand); }
 .btn.danger { background: var(--high); color: #fff; border-color: var(--high); }
 .btn.block { width: 100%; }
@@ -137,3 +140,20 @@ code.mono { word-break: break-all; }
 .error { color: var(--high-fg); font-size: 14px; margin: 8px 0; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .dot.on { background: var(--low); }
+/* 规则、机器、设置页 */
+.pre-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+.btn.danger-text { color: var(--high-fg); }
+.page-end { margin-top: 24px; }
+.card.rule .rule-id { font-size: 14px; overflow-wrap: anywhere; }
+.card.rule.off .rule-id { color: var(--muted); }
+/* 能放行对外、不可逆操作的规则（设计 5.2）：启用着时整张卡片红框，另有红色标签 */
+.card.rule.elevated { border: 2px solid var(--high-fg); }
+.card .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.card details summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 10px 0; overflow-wrap: anywhere; }
+.card details pre.block { margin-top: 0; }
+.rule-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.toggle { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
+.toggle input { width: 24px; height: 24px; margin: 0; }
+.list-item .name { overflow-wrap: anywhere; }
+.list-item .name .tag { margin-left: 6px; }
+.list-item.revoked .name { color: var(--muted); }
