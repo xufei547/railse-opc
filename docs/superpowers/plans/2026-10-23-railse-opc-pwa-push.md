@@ -5746,6 +5746,7 @@ git commit -m "test(web): Playwright 端到端（登录、批准并记住、拒�
 
 **已知取舍**
 - 网页不做组件级单元测试，纯逻辑模块（接口层、实时通道、reducer、格式化、推送状态）有 Vitest，页面交互由一条 Playwright 端到端覆盖。
+- `npm audit` 在 vitest 3 的开发依赖里报 3 条（tinypool、@vitest/mocker），`--omit=dev` 为 0，不进二进制也不对外；保持 vitest 3，第 5 份做 CI 时评估升 vitest 4（2026-10-24 执行期决定）。
 - 推送加密与签名自己实现而不引第三方包：标准库已够用，RFC 向量逐字节验证，少一个依赖。
 - 前台时 WebSocket 与推送会提醒两次（iOS 要求每条推送都显示通知），用请求 id 作 tag 让通知中心只留一条。
 - 开发代理把 `Origin` 改写成 hub 的源以通过同源校验，只在本机开发用。
