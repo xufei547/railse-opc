@@ -345,11 +345,14 @@ type ctx struct {
 	wrap    string
 	wrapArg bool
 	wrapPos int
-	// 当前简单命令里见过的词：shell 名、-c 类选项、eval、ssh；feeds 表示本条命令把输入交给 shell 或 ssh
-	shell, cflag, eval, ssh, feeds bool
-	here                           bool       // 当前词是喂给 shell 或 ssh 的 here-string
-	pipe                           []*heredoc // 当前管道里登记的 heredoc：后面的管道段是 shell 时，正文也是喂给它的
-	pending                        []*heredoc // 等下一个换行读正文的 heredoc，按出现顺序
+	// 当前简单命令里见过的：shell 名后的 -c 类选项、命令位置上的 eval、ssh；feeds 表示本条命令把输入交给 shell 或 ssh
+	cflag, eval, ssh, feeds bool
+	here                    bool // 当前词是喂给 shell 或 ssh 的 here-string
+	// shellOpts：刚见过 shell 名，正在看它自己的选项（1），或下一个词是选项的参数（2）。其间出现含 c 的选项组合就是
+	// 交给解释器执行（docker exec ctr sh -c、bash -o pipefail -c），shell 名在命令里任何位置都算；出现别的词就作罢
+	shellOpts int
+	pipe      []*heredoc // 当前管道里登记的 heredoc：后面的管道段是 shell 时，正文也是喂给它的
+	pending   []*heredoc // 等下一个换行读正文的 heredoc，按出现顺序
 }
 
 // context 从 sc.i 起扫描一层文本，到 closer（不消费）或 hi 为止，返回这层脱敏后的原文。
@@ -564,7 +567,7 @@ func (c *ctx) operator(ch byte) {
 
 // endCmd 结束当前简单命令。pipeEnd 为 false 时只是进入同一条管道的下一段。
 func (c *ctx) endCmd(pipeEnd bool) {
-	c.shell, c.cflag, c.eval, c.ssh, c.feeds, c.here = false, false, false, false, false, false
+	c.cflag, c.eval, c.ssh, c.feeds, c.here, c.shellOpts = false, false, false, false, false, 0
 	c.wrap, c.wrapArg, c.wrapPos = "", false, 0
 	c.cmdPos, c.start = true, true
 	if pipeEnd {
@@ -616,9 +619,30 @@ func (c *ctx) endWord() {
 		}
 	case w == "-exec" || w == "-execdir" || w == "-ok" || w == "-okdir":
 		c.cmdPos = true
-	case c.shell && !long && isCFlag(w):
-		c.cflag = true
+	case c.shellOpts == 2:
+		c.shellOpts = 1
+	case c.shellOpts == 1:
+		switch {
+		case !long && isCFlag(w):
+			c.cflag, c.shellOpts = true, 0
+		case w == "-o" || w == "+o" || w == "-O" || w == "+O" || w == "--rcfile" || w == "--init-file":
+			c.shellOpts = 2
+		case len(w) > 1 && (w[0] == '-' || w[0] == '+'):
+		default:
+			c.shellOpts = 0
+		}
+	case isShellName(name):
+		c.shellOpts = 1
 	}
+}
+
+// isShellName 判断去掉引号、取路径最后一段后的命令名是不是 sh/bash/zsh/dash/ksh 或 $SHELL。
+func isShellName(name string) bool {
+	switch name {
+	case "sh", "bash", "zsh", "dash", "ksh", "$SHELL", "${SHELL}":
+		return true
+	}
+	return false
 }
 
 // wrapperArgs 是包装命令的短选项里带参数的那些（sudo -u root bash）。只列常见的；认不出时把参数当命令名，
@@ -640,10 +664,12 @@ func (c *ctx) command(name, kw string) {
 		}
 		return
 	}
-	switch name {
-	case "sh", "bash", "zsh", "dash", "ksh", "$SHELL", "${SHELL}":
-		c.shell = true
+	if isShellName(name) {
+		c.shellOpts = 1
 		c.feed()
+		return
+	}
+	switch name {
 	case "ssh":
 		c.ssh = true
 		c.feed()
@@ -699,9 +725,10 @@ func isAssign(w string) bool {
 	return true
 }
 
-// recArgs 报告当前命令的引号参数是否会交给解释器执行：sh/bash/zsh/dash/ksh 带 -c 类选项、eval、ssh。
+// recArgs 报告当前命令的引号参数是否会交给解释器执行：shell 名带 -c 类选项（命令里任何位置）、命令位置上的 eval、ssh，
+// 以及喂给 shell 或 ssh 的 here-string。
 func (c *ctx) recArgs() bool {
-	return c.mode == mShell && (c.shell && c.cflag || c.eval || c.ssh || c.here) && !c.sc.dry && c.sc.depth < maxDepth
+	return c.mode == mShell && (c.cflag || c.eval || c.ssh || c.here) && !c.sc.dry && c.sc.depth < maxDepth
 }
 
 // comment 处理从 # 到行尾（不含换行）的注释：整段按字面脱敏。
