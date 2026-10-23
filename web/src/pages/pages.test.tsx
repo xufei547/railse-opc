@@ -196,7 +196,8 @@ describe('NotificationView（设置页的通知区块）', () => {
     refresh: async () => {},
     ...over,
   })
-  const view = (over: Partial<PushControl> = {}) => renderToStaticMarkup(<NotificationView push={ctl(over)} onResult={noop} />)
+  const act = async () => {}
+  const view = (over: Partial<PushControl> = {}, busy = false) => renderToStaticMarkup(<NotificationView push={ctl(over)} act={act} busy={busy} />)
   const buttons = (html: string) => [...html.matchAll(/<button[^>]*>([^<]*)<\/button>/g)].map((m) => m[1])
 
   it('标题与检查中：没有按钮', () => {
@@ -254,6 +255,14 @@ describe('NotificationView（设置页的通知区块）', () => {
     for (const status of ['off', 'on', 'stale', 'denied', 'unknown'] as const) {
       const html = view({ status, busy: true })
       expect(html.match(/<button /g)?.length, status).toBe(html.match(/disabled=""/g)?.length)
+    }
+  })
+
+  it('页面上别的操作在进行（确认面板开着、总开关在提交）：通知按钮也 disabled', () => {
+    for (const status of ['off', 'on', 'stale', 'denied', 'unknown'] as const) {
+      const html = view({ status }, true)
+      expect(html.match(/<button /g)?.length, status).toBe(html.match(/disabled=""/g)?.length)
+      expect(view({ status }, false)).not.toContain('disabled=""')
     }
   })
 

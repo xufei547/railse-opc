@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { hub } from '../api'
 import { Banner } from '../components/Banner'
-import { useActions } from '../components/Confirm'
-import type { OutcomeView } from '../decide'
+import { useActions, type Actions } from '../components/Confirm'
 import { failure, formatUptime, onlineCount } from '../manage'
 import { usePush, type PushControl } from '../push'
 import { useStore } from '../StoreProvider'
@@ -84,7 +83,7 @@ export function Settings() {
           </span>
           <input type="checkbox" role="switch" checked={paused} disabled={actions.busy || !status} onChange={togglePause} />
         </label>
-        <NotificationSection onResult={actions.notify} />
+        <NotificationSection act={actions.act} busy={actions.busy} />
         <h2 className="section-title">hub</h2>
         <dl className="kv">
           <dt>规则版本</dt>
@@ -118,18 +117,26 @@ const pushTexts: Record<PushControl['status'], string> = {
   unknown: '查不到通知状态',
 }
 
-/** 通知区块：挂载时检查推送状态，结果提示交给页面底部的结果提示（useActions 的 notify）。 */
-function NotificationSection({ onResult }: { onResult: (v: OutcomeView) => void }) {
+/** 通知区块：挂载时检查推送状态。 */
+function NotificationSection({ act, busy }: { act: Actions['act']; busy: boolean }) {
   const push = usePush()
-  return <NotificationView push={push} onResult={(v) => v && onResult(v)} />
+  return <NotificationView push={push} act={act} busy={busy} />
 }
 
-/** 通知区块的展示部分：状态文案与按钮。只有 off、stale 有“开启”（classify 保证这时能推送、不是 iOS 的 Safari 标签页）。 */
-export function NotificationView({ push, onResult }: { push: PushControl; onResult: (v: OutcomeView | null) => void }) {
+/**
+ * 通知区块的展示部分：状态文案与按钮。只有 off、stale 有“开启”（classify 保证这时能推送、不是 iOS 的 Safari 标签页）。
+ * 开启、关闭、测试都经页面的 act 做：与暂停、恢复自动审批互斥（同一时刻一件，确认面板开着时不能点），结果进底部的结果提示。
+ * busy 是页面上别的操作在进行（useActions 的 busy）。
+ */
+export function NotificationView({ push, act, busy = false }: { push: PushControl; act: Actions['act']; busy?: boolean }) {
   const s = push.status
   const detail = (s === 'hub_disabled' || s === 'unknown') && push.reason ? `：${push.reason}` : ''
-  // “开启通知”的处理函数里第一个调用就是 push.enable()（其中第一句是授权请求），前面不能有 await
-  const enable = () => void push.enable().then(onResult)
+  const off = push.busy || busy
+  // act 在第一个 await 之前就同步调用 run：“开启”的点击栈里依次是 act → push.enable → enablePush → pwa.subscribe →
+  // Notification.requestPermission()，前面不能有 await（iOS 手势规则；settings.push.test.tsx 钉住）
+  const enable = () => void act(() => push.enable(), '没有开启通知')
+  const disable = () => void act(() => push.disable(), '没有关闭通知')
+  const test = () => void act(() => push.test(), '测试通知没有发出')
   return (
     <section>
       <h2 className="section-title">通知</h2>
@@ -149,11 +156,11 @@ export function NotificationView({ push, onResult }: { push: PushControl; onResu
       )}
       {(s === 'off' || s === 'stale') && (
         <div className="btn-row">
-          <button type="button" className="btn primary" disabled={push.busy} onClick={enable}>
+          <button type="button" className="btn primary" disabled={off} onClick={enable}>
             {s === 'stale' ? '重新开启通知' : '开启通知'}
           </button>
           {s === 'stale' && (
-            <button type="button" className="btn" disabled={push.busy} onClick={() => void push.disable().then(onResult)}>
+            <button type="button" className="btn" disabled={off} onClick={disable}>
               清除旧订阅
             </button>
           )}
@@ -161,17 +168,17 @@ export function NotificationView({ push, onResult }: { push: PushControl; onResu
       )}
       {s === 'on' && (
         <div className="btn-row">
-          <button type="button" className="btn" disabled={push.busy} onClick={() => void push.test().then(onResult)}>
+          <button type="button" className="btn" disabled={off} onClick={test}>
             发一条测试通知
           </button>
-          <button type="button" className="btn" disabled={push.busy} onClick={() => void push.disable().then(onResult)}>
+          <button type="button" className="btn" disabled={off} onClick={disable}>
             关闭通知
           </button>
         </div>
       )}
       {(s === 'denied' || s === 'unknown') && (
         <div className="btn-row">
-          <button type="button" className="btn" disabled={push.busy} onClick={() => void push.refresh()}>
+          <button type="button" className="btn" disabled={off} onClick={() => void push.refresh()}>
             {s === 'denied' ? '重新检查' : '重试'}
           </button>
         </div>

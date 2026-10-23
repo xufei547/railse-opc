@@ -22,11 +22,28 @@ interface FetchCall {
   init: RequestInit | undefined
 }
 
+/** 假的推送订阅：带公钥（options.applicationServerKey）与 unsubscribe，退订记进 log。 */
+function fakeSub(endpoint: string, key: number[] | null, log: string[]) {
+  return {
+    endpoint,
+    options: { applicationServerKey: key ? new Uint8Array(key).buffer : null },
+    toJSON: () => ({ endpoint, keys: { p256dh: 'p', auth: 'a' } }),
+    unsubscribe: () => {
+      log.push(`unsubscribe ${endpoint}`)
+      return Promise.resolve(true)
+    },
+  }
+}
+
 function load(
   o: {
     clients?: FakeClient[]
     fetch?: (url: string, init?: RequestInit) => Promise<Response>
     subscribeFails?: boolean
+    /** 前几次 showNotification 被拒。 */
+    showFails?: number
+    /** pushManager.getSubscription() 回的现有订阅（公钥）；undefined 为没有。 */
+    existingKey?: number[] | null
   } = {},
 ) {
   const handlers: Record<string, (e: unknown) => void> = {}
@@ -34,6 +51,7 @@ function load(
   const shown: Shown[] = []
   const fetches: FetchCall[] = []
   const subscribeArgs: PushSubscriptionOptionsInit[] = []
+  let showFails = o.showFails ?? 0
   const self = {
     location: new URL(`${origin}/sw.js`),
     addEventListener: (type: string, fn: (e: unknown) => void) => {
@@ -59,18 +77,25 @@ function load(
     },
     registration: {
       showNotification: (title: string, options: Shown['options']) => {
+        if (showFails > 0) {
+          showFails--
+          log.push(`showNotification rejected ${title}`)
+          return Promise.reject(new TypeError('bad options'))
+        }
         shown.push({ title, options })
         return Promise.resolve()
       },
       pushManager: {
+        getSubscription: () => {
+          log.push('getSubscription')
+          return Promise.resolve(o.existingKey === undefined ? null : fakeSub('https://push.example/existing', o.existingKey, log))
+        },
         subscribe: (opts: PushSubscriptionOptionsInit) => {
           subscribeArgs.push(opts)
           log.push('subscribe')
           if (o.subscribeFails) return Promise.reject(new Error('AbortError'))
-          return Promise.resolve({
-            endpoint: 'https://push.example/new',
-            toJSON: () => ({ endpoint: 'https://push.example/new', keys: { p256dh: 'p', auth: 'a' } }),
-          })
+          const k = opts.applicationServerKey
+          return Promise.resolve(fakeSub('https://push.example/new', k ? [...new Uint8Array(k as ArrayBuffer)] : null, log))
         },
       },
     },
@@ -79,8 +104,13 @@ function load(
     fetches.push({ url, init })
     return o.fetch ? o.fetch(url, init) : Promise.resolve(new Response(null, { status: 204 }))
   }
-  // Service Worker 的全局就是 self：sw.js 里的 self、fetch、atob、URL 都按全局名字取
-  new Function('self', 'fetch', code)(self, fetchFn)
+  // Service Worker 的全局就是 self：sw.js 里的 self、fetch、atob、URL 都按全局名字取。
+  // 末尾附一句把内部的纯函数交出来测（只在测试里拼，sw.js 本身不变）
+  const helpers = new Function(
+    'self',
+    'fetch',
+    `${code}\n;return { safePath: typeof safePath === 'function' ? safePath : undefined, clickTarget: typeof clickTarget === 'function' ? clickTarget : undefined }`,
+  )(self, fetchFn) as { safePath?: (u: unknown) => string; clickTarget?: (data: unknown) => string }
 
   /** 派发一个事件，等它交给 waitUntil 的 Promise 结束；没调 waitUntil 时回 false。 */
   async function dispatch(type: string, event: Record<string, unknown>): Promise<boolean> {
@@ -104,7 +134,7 @@ function load(
       json: () => JSON.parse(text) as unknown,
     })
 
-  return { handlers, log, shown, fetches, subscribeArgs, dispatch, push, pushText }
+  return { handlers, log, shown, fetches, subscribeArgs, dispatch, push, pushText, helpers }
 }
 
 describe('sw.js：安装与缓存', () => {
@@ -176,6 +206,25 @@ describe('sw.js：push 一定弹通知', () => {
     expect(blank.shown[0]).toMatchObject({ title: 'Railse', options: { body: 'x', tag: 'railse', data: { url: '/r/1' } } })
   })
 
+  it('组通知时出错（载荷字段的 getter 抛错）：照样弹兜底通知', async () => {
+    const sw = load()
+    const evil = {
+      get title(): string {
+        throw new Error('boom')
+      },
+    }
+    expect(await sw.push({ json: () => evil })).toBe(true)
+    expect(sw.shown).toHaveLength(1)
+    expect(sw.shown[0]).toMatchObject({ title: 'Railse', options: { body: '有新消息，点开查看', tag: 'railse' } })
+  })
+
+  it('showNotification 被拒（选项不被接受等）：再弹一条最简的兜底通知', async () => {
+    const sw = load({ showFails: 1 })
+    await sw.pushText(JSON.stringify({ id: 'abc', kind: 'permission', title: 'mac · blog', body: 'x', url: '/r/abc' }))
+    expect(sw.log).toContain('showNotification rejected mac · blog')
+    expect(sw.shown).toEqual([{ title: 'Railse', options: { body: '有新消息，点开查看', tag: 'railse' } }])
+  })
+
   it('url 只收同源路径：绝对地址、跨源、协议相对、反斜杠、javascript:、相对路径都换成 /', async () => {
     const cases: [unknown, string][] = [
       ['/r/a%2Fb?x=1#y', '/r/a%2Fb?x=1#y'],
@@ -190,12 +239,59 @@ describe('sw.js：push 一定弹通知', () => {
       ['r/1', '/'],
       ['', '/'],
       [null, '/'],
+      // 点段规范化之后变成 //host（协议相对、跨源）的
+      ['/..//evil.example', '/'],
+      ['/.//evil.example', '/'],
+      ['/%2e%2e//evil.example', '/'],
+      ['/%2E%2E//evil.example', '/'],
+      ['/r/../..//evil.example', '/'],
+      ['/./\\evil.example', '/'],
+      ['/.\\\\evil.example', '/'],
+      // 编码的斜杠、反斜杠不会被解码，留在本站路径里
+      ['/%2F%2Fevil.example', '/%2F%2Fevil.example'],
+      ['/%5C%5Cevil.example', '/%5C%5Cevil.example'],
+      ['/r/../settings', '/settings'],
     ]
     for (const [url, want] of cases) {
       const sw = load()
       await sw.push({ json: () => ({ id: 'x', title: 't', body: 'b', url }) })
       expect(sw.shown[0]?.options.data, String(url)).toEqual({ url: want })
     }
+  })
+})
+
+describe('sw.js：safePath 与 clickTarget', () => {
+  const inputs: unknown[] = [
+    '/', '/r/abc', '/r/a%2Fb?x=1#y', '/settings?tab=1',
+    '/..//evil.example', '/.//evil.example', '/%2e%2e//evil.example', '/%2E%2e//evil.example', '/r/../..//evil.example',
+    '/./\\evil.example', '/.\\\\evil.example', '/\\evil.example', '/\t/evil.example', '/\n/evil.example', '//evil.example',
+    '///evil.example', '/%2F%2Fevil.example', '/%5C%5Cevil.example', '/..%2F..%2Fevil.example',
+    '\\\\evil.example', 'https://evil.example/r/1', `${origin}/r/1`, 'javascript:alert(1)', 'data:text/html,x', 'r/1', '', ' /r/1',
+    null, undefined, 42, {},
+  ]
+
+  it('结果总是本站路径：以 / 开头、不以 // 或 /\\ 开头、解析后同源，且再过一次不变（幂等）', () => {
+    const { safePath } = load().helpers
+    expect(safePath).toBeTypeOf('function')
+    for (const u of inputs) {
+      const out = safePath!(u)
+      const label = JSON.stringify(u)
+      expect(out.startsWith('/'), label).toBe(true)
+      expect(out.startsWith('//') || out.startsWith('/\\'), label).toBe(false)
+      expect(new URL(out, origin).origin, label).toBe(origin)
+      expect(safePath!(out), label).toBe(out)
+    }
+  })
+
+  it('clickTarget 自己再验一次同源：即使拿到的是 //host（没经过 safePath 的旧通知）也回首页', () => {
+    const { clickTarget } = load().helpers
+    expect(clickTarget).toBeTypeOf('function')
+    expect(clickTarget!({ url: '/r/abc' })).toBe(`${origin}/r/abc`)
+    for (const url of ['//evil.example', '/..//evil.example', '/./\\evil.example', 'https://evil.example/', 'javascript:alert(1)']) {
+      expect(clickTarget!({ url }), url).toBe(`${origin}/`)
+    }
+    for (const data of [null, undefined, {}, { url: 5 }]) expect(clickTarget!(data)).toBe(`${origin}/`)
+    for (const u of inputs) expect(new URL(clickTarget!({ url: u })).origin, JSON.stringify(u)).toBe(origin)
   })
 })
 
@@ -278,7 +374,16 @@ describe('sw.js：点通知', () => {
     let sw = load()
     await click(sw, { url: '/r/abc' }).done
     expect(sw.log.at(-1)).toBe(`openWindow ${origin}/r/abc`)
-    for (const data of [{ url: 'https://evil.example/' }, { url: '//evil.example' }, null, undefined, {}]) {
+    for (const data of [
+      { url: 'https://evil.example/' },
+      { url: '//evil.example' },
+      { url: '/..//evil.example' },
+      { url: '/%2e%2e//evil.example' },
+      { url: '/./\\evil.example' },
+      null,
+      undefined,
+      {},
+    ]) {
       sw = load()
       await click(sw, data).done
       expect(sw.log.at(-1)).toBe(`openWindow ${origin}/`)
@@ -288,65 +393,114 @@ describe('sw.js：点通知', () => {
 
 describe('sw.js：订阅换了', () => {
   const ok = () => Promise.resolve(new Response(null, { status: 204 }))
+  const hubKey = [4, 1, 2] // BAEC
+  const vapid = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status }))
+  /** /api/push/vapid 回 vapidResp（默认启用、公钥 BAEC），其余（登记、删除）回 rest（默认 204）。 */
+  const hub =
+    (vapidResp: () => Promise<Response> = () => vapid({ enabled: true, public_key: 'BAEC', reason: '' }), rest: () => Promise<Response> = ok) =>
+    (url: string) =>
+      url === '/api/push/vapid' ? vapidResp() : rest()
+  const keyArg = (sw: ReturnType<typeof load>, i = 0) => [...new Uint8Array(sw.subscribeArgs[i]?.applicationServerKey as ArrayBuffer)]
+  const old = (key: number[] | null, log: string[] = []) => fakeSub('https://push.example/old', key, log)
 
-  function oldSub(appKey: ArrayBuffer | null, endpoint = 'https://push.example/old') {
-    return { endpoint, options: { applicationServerKey: appKey } }
-  }
-
-  it('用旧订阅的公钥重新订阅，并带 cookie 登记到 hub；旧端点让 hub 删掉', async () => {
-    const appKey = new Uint8Array([4, 1, 2]).buffer
-    const sw = load({ fetch: ok })
-    expect(await sw.dispatch('pushsubscriptionchange', { oldSubscription: oldSub(appKey) })).toBe(true)
-    expect(sw.subscribeArgs).toEqual([{ userVisibleOnly: true, applicationServerKey: appKey }])
-    expect(sw.fetches[0]?.url).toBe('/api/push/subscribe')
-    expect(sw.fetches[0]?.init).toMatchObject({ method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } })
-    expect(JSON.parse(String(sw.fetches[0]?.init?.body))).toEqual({ endpoint: 'https://push.example/new', keys: { p256dh: 'p', auth: 'a' } })
+  it('先拉 hub 现在的公钥：旧订阅的公钥过时（hub 换过钥）也用新的订，带 cookie 登记，再删旧端点', async () => {
+    const sw = load({ fetch: hub() })
+    expect(await sw.dispatch('pushsubscriptionchange', { oldSubscription: old([9, 9, 9]) })).toBe(true)
+    expect(sw.fetches[0]).toMatchObject({ url: '/api/push/vapid', init: { credentials: 'same-origin' } })
+    expect(sw.subscribeArgs).toHaveLength(1)
+    expect(sw.subscribeArgs[0]?.userVisibleOnly).toBe(true)
+    expect(keyArg(sw)).toEqual(hubKey)
     expect(sw.fetches[1]?.url).toBe('/api/push/subscribe')
-    expect(sw.fetches[1]?.init).toMatchObject({ method: 'DELETE', credentials: 'same-origin' })
-    expect(JSON.parse(String(sw.fetches[1]?.init?.body))).toEqual({ endpoint: 'https://push.example/old' })
-    expect(sw.fetches).toHaveLength(2)
+    expect(sw.fetches[1]?.init).toMatchObject({ method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } })
+    expect(JSON.parse(String(sw.fetches[1]?.init?.body))).toEqual({ endpoint: 'https://push.example/new', keys: { p256dh: 'p', auth: 'a' } })
+    expect(sw.fetches[2]?.init).toMatchObject({ method: 'DELETE', credentials: 'same-origin' })
+    expect(JSON.parse(String(sw.fetches[2]?.init?.body))).toEqual({ endpoint: 'https://push.example/old' })
+    expect(sw.fetches).toHaveLength(3)
   })
 
-  it('旧订阅没有公钥（或没有旧订阅）：先拉 hub 现在的公钥', async () => {
-    for (const old of [oldSub(null), null, { endpoint: 'https://push.example/old' }]) {
-      const sw = load({
-        fetch: (url) =>
-          url === '/api/push/vapid'
-            ? Promise.resolve(new Response(JSON.stringify({ enabled: true, public_key: 'BAEC', reason: '' }), { status: 200 }))
-            : ok(),
-      })
-      await sw.dispatch('pushsubscriptionchange', { oldSubscription: old })
-      expect(sw.fetches[0]?.url).toBe('/api/push/vapid')
-      expect(sw.fetches[0]?.init).toMatchObject({ credentials: 'same-origin' })
-      expect([...new Uint8Array(sw.subscribeArgs[0]?.applicationServerKey as ArrayBuffer)]).toEqual([4, 1, 2])
+  it('没有旧订阅或旧订阅不给公钥：照样用 hub 现在的公钥', async () => {
+    for (const o of [null, undefined, old(null), { endpoint: 'https://push.example/old' }]) {
+      const sw = load({ fetch: hub() })
+      await sw.dispatch('pushsubscriptionchange', { oldSubscription: o })
+      expect(keyArg(sw)).toEqual(hubKey)
       expect(sw.fetches[1]?.init).toMatchObject({ method: 'POST' })
     }
   })
 
-  it('浏览器已经订好新的（newSubscription）：直接登记它', async () => {
-    const sw = load({ fetch: ok })
-    const fresh = { endpoint: 'https://push.example/fresh', toJSON: () => ({ endpoint: 'https://push.example/fresh', keys: {} }) }
-    await sw.dispatch('pushsubscriptionchange', { oldSubscription: oldSub(new Uint8Array([1]).buffer), newSubscription: fresh })
+  it('hub 停用推送：放弃，不订也不登记', async () => {
+    const sw = load({ fetch: hub(() => vapid({ enabled: false, public_key: '', reason: 'x' })) })
+    await expect(sw.dispatch('pushsubscriptionchange', { oldSubscription: old(hubKey) })).resolves.toBe(true)
     expect(sw.subscribeArgs).toEqual([])
-    expect(JSON.parse(String(sw.fetches[0]?.init?.body))).toEqual({ endpoint: 'https://push.example/fresh', keys: {} })
+    expect(sw.fetches.map((f) => f.url)).toEqual(['/api/push/vapid'])
   })
 
-  it('登录失效、推送停用、网络不通、订阅失败：安静放弃（下次打开页面会提示失效）', async () => {
-    const fail = [
-      load({ fetch: () => Promise.resolve(new Response('{"error":"请先登录"}', { status: 401 })) }),
-      load({ fetch: () => Promise.resolve(new Response(JSON.stringify({ enabled: false, public_key: '', reason: 'x' }), { status: 200 })) }),
-      load({ fetch: () => Promise.reject(new TypeError('Failed to fetch')) }),
-    ]
-    for (const sw of fail) {
-      await expect(sw.dispatch('pushsubscriptionchange', { oldSubscription: null })).resolves.toBe(true)
-      expect(sw.fetches.some((f) => f.init?.method === 'POST')).toBe(false)
+  it('拉不到 hub 的公钥（断网、登录失效、坏响应）：退回用旧订阅的公钥', async () => {
+    for (const fail of [
+      () => Promise.reject(new TypeError('Failed to fetch')),
+      () => vapid({ error: '请先登录' }, 401),
+      () => Promise.resolve(new Response('not json', { status: 200 })),
+      () => vapid({ enabled: true, public_key: '' }),
+    ]) {
+      const sw = load({ fetch: hub(fail) })
+      await sw.dispatch('pushsubscriptionchange', { oldSubscription: old([7, 7]) })
+      expect(keyArg(sw)).toEqual([7, 7])
+      expect(sw.fetches.some((f) => f.init?.method === 'POST')).toBe(true)
     }
-    const sub = load({ fetch: ok, subscribeFails: true })
-    await expect(sub.dispatch('pushsubscriptionchange', { oldSubscription: oldSub(new Uint8Array([1]).buffer) })).resolves.toBe(true)
-    expect(sub.fetches).toEqual([])
-    // 登记被拒：不再删旧端点
-    const rejected = load({ fetch: () => Promise.resolve(new Response('{"error":"请先登录"}', { status: 401 })) })
-    await rejected.dispatch('pushsubscriptionchange', { oldSubscription: oldSub(new Uint8Array([1]).buffer) })
-    expect(rejected.fetches.map((f) => f.init?.method)).toEqual(['POST'])
+  })
+
+  it('拉不到公钥、旧订阅也没有公钥：放弃', async () => {
+    const sw = load({ fetch: hub(() => Promise.reject(new TypeError('Failed to fetch'))) })
+    await expect(sw.dispatch('pushsubscriptionchange', { oldSubscription: null })).resolves.toBe(true)
+    expect(sw.subscribeArgs).toEqual([])
+    expect(sw.fetches.some((f) => f.init?.method === 'POST')).toBe(false)
+  })
+
+  it('浏览器已订好的新订阅（newSubscription）公钥与 hub 一致：直接登记它', async () => {
+    const sw = load({ fetch: hub() })
+    const fresh = fakeSub('https://push.example/fresh', hubKey, sw.log)
+    await sw.dispatch('pushsubscriptionchange', { oldSubscription: old([9]), newSubscription: fresh })
+    expect(sw.subscribeArgs).toEqual([])
+    expect(sw.log).not.toContain('unsubscribe https://push.example/fresh')
+    expect(JSON.parse(String(sw.fetches[1]?.init?.body))).toMatchObject({ endpoint: 'https://push.example/fresh' })
+  })
+
+  it('newSubscription 是按旧公钥订的（或看不出公钥）：先退掉，再用 hub 现在的公钥订', async () => {
+    for (const k of [[9, 9], null]) {
+      const sw = load({ fetch: hub() })
+      const stale = fakeSub('https://push.example/fresh', k, sw.log)
+      await sw.dispatch('pushsubscriptionchange', { oldSubscription: old([9, 9]), newSubscription: stale })
+      expect(sw.log.indexOf('unsubscribe https://push.example/fresh')).toBeGreaterThan(-1)
+      expect(sw.log.indexOf('unsubscribe https://push.example/fresh')).toBeLessThan(sw.log.indexOf('subscribe'))
+      expect(keyArg(sw)).toEqual(hubKey)
+      expect(JSON.parse(String(sw.fetches[1]?.init?.body))).toMatchObject({ endpoint: 'https://push.example/new' })
+    }
+  })
+
+  it('拉不到公钥时，浏览器给的 newSubscription 原样登记', async () => {
+    const sw = load({ fetch: hub(() => Promise.reject(new TypeError('Failed to fetch'))) })
+    const fresh = fakeSub('https://push.example/fresh', [9], sw.log)
+    await sw.dispatch('pushsubscriptionchange', { oldSubscription: null, newSubscription: fresh })
+    expect(sw.subscribeArgs).toEqual([])
+    expect(JSON.parse(String(sw.fetches[1]?.init?.body))).toMatchObject({ endpoint: 'https://push.example/fresh' })
+  })
+
+  it('本机现有订阅的公钥与要用的不同：先退掉再订（否则 InvalidStateError）；相同就不退', async () => {
+    let sw = load({ fetch: hub(), existingKey: [9, 9] })
+    await sw.dispatch('pushsubscriptionchange', { oldSubscription: null })
+    expect(sw.log.indexOf('unsubscribe https://push.example/existing')).toBeGreaterThan(-1)
+    expect(sw.log.indexOf('unsubscribe https://push.example/existing')).toBeLessThan(sw.log.indexOf('subscribe'))
+    sw = load({ fetch: hub(), existingKey: hubKey })
+    await sw.dispatch('pushsubscriptionchange', { oldSubscription: null })
+    expect(sw.log).not.toContain('unsubscribe https://push.example/existing')
+    expect(sw.log).toContain('subscribe')
+  })
+
+  it('订阅失败、登记被拒：安静放弃（下次打开页面会提示失效），登记被拒时不删旧端点', async () => {
+    const sub = load({ fetch: hub(), subscribeFails: true })
+    await expect(sub.dispatch('pushsubscriptionchange', { oldSubscription: old([1]) })).resolves.toBe(true)
+    expect(sub.fetches.map((f) => f.url)).toEqual(['/api/push/vapid'])
+    const rejected = load({ fetch: hub(undefined, () => vapid({ error: '请先登录' }, 401)) })
+    await expect(rejected.dispatch('pushsubscriptionchange', { oldSubscription: old([1]) })).resolves.toBe(true)
+    expect(rejected.fetches.map((f) => f.init?.method ?? 'GET')).toEqual(['GET', 'POST'])
   })
 })
