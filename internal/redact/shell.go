@@ -16,8 +16,8 @@ import (
 //     here-string，同样递归按命令行语境处理：里面的命令要露出来，里面引号里的值照旧整段抹。
 //   - heredoc 的分隔词与结束行原样保留，从不脱敏。
 //
-// 只认这些情况需要的词法，不是完整的 shell 解析器。解析按 bash 5（zsh 一样）；/bin/bash 3.2 截取 $(…) 时不认 heredoc
-// 和 case、遇到某些语法错误会丢掉本行余下的部分，在这几处它会多执行命令的地方改按命令处理（见 bodies、flipped、restOfLine）。
+// 只认这些情况需要的词法，不是完整的 shell 解析器。解析按 bash 5（zsh 一样）；不模拟 /bin/bash 3.2 的解析分歧
+// （截取 $(…) 时不认 heredoc 与 case）和语法错误恢复（丢掉本行余下的部分、从下一行接着执行），这些是接受的残余风险。
 //
 // 第二步对本层文本跑 viewRules，处理跨引号的写法（KEY="值"、--password '值'、curl -u "user:值"、mysql -p'值'）。
 // 正则不在原文上跑，而在等长的“视图”上跑：右引号换成专用字节，引号里的引号、转义、占位符换成不参与匹配的字节，
@@ -297,14 +297,6 @@ type scanner struct {
 	dry   bool // 只为找结束位置空跑，不脱敏
 	depth int
 	rec   int
-	inDQ  bool // 下一个 context 是双引号里的 $(…)
-	flip  bool // 下一个 context 在 flipped 的层里（见 ctx.flipped）
-	// inParam：下一个 context 是 ${…} 里的 $(…)。bash 3.2 截取 ${…} 时不认其中的 $(…)，在第一个 } 处就结束了，
-	// 所以这样的 $(…) 里的 heredoc 正文按命令处理
-	inParam bool
-	// sawFlip：扫描中出现过 flipped 的层。交给解释器的双引号参数空跑时出现过，就不再按去掉转义的文本递归，
-	// 改按普通双引号处理（那里才知道外层是双引号）
-	sawFlip bool
 }
 
 // lit 按 rules 脱敏一段字面文本（空跑时原样返回）。
@@ -319,7 +311,6 @@ type mode uint8
 
 const (
 	mShell mode = iota // 命令：引号、注释、heredoc、命令替换
-	mArray             // NAME=(…) 数组赋值：同上，但没有 heredoc，引号参数也不交给解释器
 	mParam             // ${…}：引号与嵌套结构，没有注释和 heredoc
 	mArith             // $((…))、((…))、$[…]：同上，括号计数
 )
@@ -339,16 +330,9 @@ type ctx struct {
 	mode   mode
 	closer byte // 结束字符：')' '}' ']'；0 表示到 hi 为止
 	hi     int
-	paren  int // 本层未闭合的 ( 或 [
-	cases  int // 本层未结束的 case：其中的 ) 是分支模式的结尾，不结束 $(…)
-	// ambig：有过因 case 没有结束 $(…) 的 )。bash 3.2 截取替换内容不认 case，在那里就结束了，之后的文本对它来说
-	// 在外层：之后的 heredoc 正文按命令处理；外层是双引号时引号的配对也反了过来，之后的引号与注释都按命令处理。
-	ambig  bool
-	inDQ   bool // 本层是双引号里的 $(…)
-	inPar  bool // 本层是 ${…} 里的 $(…)
-	flip   bool // 本层在 flipped 的层里面
+	paren  int  // 本层未闭合的 ( 或 [
+	cases  int  // 本层未结束的 case：其中的 ) 是分支模式的结尾，不结束 $(…)
 	start  bool // 下一个字符在词首（# 在这里开始注释）
-	blank  bool // 上一个字符是空白、换行，或在本层开头
 	inWord bool
 	// 当前词去掉引号与转义后的文本：word 是开头至多 64 字节（判断 VAR=值、-c 类选项、保留字），base 是最后一个 /
 	// 之后至多 64 字节（判断命令名，路径多长都行）。超出时 long、baseLong 为 true
@@ -369,10 +353,8 @@ type ctx struct {
 
 // context 从 sc.i 起扫描一层文本，到 closer（不消费）或 hi 为止，返回这层脱敏后的原文。
 func (sc *scanner) context(hi int, m mode, closer byte) string {
-	c := &ctx{sc: sc, mode: m, closer: closer, hi: hi, start: true, blank: true, cmdPos: true, inDQ: sc.inDQ, flip: sc.flip}
-	c.inPar, sc.inDQ, sc.inParam = sc.inParam, false, false
+	c := &ctx{sc: sc, mode: m, closer: closer, hi: hi, start: true, cmdPos: true}
 	c.run()
-	sc.flip = c.flip
 	if sc.dry {
 		return ""
 	}
@@ -380,25 +362,13 @@ func (sc *scanner) context(hi int, m mode, closer byte) string {
 }
 
 // cmd 报告本层是不是命令文本（不是 ${…} 或算术）。
-func (c *ctx) cmd() bool { return c.mode == mShell || c.mode == mArray }
+func (c *ctx) cmd() bool { return c.mode == mShell }
 
 func (c *ctx) run() {
 	sc, t := c.sc, c.sc.t
 	for sc.i < c.hi {
 		i := sc.i
 		ch := t.at(i)
-		blank := c.blank
-		c.blank = false
-		sc.flip = c.flipped()
-		if (ch == '\'' || ch == '"') && (sc.flip || c.oldArith()) {
-			c.wordChar()
-			continue
-		}
-		if c.mode == mArray && strings.IndexByte("|;&<>(", ch) >= 0 {
-			// 数组赋值里出现运算符是语法错误：bash 3.2 丢掉这一行余下的部分，从下一行接着执行。这一段限定在本行内处理
-			c.restOfLine()
-			continue
-		}
 		switch ch {
 		case '\n':
 			if c.cmd() {
@@ -409,7 +379,6 @@ func (c *ctx) run() {
 					c.bodies()
 				}
 				c.endCmd(true)
-				c.blank = true
 				continue
 			}
 			c.space()
@@ -418,8 +387,7 @@ func (c *ctx) run() {
 			c.space()
 			continue
 		case '#':
-			// $(…) 里 bash 3.2 只认空白之后的 #（$(;#) 的 ) 结束替换），按两种 bash 里更宽的一种不当注释
-			if c.cmd() && c.start && (c.closer != ')' || blank) && !c.flipped() {
+			if c.cmd() && c.start {
 				c.comment()
 				continue
 			}
@@ -455,8 +423,6 @@ func (c *ctx) run() {
 					if c.cases == 0 {
 						return
 					}
-					c.ambig = true
-					sc.sawFlip = sc.sawFlip || c.inDQ
 				}
 				if c.paren > 0 {
 					c.paren--
@@ -538,7 +504,7 @@ func (c *ctx) space() {
 	c.endWord()
 	c.b.char(c.sc.t, c.sc.i, viewByte(c.sc.t.at(c.sc.i)))
 	c.sc.i++
-	c.start, c.blank = true, true
+	c.start = true
 }
 
 // op 追加 n 个运算符字符：词到此结束，下一个字符在词首。
@@ -717,30 +683,6 @@ func (c *ctx) recArgs() bool {
 	return c.mode == mShell && (c.shell && c.cflag || c.eval || c.ssh || c.here) && !c.sc.dry && c.sc.depth < maxDepth
 }
 
-// flipped 报告本层是不是双引号里、已经过了 bash 3.2 会提前结束替换的 case 分支 ) 的 $(…)，或在这样的层里面：
-// 之后 bash 3.2 与 bash 5 看到的引号配对相反，引号与注释都当普通字符，整段按命令处理。
-func (c *ctx) flipped() bool { return c.flip || c.ambig && c.inDQ }
-
-// oldArith 报告本层是不是 $[…]：里面不认引号。bash 3.2 截取 $(…) 时不认其中的 $[…]，引号在那里另有配对；
-// ((…))、$((…)) 里的引号 bash 照常配对。
-func (c *ctx) oldArith() bool { return c.mode == mArith && c.closer == ']' }
-
-// restOfLine 把从当前位置到行尾（不含换行）当一层限定在本行内的命令处理。
-func (c *ctx) restOfLine() {
-	sc, t := c.sc, c.sc.t
-	e := sc.i
-	for e < c.hi && t.at(e) != '\n' {
-		e++
-	}
-	if sc.depth >= maxDepth {
-		c.wordChar()
-		return
-	}
-	sc.depth++
-	c.nestDone(sc.context(e, mShell, 0))
-	sc.depth--
-}
-
 // comment 处理从 # 到行尾（不含换行）的注释：整段按字面脱敏。
 func (c *ctx) comment() {
 	sc, t := c.sc, c.sc.t
@@ -767,14 +709,12 @@ func (c *ctx) escape() {
 		c.b.char(t, i, vMask)
 		c.b.char(t, i+1, vMask)
 		sc.i += 2
-		c.blank = true
 		return
 	case nx == '\r' && i+2 < c.hi && t.at(i+2) == '\n':
 		for k := 0; k < 3; k++ {
 			c.b.char(t, i+k, vMask)
 		}
 		sc.i += 3
-		c.blank = true
 		return
 	case c.cmd() && t.has(i+1, placeholder):
 		// 上一次脱敏留下的 \<redacted>：占位符当词的一部分，免得第二次把 > 后面读成注释
@@ -943,10 +883,7 @@ func (c *ctx) readDelim(k int) (string, bool, int) {
 //   - 分隔词带引号的正文不展开，整段按 textRules 抹；
 //   - 分隔词不带引号的正文会展开：其中的 $(…)、反引号等命令替换会执行，按命令行语境处理，其余按 textRules 抹。
 //
-// 结束行原样保留。在不带双引号的 $(…) 里时，bash 3.2 截取替换内容不认 heredoc，会在正文里第一个配不上的 ) 处
-// 结束替换，之后的文本当命令执行；那一段按命令行语境处理（bash 5 里它仍是正文，多露不多藏）。双引号里的 $(…)
-// （git commit -m "$(cat <<'EOF' …)" 这类）照 bash 5 处理：3.2 结束替换后剩下的仍在双引号里，不会执行，
-// 而提交说明里常有配不上的 )，按命令处理反而会漏出正文里的强密码。
+// 结束行原样保留。$(…) 里的 heredoc 照 bash 5 读到结束行为止（bash 3.2 会在正文里第一个配不上的 ) 处结束替换，不模拟）。
 func (c *ctx) bodies() {
 	sc, t := c.sc, c.sc.t
 	for _, h := range c.pending {
@@ -969,20 +906,15 @@ func (c *ctx) bodies() {
 		if closeAt >= 0 {
 			end = closeAt
 		}
-		shell := (h.feed || c.ambig || c.inPar) && sc.depth < maxDepth
+		shell := h.feed && sc.depth < maxDepth
 		bodyEnd := end
-		if !shell && c.closer == ')' && !c.inDQ {
-			if p := close32(t, start, end, c.paren); p >= 0 {
-				bodyEnd = p
-			}
-		}
 		sc.i = start
 		switch {
 		case bodyEnd == start:
 		case shell && !h.quoted && sc.rec < maxRec && hasBackslash(t, start, bodyEnd):
 			// 分隔词不带引号：外层 shell 先展开正文（\\ \$ \` 去掉反斜杠、\ 加换行去掉），shell 读到的是展开后的文本
 			if u := t.unquote(start, bodyEnd, bodyEscapes); u != nil {
-				sub := &scanner{t: u, dry: sc.dry, depth: sc.depth + 1, rec: sc.rec + 1, flip: sc.flip}
+				sub := &scanner{t: u, dry: sc.dry, depth: sc.depth + 1, rec: sc.rec + 1}
 				c.b.nest(sub.context(u.n(), mShell, 0))
 			} else {
 				c.b.nest(t.slice(start, bodyEnd))
@@ -995,12 +927,6 @@ func (c *ctx) bodies() {
 			c.b.nest(sc.lit(t.slice(start, bodyEnd), textRules))
 		default:
 			c.b.nest(sc.expandBody(bodyEnd))
-		}
-		if bodyEnd < end {
-			sc.i = bodyEnd
-			sc.depth++
-			c.b.nest(sc.context(end, mShell, 0))
-			sc.depth--
 		}
 		sc.i = end
 		if closeAt >= 0 {
@@ -1047,41 +973,6 @@ func oddBackslashes(t *text, pos, e int) bool {
 	return n%2 == 1
 }
 
-// close32 模拟 bash 3.2 截取 $(…) 内容的做法（认引号、反斜杠、空白之后的注释和括号，不认 heredoc 与 case）：
-// 从 start 起找结束替换的 )，depth 是此前未闭合的 (。找不到时返回 -1。
-func close32(t *text, start, end, depth int) int {
-	blank := true
-	for i := start; i < end; i++ {
-		ch := t.at(i)
-		switch {
-		case ch == '\\':
-			i++
-		case ch == '\'':
-			for i++; i < end && t.at(i) != '\''; i++ {
-			}
-		case ch == '"':
-			for i++; i < end && t.at(i) != '"'; i++ {
-				if t.at(i) == '\\' {
-					i++
-				}
-			}
-		case ch == '#' && blank:
-			for i+1 < end && t.at(i+1) != '\n' {
-				i++
-			}
-		case ch == '(':
-			depth++
-		case ch == ')':
-			if depth == 0 {
-				return i
-			}
-			depth--
-		}
-		blank = ch == ' ' || ch == '\t' || ch == '\n'
-	}
-	return -1
-}
-
 // expandBody 处理分隔词不带引号的 heredoc 正文（从 sc.i 到 end）：$(…)、${…}、$((…))、$[…]、反引号会在展开时执行，
 // 按命令行语境递归处理；其余是字面文本，一段一段按 textRules 抹。
 func (sc *scanner) expandBody(end int) string {
@@ -1118,23 +1009,11 @@ func (sc *scanner) expandBody(end int) string {
 	return out.String()
 }
 
-// paren1 处理 (：NAME=( 是数组赋值；命令位置的 (( 是算术命令；命令里的 ( 是子 shell，计数；算术里的 ( 计数。
+// paren1 处理 (：命令位置的 (( 是算术命令；命令里的 ( 是子 shell（含 NAME=( 数组赋值），计数；算术里的 ( 计数。
 func (c *ctx) paren1() bool {
 	sc, t := c.sc, c.sc.t
 	switch c.mode {
-	case mShell, mArray:
-		if c.inWord && !c.long && sc.depth < maxDepth {
-			w := string(c.word)
-			// NAME=((、NAME=x(( 是语法错误：bash 3.2 丢掉这一行余下的部分，从下一行接着执行
-			if sc.i+1 < c.hi && t.at(sc.i+1) == '(' && isAssign(w) {
-				c.restOfLine()
-				return true
-			}
-			if strings.HasSuffix(w, "=") && isAssign(w) {
-				c.nestDone(sc.nestedText(c.hi, 1, mArray, ')', 1))
-				return true
-			}
-		}
+	case mShell:
 		c.endWord()
 		if c.cmdPos && sc.i+1 < c.hi && t.at(sc.i+1) == '(' && sc.depth < maxDepth {
 			// 算术命令 ((…)) 是一整条命令，之后在词首：((…))# 的 # 开始注释
@@ -1164,13 +1043,13 @@ func (c *ctx) dollar(top bool) bool {
 	}
 	switch t.at(i + 1) {
 	case '\'':
-		if !top || c.flipped() || c.oldArith() {
+		if !top {
 			return false
 		}
 		c.ansiQuoted()
 		return true
 	case '"':
-		if !top || c.flipped() || c.oldArith() {
+		if !top {
 			return false
 		}
 		c.doubleQuoted(true)
@@ -1179,9 +1058,7 @@ func (c *ctx) dollar(top bool) bool {
 	if sc.depth >= maxDepth {
 		return false
 	}
-	sc.inParam = c.mode == mParam
 	s, ok := sc.dollarText(c.hi)
-	sc.inParam = false
 	if ok {
 		c.nestDone(s)
 	}
@@ -1198,7 +1075,7 @@ func (sc *scanner) dollarText(hi int) (string, bool) {
 	switch t.at(i + 1) {
 	case '(':
 		if i+2 < hi && t.at(i+2) == '(' {
-			return sc.arithText(hi), true
+			return sc.nestedText(hi, 3, mArith, ')', 2), true
 		}
 		return sc.nestedText(hi, 2, mShell, ')', 1), true
 	case '{':
@@ -1207,31 +1084,6 @@ func (sc *scanner) dollarText(hi int) (string, bool) {
 		return sc.nestedText(hi, 2, mArith, ']', 1), true
 	}
 	return "", false
-}
-
-// arithText 处理 sc.i 处的 $((…))。结尾不是 )) 时 bash 把它重新当成 $( (…) …)：单个 ) 之后的部分按命令处理，
-// 到结束命令替换的 ) 为止。
-func (sc *scanner) arithText(hi int) string {
-	t := sc.t
-	start := sc.i
-	sc.i += 3
-	sc.depth++
-	defer func() { sc.depth-- }()
-	inner := sc.context(hi, mArith, ')')
-	if sc.i+1 < hi && t.at(sc.i+1) == ')' {
-		sc.i += 2
-		return t.slice(start, start+3) + inner + t.slice(sc.i-2, sc.i)
-	}
-	if sc.i < hi {
-		inner += t.slice(sc.i, sc.i+1)
-		sc.i++
-	}
-	rest := sc.context(hi, mShell, ')')
-	end := sc.i
-	if sc.i < hi {
-		sc.i++
-	}
-	return t.slice(start, start+3) + inner + rest + t.slice(end, sc.i)
 }
 
 // nestedText 处理以 n 个字符开头、以 closeLen 个 closer 结尾的嵌套结构，里面按 m 语境递归脱敏，返回整段。
@@ -1280,7 +1132,7 @@ func (sc *scanner) backtickText(hi int) string {
 		u = t.unquote(start+1, k, bodyEscapes)
 	}
 	if u != nil {
-		sub := &scanner{t: u, dry: sc.dry, depth: sc.depth + 1, rec: sc.rec + 1, flip: sc.flip}
+		sub := &scanner{t: u, dry: sc.dry, depth: sc.depth + 1, rec: sc.rec + 1}
 		inner = sub.context(u.n(), mShell, 0)
 	} else {
 		sc.i = start + 1
@@ -1375,7 +1227,7 @@ func (c *ctx) doubleQuoted(dollar bool) {
 		dry := &scanner{t: t, i: i + open, dry: true, depth: sc.depth}
 		closed := (&ctx{sc: dry, mode: c.mode, hi: c.hi}).dqInterior()
 		k := dry.i
-		if u := t.unquote(i+open, k, dqEscapes); u != nil && !dry.sawFlip {
+		if u := t.unquote(i+open, k, dqEscapes); u != nil {
 			sub := &scanner{t: u, depth: sc.depth + 1, rec: sc.rec + 1}
 			inner := sub.context(u.n(), mShell, 0)
 			end := k
@@ -1429,9 +1281,7 @@ func (c *ctx) dqInterior() bool {
 		case '$':
 			if sc.i+1 < c.hi && strings.IndexByte("({[", t.at(sc.i+1)) >= 0 && sc.depth < maxDepth {
 				flush()
-				sc.inDQ = true
 				s, _ := sc.dollarText(c.hi)
-				sc.inDQ = false
 				c.b.nest(s)
 				c.addWordText(s)
 				piece = sc.i
