@@ -3,12 +3,13 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { ConfirmSheet } from '../components/Confirm'
+import type { PushControl } from '../push'
 import { StoreProvider } from '../StoreProvider'
 import type { Machine, RequestView, Rule } from '../types'
 import { History, HistoryCard } from './History'
 import { MachineRow, Machines } from './Machines'
 import { RuleCard, Rules } from './Rules'
-import { Settings } from './Settings'
+import { NotificationView, Settings } from './Settings'
 
 const noop = () => {}
 const inRouter = (node: ReactNode, path = '/') => renderToStaticMarkup(<MemoryRouter initialEntries={[path]}>{node}</MemoryRouter>)
@@ -183,6 +184,87 @@ describe('ConfirmSheet', () => {
   })
 })
 
+describe('NotificationView（设置页的通知区块）', () => {
+  const ctl = (over: Partial<PushControl> = {}): PushControl => ({
+    status: 'off',
+    reason: '',
+    publicKey: 'BAEC',
+    busy: false,
+    enable: async () => null,
+    disable: async () => null,
+    test: async () => null,
+    refresh: async () => {},
+    ...over,
+  })
+  const view = (over: Partial<PushControl> = {}) => renderToStaticMarkup(<NotificationView push={ctl(over)} onResult={noop} />)
+  const buttons = (html: string) => [...html.matchAll(/<button[^>]*>([^<]*)<\/button>/g)].map((m) => m[1])
+
+  it('标题与检查中：没有按钮', () => {
+    const html = view({ status: 'checking' })
+    expect(html).toContain('<h2 class="section-title">通知</h2>')
+    expect(html).toContain('正在检查')
+    expect(buttons(html)).toEqual([])
+  })
+
+  it('没开启：只有“开启通知”（主按钮）', () => {
+    const html = view({ status: 'off' })
+    expect(html).toContain('还没开启')
+    expect(html).toMatch(/<button type="button" class="btn primary"[^>]*>开启通知<\/button>/)
+    expect(buttons(html)).toEqual(['开启通知'])
+  })
+
+  it('已开启：测试与关闭，没有开启', () => {
+    const html = view({ status: 'on' })
+    expect(html).toContain('已开启')
+    expect(buttons(html)).toEqual(['发一条测试通知', '关闭通知'])
+  })
+
+  it('失效：说明原因，可重新开启或清除旧订阅', () => {
+    const html = view({ status: 'stale' })
+    expect(html).toContain('通知已失效')
+    expect(buttons(html)).toEqual(['重新开启通知', '清除旧订阅'])
+  })
+
+  it('iOS 的 Safari 标签页：加到主屏幕的步骤，没有开启按钮', () => {
+    const html = view({ status: 'need_standalone' })
+    expect(html).toMatch(/<ol class="steps">/)
+    expect(html).toContain('添加到主屏幕')
+    expect(html).toContain('16.4')
+    expect(buttons(html)).toEqual([])
+  })
+
+  it('不支持、hub 停用（带 hub 的原因）：没有按钮', () => {
+    expect(buttons(view({ status: 'unsupported' }))).toEqual([])
+    expect(view({ status: 'unsupported' })).toContain('不支持网页推送')
+    const html = view({ status: 'hub_disabled', reason: 'hub 没有配置 --public-url，推送停用' })
+    expect(html).toContain('这个 hub 没有启用推送：hub 没有配置 --public-url，推送停用')
+    expect(buttons(html)).toEqual([])
+  })
+
+  it('被拒绝：说明去哪里允许，可重新检查；查不到：给原因与重试', () => {
+    const denied = view({ status: 'denied' })
+    expect(denied).toContain('设置 → 通知 → Railse')
+    expect(buttons(denied)).toEqual(['重新检查'])
+    const unknown = view({ status: 'unknown', reason: '连不上 hub，请检查网络' })
+    expect(unknown).toContain('查不到通知状态：连不上 hub，请检查网络')
+    expect(buttons(unknown)).toEqual(['重试'])
+  })
+
+  it('进行中：按钮都 disabled', () => {
+    for (const status of ['off', 'on', 'stale', 'denied', 'unknown'] as const) {
+      const html = view({ status, busy: true })
+      expect(html.match(/<button /g)?.length, status).toBe(html.match(/disabled=""/g)?.length)
+    }
+  })
+
+  it('原因里的 HTML 转义；没有内联样式', () => {
+    expect(view({ status: 'hub_disabled', reason: '<b>x</b>' })).toContain('&lt;b&gt;x&lt;/b&gt;')
+    for (const status of ['checking', 'unsupported', 'need_standalone', 'hub_disabled', 'denied', 'off', 'on', 'stale', 'unknown'] as const) {
+      expect(view({ status, reason: 'r' })).not.toContain('style=')
+    }
+  })
+})
+
 describe('四个页面的首屏（还没数据）', () => {
   const page = (node: ReactNode, path: string) => inRouter(<StoreProvider onUnauthorized={noop}>{node}</StoreProvider>, path)
 
@@ -212,6 +294,11 @@ describe('四个页面的首屏（还没数据）', () => {
     expect(html).toContain('规则版本')
     expect(html).toContain('在线机器')
     expect(html).toContain('退出登录')
+    // 通知区块在总开关与 hub 信息之间，首屏在检查中
+    expect(html).toContain('<h2 class="section-title">通知</h2>')
+    expect(html).toContain('正在检查')
+    expect(html.indexOf('暂停自动审批')).toBeLessThan(html.indexOf('>通知</h2>'))
+    expect(html.indexOf('>通知</h2>')).toBeLessThan(html.indexOf('>hub</h2>'))
   })
 
   it('都没有内联样式', () => {

@@ -157,3 +157,7 @@ code.mono { word-break: break-all; }
 .list-item .name { overflow-wrap: anywhere; }
 .list-item .name .tag { margin-left: 6px; }
 .list-item.revoked .name { color: var(--muted); }
+/* 设置页的通知区块 */
+.push-state { margin: 6px 0 0; font-size: 14px; overflow-wrap: anywhere; }
+ol.steps { margin: 8px 0 4px; padding-left: 22px; font-size: 14px; }
+ol.steps li { margin: 4px 0; }

@@ -3,7 +3,9 @@ import { useNavigate } from 'react-router'
 import { hub } from '../api'
 import { Banner } from '../components/Banner'
 import { useActions } from '../components/Confirm'
+import type { OutcomeView } from '../decide'
 import { failure, formatUptime, onlineCount } from '../manage'
+import { usePush, type PushControl } from '../push'
 import { useStore } from '../StoreProvider'
 
 export function Settings() {
@@ -82,7 +84,7 @@ export function Settings() {
           </span>
           <input type="checkbox" role="switch" checked={paused} disabled={actions.busy || !status} onChange={togglePause} />
         </label>
-        {/* 通知区块：Task 10 */}
+        <NotificationSection onResult={actions.notify} />
         <h2 className="section-title">hub</h2>
         <dl className="kv">
           <dt>规则版本</dt>
@@ -100,5 +102,80 @@ export function Settings() {
       </div>
       {actions.overlays}
     </>
+  )
+}
+
+const pushTexts: Record<PushControl['status'], string> = {
+  checking: '正在检查这台设备的通知状态…',
+  unsupported: '这个浏览器不支持网页推送，这台设备收不到新审批的通知。',
+  need_standalone: 'iPhone、iPad 上要先把 Railse 加到主屏幕，再从主屏幕图标打开，才能开启通知：',
+  hub_disabled: '这个 hub 没有启用推送',
+  denied:
+    '通知权限被拒绝了。iPhone、iPad 上到“设置 → 通知 → Railse”里允许通知；电脑上在浏览器地址栏左侧的网站设置里允许。改好后回到这里。',
+  off: '还没开启。开启后，新的审批与提问会推送到这台设备。',
+  on: '已开启：新的审批与提问会推送到这台设备。',
+  stale: '通知已失效：hub 上已经没有这台设备的订阅（推送服务注销了它，或 hub 换了推送密钥），新审批不会推送过来。重新开启即可。',
+  unknown: '查不到通知状态',
+}
+
+/** 通知区块：挂载时检查推送状态，结果提示交给页面底部的结果提示（useActions 的 notify）。 */
+function NotificationSection({ onResult }: { onResult: (v: OutcomeView) => void }) {
+  const push = usePush()
+  return <NotificationView push={push} onResult={(v) => v && onResult(v)} />
+}
+
+/** 通知区块的展示部分：状态文案与按钮。只有 off、stale 有“开启”（classify 保证这时能推送、不是 iOS 的 Safari 标签页）。 */
+export function NotificationView({ push, onResult }: { push: PushControl; onResult: (v: OutcomeView | null) => void }) {
+  const s = push.status
+  const detail = (s === 'hub_disabled' || s === 'unknown') && push.reason ? `：${push.reason}` : ''
+  // “开启通知”的处理函数里第一个调用就是 push.enable()（其中第一句是授权请求），前面不能有 await
+  const enable = () => void push.enable().then(onResult)
+  return (
+    <section>
+      <h2 className="section-title">通知</h2>
+      <p className="push-state">
+        {pushTexts[s]}
+        {detail}
+      </p>
+      {s === 'need_standalone' && (
+        <>
+          <ol className="steps">
+            <li>在 Safari 里点“分享”按钮（找不到时先点地址栏旁的“⋯”）</li>
+            <li>选“添加到主屏幕”，再点“添加”</li>
+            <li>回到主屏幕，点 Railse 图标打开，到“设置”里开启通知</li>
+          </ol>
+          <p className="sub line">需要 iOS 16.4 或更新的系统。</p>
+        </>
+      )}
+      {(s === 'off' || s === 'stale') && (
+        <div className="btn-row">
+          <button type="button" className="btn primary" disabled={push.busy} onClick={enable}>
+            {s === 'stale' ? '重新开启通知' : '开启通知'}
+          </button>
+          {s === 'stale' && (
+            <button type="button" className="btn" disabled={push.busy} onClick={() => void push.disable().then(onResult)}>
+              清除旧订阅
+            </button>
+          )}
+        </div>
+      )}
+      {s === 'on' && (
+        <div className="btn-row">
+          <button type="button" className="btn" disabled={push.busy} onClick={() => void push.test().then(onResult)}>
+            发一条测试通知
+          </button>
+          <button type="button" className="btn" disabled={push.busy} onClick={() => void push.disable().then(onResult)}>
+            关闭通知
+          </button>
+        </div>
+      )}
+      {(s === 'denied' || s === 'unknown') && (
+        <div className="btn-row">
+          <button type="button" className="btn" disabled={push.busy} onClick={() => void push.refresh()}>
+            {s === 'denied' ? '重新检查' : '重试'}
+          </button>
+        </div>
+      )}
+    </section>
   )
 }

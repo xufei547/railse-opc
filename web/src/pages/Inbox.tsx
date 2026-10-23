@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { Banner } from '../components/Banner'
 import { RequestCard } from '../components/RequestCard'
+import { usePush } from '../push'
 import { isIOS, isStandalone } from '../pwa'
 import { groupByProject } from '../store'
 import { useStore } from '../StoreProvider'
@@ -10,6 +11,7 @@ const guideKey = 'railse.hideInstallGuide'
 
 export function Inbox() {
   const { state, reload } = useStore()
+  const push = usePush()
   const [hideGuide, setHideGuide] = useState(() => {
     try {
       return localStorage.getItem(guideKey) === '1'
@@ -61,6 +63,11 @@ export function Inbox() {
         {state.status?.paused && (
           <Banner tone="info">
             自动审批已暂停，所有请求都交回终端处理。<Link to="/settings">去设置</Link>
+          </Banner>
+        )}
+        {push.status === 'stale' && (
+          <Banner tone="warn">
+            通知已失效，新审批不会推送到这台设备。<Link to="/settings">去设置重新开启</Link>
           </Banner>
         )}
         {showGuide && (

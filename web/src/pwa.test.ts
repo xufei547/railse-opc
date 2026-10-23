@@ -56,17 +56,41 @@ describe('环境判断', () => {
 })
 
 describe('Service Worker 与订阅', () => {
-  function stubSW(opts: { permission?: NotificationPermission; registered?: boolean; registerFails?: boolean; existing?: unknown } = {}) {
+  function stubSW(
+    opts: {
+      permission?: NotificationPermission
+      registered?: boolean
+      registerFails?: boolean
+      existing?: unknown
+      /** 本机已有一条用这个公钥订的订阅（null：浏览器不给公钥）。 */
+      existingKey?: number[] | null
+      unsubscribeFails?: boolean
+      subscribeError?: Error
+    } = {},
+  ) {
     const log: string[] = []
     const subscribeArgs: PushSubscriptionOptionsInit[] = []
+    const old =
+      opts.existingKey === undefined
+        ? (opts.existing ?? null)
+        : {
+            endpoint: 'https://push.example/old',
+            options: { applicationServerKey: opts.existingKey ? new Uint8Array(opts.existingKey).buffer : null },
+            unsubscribe: async () => {
+              log.push('unsubscribe')
+              if (opts.unsubscribeFails) throw new Error('nope')
+              return true
+            },
+          }
     const pushManager = {
       getSubscription: async () => {
         log.push('getSubscription')
-        return opts.existing ?? null
+        return old
       },
       subscribe: async (o: PushSubscriptionOptionsInit) => {
         log.push('subscribe')
         subscribeArgs.push(o)
+        if (opts.subscribeError) throw opts.subscribeError
         return { endpoint: 'https://push.example/x' }
       },
     }
@@ -124,6 +148,32 @@ describe('Service Worker 与订阅', () => {
     s = stubSW({ registered: false, registerFails: true })
     await expect(subscribe('BAEC')).rejects.toThrow('Service Worker 没有注册成功，刷新页面后再试')
     expect(s.log).not.toContain('subscribe')
+  })
+
+  it('已有订阅且公钥不同（hub 换过钥）：先退掉再订，否则浏览器抛 InvalidStateError', async () => {
+    const s = stubSW({ existingKey: [9, 9, 9] })
+    await subscribe('BAEC')
+    expect(s.log[0]).toBe('requestPermission')
+    expect(s.log.slice(-3)).toEqual(['getSubscription', 'unsubscribe', 'subscribe'])
+  })
+
+  it('已有订阅且公钥相同、或浏览器不给旧公钥：也先退掉换新的（走到这里多半是 hub 已把旧端点当失效删了）', async () => {
+    for (const existingKey of [[4, 1, 2], null]) {
+      const s = stubSW({ existingKey })
+      await subscribe('BAEC')
+      expect(s.log.slice(-3)).toEqual(['getSubscription', 'unsubscribe', 'subscribe'])
+    }
+  })
+
+  it('退旧订阅失败也照样订新的', async () => {
+    const s = stubSW({ existingKey: [9], unsubscribeFails: true })
+    await expect(subscribe('BAEC')).resolves.toMatchObject({ endpoint: 'https://push.example/x' })
+    expect(s.log.slice(-2)).toEqual(['unsubscribe', 'subscribe'])
+  })
+
+  it('浏览器订阅失败：中文错误，带上浏览器给的原因', async () => {
+    stubSW({ subscribeError: new Error('Registration failed - push service error') })
+    await expect(subscribe('BAEC')).rejects.toThrow('浏览器没能订阅推送：Registration failed - push service error')
   })
 
   it('getSubscription：没注册时回 null 而不是一直等 ready', async () => {

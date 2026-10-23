@@ -47,6 +47,10 @@ export async function getSubscription(): Promise<PushSubscription | null> {
 /**
  * 订阅推送。必须在用户点击的处理函数里第一个调用，且调用前不能有任何 await：iOS 只认直接来自用户手势的授权请求。
  * 所以这里第一句就是 Notification.requestPermission()，公钥由调用方事先拉好传进来。
+ *
+ * 本机已有订阅时先退掉再订新的：公钥不同（hub 换过钥，railse hub vapid --rotate）时不退，浏览器会抛 InvalidStateError；
+ * 公钥相同时 subscribe 会原样还回旧订阅，而走到“开启”这一步时多半是 hub 已经把它当失效删了（推送服务回过 404/410），
+ * 沿用旧端点只会再失效一次。
  */
 export async function subscribe(publicKey: string): Promise<PushSubscription> {
   const permission = await Notification.requestPermission()
@@ -55,5 +59,12 @@ export async function subscribe(publicKey: string): Promise<PushSubscription> {
   if (!reg) throw new Error('Service Worker 没有注册成功，刷新页面后再试')
   // pushManager.subscribe 要求有激活的 worker：刚注册的要等它激活
   const ready = await navigator.serviceWorker.ready
-  return ready.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) })
+  const old = await ready.pushManager.getSubscription()
+  if (old) await old.unsubscribe().catch(() => false)
+  try {
+    return await ready.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) })
+  } catch (e) {
+    // 浏览器给的是英文（如 Chrome 连不上推送服务时的 “Registration failed - push service error”），原样附上便于排查
+    throw new Error(`浏览器没能订阅推送：${e instanceof Error ? e.message || e.name : String(e)}`)
+  }
 }
