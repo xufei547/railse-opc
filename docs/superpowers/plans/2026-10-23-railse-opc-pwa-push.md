@@ -6,7 +6,7 @@
 
 **Architecture:** 网页只经 REST 与 `/ws/client` 跟 hub 打交道，cookie 登录，与 hub 同源（hub 的写接口校验 Origin）；构建产物由 Go `embed` 进 hub 二进制，`/api`、`/ws` 之外的路径都回 `index.html`。Web Push 的加密（RFC 8291）与签名（RFC 8292 VAPID）用 Go 标准库自己实现，不加第三方依赖；推送只在新请求产生时发（permission、webhook、question），每条推送手机上必显示一条通知（iOS 要求），点开由页面读 URL 自己定位请求。订阅与 VAPID 私钥明文存库（设计 5.3 的例外）。
 
-**Tech Stack:** Go 1.26（标准库 `crypto/ecdh`、`crypto/ecdsa`、`crypto/hkdf`、`crypto/aes`、`embed`）；Node 20（本机 20.20）、npm；`react@19`、`react-dom@19`、`react-router@7`、`vite@7`、`@vitejs/plugin-react@4`、`typescript@5`、`vitest@3`、`@playwright/test@1`。版本由 `web/package-lock.json` 锁定并入库。Go 侧不新增依赖。
+**Tech Stack:** Go 1.26（标准库 `crypto/ecdh`、`crypto/ecdsa`、`crypto/hkdf`、`crypto/aes`、`embed`）；Node 20（本机 20.20）、npm；`react@19`、`react-dom@19`、`react-router@7`、`vite@7`、`@vitejs/plugin-react@4`、`typescript@5`、`vitest@3`、`@playwright/test@1`，以及仅类型的 `@types/react@19`、`@types/react-dom@19`、`@types/node@20`（React 19 不自带类型，TSX 编译必需）。版本由 `web/package-lock.json` 锁定并入库。Go 侧不新增依赖。
 
 **设计文档：** `docs/superpowers/specs/2026-10-21-railse-opc-design.md` 第 1、2、3、5、6 节，§0.6 的“第 4 份计划动笔前的三件事”（脱敏按 shell 词法边界修、出站与签名密钥明文例外、记住前预览与范围）；iOS 实验结论 `docs/superpowers/specs/2026-10-21-ios-webpush-findings.md` 第 5 节（固定域名、先判断 standalone、授权必须是点击里第一个调用、载荷带 id 与 URL、点击时 navigate 与 openWindow 两条路都写、用请求 id 作 tag）。**前置：** 第 1、2、3 份计划已合并到 main（9487097 之后），hub 的接口以 `docs/hub.md` 为准，本计划会改动其中的 `/api/inbox` 返回形状并新增接口，文档随 Task 一起改。
 
