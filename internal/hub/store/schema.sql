@@ -1,5 +1,5 @@
 -- 改动 schema 必须提高 store.go 的 schemaVersion 并写迁移（版本一致时不会重新执行建表）。
--- Railse OPC hub 数据库，版本 1。时间列一律定宽 UTC 文本（纳秒 9 位、以 Z 结尾，见 store.go 的 timeLayout），按字典序比较即按时间先后。
+-- Railse OPC hub 数据库，版本 2。时间列一律定宽 UTC 文本（纳秒 9 位、以 Z 结尾，见 store.go 的 timeLayout），按字典序比较即按时间先后。
 CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -94,8 +94,10 @@ CREATE INDEX IF NOT EXISTS audit_request ON audit_events (request_id, id);
 
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   id         TEXT PRIMARY KEY,
-  endpoint   TEXT NOT NULL,
-  keys       TEXT NOT NULL,              -- JSON
+  endpoint   TEXT NOT NULL UNIQUE,
+  keys       TEXT NOT NULL,              -- JSON {"p256dh":"…","auth":"…"}，明文（设计 5.3 例外）
+  user_agent TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
-  last_ok_at TEXT
+  last_ok_at TEXT,
+  failures   INTEGER NOT NULL DEFAULT 0  -- 连续失败次数，成功归零
 );

@@ -63,7 +63,7 @@ func TestOpenMigratesAndSetsPerms(t *testing.T) {
 	}
 	assertPerms(t, path)
 	var v int
-	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != 1 {
+	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != schemaVersion {
 		t.Fatalf("schema_version = %d, %v", v, err)
 	}
 	var mode string
@@ -138,8 +138,8 @@ func TestOpenRejectsOtherSchemaVersion(t *testing.T) {
 		s2.Close()
 		t.Fatal("版本不一致应报错")
 	}
-	if !strings.Contains(err.Error(), "数据库版本 2 与程序版本 1 不一致") {
-		t.Fatalf("错误应说明版本不一致: %v", err)
+	if want := fmt.Sprintf("数据库版本 %d 比程序（%d）新，请升级 railse", schemaVersion+1, schemaVersion); !strings.Contains(err.Error(), want) {
+		t.Fatalf("错误应说明库比程序新: %v", err)
 	}
 	if tableExists(t, path, "push_subscriptions") {
 		t.Fatal("版本不一致时不应往库里补建表")

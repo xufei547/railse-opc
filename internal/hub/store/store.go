@@ -17,7 +17,22 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-const schemaVersion = 1
+const schemaVersion = 2
+
+// migrations 是逐版本升级的 SQL，键是升级后的版本号。改 schema.sql 时必须同时加一条迁移并提高 schemaVersion：
+// 已有库只跑迁移，不再执行 schema.sql。
+var migrations = map[int]string{
+	// 2：push_subscriptions 的 endpoint 唯一，加 user_agent 与 failures。旧库里重复的端点按 created_at 只留最早的一条。
+	2: `
+CREATE TABLE push_subscriptions_v2 (
+  id TEXT PRIMARY KEY, endpoint TEXT NOT NULL UNIQUE, keys TEXT NOT NULL, user_agent TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, last_ok_at TEXT, failures INTEGER NOT NULL DEFAULT 0);
+INSERT OR IGNORE INTO push_subscriptions_v2(id, endpoint, keys, created_at, last_ok_at)
+  SELECT id, endpoint, keys, created_at, last_ok_at FROM push_subscriptions ORDER BY created_at;
+DROP TABLE push_subscriptions;
+ALTER TABLE push_subscriptions_v2 RENAME TO push_subscriptions;
+`,
+}
 
 // ErrNotFound 表示查无此行。
 var ErrNotFound = errors.New("not found")
@@ -78,8 +93,9 @@ func prepareFile(path string) error {
 	return f.Close()
 }
 
-// migrate 在一个事务里检查并建表：schema_version 已存在时只核对版本，不一致就报错且不改动库；
-// 不存在时建全部表并写入版本。
+// migrate 在一个事务里检查并建表：schema_version 不存在时建全部表并写入版本；
+// 已存在时核对版本：比程序新就报错且不改动库，比程序旧就依次跑 migrations 升到 schemaVersion，
+// 任何一步出错整个事务回滚，库保持原版本。
 func (s *Store) migrate() error {
 	return s.Tx(func(tx *sql.Tx) error {
 		var exists int
@@ -106,8 +122,23 @@ func (s *Store) migrate() error {
 		if err := tx.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil {
 			return fmt.Errorf("读 schema_version: %w", err)
 		}
-		if v != schemaVersion {
-			return fmt.Errorf("数据库版本 %d 与程序版本 %d 不一致", v, schemaVersion)
+		switch {
+		case v > schemaVersion:
+			return fmt.Errorf("数据库版本 %d 比程序（%d）新，请升级 railse", v, schemaVersion)
+		case v < schemaVersion:
+			for next := v + 1; next <= schemaVersion; next++ {
+				sqlText, ok := migrations[next]
+				if !ok {
+					return fmt.Errorf("缺少到版本 %d 的迁移", next)
+				}
+				if _, err := tx.Exec(sqlText); err != nil {
+					return fmt.Errorf("迁移到版本 %d: %w", next, err)
+				}
+				// schema_version 只有一行，上面已校验 n == 1
+				if _, err := tx.Exec("UPDATE schema_version SET v = ?", next); err != nil {
+					return fmt.Errorf("写 schema_version: %w", err)
+				}
+			}
 		}
 		return nil
 	})
