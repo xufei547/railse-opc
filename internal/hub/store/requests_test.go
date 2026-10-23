@@ -652,3 +652,65 @@ func TestClearCallbackToken(t *testing.T) {
 		t.Fatalf("没有这条请求应 ErrNotFound: %v", err)
 	}
 }
+
+// OpenQuestions 只列还在等回答的 question：recorded、不早于 since，且同一会话之后没有任何新行（done、新的 permission
+// 或 question 都说明 agent 已经不在等）；没有会话的视为仍在等；按创建时间倒序，受 limit 约束。
+func TestOpenQuestions(t *testing.T) {
+	s := openTemp(t)
+	m, err := s.CreateMachine("mac", RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := s.CreateMachine("mac2", RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := func(machineID, cli string) string {
+		t.Helper()
+		id, err := s.UpsertSession(machineID, proto.Session{Tool: "claude", CLISessionID: cli, Cwd: "/p"}, "p")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	s1, s2, s3 := sess(m.ID, "s1"), sess(m.ID, "s2"), sess(m2.ID, "s3")
+	at := func(sec int) string { return FormatTime(time.Date(2026, 10, 23, 10, 0, sec, 0, time.UTC)) }
+	mk := func(id, machineID, session, kind, state, created string) {
+		t.Helper()
+		if err := s.InsertRequest(Request{ID: id, MachineID: machineID, SessionID: session, Kind: kind, State: state,
+			Payload: policy.Payload{Type: policy.PayloadType("other")}, CreatedAt: created}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	since := time.Date(2026, 10, 23, 10, 0, 1, 0, time.UTC)
+	ids := func(limit int) string {
+		t.Helper()
+		got, err := s.OpenQuestions(since, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, r := range got {
+			out = append(out, r.ID)
+		}
+		return strings.Join(out, ",")
+	}
+	mk("q1", m.ID, s1, "question", "recorded", at(1)) // 之后有 done：不再等
+	mk("d1", m.ID, s1, "done", "recorded", at(2))
+	mk("q2", m.ID, s2, "question", "recorded", at(3)) // 仍在等
+	mk("q3", m.ID, "", "question", "recorded", at(4)) // 没有会话：仍在等
+	mk("q4", m.ID, s2, "question", "recorded", at(0)) // 太旧
+	mk("q5", m2.ID, s3, "question", "recorded", at(6))
+	mk("x1", m.ID, s1, "permission", "pending", at(7)) // 别的会话的新行不影响 q5、q2
+	if got := ids(10); got != "q5,q3,q2" {
+		t.Fatalf("OpenQuestions = %s", got)
+	}
+	if got := ids(2); got != "q5,q3" {
+		t.Fatalf("limit 2 = %s", got)
+	}
+	mk("p1", m.ID, s2, "permission", "pending", at(5)) // 同会话来了新的审批：q2 不再等
+	mk("q6", m2.ID, s3, "question", "recorded", at(8)) // 同会话又问了一个：q5 不再等，q6 在等
+	if got := ids(10); got != "q6,q3" {
+		t.Fatalf("有新 permission、新 question 后 = %s", got)
+	}
+}

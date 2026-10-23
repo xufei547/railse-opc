@@ -192,9 +192,11 @@ func TestEndToEndHubApproval(t *testing.T) {
 		p.Payload.Command != "git push origin main" || p.ProjectRoot == "" || p.ExpiresAt == nil {
 		t.Fatalf("hub 里的请求: %+v", p)
 	}
-	var inbox []map[string]any
+	var inbox struct {
+		Pending []map[string]any `json:"pending"`
+	}
 	phoneRequest(t, h, ck, "GET", "/api/inbox", nil, &inbox)
-	if len(inbox) != 1 || inbox[0]["id"] != p.ID || inbox[0]["machine_name"] != "mac" {
+	if len(inbox.Pending) != 1 || inbox.Pending[0]["id"] != p.ID || inbox.Pending[0]["machine_name"] != "mac" {
 		t.Fatalf("收件箱: %+v", inbox)
 	}
 	r := hookAnswer(t, res, decideOnPhone(t, h, ck, p.ID, "allow", allowNote, false))

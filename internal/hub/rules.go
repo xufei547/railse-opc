@@ -52,31 +52,50 @@ func (s *Server) pushRules() {
 	s.clients.broadcast("rules_updated", map[string]int{"version": version})
 }
 
-// learnRule 从一条请求生成规则并入库，返回实际的规则 id。它不下发：调用方在请求状态改成功之后再 pushRules，
-// 改状态失败时用 rollbackLearned 删掉。
+// “记住”的范围（DecideInput.Scope、propose 的 scope）。空串表示沿用旧行为：有项目根记成项目，没有记成全局。
+const (
+	scopeProject = "project"
+	scopeGlobal  = "global"
+)
+
+// validScope 报告 scope 是不是认识的取值（含空串）。
+func validScope(scope string) bool {
+	return scope == "" || scope == scopeProject || scope == scopeGlobal
+}
+
+// draftRule 生成“记住”会入库的那条规则，但不入库：propose 拿它给网页预览，learnRule 拿它入库，两边看到的是同一条。
 //   - 批准：policy.ProposeRule 生成 learned 放行；outward、destructive、unknown、write_outside 返回 ErrCannotLearn，
 //     所以“记住”永远产生不了能放行这几类的规则。
 //   - 拒绝：denyRule 直接构造 user 来源的 deny，压过一切放行（见 policy.betterRule）。
 //
-// webhook 请求不学。载荷含脱敏占位符时不学：学出来的规则匹配的是占位符，不是原命令，用户却以为记住了。
-// 锚点超过 maxLearnAnchor，或现有规则加上这条编成快照会超过单帧上限（减去余量）时不学：否则快照与 welcome 都发不出去，
-// 所有守护进程会连不上。“读现有规则 → 试编 → 入库”在 rulesMu 下进行，与导入、启停串行。
-// 学不了的错误包 errLearn；读机器、读存规则的错误不包（其中的 store.ErrNotFound 也不外露，免得被当成“没有这条请求”）。
-func (s *Server) learnRule(r store.Request, action string) (string, error) {
+// 两者都在有项目根时限定该项目、没有时为 global；scope 为 global 时再去掉项目范围，为空时保持原样。
+// deny 的引擎自检（denySelfCheck）在范围改写之后做，查的就是要入库的那条；草案最后再经 RuleSet.Validate。
+// 显式 scope 为 project 而请求没有项目根时拒绝，这一步放在最后：此时全局规则一定生成得出来，文案“只能记成全局”才属实。
+//
+// webhook 请求不学。载荷含脱敏占位符时不学：学出来的规则匹配的是占位符，不是原命令，用户却以为记住了。锚点超过 maxLearnAnchor 不学。
+// 学不了的错误包 errLearn；action、scope 不认识时返回 errBadAction、errBadScope；读机器的错误不包
+// （其中的 store.ErrNotFound 也不外露，免得被当成“没有这条请求”）。只读库，不写。
+func (s *Server) draftRule(r store.Request, action, scope string) (policy.Rule, error) {
+	if action != "allow" && action != "deny" {
+		return policy.Rule{}, errBadAction
+	}
+	if !validScope(scope) {
+		return policy.Rule{}, errBadScope
+	}
 	// webhook 请求不是工具调用：学出来的规则会下发给所有守护进程，而且它没有机器可查
 	if r.Kind == "webhook" {
-		return "", fmt.Errorf("%w：webhook 请求不能记住", errLearn)
+		return policy.Rule{}, fmt.Errorf("%w：webhook 请求不能记住", errLearn)
 	}
 	// 先查长度（便宜），超长的大载荷不必再跑脱敏正则
 	if what, long := anchorTooLong(r.Payload); long {
-		return "", fmt.Errorf("%w：%s太长不能记住（超过 4 KiB）", errLearn, what)
+		return policy.Rule{}, fmt.Errorf("%w：%s太长不能记住（超过 4 KiB）", errLearn, what)
 	}
 	if hasRedacted(r.Payload) {
-		return "", fmt.Errorf("%w：含凭据的命令不能记住", errLearn)
+		return policy.Rule{}, fmt.Errorf("%w：含凭据的命令不能记住", errLearn)
 	}
 	m, err := s.store.GetMachine(r.MachineID)
 	if err != nil {
-		return "", fmt.Errorf("读机器 %s: %v", r.MachineID, err)
+		return policy.Rule{}, fmt.Errorf("读机器 %s: %v", r.MachineID, err)
 	}
 	ctx := policy.Context{ProjectRoot: r.ProjectRoot, HomeDir: m.HomeDir, MachineID: r.MachineID}
 	var rule policy.Rule
@@ -86,23 +105,77 @@ func (s *Server) learnRule(r store.Request, action string) (string, error) {
 		rule, err = policy.ProposeRule(r.Payload, ctx, r.ID)
 	}
 	if err != nil {
-		return "", fmt.Errorf("%w：%w", errLearn, err)
+		return policy.Rule{}, fmt.Errorf("%w：%w", errLearn, err)
+	}
+	if scope == scopeGlobal {
+		rule.Scope = policy.Scope{}
+	}
+	if action == "deny" {
+		if err := denySelfCheck(rule, r.Payload, ctx); err != nil {
+			return policy.Rule{}, fmt.Errorf("%w：%w", errLearn, err)
+		}
+	}
+	if err := (policy.RuleSet{Version: policy.RuleSetVersion, Rules: []policy.Rule{rule}}).Validate(); err != nil {
+		return policy.Rule{}, fmt.Errorf("%w：%w", errLearn, err)
+	}
+	if scope == scopeProject && r.ProjectRoot == "" {
+		return policy.Rule{}, fmt.Errorf("%w：没有项目根，只能记成全局", errLearn)
+	}
+	return rule, nil
+}
+
+// learnRule 按 draftRule 生成规则并入库，返回实际的规则 id（与已有规则同 id 时入库会加 -2 之类的后缀）。
+// 它不下发：调用方在请求状态改成功之后再 pushRules，改状态失败时用 rollbackLearned 删掉。
+// 现有规则加上这条编成快照会超过单帧上限（减去余量）时不学（checkFits）：否则快照与 welcome 都发不出去，所有守护进程会连不上。
+// “读现有规则 → 试编 → 入库”在 rulesMu 下进行，与导入、启停串行。错误约定同 draftRule；读、存规则的错误不包 errLearn。
+func (s *Server) learnRule(r store.Request, action, scope string) (string, error) {
+	rule, err := s.draftRule(r, action, scope)
+	if err != nil {
+		return "", err
 	}
 	s.rulesMu.Lock()
 	defer s.rulesMu.Unlock()
-	rs, _, err := s.store.RuleSet()
-	if err != nil {
-		return "", fmt.Errorf("读规则: %v", err)
-	}
-	rs.Rules = append(rs.Rules, rule)
-	if !rulesFitFrame(rs) {
-		return "", fmt.Errorf("%w：规则集已接近下发上限，放不下这条规则，请先清理不用的规则", errLearn)
+	if err := s.checkFits(rule); err != nil {
+		return "", err
 	}
 	id, _, err := s.store.InsertRule(rule)
 	if err != nil {
 		return "", fmt.Errorf("存规则: %v", err)
 	}
 	return id, nil
+}
+
+// checkFits 读现有规则，加上 rule 编成快照后超过单帧上限（减去余量）时返回包 errLearn 的错误；读规则的错误不包。
+// learnRule 在 rulesMu 下调它再入库；propose 不拿锁调它，只为预览如实（保存时 learnRule 会再查一次）。
+func (s *Server) checkFits(rule policy.Rule) error {
+	rs, _, err := s.store.RuleSet()
+	if err != nil {
+		return fmt.Errorf("读规则: %v", err)
+	}
+	rs.Rules = append(rs.Rules, rule)
+	if !rulesFitFrame(rs) {
+		return fmt.Errorf("%w：规则集已接近下发上限，放不下这条规则，请先清理不用的规则", errLearn)
+	}
+	return nil
+}
+
+// ruleAnchor 是草案里起匹配作用的那个锚点，网页预览用：command_prefix、command_regex、path_glob、
+// mcp_server/mcp_tool、domain 里第一个非空的。整条命令学成的放行同时有前缀与正则，前缀就是整条命令的词，比正则好读。
+func ruleAnchor(r policy.Rule) string {
+	m := r.Match
+	switch {
+	case m.CommandPrefix != "":
+		return m.CommandPrefix
+	case m.CommandRegex != "":
+		return m.CommandRegex
+	case m.PathGlob != "":
+		return m.PathGlob
+	case m.MCPServer != "" || m.MCPTool != "":
+		return strings.TrimSuffix(m.MCPServer+"/"+m.MCPTool, "/")
+	case m.Domain != "":
+		return m.Domain
+	}
+	return ""
 }
 
 // anchorTooLong 报告载荷里会成为规则锚点的部分是否超过 maxLearnAnchor，并说明是哪一部分。
@@ -140,8 +213,7 @@ func (s *Server) rollbackLearned(r store.Request, ruleID string) {
 //   - file_write：精确路径（相对路径接在 cwd 或项目根后，~ 按家目录展开），通配元字符转义；
 //   - mcp：服务加工具；network：主机名。
 //
-// 锚点缺失、类型不认识，或构造出的规则拒绝不了原请求（例如复合命令：引擎对 deny 正则按段匹配，整条复合命令的正则哪段都对不上）
-// 时返回错误：不学死规则。
+// 锚点缺失或类型不认识时返回错误。它只构造，不自检：调用方（draftRule）改写范围之后再用 denySelfCheck 确认它拒得了原请求。
 func denyRule(r store.Request, ctx policy.Context) (policy.Rule, error) {
 	p := r.Payload
 	rule := policy.Rule{ID: "deny-" + shortRuleID(r.ID), Source: policy.SourceUser, Action: policy.ActionDeny, CreatedFrom: r.ID,
@@ -180,15 +252,20 @@ func denyRule(r store.Request, ctx policy.Context) (policy.Rule, error) {
 	default:
 		return policy.Rule{}, fmt.Errorf("载荷类型 %q 不能记住", p.Type)
 	}
-	// NewEngine 先跑 RuleSet.Validate；再用只含这条规则的引擎评估原请求，必须命中它并拒绝
+	return rule, nil
+}
+
+// denySelfCheck 用只含这条规则的引擎评估原请求，必须命中它并拒绝：构造出的规则拒绝不了原请求时（例如复合命令：
+// 引擎对 deny 正则按段匹配，整条复合命令的正则哪段都对不上）返回错误，不学死规则。NewEngine 先跑 RuleSet.Validate。
+func denySelfCheck(rule policy.Rule, p policy.Payload, ctx policy.Context) error {
 	eng, err := policy.NewEngine(policy.RuleSet{Version: policy.RuleSetVersion, Rules: []policy.Rule{rule}})
 	if err != nil {
-		return policy.Rule{}, err
+		return err
 	}
 	if d := eng.Evaluate(p, ctx); d.Action != policy.ActionDeny || d.RuleID != rule.ID {
-		return policy.Rule{}, errors.New("记住的拒绝匹配不上这条请求（例如复合命令），请手写规则")
+		return errors.New("记住的拒绝匹配不上这条请求（例如复合命令），请手写规则")
 	}
-	return rule, nil
+	return nil
 }
 
 // homePrefixes 与 policy 引擎认识的家目录写法一致。

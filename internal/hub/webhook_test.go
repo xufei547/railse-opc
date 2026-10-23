@@ -175,10 +175,13 @@ func TestWebhookIngestAndCallback(t *testing.T) {
 
 	resp := doReq(t, "GET", h.http.URL+"/api/inbox", nil, "", ck)
 	raw, _ := io.ReadAll(resp.Body)
-	var inbox []map[string]any
-	if err := json.Unmarshal(raw, &inbox); err != nil {
+	var box struct {
+		Pending []map[string]any `json:"pending"`
+	}
+	if err := json.Unmarshal(raw, &box); err != nil {
 		t.Fatal(err)
 	}
+	inbox := box.Pending
 	if len(inbox) != 1 || inbox[0]["title"] != "发布周报" || inbox[0]["id"] != id {
 		t.Fatalf("inbox = %+v", inbox)
 	}

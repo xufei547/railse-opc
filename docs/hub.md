@@ -70,10 +70,11 @@ railse hub run --listen 127.0.0.1:8787
 | `POST /api/webhook/approvals` | Bearer 来源令牌 | 见下文 webhook；没配令牌 503，令牌不对 401 |
 | `GET /api/status` | cookie | `{"paused","pending","rules_version","machines":[{"id","name","online","last_seen","revoked"}],"uptime"}` |
 | `POST /api/pause`、`/api/resume` | cookie + 同源 | 改 hub 总开关并下发 → 204 |
-| `GET /api/inbox` | cookie | 全部 pending（至多 500 条），每条是请求加 `machine_name`、`project` |
+| `GET /api/inbox` | cookie | `{"pending":[…],"questions":[…]}`，都是请求视图、按创建时间倒序，没有时是空数组：`pending` 是全部待审批（至多 500 条）；`questions` 是最近 24 小时还在等回答的 `question`（至多 100 条），同一会话之后有了任何新事件（`done`、新的 `permission` 或 `question`）就不再列出，没有会话 id 的一直列到滑出 24 小时 |
 | `GET /api/requests?state=&limit=` | cookie | 按创建时间倒序；`state` 为空表示全部，`limit` 默认 50、最大 500 |
 | `GET /api/requests/{id}` | cookie | `{"request":…,"audit":[…]}`，审计倒序至多 200 条；没有 404 |
-| `POST /api/requests/{id}/decide` | cookie + 同源 | `{"action":"allow|deny","note":"…","remember":bool}` → 决定后的请求；坏 action 或备注超过 1000 字符 400，没有 404，已处理、已过期或机器已吊销 409，记不住 422 |
+| `POST /api/requests/{id}/propose` | cookie + 同源 | `{"action":"allow|deny","scope":"project|global"}` → `{"rule_id","scope","yaml","summary":{"action","payload","anchor"}}`：只计算“记住”会生成的规则，不入库、不审计、不改请求。`scope` 是草案实际的范围（缺省时按下文规则选定），`yaml` 是这条规则的 YAML（与入库后 `/api/rules` 里的相同），`summary.payload` 取 `shell|file_write|network|mcp`，`anchor` 是起匹配作用的命令前缀、命令正则、路径、`服务/工具` 或主机名。错误码与 decide 相同：坏请求体、坏 action、坏 scope 400，没有 404，已处理、已过期或机器已吊销 409（文案同 decide，但 propose 不改请求状态），记不住 422 |
+| `POST /api/requests/{id}/decide` | cookie + 同源 | `{"action":"allow|deny","note":"…","remember":bool,"scope":"project|global"}` → 决定后的请求；`scope` 只在 `remember: true` 时起作用。坏 action、坏 scope（不论是否 remember）或备注超过 1000 字符 400，没有 404，已处理、已过期或机器已吊销 409，记不住 422 |
 | `GET /api/rules` | cookie | 每条 `id、source、enabled、elevated、hit_count、last_hit_at、created_at、created_from、yaml` |
 | `PATCH /api/rules/{id}` | cookie + 同源 | `{"enabled":bool}` → 204 并下发 |
 | `DELETE /api/rules/{id}` | cookie + 同源 | → 204 并下发 |
@@ -83,13 +84,17 @@ railse hub run --listen 127.0.0.1:8787
 | `DELETE /api/machines/{id}` | cookie + 同源 | 吊销 → 204；没有 404 |
 | `GET /ws/client` | cookie + 同源 | 网页的推送通道，见下 |
 
-请求的 JSON 字段：`id、machine_id、session_id、kind（permission|question|done|webhook）、tool_name、payload（已脱敏）、risk、project_root、engine_reason、state、decided_by、decision_note、rule_id、turn_id、cli_session_id、title、created_at、expires_at、decided_at、delivered_at`；`/api/inbox`、`/api/requests`、`/api/requests/{id}` 的 `request`、decide 的返回与 `/ws/client` 推送的请求（统称“请求视图”）还带 `machine_name`（webhook 请求为空）、`project`（项目根的最后一段）与 `has_redacted`（载荷任一字段含脱敏占位符 `<redacted>` 时为 true）。`state` 取 `pending、approved、denied、cancelled、expired、auto_allowed、auto_denied、passthrough、recorded`；`delivered_at` 非空表示决定已交到钩子（或 webhook 回调已成功）。
+请求的 JSON 字段：`id、machine_id、session_id、kind（permission|question|done|webhook）、tool_name、payload（已脱敏）、risk、project_root、engine_reason、state、decided_by、decision_note、rule_id、turn_id、cli_session_id、title、created_at、expires_at、decided_at、delivered_at`；`/api/inbox` 的 `pending` 与 `questions`、`/api/requests`、`/api/requests/{id}` 的 `request`、decide 的返回与 `/ws/client` 推送的请求（统称“请求视图”）还带 `machine_name`（webhook 请求为空）、`project`（项目根的最后一段）与 `has_redacted`（载荷任一字段含脱敏占位符 `<redacted>` 时为 true）。`state` 取 `pending、approved、denied、cancelled、expired、auto_allowed、auto_denied、passthrough、recorded`；`delivered_at` 非空表示决定已交到钩子（或 webhook 回调已成功）。
 
 **`has_redacted` 为 true 的请求，网页必须醒目告警。** 这时网页展示的不是原文：凭据被换成了 `<redacted>`。命令里不在引号内的裸值在 shell 元字符处停止；引号里的值、注释和不交给解释器的 heredoc 正文整段抹掉（分隔词不带引号的正文里的 `$(…)`、反引号会执行，按命令处理）；交给 `sh`/`bash`/`zsh`/`dash`/`ksh -c`、`eval`、`ssh` 执行的参数，以及喂给它们的 heredoc 正文与 here-string，按命令行语境递归处理，其中引号里的值仍整段抹。所以显示的仍不是原文，引擎却是按原文定级的。告警文案例如“命令含被隐藏的部分，展示的不是原文，建议去终端核对”，并突出 `risk` 与 `engine_reason`。这类请求也不能“记住”（见下）。
 
-**“记住”。** `remember: true` 批准时生成一条 `learned` 放行规则，拒绝时 hub 直接构造 `source: user`、`action: deny` 的规则（shell 命令用锚定整条命令字面原文的 `command_regex: ^…$`，只拒这一条，不连带同前缀的命令），都立即下发给所有在线守护进程。记不住时请求保持 pending，回 422，文案以“不能记住：”开头，例如：只读、项目内改动和联网操作之外的不能记成放行（`outward`、`destructive` 永远不行）；含凭据的命令（载荷里有 `<redacted>`）；命令、路径等超过 4 KiB；规则集已接近下发上限；拒绝匹配不上这条请求（例如 `a && b` 这样的复合命令，请手写规则）；webhook 请求。
+**“记住”。** `remember: true` 批准时生成一条 `learned` 放行规则，拒绝时 hub 直接构造 `source: user`、`action: deny` 的规则（shell 命令用锚定整条命令字面原文的 `command_regex: ^…$`，只拒这一条，不连带同前缀的命令），都立即下发给所有在线守护进程。保存前网页先调 `propose` 拿到同一条规则的草案（YAML 与摘要）给用户看，用户选好范围后再带同样的 `action`、`scope` 调 decide。
 
-**`/ws/client` 帧**：每帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`。`request_new`、`request_updated` 的 `data` 是请求视图（与 `/api/inbox` 每条同形状，守护进程、webhook、question/done 的请求都一样），`rules_updated` 是 `{"version"}`，`status` 是 `{"paused"}`。请求的状态变化、决定未送达（undeliverable），以及 `delivered_at` 从空变成有值（守护进程的送达回执、送达对账、webhook 回调成功）都推 `request_updated`。推送只是“有变化”的提示：慢的订阅者（积压 64 帧）会被丢帧，网页每次连上或怀疑漏帧时必须全量重新拉取（`/api/inbox`、`/api/status`、`/api/rules` 等）。hub 每 30 秒复核一次登录并 ping，登录失效（登出、换密码、过期）时以 1008 关闭；网页不该发数据帧，发了就断开。
+范围 `scope`：`global` 去掉项目范围，规则对所有项目生效（放行规则仍限定原来的风险等级，换了项目定级不同就不命中）；`project` 限定请求的项目根，请求没有项目根时 422“不能记住：没有项目根，只能记成全局”；缺省（不带或空串）沿用旧行为——有项目根记成项目，没有记成全局，所以不带 `scope` 的旧客户端（curl 等）行为不变。`project`、`global` 以外的取值一律 400。
+
+记不住时请求保持 pending，回 422，文案以“不能记住：”开头，例如：只读、项目内改动和联网操作之外的不能记成放行（`outward`、`destructive` 永远不行）；没有项目根的命令或文件写入不能记成放行（全局也不行：定级依赖项目根）；含凭据的命令（载荷里有 `<redacted>`）；命令、路径等超过 4 KiB；规则集已接近下发上限；拒绝匹配不上这条请求（例如 `a && b` 这样的复合命令，请手写规则）；webhook 请求；显式 `scope: project` 而没有项目根。
+
+**`/ws/client` 帧**：每帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`。`request_new`、`request_updated` 的 `data` 是请求视图（与 `/api/inbox` 里每条同形状，守护进程、webhook、question/done 的请求都一样），`rules_updated` 是 `{"version"}`，`status` 是 `{"paused"}`。请求的状态变化、决定未送达（undeliverable），以及 `delivered_at` 从空变成有值（守护进程的送达回执、送达对账、webhook 回调成功）都推 `request_updated`。question 不再等（同一会话来了新事件）时不单独推 `request_updated`：之后的 question、done 与待审批本身以 `request_new` 推出，网页收到 `request_new` 时应重新拉 `/api/inbox`，`questions` 随之更新；由守护进程审计补进的历史行（本机自动放行、自动拒绝等）不推送，它们让 question 不再等的变化要到下一次全量拉取才看得到。推送只是“有变化”的提示：慢的订阅者（积压 64 帧）会被丢帧，网页每次连上或怀疑漏帧时必须全量重新拉取（`/api/inbox`、`/api/status`、`/api/rules` 等）。hub 每 30 秒复核一次登录并 ping，登录失效（登出、换密码、过期）时以 1008 关闭；网页不该发数据帧，发了就断开。
 
 **webhook。** `POST /api/webhook/approvals`，`Authorization: Bearer <来源令牌>`，请求体至多 64 KiB：
 
