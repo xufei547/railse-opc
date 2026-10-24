@@ -31,15 +31,17 @@ import (
 )
 
 // fakePushEndpoint 冒充推送服务：记每次收到的请求头与路径，按 status 回应（reason 作响应体）；hang 为真时挂到请求被取消；
-// delay 非零时每次先等这么久（纳秒）再回应。
+// delay 非零时每次先等这么久（纳秒）再回应。inflight 是正在处理的请求数，maxInflight 是它到过的最大值（看并行度）。
 type fakePushEndpoint struct {
-	srv    *httptest.Server
-	status atomic.Int32
-	reason atomic.Value // string
-	hang   atomic.Bool
-	delay  atomic.Int64
-	mu     sync.Mutex
-	got    []http.Header
+	srv         *httptest.Server
+	status      atomic.Int32
+	reason      atomic.Value // string
+	hang        atomic.Bool
+	delay       atomic.Int64
+	inflight    atomic.Int32
+	maxInflight atomic.Int32
+	mu          sync.Mutex
+	got         []http.Header
 }
 
 func newFakePushEndpoint(t *testing.T) *fakePushEndpoint {
@@ -52,6 +54,14 @@ func newFakePushEndpoint(t *testing.T) *fakePushEndpoint {
 		f.mu.Lock()
 		f.got = append(f.got, r.Header.Clone())
 		f.mu.Unlock()
+		n := f.inflight.Add(1)
+		defer f.inflight.Add(-1)
+		for {
+			m := f.maxInflight.Load()
+			if n <= m || f.maxInflight.CompareAndSwap(m, n) {
+				break
+			}
+		}
 		if f.hang.Load() {
 			<-r.Context().Done()
 			return
@@ -1003,8 +1013,9 @@ func TestPushMessageZeroWidthPadding(t *testing.T) {
 	}
 }
 
-// 一条请求对多个订阅并行发送（pushWorkers 路）：假端点每次慢 300ms，8 个订阅并行 4 路约 600ms 发完，串行要 2.4 秒。
-// 结果照常汇总进 push_sent。
+// 一条请求对多个订阅并行发送（pushWorkers 路）：假端点每次慢 300ms，看端点同时在处理的请求数——串行时恒为 1，
+// 并行时大于 1 且不超过 pushWorkers（不量墙钟，负载高的机器上也稳）。结果照常汇总进 push_sent。
+// 恰好 pushWorkers 路在途由 TestPushDeliverStopsOnCancel 用挂住的端点确定性地验证。
 func TestPushDeliversInParallel(t *testing.T) {
 	f := newFakePushEndpoint(t)
 	f.delay.Store(int64(300 * time.Millisecond))
@@ -1016,11 +1027,10 @@ func TestPushDeliversInParallel(t *testing.T) {
 	id, secret := enrollMachine(t, h, "mac")
 	c := dialAgent(t, h, secret, wire.Hello{MachineID: id, Proto: wire.Proto, HomeDir: "/home/u"})
 	defer c.close()
-	start := time.Now()
 	c.send(pendingFrame("r1", "s1", "t1", "git push origin main"))
 	waitFor(t, "审计 push_sent", func() bool { return hasAuditFor(h, "r1", "push_sent") })
-	if d := time.Since(start); d > 1500*time.Millisecond {
-		t.Fatalf("8 条推送用了 %s，没有并行", d)
+	if m := f.maxInflight.Load(); m < 2 || m > pushWorkers {
+		t.Fatalf("端点同时在处理的推送至多 %d 条，应在 2 到 %d 之间（串行时为 1）", m, pushWorkers)
 	}
 	if f.count() != 8 || !hasAudit(h, "push_sent", `{"failed":0,"gone":0,"sent":8}`) {
 		t.Fatalf("应发出 8 条: 端点收到 %d 次", f.count())

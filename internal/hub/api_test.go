@@ -2208,6 +2208,20 @@ func TestVersionEndpointAndSecureCookieFromPublicURL(t *testing.T) {
 	}
 }
 
+// --public-url 的 scheme 大小写不敏感（CheckPublicURL 经 url.Parse 接受 HTTPS://）：大写的照样蕴含 Secure。
+func TestSecureCookieFromUppercasePublicURL(t *testing.T) {
+	if err := CheckPublicURL("HTTPS://Hub.Example.com"); err != nil {
+		t.Fatalf("大写 scheme 应是合法的 public-url: %v", err)
+	}
+	h := newTestHubWith(t, func(c *Config) { c.PublicURL = "HTTPS://Hub.Example.com" }, nil)
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
+		t.Fatal(err)
+	}
+	if ck := login(t, h, "hunter22"); !ck.Secure {
+		t.Fatal("大写 HTTPS 的 --public-url 也应让 cookie 带 Secure")
+	}
+}
+
 // 推送订阅至多 maxPushSubscriptions 条：再登记新端点回 409；已有端点重新登记是更新，不算新增。
 func TestPushSubscriptionCap(t *testing.T) {
 	f := newFakePushEndpoint(t)

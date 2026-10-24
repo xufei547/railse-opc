@@ -171,7 +171,7 @@ server {
 }
 ```
 
-配套：`railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com --secure-cookies --trusted-proxy 127.0.0.1`（`--public-url` 是手机打开网页的源，不加推送就是停用的；nginx 经 IPv6 回环连 hub 时再加 `::1`）。用 Caddy 时 `reverse_proxy 127.0.0.1:8787` 即可（按 Caddy v2 文档：默认透传 Host、覆盖 X-Forwarded-For、自动代理 WebSocket）。
+配套：`railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com --trusted-proxy 127.0.0.1`（`--public-url` 是手机打开网页的源，不加推送就是停用的；nginx 经 IPv6 回环连 hub 时再加 `::1`）。用 Caddy 时 `reverse_proxy 127.0.0.1:8787` 即可（按 Caddy v2 文档：默认透传 Host、覆盖 X-Forwarded-For、自动代理 WebSocket）。
 
 ## 故障排查
 
