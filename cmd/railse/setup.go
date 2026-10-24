@@ -1,232 +1,72 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/railse/railse-opc/internal/hooksconf"
 )
 
 const setupUsage = `用法:
   railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--bin 路径] [--dry-run]
-    默认三个都装。Claude 与 Gemini 写项目级配置，Codex 写用户级 ~/.codex/hooks.json。`
+    默认三个都装。Claude 写项目级 .claude/settings.local.json（不入库；旧版写在 settings.json 的会迁走），
+    Gemini 写项目级 .gemini/settings.json，Codex 写用户级 ~/.codex/hooks.json。`
 
-type hookEntry struct {
-	Name    string `json:"name,omitempty"`
-	Type    string `json:"type"`
-	Command string `json:"command"`
-	Timeout int    `json:"timeout,omitempty"`
+// pendingWrite 是算好、待写的一个配置文件。
+type pendingWrite struct {
+	show, path string // show 是给人看的路径，path 是解开符号链接后真正写的文件
+	data       []byte
+	mode       os.FileMode
+	migrated   bool // 只删不加：把 Railse 钩子从 Claude 的 settings.json 迁走
 }
 
-type hookGroup struct {
-	Matcher *string     `json:"matcher,omitempty"`
-	Hooks   []hookEntry `json:"hooks"`
+// resolveForWrite 解开符号链接：配置是符号链接（如 dotfiles）时写到链接指向的文件，不把链接换成普通文件。
+// 同时取现有文件的权限沿用，文件还不存在时用 0644。
+func resolveForWrite(path string) (target string, mode os.FileMode) {
+	target, mode = path, 0o644
+	if r, err := filepath.EvalSymlinks(path); err == nil {
+		target = r
+	}
+	if st, err := os.Stat(target); err == nil {
+		mode = st.Mode().Perm()
+	}
+	return target, mode
 }
 
-func strp(s string) *string { return &s }
-
-// shellQuote 让 bin 能安全地拼进钩子命令（三家 CLI 都交给 shell 执行）：
-// 普通路径原样返回，含空格等特殊字符时用单引号包起来。
-func shellQuote(s string) string {
-	plain := s != "" && strings.IndexFunc(s, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+:@%,=", r))
-	}) < 0
-	if plain {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// hookPlan 给出每个 CLI 要写入的事件与条目。
-func hookPlan(cli, bin string) map[string][]hookGroup {
-	cmd := shellQuote(bin) + " hook " + cli
-	one := func(name string, timeout int) []hookGroup {
-		return []hookGroup{{Hooks: []hookEntry{{Name: name, Type: "command", Command: cmd, Timeout: timeout}}}}
-	}
-	switch cli {
-	case "claude":
-		return map[string][]hookGroup{
-			"PermissionRequest": {{Matcher: strp(""), Hooks: []hookEntry{{Type: "command", Command: cmd, Timeout: 86400}}}},
-			"Notification":      one("", 0),
-			"Stop":              one("", 0),
-			"SessionEnd":        one("", 0),
-		}
-	case "codex":
-		return map[string][]hookGroup{
-			"PermissionRequest": {{Matcher: strp(""), Hooks: []hookEntry{{Type: "command", Command: cmd, Timeout: 86400}}}},
-			"Stop":              one("", 0),
-			"SessionEnd":        one("", 3),
-		}
-	case "gemini":
-		return map[string][]hookGroup{
-			"BeforeTool":   {{Matcher: strp(".*"), Hooks: []hookEntry{{Name: "railse-before-tool", Type: "command", Command: cmd, Timeout: 86400000}}}},
-			"Notification": one("railse-notification", 0),
-			"AfterAgent":   one("railse-after-agent", 0),
-			"SessionEnd":   one("railse-session-end", 0),
+// claudeMigration 算出把 Railse 钩子从 Claude 的共享配置 settings.json 迁走后的内容；没有要迁的返回 false，文件不动。
+// settings.json 已不是写入目标：读不了、不是合法配置时只在 stderr 警告并跳过，不挡安装。
+// settings.local.json 与它是同一个文件（链接）时不迁，否则会把刚装进去的钩子删掉。
+func claudeMigration(shared, localReal, bin string, stderr io.Writer) (pendingWrite, bool) {
+	target, mode := resolveForWrite(shared)
+	if a, err := os.Stat(target); err == nil {
+		if b, err := os.Stat(localReal); err == nil && os.SameFile(a, b) {
+			return pendingWrite{}, false
 		}
 	}
-	return nil
-}
-
-// isOurs 判断单个钩子条目是不是 Railse 写的：name 以 railse- 开头，
-// 或命令是“<程序> hook …”且程序是本次的 bin，
-// 或命令恰好是“<程序> hook claude|codex|gemini”且程序文件名是 railse（换过安装路径时留下的旧条目）。
-func isOurs(entry any, bin string) bool {
-	m, ok := entry.(map[string]any)
-	if !ok {
-		return false
+	existing, err := os.ReadFile(target)
+	if os.IsNotExist(err) {
+		return pendingWrite{}, false
 	}
-	cmd, _ := m["command"].(string)
-	name, _ := m["name"].(string)
-	if strings.HasPrefix(name, "railse-") || strings.HasPrefix(cmd, shellQuote(bin)+" hook ") {
-		return true
+	if err != nil {
+		fmt.Fprintf(stderr, "警告：读不了 %s，没有检查里面有没有旧版写的 Railse 钩子：%v\n", shared, err)
+		return pendingWrite{}, false
 	}
-	if prog, ok := hookCommandProgram(cmd); ok && filepath.Base(prog) == "railse" {
-		return true
+	ins, err := hooksconf.Inspect(existing, bin)
+	if err == nil && len(ins.Events) == 0 {
+		return pendingWrite{}, false
 	}
-	return false
-}
-
-// withoutOurs 从一个条目组里删掉我们的条目。返回去掉后的组，以及这个组是否因此删空、应整组去掉。
-// 组里没有我们的条目时原样返回；别人追加在我们组里的条目连同组的其他字段（如 matcher）都保留。
-func withoutOurs(group any, bin string) (kept any, drop bool) {
-	gm, ok := group.(map[string]any)
-	if !ok {
-		return group, false
+	var data []byte
+	if err == nil {
+		data, err = hooksconf.Merge(existing, bin, nil)
 	}
-	hooks, ok := gm["hooks"].([]any)
-	if !ok {
-		return group, false
+	if err != nil {
+		fmt.Fprintf(stderr, "警告：%s：%v，跳过迁移；里面若有旧版写的 Railse 钩子请手动删掉，否则会和 settings.local.json 里的一起触发两次\n", shared, err)
+		return pendingWrite{}, false
 	}
-	rest := []any{}
-	for _, h := range hooks {
-		if !isOurs(h, bin) {
-			rest = append(rest, h)
-		}
-	}
-	switch {
-	case len(rest) == len(hooks):
-		return group, false
-	case len(rest) == 0:
-		return nil, true
-	}
-	gm["hooks"] = rest
-	return gm, false
-}
-
-// hookCommandProgram 认出 hookPlan 写过的命令形状“<一个词> hook claude|codex|gemini”，返回去掉引号的程序路径。
-// “一个词”是不含空白的裸词，或 shellQuote 产生的单引号词（内部单引号按 shellQuote 的写法转义）。其他形状一律不认。
-func hookCommandProgram(cmd string) (string, bool) {
-	var prog, rest string
-	if strings.HasPrefix(cmd, "'") {
-		var b strings.Builder
-		i := 1
-		for {
-			j := strings.IndexByte(cmd[i:], '\'')
-			if j < 0 {
-				return "", false
-			}
-			b.WriteString(cmd[i : i+j])
-			i += j + 1
-			if !strings.HasPrefix(cmd[i:], `\''`) {
-				break
-			}
-			b.WriteByte('\'')
-			i += 3
-		}
-		prog, rest = b.String(), cmd[i:]
-	} else {
-		i := strings.IndexAny(cmd, " \t\r\n")
-		if i <= 0 {
-			return "", false
-		}
-		prog, rest = cmd[:i], cmd[i:]
-	}
-	switch rest {
-	case " hook claude", " hook codex", " hook gemini":
-		return prog, true
-	}
-	return "", false
-}
-
-// mergeHooks 把我们的条目并进现有配置：逐个条目删旧的 Railse 条目（组删空了才删组），保留别人的，追加新的。
-// 现有内容不是合法 JSON、顶层或 hooks 不是对象、本次要写的事件不是数组时都视为损坏，返回错误不覆盖；
-// hooks 里其他非数组的值（如 Gemini 的开关项）原样保留。
-func mergeHooks(existing []byte, bin string, entries map[string][]hookGroup) ([]byte, error) {
-	doc := map[string]any{}
-	if len(bytes.TrimSpace(existing)) > 0 {
-		dec := json.NewDecoder(bytes.NewReader(existing))
-		dec.UseNumber() // 别人的数字原样保留，不经 float64 丢精度
-		var v any
-		if err := dec.Decode(&v); err != nil {
-			return nil, fmt.Errorf("现有配置不是合法 JSON，不覆盖: %w", err)
-		}
-		if _, err := dec.Token(); err != io.EOF {
-			return nil, errors.New("现有配置不是合法 JSON（末尾有多余内容），不覆盖")
-		}
-		m, ok := v.(map[string]any)
-		if !ok {
-			return nil, errors.New("现有配置顶层不是对象，不覆盖")
-		}
-		doc = m
-	}
-	hooks := map[string]any{}
-	if raw, ok := doc["hooks"]; ok {
-		h, ok := raw.(map[string]any)
-		if !ok {
-			return nil, errors.New(`现有配置的 "hooks" 不是对象，不覆盖`)
-		}
-		hooks = h
-	}
-	for ev := range entries {
-		if raw, ok := hooks[ev]; ok {
-			if _, ok := raw.([]any); !ok {
-				return nil, fmt.Errorf(`现有配置的 "hooks.%s" 不是数组，不覆盖`, ev)
-			}
-		}
-	}
-	// 先从所有事件里逐个条目删掉我们旧的条目；组里只剩我们的条目时整组删掉
-	for ev, raw := range hooks {
-		groups, ok := raw.([]any)
-		if !ok {
-			continue // 不是事件数组（我们不写的键），原样保留
-		}
-		kept := []any{}
-		for _, g := range groups {
-			if g2, drop := withoutOurs(g, bin); !drop {
-				kept = append(kept, g2)
-			}
-		}
-		switch {
-		case len(kept) == 0 && len(groups) > 0:
-			delete(hooks, ev)
-		default:
-			hooks[ev] = kept
-		}
-	}
-	// 再追加本次的
-	for ev, groups := range entries {
-		list, _ := hooks[ev].([]any)
-		for _, g := range groups {
-			list = append(list, g)
-		}
-		hooks[ev] = list
-	}
-	doc["hooks"] = hooks
-	// map 按键排序输出，重复运行结果字节相同；不转义 &、<、>，别人的命令保持可读
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(doc); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return pendingWrite{show: shared, path: target, data: data, mode: mode, migrated: true}, true
 }
 
 // writeFileAtomic 先写同目录的临时文件再 rename，中途失败不会留下写了一半的配置。
@@ -302,58 +142,61 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		*codexFile = filepath.Join(home, ".codex", "hooks.json")
+		*codexFile = hooksconf.CodexPath(home)
 	}
+	claudeLocal, claudeShared := hooksconf.ClaudePaths(absProject)
 	targets := []struct {
 		cli  string
 		on   bool
 		path string
 	}{
-		{"claude", *doClaude, filepath.Join(absProject, ".claude", "settings.json")},
+		{"claude", *doClaude, claudeLocal},
 		{"codex", *doCodex, *codexFile},
-		{"gemini", *doGemini, filepath.Join(absProject, ".gemini", "settings.json")},
+		{"gemini", *doGemini, hooksconf.GeminiPath(absProject)},
 	}
-	type pending struct {
-		show, path string // show 是给人看的路径，path 是解开符号链接后真正写的文件
-		data       []byte
-		mode       os.FileMode
-	}
-	// 先把所有目标都算好，任何一个出错就一个都不写
-	var writes []pending
+	// 先把所有目标（连同 settings.json 的迁移）都算好，任何一个出错就一个都不写
+	var writes []pendingWrite
 	for _, tg := range targets {
 		if !tg.on {
 			continue
 		}
-		path := tg.path
-		if real, err := filepath.EvalSymlinks(path); err == nil {
-			path = real // 配置是符号链接（如 dotfiles）时写到链接指向的文件，不把链接换成普通文件
-		}
+		path, mode := resolveForWrite(tg.path)
 		existing, err := os.ReadFile(path)
 		if err != nil && !os.IsNotExist(err) {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		merged, err := mergeHooks(existing, *bin, hookPlan(tg.cli, *bin))
+		merged, err := hooksconf.Merge(existing, *bin, hooksconf.Plan(tg.cli, *bin))
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", tg.path, err)
 			return 1
 		}
-		mode := os.FileMode(0o644)
-		if st, err := os.Stat(path); err == nil {
-			mode = st.Mode().Perm()
+		writes = append(writes, pendingWrite{show: tg.path, path: path, data: merged, mode: mode})
+		if tg.cli == "claude" {
+			// 紧跟在 settings.local.json 之后：先装好新的再删旧的，中途失败也不会两处都没有
+			if w, ok := claudeMigration(claudeShared, path, *bin, stderr); ok {
+				writes = append(writes, w)
+			}
 		}
-		writes = append(writes, pending{tg.path, path, merged, mode})
 	}
 	for _, w := range writes {
 		if *dryRun {
-			fmt.Fprintf(stdout, "== %s ==\n%s", w.show, w.data)
+			if w.migrated {
+				fmt.Fprintf(stdout, "== %s（迁走 Railse 钩子后）==\n%s", w.show, w.data)
+			} else {
+				fmt.Fprintf(stdout, "== %s ==\n%s", w.show, w.data)
+			}
 			continue
 		}
 		if err := writeFileAtomic(w.path, w.data, w.mode); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "已写入 %s\n", w.show)
+		if w.migrated {
+			fmt.Fprintf(stdout, "已从 %s 迁走 Railse 钩子（现在写在 settings.local.json，不入库）\n", w.show)
+		} else {
+			fmt.Fprintf(stdout, "已写入 %s\n", w.show)
+		}
 	}
 	if *doCodex {
 		// notify 是 argv 数组，bin 必须单独作为第一个元素；%q 的转义对普通路径与 TOML 基本字符串一致

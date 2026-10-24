@@ -18,7 +18,9 @@ railse agent status              # 另开终端查看：paused、规则条数、
 railse setup hooks --project <目录> [--claude] [--codex] [--gemini] [--bin 路径] [--dry-run]
 ```
 
-不带 CLI 开关时三个都装。Claude 写 `<目录>/.claude/settings.json`，Gemini 写 `<目录>/.gemini/settings.json`，Codex 写用户级 `~/.codex/hooks.json`（`--codex-file` 可改）。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
+不带 CLI 开关时三个都装。Claude 写 `<目录>/.claude/settings.local.json`，Gemini 写 `<目录>/.gemini/settings.json`，Codex 写用户级 `~/.codex/hooks.json`（`--codex-file` 可改）。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
+
+Claude 的钩子放在 `settings.local.json`，因为钩子命令里是本机的 railse 路径，不该随项目入库；按 Claude Code 的约定这个文件不入库，若 `git status` 里看到它，把它加进 `.gitignore`。旧版写在 `.claude/settings.json` 的 Railse 钩子会在装 Claude 钩子时迁走：只删 Railse 自己的条目（`hooks` 删空了连键一起去掉），别人的钩子与其他设置保留，打印“已从 … 迁走 Railse 钩子”；`--dry-run` 两份都打印。`settings.json` 里没有 Railse 条目时不碰它；它不是合法 JSON 时只警告、不迁移，照样装好 `settings.local.json`，这时请手动删掉里面旧的 Railse 钩子，否则同一个事件会触发两次。
 
 ## 看审计
 
@@ -80,7 +82,7 @@ railse setup hooks --project <目录> [--claude] [--codex] [--gemini] [--bin 路
 
 ## 冒烟
 
-`scripts/smoke-claude.sh` 在临时目录里起守护进程、装 Claude 钩子，再让 `claude -p` 执行一条 `touch`，最后打印审计。需要本机 Claude Code 已登录，会消耗模型额度，不进 CI。
+`scripts/smoke-claude.sh` 在临时目录里起守护进程、装 Claude 钩子，再让 `claude -p` 执行一条 `touch`，最后打印审计。需要本机 Claude Code 已登录，会消耗模型额度，不进 CI。脚本用 `--setting-sources project,local`：钩子在 `settings.local.json`（`local` 来源），只写 `project` 读不到；不加 `user`，免得用户级设置替人审批。
 
 ## 接入 hub 后
 

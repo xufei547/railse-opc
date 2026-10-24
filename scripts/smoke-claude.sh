@@ -15,10 +15,12 @@ for _ in $(seq 1 50); do [ -S "$RAILSE_HOME/agent.sock" ] && break; sleep 0.1; d
 mkdir -p "$WORK/proj" && (cd "$WORK/proj" && git init -q)
 "$WORK/railse" setup hooks --project "$WORK/proj" --claude --bin "$WORK/railse" || exit 1
 # env -i 隔离掉宿主应用注入的变量，但 USER/LOGNAME/TMPDIR/SHELL 必须保留，否则 claude 找不到钥匙串里的登录态。
+# --setting-sources project,local：钩子在 .claude/settings.local.json（local 来源），project 只含 .claude/settings.json；
+# 不加 user，避免用户级的 defaultMode: auto 让分类器替人审批。
 (cd "$WORK/proj" && env -i HOME="$HOME" PATH="$PATH" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" \
   TMPDIR="${TMPDIR:-/tmp}" SHELL="${SHELL:-/bin/sh}" LANG="${LANG:-C}" TERM=dumb RAILSE_HOME="$RAILSE_HOME" \
   claude -p "Run exactly this shell command with the Bash tool and nothing else: touch smoke-proof.txt . Then reply DONE." \
-  --setting-sources project --output-format json < /dev/null > "$WORK/claude.json")
+  --setting-sources project,local --output-format json < /dev/null > "$WORK/claude.json")
 CLAUDE_EXIT=$?
 echo "== claude 输出（退出码 $CLAUDE_EXIT）=="; cat "$WORK/claude.json"; echo
 echo "== 审计 =="; cat "$RAILSE_HOME/audit.jsonl"
