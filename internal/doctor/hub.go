@@ -115,12 +115,17 @@ func hubDirUnusable(dir string, statErr error) (Check, string) {
 // 只读打开 hub.db 的两种 URI 参数。hub 没在跑（没有 -wal）时用 immutable：SQLite 不加锁、不建 -wal 与 -shm
 // （单用 mode=ro 打开 WAL 库会建出 -wal、-shm 并留下，sudo 跑 doctor 时属主还是 root，hub 之后就写不了库）。
 // 有 -wal 时（hub 在跑，或异常退出没检查点）用 readonly_shm：只读地用现成的 -shm，读得到还在 WAL 里的数据；
-// -shm 不在（崩溃后被删）时它报 CANTOPEN 而不新建，这时回退 immutable 再读（读到的是最后一次检查点的数据）。
+// 它打不开（CANTOPEN，如崩溃后 -shm 被删）而不新建时，只有 -wal 是空的才回退 immutable（这时读到的就是全部数据）；
+// -wal 里有数据而 -shm 不在时 immutable 只读得到最后一次检查点（从没检查点的库连表都没有），doctor 只读、不做恢复，
+// 报 errWALPending，不按旧数据下结论。
 // busy timeout 只对加锁的那种有用：hub 关库、崩溃恢复时会短暂独占，等一会儿而不是立刻报 SQLITE_BUSY。
 const (
 	dsnImmutable   = "mode=ro&immutable=1"
 	dsnReadonlySHM = "mode=ro&readonly_shm=1&_busy_timeout=2000"
 )
+
+// errWALPending 表示 -wal 里有没检查点的数据而 -shm 不在：要等 hub 下次启动时恢复，doctor 不读旧数据。
+var errWALPending = errors.New("WAL 里有未检查点的数据而 -shm 不在")
 
 // hubDB 是只读打开、读过 schema_version 的 hub.db。
 type hubDB struct {
@@ -152,8 +157,14 @@ func openHubDB(path string) (*hubDB, error) {
 		}
 		db.Close()
 		lastErr = err
-		if sqliteCode(err) != sqlite3.SQLITE_CANTOPEN {
+		if sqliteCode(err) != sqlite3.SQLITE_CANTOPEN || query != dsnReadonlySHM {
 			break
+		}
+		if wal, err := os.Lstat(abs + "-wal"); err == nil && wal.Size() > 0 {
+			if _, err := os.Lstat(abs + "-shm"); errors.Is(err, fs.ErrNotExist) {
+				return nil, errWALPending
+			}
+			break // -shm 在却打不开（多半是权限）：照实报，不读旧数据
 		}
 	}
 	return nil, lastErr
@@ -199,6 +210,9 @@ func hubDBChecks(o Options) []Check {
 		return append([]Check{perm}, skipRest("没有数据库")...)
 	}
 	h, err := openHubDB(dbPath)
+	if errors.Is(err, errWALPending) {
+		return append([]Check{withPerm(perm, Check{ID: id, Name: name, Status: Warn, Detail: "hub 上次没正常退出且 -shm 不在，WAL 里有未检查点的数据，doctor 只读不做恢复", Hint: "启动一次 railse hub run（会自动恢复）后重跑 railse doctor"})}, skipRest("WAL 里有未恢复的数据，不按旧数据下结论")...)
+	}
 	if err != nil {
 		return append([]Check{withPerm(perm, Check{ID: id, Name: name, Status: Fail, Detail: "读不到 schema_version：" + err.Error(), Hint: dbErrHint(err)})}, skipRest("数据库读不了")...)
 	}

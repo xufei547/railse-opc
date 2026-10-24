@@ -16,9 +16,10 @@ const (
 
 var versionRe = regexp.MustCompile(`\d+\.\d+\.\d+`)
 
-// versionLineRe 认“整行就是版本号”的行：前面可有一个词（claude、codex-cli 之类）与 v，后面可有预发布后缀与括注，
-// 如“2.1.280 (Claude Code)”“codex-cli 0.150.0”“v1.2.3”“0.66.0-nightly.1”。
-var versionLineRe = regexp.MustCompile(`^\s*(?:[A-Za-z][\w.-]*\s+)?v?(\d+\.\d+\.\d+)[^\s()]*\s*(?:\([^()]*\))?\s*$`)
+// versionLineRe 认“整行就是版本号”的行：前面可有 CLI 自己的名字（claude、codex、codex-cli、gemini）、version 一词与 v，
+// 后面可有预发布后缀与括注，如“2.1.280 (Claude Code)”“codex-cli 0.150.0”“gemini version 0.60.0”“v1.2.3”“0.66.0-nightly.1”。
+// 前缀词只认这几个：别的程序的版本行（如 stderr 里混进来的“Node.js v18.19.0”）不算。
+var versionLineRe = regexp.MustCompile(`^\s*(?i:(?:claude|codex-cli|codex|gemini)\s+)?(?i:version\s+)?v?(\d+\.\d+\.\d+)[^\s()]*\s*(?:\([^()]*\))?\s*$`)
 
 // parseVersion 从 `--version` 的合并输出里取版本号。stderr 里的警告也会混进来（如 node 的
 // “requires node v18.19.0”），所以优先取整行就是版本号的行（有多行时取最后一行），没有这样的行才取最后一个 x.y.z。

@@ -989,6 +989,12 @@ func TestParseVersion(t *testing.T) {
 		"(node:123) Warning: requires node v18.19.0\n0.60.0\n": "0.60.0",
 		"0.60.0\n(node:123) Warning: requires node v18.19.0\n": "0.60.0",
 		"update available: 1.0.0 -> 1.2.0":                     "1.2.0",
+		// 别的程序的版本行（如 Node.js）不算：前缀词只认 CLI 自己的名字与 version
+		"0.60.0\nNode.js v18.19.0\n":                                      "0.60.0",
+		"gemini version 0.60.0\n(node:1) Warning: requires node v18.19.0": "0.60.0",
+		"Gemini Version v0.66.1\n":                                        "0.66.1",
+		"codex 0.150.0\n":                                                 "0.150.0",
+		"claude 2.1.280\n":                                                "2.1.280",
 	} {
 		v, ok := parseVersion(in)
 		if got := fmt.Sprintf("%d.%d.%d", v[0], v[1], v[2]); !ok || got != want {
@@ -1206,6 +1212,63 @@ func TestHubDirRequired(t *testing.T) {
 			if c := find(t, r, id); c.Status != Skip || !strings.Contains(c.Detail, dir) {
 				t.Fatalf("没要求时 %s 应 skip: %+v", id, c)
 			}
+		}
+	}
+}
+
+// hub 上次没正常退出（WAL 里有没检查点的数据）且 -shm 被删了：immutable 只读得到最后一次检查点的数据，
+// 从没检查点的库会被误报成“没有 schema_version 表”、只写在 WAL 里的密码会被误报成“还没设”。这时报 warn 叫人先起一次 hub，
+// 读库内容的几项跳过，目录原封不动。
+func TestHubDBUncheckpointedWALWithoutShm(t *testing.T) {
+	o, home := fakeOpts(t)
+	src := filepath.Join(home, "src")
+	if err := os.MkdirAll(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(src, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetSetting("password_hash", "$argon2id$x"); err != nil {
+		t.Fatal(err)
+	}
+	// store 还开着：数据都在 -wal 里，没检查点。只拷 hub.db 与 -wal，模拟崩溃后 -shm 被删
+	hubDir := filepath.Join(home, ".railse-hub")
+	if err := os.MkdirAll(hubDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"hub.db", "hub.db-wal"} {
+		b, err := os.ReadFile(filepath.Join(src, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(hubDir, name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fi, err := os.Stat(filepath.Join(hubDir, "hub.db-wal")); err != nil || fi.Size() == 0 {
+		t.Fatalf("前提：-wal 应非空: %v %v", fi, err)
+	}
+	o.HubDir = hubDir
+	before := snapshot(t, hubDir)
+	time.Sleep(20 * time.Millisecond)
+	r := Run(o)
+	if c := find(t, r, "hubsrv.db"); c.Status != Warn || !strings.Contains(c.Detail, "WAL 里有未检查点的数据") || !strings.Contains(c.Hint, "railse hub run") {
+		t.Fatalf("hubsrv.db 应 warn: %+v", c)
+	}
+	for _, id := range []string{"hubsrv.password", "hubsrv.vapid"} {
+		if c := find(t, r, id); c.Status != Skip {
+			t.Fatalf("%s 读的是库内容，应 skip: %+v", id, c)
+		}
+	}
+	after := snapshot(t, hubDir)
+	if names(after) != names(before) {
+		t.Fatalf("doctor 多建了文件：前 %s，后 %s", names(before), names(after))
+	}
+	for name, b := range before {
+		if a := after[name]; a != b {
+			t.Fatalf("%s 变了：前 %+v，后 %+v", name, b, a)
 		}
 	}
 }
