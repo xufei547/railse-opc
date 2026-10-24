@@ -3,11 +3,14 @@
 // hook 返回的函数（SSR 下 setState 是空操作，ref 照常），再直接调用；onClick 从 NotificationView 返回的元素树里找。
 import { isValidElement, type ReactElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError, hub } from '../api'
 import { useActions, type Actions } from '../components/Confirm'
-import { usePush, type PushApi, type PushControl, type PushEnv } from '../push'
+import { browserEnv, usePush, type PushApi, type PushControl, type PushEnv } from '../push'
 import { subscribe } from '../pwa'
-import { NotificationView } from './Settings'
+import { StoreProvider } from '../StoreProvider'
+import { NotificationView, Settings } from './Settings'
 
 let log: string[] = []
 
@@ -27,6 +30,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 const env: PushEnv = {
@@ -135,5 +139,77 @@ describe('通知操作经 useActions 互斥', () => {
     await vi.waitFor(() => expect(log).toContain('vapid'))
     expect(log).toContain('hub.test')
     expect(log).not.toContain('hub.unsubscribe')
+  })
+})
+
+describe('退出登录先关本机推送', () => {
+  /** SSR 跑一次设置页（在路由与 store 里），拿到它返回的元素树，从中找“退出登录”按钮。 */
+  function logoutButton() {
+    let tree: ReactNode = null
+    function H() {
+      tree = Settings()
+      return null
+    }
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={['/settings']}>
+        <StoreProvider onUnauthorized={() => {}}>
+          <H />
+        </StoreProvider>
+      </MemoryRouter>,
+    )
+    const btn = findButton(tree, '退出登录')
+    expect(btn).not.toBeNull()
+    return btn!
+  }
+
+  function spies(unsubscribe: () => Promise<void>) {
+    const sub = {
+      endpoint: 'https://push.example/a',
+      unsubscribe: async () => {
+        log.push('local.unsubscribe')
+        return true
+      },
+    } as unknown as PushSubscription
+    vi.spyOn(browserEnv, 'getSubscription').mockImplementation(async () => {
+      log.push('getSubscription')
+      return sub
+    })
+    vi.spyOn(hub, 'pushUnsubscribe').mockImplementation(async (endpoint: string) => {
+      log.push(`hub.unsubscribe ${endpoint}`)
+      return unsubscribe()
+    })
+    vi.spyOn(hub, 'logout').mockImplementation(async () => {
+      log.push('hub.logout')
+    })
+    // 退出后跳登录页（SSR 下 navigate 不生效，只会告警）
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+  }
+
+  it('点“退出登录”：先让 hub 删掉本机订阅并退掉本机订阅，再 hub.logout()', async () => {
+    spies(async () => {})
+    logoutButton().props.onClick()
+    await vi.waitFor(() => expect(log).toContain('hub.logout'))
+    expect(log).toEqual(['getSubscription', 'hub.unsubscribe https://push.example/a', 'local.unsubscribe', 'hub.logout'])
+  })
+
+  it('hub 删订阅失败也照常退出登录', async () => {
+    spies(async () => {
+      throw new ApiError(0, '连不上 hub，请检查网络')
+    })
+    logoutButton().props.onClick()
+    await vi.waitFor(() => expect(log).toContain('hub.logout'))
+    expect(log).toEqual(['getSubscription', 'hub.unsubscribe https://push.example/a', 'local.unsubscribe', 'hub.logout'])
+  })
+
+  it('hub 删订阅一直不回：等满时限后照常退出登录', async () => {
+    vi.useFakeTimers()
+    try {
+      spies(() => new Promise<void>(() => {}))
+      logoutButton().props.onClick()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(log).toEqual(['getSubscription', 'hub.unsubscribe https://push.example/a', 'local.unsubscribe', 'hub.logout'])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -4,13 +4,14 @@ import { hub } from '../api'
 import { Banner } from '../components/Banner'
 import { useActions, type Actions } from '../components/Confirm'
 import { failure, formatUptime, onlineCount } from '../manage'
-import { usePush, type PushControl } from '../push'
+import { browserEnv, logoutDevice, usePush, type PushControl } from '../push'
 import { useStore } from '../StoreProvider'
 
 export function Settings() {
   const { state, reload } = useStore()
   const navigate = useNavigate()
   const actions = useActions()
+  const push = usePush()
   const [error, setError] = useState<string | null>(null)
   const [leaving, setLeaving] = useState(false)
 
@@ -47,17 +48,19 @@ export function Settings() {
     })
   }
 
+  // 先尽力关掉这台设备的推送（不然退出后锁屏上照样收到审批摘要；最多等几秒，失败不挡退出），再退出登录
   async function logout() {
     setLeaving(true)
     setError(null)
     try {
-      await hub.logout()
+      await logoutDevice(browserEnv, hub)
       navigate('/login', { replace: true })
     } catch (e) {
-      // 没退成（多半是网络）：留在这里说明，不假装已经退出——服务端的会话还有效
+      // 没退成（多半是网络）：留在这里说明，不假装已经退出——服务端的会话还有效。推送可能已经关了，重新检查一次
       const m = failure(e, '退出失败')
       if (m) setError(`退出失败：${m}`)
       setLeaving(false)
+      void push.refresh()
     }
   }
 
@@ -83,7 +86,7 @@ export function Settings() {
           </span>
           <input type="checkbox" role="switch" checked={paused} disabled={actions.busy || !status} onChange={togglePause} />
         </label>
-        <NotificationSection act={actions.act} busy={actions.busy} />
+        <NotificationView push={push} act={actions.act} busy={actions.busy || leaving} />
         <h2 className="section-title">hub</h2>
         <dl className="kv">
           <dt>规则版本</dt>
@@ -95,7 +98,7 @@ export function Settings() {
           <dt>已运行</dt>
           <dd>{status ? formatUptime(status.uptime) : '-'}</dd>
         </dl>
-        <button type="button" className="btn block page-end" disabled={leaving} onClick={() => void logout()}>
+        <button type="button" className="btn block page-end" disabled={leaving || actions.busy || push.busy} onClick={() => void logout()}>
           {leaving ? '正在退出…' : '退出登录'}
         </button>
       </div>
@@ -117,16 +120,10 @@ const pushTexts: Record<PushControl['status'], string> = {
   unknown: '查不到通知状态',
 }
 
-/** 通知区块：挂载时检查推送状态。 */
-function NotificationSection({ act, busy }: { act: Actions['act']; busy: boolean }) {
-  const push = usePush()
-  return <NotificationView push={push} act={act} busy={busy} />
-}
-
 /**
  * 通知区块的展示部分：状态文案与按钮。只有 off、stale 有“开启”（classify 保证这时能推送、不是 iOS 的 Safari 标签页）。
  * 开启、关闭、测试都经页面的 act 做：与暂停、恢复自动审批互斥（同一时刻一件，确认面板开着时不能点），结果进底部的结果提示。
- * busy 是页面上别的操作在进行（useActions 的 busy）。
+ * busy 是页面上别的操作在进行（useActions 的 busy，或正在退出登录）。
  */
 export function NotificationView({ push, act, busy = false }: { push: PushControl; act: Actions['act']; busy?: boolean }) {
   const s = push.status

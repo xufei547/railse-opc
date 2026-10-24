@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -321,7 +322,7 @@ func TestCreateMachineRejectsEmptySecret(t *testing.T) {
 // 写密码哈希与删光登录会话在同一事务里：换密码后旧会话全部失效；删除失败时密码也不变。
 func TestSetPasswordHashRevokesSessions(t *testing.T) {
 	s := openTemp(t)
-	if err := s.SetPasswordHash("old"); err != nil {
+	if _, err := s.SetPasswordHash("old"); err != nil {
 		t.Fatal(err)
 	}
 	a, err := s.CreateClientSession(time.Hour)
@@ -335,7 +336,7 @@ func TestSetPasswordHashRevokesSessions(t *testing.T) {
 	if _, err := s.db.Exec("CREATE TRIGGER no_delete BEFORE DELETE ON client_sessions BEGIN SELECT RAISE(ABORT, 'no delete'); END"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPasswordHash("new"); err == nil {
+	if _, err := s.SetPasswordHash("new"); err == nil {
 		t.Fatal("删会话失败时应报错")
 	}
 	if v, ok, err := s.GetSetting("password_hash"); err != nil || !ok || v != "old" {
@@ -344,8 +345,12 @@ func TestSetPasswordHashRevokesSessions(t *testing.T) {
 	if _, err := s.db.Exec("DROP TRIGGER no_delete"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetPasswordHash("new"); err != nil {
+	ch, err := s.SetPasswordHash("new")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if ch.Sessions != 2 {
+		t.Fatalf("删掉的会话数 = %d，应为 2", ch.Sessions)
 	}
 	if v, ok, err := s.GetSetting("password_hash"); err != nil || !ok || v != "new" {
 		t.Fatalf("password_hash = %q, %v, %v", v, ok, err)
@@ -354,5 +359,78 @@ func TestSetPasswordHashRevokesSessions(t *testing.T) {
 		if ok, err := s.ValidateClientSession(tok); err != nil || ok {
 			t.Fatalf("换密码后旧会话应失效: %v, %v", ok, err)
 		}
+	}
+}
+
+// 换密码同一事务里删掉全部推送订阅（丢了的设备不再收到审批摘要），并记审计 push_subscriptions_cleared
+// （{"reason":"password_changed","count":n}）：只有原因与条数，不含密钥、端点与哈希。
+// 删订阅失败时整个事务回滚：密码、会话、订阅都不变，也不记审计。
+func TestSetPasswordHashRemovesPushSubscriptions(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.SetPasswordHash("old"); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.CreateClientSession(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ep := range []string{"https://web.push.apple.com/secret-path-1", "https://fcm.googleapis.com/fcm/send/secret-path-2"} {
+		if _, err := s.UpsertPushSubscription(ep, "p256dh-secret", "auth-secret", "ua"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.db.Exec("CREATE TRIGGER no_delete BEFORE DELETE ON push_subscriptions BEGIN SELECT RAISE(ABORT, 'no delete'); END"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetPasswordHash("new"); err == nil {
+		t.Fatal("删订阅失败时应报错")
+	}
+	if v, _, _ := s.GetSetting("password_hash"); v != "old" {
+		t.Fatalf("删订阅失败时密码不应变: %q", v)
+	}
+	if ok, _ := s.ValidateClientSession(sess); !ok {
+		t.Fatal("删订阅失败时会话不应被删")
+	}
+	if n, _ := s.CountPushSubscriptions(); n != 2 {
+		t.Fatalf("删订阅失败时订阅数 = %d，应仍为 2", n)
+	}
+	if evs, _ := s.ListAudit(0, ""); len(evs) != 1 {
+		t.Fatalf("回滚后不应多出审计（只有设初始密码那条）: %+v", evs)
+	}
+	if _, err := s.db.Exec("DROP TRIGGER no_delete"); err != nil {
+		t.Fatal(err)
+	}
+	ch, err := s.SetPasswordHash("new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch != (PasswordChange{Sessions: 1, PushSubscriptions: 2}) {
+		t.Fatalf("换密码删掉的 = %+v", ch)
+	}
+	if n, _ := s.CountPushSubscriptions(); n != 0 {
+		t.Fatalf("换密码后订阅数 = %d，应为 0", n)
+	}
+	evs, err := s.ListAudit(0, "")
+	if err != nil || len(evs) != 2 {
+		t.Fatalf("审计: %+v %v", evs, err)
+	}
+	e := evs[0]
+	if e.Action != "push_subscriptions_cleared" || e.Actor != "system" || e.MachineID != "" || e.RequestID != "" {
+		t.Fatalf("审计行: %+v", e)
+	}
+	if e.Detail != `{"reason":"password_changed","count":2}` {
+		t.Fatalf("审计 detail = %s", e.Detail)
+	}
+	for _, secret := range []string{"secret-path", "push.apple", "fcm", "p256dh-secret", "auth-secret", `"new"`, `"old"`} {
+		if strings.Contains(e.Detail, secret) {
+			t.Fatalf("审计不能含 %q: %s", secret, e.Detail)
+		}
+	}
+	// 没有订阅、没有会话时照样成功，条数为 0（审计照记，count 为 0）
+	if ch, err := s.SetPasswordHash("newer"); err != nil || ch != (PasswordChange{}) {
+		t.Fatalf("再换一次: %+v %v", ch, err)
+	}
+	if evs, _ := s.ListAudit(0, ""); len(evs) != 3 || evs[0].Detail != `{"reason":"password_changed","count":0}` {
+		t.Fatalf("再换一次的审计: %+v", evs)
 	}
 }

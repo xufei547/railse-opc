@@ -61,7 +61,7 @@ func doReqHdr(t *testing.T, method, url string, body []byte, ct string, cookie *
 // loggedIn 设密码并登录，返回会话 cookie。
 func loggedIn(t *testing.T, h *testHub) *http.Cookie {
 	t.Helper()
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	return login(t, h, "hunter22")
@@ -987,7 +987,7 @@ func TestClientWSRechecksSession(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("会话有效时应照常收到广播")
 	}
-	if err := h.srv.SetPassword("another22"); err != nil {
+	if _, err := h.srv.SetPassword("another22"); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1328,7 +1328,7 @@ func TestRunWaitsForWebSocketHandlers(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 		exited.Add(1)
 	}
-	if err := srv.SetPassword("hunter22"); err != nil {
+	if _, err := srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	secret := store.RandomToken()
@@ -1611,7 +1611,7 @@ func TestServeEndedStillShutsDown(t *testing.T) {
 			}
 			exited.Add(1)
 		}
-		if err := srv.SetPassword("hunter22"); err != nil {
+		if _, err := srv.SetPassword("hunter22"); err != nil {
 			t.Fatal(err)
 		}
 		secret := store.RandomToken()

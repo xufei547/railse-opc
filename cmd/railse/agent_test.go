@@ -494,7 +494,7 @@ func enrollTestMachine(t *testing.T, h *testHub, cfgDir string) agent.MachineCon
 // hubLogin 给测试 hub 设密码并登录，返回会话 cookie（登录按来源每分钟限 5 次，测试里登录一次反复用）。
 func hubLogin(t *testing.T, h *testHub) *http.Cookie {
 	t.Helper()
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(map[string]string{"password": "hunter22"})

@@ -1,6 +1,20 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './api'
-import { classify, disablePush, enablePush, keyChanged, probe, testPush, type ClassifyInput, type PushApi, type PushEnv, type PushStatus } from './push'
+import {
+  classify,
+  disablePush,
+  enablePush,
+  keyChanged,
+  LOGOUT_PUSH_WAIT,
+  logoutDevice,
+  probe,
+  testPush,
+  type ClassifyInput,
+  type LogoutApi,
+  type PushApi,
+  type PushEnv,
+  type PushStatus,
+} from './push'
 import type { VapidInfo } from './types'
 
 const base = { supported: true, ios: false, standalone: true, hubEnabled: true, permission: 'default' as NotificationPermission, hasSubscription: false, hubActive: false }
@@ -332,6 +346,87 @@ describe('disablePush', () => {
     const s = setup()
     await disablePush(s.env, s.api)
     expect(s.log).toEqual(['getSubscription'])
+  })
+})
+
+describe('logoutDevice', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** setup 的 api 加上 logout；登出时记下本机订阅退了没有。 */
+  function withLogout(s: ReturnType<typeof setup>, sub?: Sub, over: Partial<LogoutApi> = {}, logoutError?: Error): LogoutApi {
+    return {
+      pushUnsubscribe: s.api.pushUnsubscribe,
+      logout: async () => {
+        s.log.push(sub ? `logout (local unsubscribed: ${sub.unsubscribed})` : 'logout')
+        if (logoutError) throw logoutError
+      },
+      ...over,
+    }
+  }
+
+  it('先让 hub 删掉这条订阅、退掉本机订阅，再退出登录（DELETE 要登录 cookie）', async () => {
+    const sub = fakeSub('https://push.example/a')
+    const s = setup({ sub })
+    await logoutDevice(s.env, withLogout(s, sub))
+    expect(s.log).toEqual(['getSubscription', 'hub.unsubscribe https://push.example/a', 'logout (local unsubscribed: true)'])
+  })
+
+  it('没有订阅：只退出登录', async () => {
+    const s = setup()
+    await logoutDevice(s.env, withLogout(s))
+    expect(s.log).toEqual(['getSubscription', 'logout'])
+  })
+
+  it('关推送失败（hub 删不掉、本机退不掉、读不到订阅）不挡退出登录', async () => {
+    const sub = fakeSub('https://push.example/a', key(4, 1, 2), true)
+    let s = setup({ sub, unsubscribeHub: new ApiError(0, '连不上 hub，请检查网络') })
+    await logoutDevice(s.env, withLogout(s, sub))
+    expect(s.log).toEqual(['getSubscription', 'hub.unsubscribe https://push.example/a', 'logout (local unsubscribed: false)'])
+    s = setup({ subError: true })
+    await logoutDevice(s.env, withLogout(s))
+    expect(s.log).toEqual(['getSubscription', 'logout'])
+  })
+
+  it('hub 那边卡住：本机订阅照退，最多等 LOGOUT_PUSH_WAIT 毫秒就退出登录', async () => {
+    vi.useFakeTimers()
+    const sub = fakeSub('https://push.example/a')
+    const s = setup({ sub })
+    const api = withLogout(s, sub, {
+      pushUnsubscribe: (endpoint: string) => {
+        s.log.push(`hub.unsubscribe ${endpoint}`)
+        return new Promise<void>(() => {})
+      },
+    })
+    const p = logoutDevice(s.env, api)
+    await vi.advanceTimersByTimeAsync(LOGOUT_PUSH_WAIT - 1)
+    expect(s.log).toEqual(['getSubscription', 'hub.unsubscribe https://push.example/a'])
+    expect(sub.unsubscribed).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    await p
+    expect(s.log.at(-1)).toBe('logout (local unsubscribed: true)')
+  })
+
+  it('读订阅卡住（Service Worker 一直没就绪）：等满时限后照常退出登录', async () => {
+    vi.useFakeTimers()
+    const s = setup()
+    s.env.getSubscription = () => new Promise<PushSubscription | null>(() => {})
+    const p = logoutDevice(s.env, withLogout(s), 500)
+    await vi.advanceTimersByTimeAsync(499)
+    expect(s.log).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+    await p
+    expect(s.log).toEqual(['logout'])
+  })
+
+  it('关推送很快时不留定时器；退出登录本身失败照抛（服务端会话还有效，不能假装已退出）', async () => {
+    vi.useFakeTimers()
+    const s = setup({ sub: fakeSub('https://push.example/a') })
+    await logoutDevice(s.env, withLogout(s))
+    expect(vi.getTimerCount()).toBe(0)
+    const t = setup()
+    await expect(logoutDevice(t.env, withLogout(t, undefined, {}, new ApiError(0, '连不上 hub，请检查网络')))).rejects.toThrow('连不上 hub')
   })
 })
 

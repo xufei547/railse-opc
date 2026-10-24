@@ -216,6 +216,41 @@ func TestHubTokenRejectsBadTTL(t *testing.T) {
 	}
 }
 
+// railse hub password 换密码时删掉全部推送订阅，并说明删了几条、手机要重新开启通知。
+func TestHubPasswordClearsPushSubscriptions(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "hub")
+	var out, errOut bytes.Buffer
+	if code := runHub([]string{"password", "--dir", dir}, strings.NewReader("hunter22\n"), &out, &errOut); code != 0 {
+		t.Fatal(errOut.String())
+	}
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertPushSubscription("https://web.push.apple.com/lost-phone", "p", "a", ""); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	out.Reset()
+	if code := runHub([]string{"password", "--dir", dir}, strings.NewReader("another-pass\n"), &out, &errOut); code != 0 {
+		t.Fatalf("password: %d %q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "删除了 1 条推送订阅") || !strings.Contains(out.String(), "重新开启通知") {
+		t.Fatalf("应说明删了推送订阅、要重新开启通知: %q", out.String())
+	}
+	if strings.Contains(out.String(), "lost-phone") {
+		t.Fatalf("输出不能有端点: %q", out.String())
+	}
+	st, err = store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if n, _ := st.CountPushSubscriptions(); n != 0 {
+		t.Fatalf("换密码后订阅数 = %d，应为 0", n)
+	}
+}
+
 func TestHubRunServesAndStops(t *testing.T) {
 	dir := filepath.Join(tempDir(t), "hub")
 	var out, errOut bytes.Buffer

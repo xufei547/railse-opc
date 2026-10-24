@@ -171,6 +171,43 @@ export async function disablePush(env: PushEnv, api: PushApi): Promise<void> {
   await sub.unsubscribe()
 }
 
+/** 退出登录用到的 hub 接口。 */
+export type LogoutApi = Pick<typeof hub, 'pushUnsubscribe' | 'logout'>
+
+/** 退出登录前最多等多久（毫秒）关掉本机推送；超过就照常退出，关推送不能挡住退出。 */
+export const LOGOUT_PUSH_WAIT = 3000
+
+/**
+ * 退出登录：先尽力关掉这台设备的推送，再 hub.logout()。推送订阅与登录会话是分开的，只退出登录的话 hub 会继续把审批摘要
+ * 推到这台设备的锁屏上。
+ * 关推送必须在退出之前（DELETE /api/push/subscribe 要登录 cookie）：让 hub 删掉这条订阅，同时退掉本机订阅（退掉后推送服务
+ * 对这个端点回 404/410，hub 那条即使没删成，下次推送时也会删掉）。读订阅、hub、浏览器任何一步失败或卡住都不挡退出：
+ * 最多等 wait 毫秒。hub.logout() 自己的错误照抛（服务端会话还有效，不能假装已经退出）。
+ */
+export async function logoutDevice(env: PushEnv, api: LogoutApi, wait = LOGOUT_PUSH_WAIT): Promise<void> {
+  await within(stopPush(env, api), wait)
+  await api.logout()
+}
+
+async function stopPush(env: PushEnv, api: Pick<PushApi, 'pushUnsubscribe'>): Promise<void> {
+  const sub = await env.getSubscription()
+  if (!sub) return
+  await Promise.allSettled([api.pushUnsubscribe(sub.endpoint), sub.unsubscribe()])
+}
+
+/** 等 p 结束（成功失败都算），最多等 ms 毫秒。不会 reject。 */
+async function within(p: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms)
+  })
+  try {
+    await Promise.race([p.catch(() => undefined), timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** 让 hub 给本机订阅发一条测试通知。hub 的 404（没有这条订阅）、502（推送服务没收下）、503（推送停用）原文抛出。 */
 export async function testPush(env: PushEnv, api: PushApi): Promise<void> {
   const sub = await env.getSubscription()

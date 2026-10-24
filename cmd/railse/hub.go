@@ -223,11 +223,15 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		if err := srv.SetPassword(pw); err != nil {
+		ch, err := srv.SetPassword(pw)
+		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 		fmt.Fprintln(stdout, "密码已设置（已登录的网页需要重新登录）")
+		if ch.PushSubscriptions > 0 {
+			fmt.Fprintf(stdout, "删除了 %d 条推送订阅：各设备重新登录后，要在网页设置里重新开启通知。\n", ch.PushSubscriptions)
+		}
 	case "token":
 		tok, err := st.CreateEnrollToken(*ttl)
 		if err != nil {
