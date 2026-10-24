@@ -67,6 +67,8 @@ type Options struct {
 
 	// HubDirRequired 表示 HubDir 是显式给的（--hub-dir）：它不存在或读不到时 hubsrv.dir 报 fail，而不是把 hub 侧整段跳过。
 	HubDirRequired bool
+	// HubSkip 非空且 HubDir 为空时，hub 侧整段 skip，细节用它（如系统 hub 目录属于别的用户、查过哪些位置）。
+	HubSkip string
 
 	// DefaultSocket 是不带 --socket 的钩子会连的 socket：当前环境下 $RAILSE_HOME 或 ~/.railse 里的 agent.sock（钩子进程
 	// 的环境是 CLI 的，doctor 只能拿自己的环境推）。为空时 Run 按同样规则推；推不出（没有家目录）就不比对不带 --socket 的钩子。

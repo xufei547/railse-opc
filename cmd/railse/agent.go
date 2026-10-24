@@ -125,11 +125,13 @@ func agentConfigFor(dir string) (agent.Config, error) {
 	return agent.DefaultConfig()
 }
 
-// hubLine 显示到 hub 的连接：none（未接入；旧版守护进程不报时也按 none）、connecting/connected 加地址；
-// disabled（连续被 hub 以 401 拒绝）时说明怎么恢复。
+// hubLine 显示到 hub 的连接：none（未接入）、connecting/connected 加地址；disabled（连续被 hub 以 401 拒绝）时说明怎么恢复；
+// 旧版守护进程不报（为空）时显示未知并提示重启，与 doctor 一致，不说成未接入。
 func hubLine(st *proto.Status) string {
 	switch st.Hub {
-	case "", "none":
+	case "":
+		return "hub: 未知（守护进程版本较旧？重启它）"
+	case "none":
 		return "hub: none"
 	case "disabled":
 		return fmt.Sprintf("hub: disabled %s（本机密钥被拒，请 railse agent enroll --force 后重启守护进程）", st.HubURL)

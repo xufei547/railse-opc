@@ -45,6 +45,15 @@ func setDoctorHubFallback(t *testing.T, goos, dir string) {
 	t.Cleanup(func() { doctorGOOS, doctorSystemHubDir = oldGOOS, oldDir })
 }
 
+// setDoctorOwner 在本测试期间换掉 doctor 认系统 hub 目录属主用的 euid 与属主（owner 为负表示查不到），结束时换回。
+func setDoctorOwner(t *testing.T, euid, owner int) {
+	t.Helper()
+	oldEuid, oldOwner := doctorEuid, doctorDirOwner
+	doctorEuid = func() int { return euid }
+	doctorDirOwner = func(string) (int, bool) { return owner, owner >= 0 }
+	t.Cleanup(func() { doctorEuid, doctorDirOwner = oldEuid, oldOwner })
+}
+
 type doctorCheck struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
@@ -381,6 +390,38 @@ func TestDoctorLinuxSystemHubDir(t *testing.T) {
 	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "skip" || !strings.Contains(c.Detail, userHub) {
 		t.Fatalf("非 Linux 不该回退: %+v", c)
 	}
+	// 系统 hub 目录属于别的用户（不是 root 跑的）：不回退，hub 侧 skip 并说明
+	setDoctorHubFallback(t, "linux", sys)
+	setDoctorOwner(t, 1000, 2000)
+	_, checks = doctorJSON(t, "--dir", agentDir, "--project", base)
+	for _, id := range []string{"hubsrv.dir", "hubsrv.db", "hubsrv.autostart"} {
+		if c := mustCheck(t, checks, id); c.Status != "skip" || !strings.Contains(c.Detail, sys) || !strings.Contains(c.Detail, "属于别的用户") || !strings.Contains(c.Detail, "--hub-dir") {
+			t.Fatalf("系统 hub 目录属于别人时 %s 应 skip 并说明: %+v", id, c)
+		}
+	}
+	// 属主查不到也一样不回退
+	setDoctorOwner(t, 1000, -1)
+	if _, checks = doctorJSON(t, "--dir", agentDir, "--project", base); mustCheck(t, checks, "hubsrv.dir").Status != "skip" {
+		t.Fatalf("属主查不到时不该回退: %+v", checks["hubsrv.dir"])
+	}
+	// 以 root 跑：读得了别人的目录，照常回退
+	setDoctorOwner(t, 0, 2000)
+	if _, checks = doctorJSON(t, "--dir", agentDir, "--project", base); mustCheck(t, checks, "hubsrv.dir").Detail != sys {
+		t.Fatalf("root 跑时应回退到系统 hub 目录: %+v", checks["hubsrv.dir"])
+	}
+	// 属主就是自己：回退
+	setDoctorOwner(t, 2000, 2000)
+	if _, checks = doctorJSON(t, "--dir", agentDir, "--project", base); mustCheck(t, checks, "hubsrv.dir").Detail != sys {
+		t.Fatalf("属主是自己时应回退: %+v", checks["hubsrv.dir"])
+	}
+	// Linux 上两处都没有：skip 的细节列出查过的两个位置
+	os.Remove(sys)
+	_, checks = doctorJSON(t, "--dir", agentDir, "--project", base)
+	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "skip" || !strings.Contains(c.Detail, userHub) || !strings.Contains(c.Detail, sys) {
+		t.Fatalf("两处都没有时应列出查过的位置: %+v", c)
+	}
+	os.Mkdir(sys, 0o700)
+
 	// 显式 --hub-dir 优先于一切默认
 	setDoctorHubFallback(t, "linux", sys)
 	other := filepath.Join(base, "other-hub")

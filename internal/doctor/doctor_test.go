@@ -167,7 +167,24 @@ func TestAgentHubStates(t *testing.T) {
 			if strings.Contains(c.Detail, "未接入") || !strings.Contains(c.Hint, "重启") {
 				t.Fatalf("旧守护进程: %+v", c)
 			}
+		case "none":
+			if !strings.Contains(c.Hint, "enroll") {
+				t.Fatalf("没有 machine.json 时提示接入: %+v", c)
+			}
 		}
+	}
+	// 守护进程报 none 但 machine.json 已在：接入后还没重启守护进程，提示重启而不是再接入
+	writeFile(t, filepath.Join(o.AgentDir, "machine.json"), []byte(`{}`))
+	o.AgentStatus = func(string) (proto.Status, error) { return proto.Status{Hub: "none"}, nil }
+	c := find(t, Run(o), "agent.hub")
+	if c.Status != Warn || strings.Contains(c.Hint, "enroll") || !strings.Contains(c.Hint, "railse setup autostart") ||
+		!strings.Contains(c.Hint, "railse agent run") || !strings.Contains(c.Detail, "machine.json") {
+		t.Fatalf("接入后没重启: %+v", c)
+	}
+	// 守护进程不在默认目录：提示里的命令带 --dir
+	o.DefaultSocket = "/elsewhere/agent.sock"
+	if c := find(t, Run(o), "agent.hub"); !strings.Contains(c.Hint, "railse setup autostart --dir "+hooksconf.ShellQuote(o.AgentDir)) {
+		t.Fatalf("非默认目录时提示带 --dir: %+v", c)
 	}
 }
 

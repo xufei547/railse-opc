@@ -121,6 +121,11 @@ func agentRunningChecks(o Options) []Check {
 		hc = Check{ID: id, Name: name, Status: Fail, Detail: st.HubURL + " 连续以 401 拒绝本机密钥（机器被吊销或密钥无效），守护进程已停止重连", Hint: "railse agent enroll --hub … --token … --force 重新接入后重启守护进程"}
 	case "none":
 		hc = Check{ID: id, Name: name, Status: Warn, Detail: "未接入 hub，引擎定不了的请求会交回终端", Hint: "要在手机上审批就接入：railse agent enroll --hub https://… --token …"}
+		// 守护进程只在启动时读 machine.json：文件已在却报 none，是接入之后还没重启它
+		if _, err := os.Lstat(filepath.Join(o.AgentDir, "machine.json")); err == nil {
+			hc.Detail = "守护进程没接 hub，但 machine.json 已在：接入后还没重启守护进程（它只在启动时读 machine.json）"
+			hc.Hint = "接入后还没重启守护进程：托管的用 railse setup autostart" + dirFlag(o) + " 重装，前台跑的停掉后重新 railse agent run" + dirFlag(o)
+		}
 	default:
 		// 升级了程序却没重启守护进程时，旧进程不报 hub 状态
 		hc = Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf("守护进程没有报告 hub 状态（%q），可能是升级前启动的旧进程", st.Hub), Hint: "重启守护进程：托管的重跑一次 railse setup autostart，前台跑的停掉后重新 railse agent run"}

@@ -1318,9 +1318,9 @@ func TestSetupAllNoAutostartReenrollWhileDaemonRuns(t *testing.T) {
 	if !strings.Contains(out.String(), "停掉后重新 railse agent run --dir "+f.dir) {
 		t.Fatalf("手动的守护进程在跑时应提示重启它: %q", out.String())
 	}
-	// 没有新接入时不提示
+	// 没有新接入时第 3 步不提示（体检的 agent.hub 照样会说守护进程接入后没重启）
 	out.Reset()
-	if code := run(f.args("--no-autostart"), &out, &errOut); code != 0 || strings.Contains(out.String(), "重装或重启后生效") || strings.Contains(out.String(), "停掉后重新") {
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 0 || strings.Contains(out.String(), "读不到刚写的 machine.json") {
 		t.Fatalf("没有新接入时不该提示: %d %q", code, out.String())
 	}
 }

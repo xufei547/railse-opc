@@ -12,7 +12,7 @@ railse agent run --foreground    # 前台运行，--foreground 让日志同时�
 railse agent status              # 另开终端查看：paused、规则条数、待决请求数、hub 连接
 ```
 
-`railse agent status` 的 `hub:` 行：没接入 hub（没有 `machine.json`）时是 `hub: none`；接入后是 `hub: connecting <地址>`（还没连上或等着重连）、`hub: connected <地址>`，或 `hub: disabled <地址>`（连续 3 次被 hub 以 401 拒绝，已停止连接，要 `railse agent enroll --force` 后重启守护进程，见 `docs/hub.md`）。
+`railse agent status` 的 `hub:` 行：没接入 hub（没有 `machine.json`，或接入后还没重启守护进程）时是 `hub: none`；升级前起的旧守护进程不报这一项，显示 `hub: 未知（守护进程版本较旧？重启它）`；接入后是 `hub: connecting <地址>`（还没连上或等着重连）、`hub: connected <地址>`，或 `hub: disabled <地址>`（连续 3 次被 hub 以 401 拒绝，已停止连接，要 `railse agent enroll --force` 后重启守护进程，见 `docs/hub.md`）。
 
 配置目录取 `$RAILSE_HOME`，没设就是 `~/.railse`（权限 0700），里面有 `agent.sock`、`rules.yaml`、`audit.jsonl`、`state.json`、`agent.log`，socket 与审计为 0600。`agent` 子命令也接受 `--dir 目录`。钩子不带 `--socket` 时连 `$RAILSE_HOME` 或 `~/.railse` 里的 `agent.sock`（看的是 CLI 起钩子时的环境），所以守护进程不在默认目录时，装钩子要给同一个目录：`railse setup hooks --dir <目录>` 在钩子命令里写上 `--socket <目录>/agent.sock`（默认目录时不写，命令不变）。以前手工换过目录、钩子是不带 `--dir` 装的，重跑一次 `setup hooks --dir <目录>`；`railse doctor --dir <目录>` 会在 `hooks.*` 报出对不上的 socket。开机自启与退出后自动拉起用 `railse setup autostart`（macOS launchd、Linux systemd 用户单元，见 [setup.md](setup.md)）；`railse doctor` 只读地检查目录与文件权限、守护进程在不在跑、钩子装没装好。
 

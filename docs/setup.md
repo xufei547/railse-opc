@@ -132,7 +132,7 @@ railse doctor [--project 目录] [--dir 目录] [--hub-dir 目录] [--bin 路径
 
 只读：不改配置、不建文件，数据库按只读打开；网络只访问 hub 的 `GET /api/version`（不带凭据）；唯一会起的进程是 `claude`、`codex`、`gemini` 的 `--version`（各 10 秒超时），sudo 下（euid 是 root，或家目录不归当前用户）不跑，`cli.*` 报 skip。每项结果是 `ok`、`warn`、`fail`、`skip` 之一，warn 与 fail 下一行给“修复：”；有任一项 fail 退出码 1；`--json` 输出机器可读的结果（ID 固定不变）。
 
-hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux 上两者都没有时再看 `/var/lib/railse-hub`（系统单元的）。默认目录都不在就跳过 hub 侧；显式给的 `--hub-dir` 不存在时报 fail。系统单元的 hub 要以服务用户身份检查（`railse doctor`，或 `sudo -u 名字 /usr/local/bin/railse doctor --hub-dir /var/lib/railse-hub`），别的用户读不到 `hub.db`；服务用户的家目录里另有 `~/.railse-hub` 时，doctor 默认看的是它，这时显式给 `--hub-dir`。
+hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux 上两者都没有时再看 `/var/lib/railse-hub`（系统单元的），但只在它归当前用户（即服务用户）或以 root 跑 doctor 时才看，属于别的用户时 hub 侧整段 skip 并说明（换那个用户跑，或给 `--hub-dir`）。默认目录都不在就跳过 hub 侧（Linux 上 skip 的说明列出查过的两个位置）；显式给的 `--hub-dir` 不存在时报 fail。系统单元的 hub 要以服务用户身份检查（`railse doctor`，或 `sudo -u 名字 /usr/local/bin/railse doctor --hub-dir /var/lib/railse-hub`），别的用户读不到 `hub.db`；服务用户的家目录里另有 `~/.railse-hub` 时，doctor 默认看的是它，这时显式给 `--hub-dir`。
 
 | ID | 名称（输出里的） | 看什么 | 不过时 |
 | --- | --- | --- | --- |
@@ -140,7 +140,7 @@ hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux
 | `agent.files` | 配置与审计文件权限 | `rules.yaml`、`machine.json`、`audit.jsonl`、`state.json`（存在的）都是 0600 | 按提示 `chmod 600` |
 | `agent.socket` | socket 文件 | `agent.sock` 在、是 socket、0600 | 守护进程没在跑：`railse agent run` 或 `railse setup autostart`；不是 socket 就移走它再重启 |
 | `agent.running` | 守护进程在跑 | 守护进程应答 status | 同上 |
-| `agent.hub` | hub 连接 | 守护进程连 hub 的状态：`connected` 为 ok，`connecting`、`none`（未接入）为 warn，`disabled`（连续 3 次被 401 拒绝）为 fail | `connecting` 看 `agent.log`；`disabled` 要 `railse agent enroll --force` 后重启守护进程；没有报状态的是升级前起的旧进程，重启它 |
+| `agent.hub` | hub 连接 | 守护进程连 hub 的状态：`connected` 为 ok，`connecting`、`none`（未接入）为 warn，`disabled`（连续 3 次被 401 拒绝）为 fail | `connecting` 看 `agent.log`；`none` 而 `machine.json` 已在：接入后还没重启守护进程，按提示重启（不用再接入）；`disabled` 要 `railse agent enroll --force` 后重启守护进程；没有报状态的是升级前起的旧进程，重启它 |
 | `agent.autostart` | 守护进程开机自启 | 有没有守护进程的托管文件（只看文件，不问 launchd/systemd） | `railse setup autostart`（warn） |
 | `hub.reachable` | hub 可达 | `machine.json` 里 hub 的 `/api/version` 答得上、协议号与本机一致；没接入时 skip | 连不上：看 hub 在不在跑、地址、证书；不是 200：hub 太旧或地址被重定向；协议不一致：升级较旧的一方 |
 | `hooks.claude` | Claude Code 钩子 | `.claude/settings.local.json` 里 `PermissionRequest`、`Notification`、`Stop`、`SessionEnd` 四个事件都在，`PermissionRequest` 超时不低于 86400 秒；程序路径不是当前程序时 warn；钩子连的 socket（命令里的 `--socket`，没有就是默认的）不是 `--dir` 那个守护进程的时 warn | 缺了或超时不够：`railse setup hooks --project <目录> --claude`（守护进程不在默认目录时提示里带 `--dir`）；只在旧位置 `settings.json`，或两处都装了（会触发两次）：同一条命令迁走（warn）；socket 对不上：带 `--dir` 重装，或是 doctor 自己少给了 `--dir` |

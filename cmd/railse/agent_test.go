@@ -185,7 +185,7 @@ func TestHubLineShowsState(t *testing.T) {
 		st   proto.Status
 		want string
 	}{
-		{proto.Status{}, "hub: none"}, // 旧版守护进程不报
+		{proto.Status{}, "hub: 未知（守护进程版本较旧？重启它）"}, // 旧版守护进程不报（与 doctor 一致，不说成未接入）
 		{proto.Status{Hub: "none"}, "hub: none"},
 		{proto.Status{Hub: "connecting", HubURL: u}, "hub: connecting " + u},
 		{proto.Status{Hub: "connected", HubURL: u}, "hub: connected " + u},

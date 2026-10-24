@@ -70,6 +70,9 @@ func hubServerChecks(o Options) []Check {
 		return out
 	}
 	if o.HubDir == "" {
+		if o.HubSkip != "" {
+			return skipAll(o.HubSkip)
+		}
 		return skipAll("这台机器没有 hub 数据目录")
 	}
 	st, err := os.Stat(o.HubDir)
