@@ -38,6 +38,10 @@ const (
 	// 只是让 sshpass -p、curl -u 这类规则认得出“同一条命令跨行”：只有续行能跨，真正的换行不能。
 	// 反斜杠加 CRLF 不是续行：bash 里 \ 转义的是 CR，随后的 LF 照样分隔命令
 	vCont = 0x15
+	// vCmd 是命令位置上的 sshpass 命令名（"sshpass"、SSHPASS、/usr/bin/sshpass、ss''hpass……）：扫描时认出命令名后，
+	// 整个词在视图里换成它（词里的 vNest 保留）。sshpass -p 规则在视图里只从这里开始认，别的工具参数里的 sshpass 不认
+	// （env -u SSHPASS -u -p curl 的 -p 是 env -u 的参数，curl 才是程序，不能当密码抹掉）
+	vCmd = 0x16
 )
 
 // viewPlaceholder 是占位符在视图里的样子，与 placeholder 等长。
@@ -46,7 +50,7 @@ const viewPlaceholder = "\x13redacted>"
 // viewStruct 是视图里的结构字节，引号值也不能跨过；viewExcluded 另含占位符和引号里屏蔽的字节，裸值、用户名、URL 密码都排除。
 const (
 	viewStruct   = `\x10\x11\x12`
-	viewExcluded = `\x10\x11\x12\x13\x14`
+	viewExcluded = `\x10\x11\x12\x13\x14\x16`
 )
 
 // maxDepth 是嵌套结构的层数上限，超过的不再展开（开头的字符当普通字符），免得对抗输入把递归压得太深。
@@ -77,7 +81,7 @@ var viewRules = func() []rule {
 		cont:     `\x00\x15`, // 续行：\ 是 vMask，换行是 vCont（\ 加 CRLF 不是续行）
 		urlUser:  `[^/\s:@'"\\` + x + `]*`,
 		urlPass:  "[^\\s/?#'\"\\\\;|&<>()`$" + x + "]+",
-		nameEnd:  `[\x11\x12]`, // 视图里命令名的右引号是专用字节
+		sshpass:  `\x16[\x16\x10]*`, // 命令位置上的 sshpass，见 vCmd
 		excluded: x,
 		ph:       `[<\x13\x14]redacted>`, // 原文里的、本层插入的、引号里已抹过的占位符
 		word:     true,
@@ -235,7 +239,16 @@ func (b *builder) nest(s string) {
 	b.nests = append(b.nests, s)
 }
 
-func isViewByte(c byte) bool { return c >= vNest && c <= vCont }
+// markCmd 把视图里从 from 到末尾的这个命令名换成 vCmd，其中的 vNest 保留（个数与顺序不能变）。原文不动。
+func (b *builder) markCmd(from int) {
+	for i := from; i < len(b.view); i++ {
+		if b.view[i] != vNest {
+			b.view[i] = vCmd
+		}
+	}
+}
+
+func isViewByte(c byte) bool { return c >= vNest && c <= vCmd }
 
 // viewByte 是引号外普通字符在视图里的样子。
 func viewByte(c byte) byte {
@@ -343,6 +356,7 @@ type ctx struct {
 	cases  int  // 本层未结束的 case：其中的 ) 是分支模式的结尾，不结束 $(…)
 	start  bool // 下一个字符在词首（# 在这里开始注释）
 	inWord bool
+	wstart int // 当前词在视图里的起点（见 begin）
 	// 当前词去掉引号与转义后的文本：word 是开头至多 64 字节（判断 VAR=值、-c 类选项、保留字），base 是最后一个 /
 	// 之后至多 64 字节（判断命令名，路径多长都行）。超出时 long、baseLong 为 true
 	word, base     []byte
@@ -475,8 +489,17 @@ func (c *ctx) run() {
 	}
 }
 
+// begin 在词还没开始时记下视图里的当前位置：接下来追加的是一个新词的第一个字节。每个往词里追加内容的入口
+// （wordChar、escape、三种引号、nestDone、引号外的占位符）先调它；续行不调，它不开始新词。
+func (c *ctx) begin() {
+	if !c.inWord {
+		c.wstart = len(c.b.view)
+	}
+}
+
 // wordChar 追加当前字符作为词的一部分。
 func (c *ctx) wordChar() {
+	c.begin()
 	sc, t := c.sc, c.sc.t
 	ch := t.at(sc.i)
 	c.b.char(t, sc.i, viewByte(ch))
@@ -533,6 +556,7 @@ func (c *ctx) op(n int) {
 
 // nestDone 追加一个嵌套结构的文本，它是当前词的一部分。
 func (c *ctx) nestDone(s string) {
+	c.begin()
 	c.b.nest(s)
 	c.addWordNest(s)
 }
@@ -676,6 +700,10 @@ func (c *ctx) command(name, kw string) {
 		}
 		return
 	}
+	if strings.EqualFold(name, "sshpass") {
+		// sshpass -p 规则只从命令位置上的 sshpass 开始认（见 vCmd）。大小写不论：macOS 默认的文件系统不分大小写
+		c.b.markCmd(c.wstart)
+	}
 	if isShellName(name) {
 		c.shellOpts = 1
 		c.feed()
@@ -765,13 +793,14 @@ func (c *ctx) escape() {
 		return
 	}
 	nx := t.at(i + 1)
-	switch {
-	case nx == '\n':
+	if nx == '\n' {
 		c.b.char(t, i, vMask)
 		c.b.char(t, i+1, vCont)
 		sc.i += 2
 		return
-	case c.cmd() && t.has(i+1, placeholder):
+	}
+	c.begin()
+	if c.cmd() && t.has(i+1, placeholder) {
 		// 上一次脱敏留下的 \<redacted>：占位符当词的一部分，免得第二次把 > 后面读成注释
 		c.b.char(t, i, vMask)
 		sc.i++
@@ -834,6 +863,7 @@ func (c *ctx) redirect() {
 		c.op(2)
 		return
 	case ch == '<' && t.has(i, placeholder):
+		c.begin()
 		c.placeholderWord()
 		return
 	}
@@ -1205,6 +1235,7 @@ func (sc *scanner) backtickText(hi int) string {
 
 // singleQuoted 处理单引号：里面是字面文本，整段按 literalRules 抹；交给解释器执行的递归按命令行语境处理。
 func (c *ctx) singleQuoted() {
+	c.begin()
 	sc, t := c.sc, c.sc.t
 	i := sc.i
 	k := i + 1
@@ -1237,6 +1268,7 @@ func (c *ctx) singleQuoted() {
 
 // ansiQuoted 处理 $'…'：认 \ 转义，里面是字面文本（交给解释器执行的递归按命令行语境处理）。视图里 $ 当左引号，' 是 vMask。
 func (c *ctx) ansiQuoted() {
+	c.begin()
 	sc, t := c.sc, c.sc.t
 	i := sc.i
 	k := i + 2
@@ -1275,6 +1307,7 @@ func (c *ctx) ansiQuoted() {
 // doubleQuoted 处理双引号（dollar 为 true 时是 $"…"）：命令替换这类嵌套结构递归处理，其余是字面文本，
 // 一段一段按 literalRules 抹。交给解释器执行的，先空跑一遍找到右引号，再把去掉转义后的内容按命令行语境递归处理。
 func (c *ctx) doubleQuoted(dollar bool) {
+	c.begin()
 	sc, t := c.sc, c.sc.t
 	i := sc.i
 	open := 1

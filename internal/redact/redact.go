@@ -68,7 +68,7 @@ type quoting struct {
 	cont     string // 反斜杠续行：同一条命令跨到下一行（真正的换行是命令分隔符，不算；\ 加 CRLF 在 bash 里也不是续行）
 	urlUser  string // URL userinfo 的用户名
 	urlPass  string // URL userinfo 的密码
-	nameEnd  string // 命令名的右引号（"sshpass"、'sshpass'）
+	sshpass  string // sshpass 的命令名：文本语境认字面的 sshpass，命令行视图只认命令位置上的（见 shell.go 的 vCmd）
 	excluded string // 视图专用字节，所有值字符类都排除（文本语境为空）
 	ph       string // 已经抹过的占位符
 	// word：值是整个词，引号段与值字符可以相连（"password":、'a'"b"），免得第一次只抹引号那段、第二次再连带后面的字符
@@ -84,7 +84,10 @@ func textQuoting(open bool) quoting {
 		sqUser: `('[^'":\s\\]*:)`, sqPass: `[^']*`, sqEnd: `(')`,
 		dqUser: `("[^'":\s\\]*:)`, dqPass: `(?:[^"\\]|\\.)*`, dqEnd: `(")`,
 		jqEnd: `(\\")`, user: `([^'":\s\\]*:)`, sameCmd: sameCmd, cont: `\\\n`,
-		urlUser: `[^/\s:@'"\\]*`, urlPass: `[^\s/?#'"\\]+`, nameEnd: `['"]`, ph: placeholder,
+		urlUser: `[^/\s:@'"\\]*`, urlPass: `[^\s/?#'"\\]+`, ph: placeholder,
+		// 文本不执行，也没有命令位置可看：哪里出现都认，秘密一侧宁可多抹。命令名可以带引号（"sshpass"、'sshpass'），
+		// 大小写不论（macOS 默认的文件系统不分大小写，SSHPASS 照样能执行）
+		sshpass: `\b(?i:sshpass)['"]?`,
 	}
 	if open {
 		q.quoted, q.jsonStr = quotedOpen, `"(?:[^"\\]|\\.)*(?:"|$)`
@@ -113,18 +116,23 @@ func build(bare string, q quoting) []rule {
 	// sep 是词与词之间：至少一个空格或制表符（续行本身只是把两行接起来，x\⏎-p 是一个词 x-p）；gap 是选项与紧跟的值之间，可以没有
 	sep := `(?:` + q.cont + `)*[ \t](?:[ \t]|` + q.cont + `)*`
 	gap := `(?:[ \t]|` + q.cont + `)*`
-	// sshpass 在 -p 之前的选项（getopt 的 + 模式只认命令之前的选项）：带参数的 -f 文件、-d 描述符、-P 提示词（参数紧贴或
-	// 隔空白，可以是引号段），不带参数的 -h -e -V -v（可组合）；带参数的字母之后都是它的参数（-fp 是文件 p，不是 -p）。
-	// sshpass 不认的选项（常见的是把 ssh 的 -o StrictHostKeyChecking=no 写到了 sshpass 上）让它报错退出、什么都不执行：
-	// 这样的选项词连同后面至多一个词都跳过，-p 的密码照样抹（命令行上的密码会进通知，跳过的部分又不会执行，藏不住命令）。
-	// 参数不脱敏，只是跳过；参数里可以有前面的规则刚插入的占位符（-o PasswordAuthentication=<redacted>），否则跳不过去、
+	// sshpass 在 -p 之前的选项，取自 sshpass 1.06（getopt 串 "+f:d:p:P:heVv"，+ 模式只认程序名之前的选项）：带参数的 -f 文件、
+	// -d 描述符、-P 提示词（参数紧贴或隔空白，可以是引号段），不带参数的 -h -e -V -v（可组合）；带参数的字母之后都是它的参数
+	// （-fp 是文件 p，不是 -p）。macOS 的 getopt 把 + 也当成不带参数的选项（1.06 实测 -+ 照常执行），一并算进 fl。
+	// 别的 - 开头的词（-o、-1、--foo、-v-）让 sshpass 1.06 报 illegal option 退出、什么都不执行（实测）：这样的词连同后面
+	// 至多一个词（常见的是把 ssh 的 -o StrictHostKeyChecking=no 写到了 sshpass 上）都跳过，-p 的密码照样抹，命令行上的
+	// 密码会进通知。单独的 - 是程序名、-- 结束选项，都不跳过；词里有被转义的字符（-\p 就是 -p）或 glob、花括号（展开结果
+	// 拿不准）时也不跳过，只会漏抹、不会多抹。
+	// “跳过的部分不会执行”只在 sshpass 确实是被执行的程序时成立：命令行视图里这条规则只从命令位置上的 sshpass 开始认
+	// （shell.go 的 vCmd），别的工具参数里的 sshpass（env -u SSHPASS -u -p curl）后面的 -p 不是它的，后面的词可能正是程序。
+	// 跳过的参数不脱敏；参数里可以有前面的规则刚插入的占位符（-o PasswordAuthentication=<redacted>），否则跳不过去、
 	// 后面的 -p 就漏了
+	fl := `[ehVv+]`
 	optPiece := `(?:` + q.quoted + `|` + q.ph + `|` + bare + `)`
 	optArg := optPiece + `+`
-	unknownOpt := `-[ehVv]*[a-cgi-oq-uw-zA-OQ-UW-Z]` + optPiece + `*` // 含 d e f h p P v V 以外的字母
-	sshpassOpts := `(?:` + sep + `-[ehVv]*[fdP]` + gap + optArg + `|` + sep + `-[ehVv]+|` + sep + unknownOpt + `(?:` + sep + optArg + `)?)*`
-	// 命令名可以带引号（"sshpass"、'sshpass'），大小写不论（macOS 默认的文件系统不分大小写，SSHPASS 照样能执行）
-	sshpassName := `\b(?i:sshpass)` + q.nameEnd + `?`
+	unknownChar := `[^` + bare[2:len(bare)-2] + `\\\x00\x15ehVv+fdpP*?\[\]{}-]` // 不是已知选项字母、- 与拿不准的字符
+	unknownOpt := `-(?:` + fl + `*` + unknownChar + `|` + fl + `+-|-` + optPiece + `)` + optPiece + `*`
+	sshpassOpts := `(?:` + sep + `-` + fl + `*[fdP]` + gap + optArg + `|` + sep + `-` + fl + `+|` + sep + unknownOpt + `(?:` + sep + optArg + `)?)*`
 	phOnly := q.ph + `(?P<phend>` + stop + `|$)`
 	value := `(?:` + q.quoted + `|(?:` + phOnly + `|(?:` + q.ph + `)?` + bare + `))`
 	if q.word {
@@ -161,9 +169,11 @@ func build(bare string, q quoting) []rule {
 		// mysql 系命令紧贴 -p 的密码（-pxxx、-p'xxx'）。-p 单独出现时 mysql 提示输入密码、后面的是库名；-P 是端口：都不动
 		{re: regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + q.sameCmd + `\s-p)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
 		// sshpass 的 -p 密码（-p pw、-p 'pw'、-p'pw'、-ppw，-p 可以在 -v 这类选项之后或组合在末尾，如 -vp）。只认 sshpass
-		// 自己的选项里的 -p：后面 ssh、scp、rsync 自己的 -p（端口、保留权限）不动。sshpass 不限命令位置（echo sshpass -p x
-		// 也抹）：sudo、env、timeout 之后同样认，多抹的只是参数里的一个词，值在空白与 shell 元字符处停，藏不住命令
-		{re: regexp.MustCompile(`(` + sshpassName + sshpassOpts + sep + `-[ehVv]*p` + gap + `)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
+		// 自己的选项里的 -p：后面 ssh、scp、rsync 自己的 -p（端口、保留权限）不动。命令行视图里只认命令位置上的 sshpass
+		// （行首、; | && ( $( 之后、VAR=值 之后、sudo env timeout nohup exec xargs 等包装命令之后，见 shell.go 的 endWord）：
+		// echo sshpass -p x、docker run -e SSHPASS -p 8080:80 不动。代价是扫描器不认的包装命令（watch、ssh host 后面的远端命令）
+		// 之后的 sshpass -p 密码漏抹
+		{re: regexp.MustCompile(`(` + q.sshpass + sshpassOpts + sep + `-` + fl + `*p` + gap + `)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
 		// 裸 token：GitHub、OpenAI、Slack、AWS
 		{re: regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), repl: placeholder, need: "_-A"},
 	}
@@ -241,17 +251,23 @@ func args(raw json.RawMessage) json.RawMessage {
 // 让裸值在 shell 元字符处停下，后半截命令露出来（第 4 份终审 m-4）。
 var shellValueKey = regexp.MustCompile(`(?i)^(command|cmd|script|shell_command|bash|sh)$`)
 
-// walk 递归处理 JSON 值：敏感键的值整体抹掉，装命令的键（字符串值）按命令行语境，其余字符串按普通文本逐个脱敏。
-// 嵌套对象与数组里同样生效。
+// shellArgsKey 是与命令键同级、装命令参数的键名：命令键的值是 shell 解释器时，这些数组的元素是交给 shell 的参数
+// （{"command":"bash","args":["-c","…"]}），同样按命令行语境。
+var shellArgsKey = regexp.MustCompile(`(?i)^(args|argv|arguments)$`)
+
+// walk 递归处理 JSON 值：敏感键的值整体抹掉，装命令的键按命令行语境（见 commandValue），命令键是 shell 解释器时同级的
+// args、argv、arguments 数组也按命令行语境，其余字符串按普通文本逐个脱敏。嵌套对象与数组里同样生效。
 func walk(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
+		shellArgs := runsShell(x)
 		for k, e := range x {
-			switch s, ok := e.(string); {
+			_, isArray := e.([]any)
+			switch {
 			case sensitiveKey.MatchString(k):
 				x[k] = placeholder
-			case ok && shellValueKey.MatchString(k):
-				x[k] = String(s)
+			case shellValueKey.MatchString(k), shellArgs && isArray && shellArgsKey.MatchString(k):
+				x[k] = commandValue(e)
 			default:
 				x[k] = walk(e)
 			}
@@ -264,4 +280,42 @@ func walk(v any) any {
 		return redact(x, textRules)
 	}
 	return v
+}
+
+// commandValue 处理装命令的值：字符串按命令行语境；argv 数组（["sh","-c","…"]）的字符串元素逐个按命令行语境，
+// 别的元素照旧 walk；对象等其余值照旧 walk。
+func commandValue(v any) any {
+	switch x := v.(type) {
+	case string:
+		return String(x)
+	case []any:
+		for i, e := range x {
+			if s, ok := e.(string); ok {
+				x[i] = String(s)
+			} else {
+				x[i] = walk(e)
+			}
+		}
+		return x
+	}
+	return walk(v)
+}
+
+// runsShell 报告对象里是否有命令键的值是 shell 解释器：sh、bash、zsh、dash、ksh（与 shell.go 认的一样），
+// 可带路径（/bin/bash）、前后空白和一层成对的引号（"bash"、'/bin/zsh'）。
+func runsShell(m map[string]any) bool {
+	for k, e := range m {
+		s, ok := e.(string)
+		if !ok || !shellValueKey.MatchString(k) {
+			continue
+		}
+		s = strings.TrimSpace(s)
+		if n := len(s); n >= 2 && (s[0] == '"' || s[0] == '\'') && s[n-1] == s[0] {
+			s = s[1 : n-1]
+		}
+		if isShellName(s[strings.LastIndexByte(s, '/')+1:]) {
+			return true
+		}
+	}
+	return false
 }

