@@ -20,6 +20,7 @@ import (
 
 	"github.com/railse/railse-opc/internal/hub/store"
 	"github.com/railse/railse-opc/internal/hub/webui"
+	"github.com/railse/railse-opc/internal/hub/wire"
 )
 
 // ErrShutdownTimeout 表示 Run 关停时没在时限内等到全部在途请求、WebSocket 处理（/ws/agent、/ws/client）、webhook 回调或推送工作协程退出。
@@ -43,6 +44,8 @@ type Config struct {
 	TrustedProxies []netip.Prefix
 	// PublicURL 是 hub 对外的源（https://host[:port]，见 CheckPublicURL），也是 VAPID 的 sub。空则 Web Push 停用。
 	PublicURL string
+	// Version 是 hub 的版本号（cmd 注入 main.version），GET /api/version 回它；空时显示 dev。
+	Version string
 }
 
 // validate 检查时长为正、可信代理前缀有效、PublicURL 为空或是 https 源。
@@ -235,8 +238,19 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/enroll", s.handleEnroll)
 	s.mux.HandleFunc("GET /ws/agent", s.handleAgentWS)
 	s.mux.HandleFunc("POST /api/webhook/approvals", s.handleWebhookIngest)
+	s.mux.HandleFunc("GET /api/version", s.handleVersion)
 	s.apiRoutes()
 	s.pushRoutes()
+}
+
+// handleVersion 无需登录：doctor 与安装脚本用它确认 hub 可达、版本与守护进程协议号。回 {"version","agent_proto"}，
+// 没注入版本（开发构建）时 version 是 dev。
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	v := s.cfg.Version
+	if v == "" {
+		v = "dev"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"version": v, "agent_proto": wire.Proto})
 }
 
 // Handler 返回根处理器（serveRoot）。
@@ -301,8 +315,11 @@ func (s *Server) serve(parent context.Context, ln net.Listener) error {
 	// 不取消的话 /ws/client 的 handler 一直挂着，关停等不到它们退出。
 	ctx, cancelRun := context.WithCancel(parent)
 	defer cancelRun()
-	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.countRequests(s.Handler()), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: idleTimeout,
-		BaseContext: func(net.Listener) context.Context { return ctx }}
+	// ReadTimeout：直出 TLS 时没有反向代理替 hub 缓冲慢速请求，请求体迟迟发不完的连接到期断开（处理器不读请求体时，
+	// net/http 回应前要读掉剩下的）。不影响长连接与慢处理器：WebSocket 在 Hijack 时清掉期限；请求体读完（或没有请求体）时
+	// net/http 开后台读也清掉期限；decodeJSON 自己设、自己清读截止。
+	hs := &http.Server{Addr: s.cfg.Listen, Handler: s.countRequests(s.Handler()), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: readTimeout,
+		IdleTimeout: idleTimeout, BaseContext: func(net.Listener) context.Context { return ctx }}
 	s.log.Printf("hub 监听 %s", ln.Addr())
 	// 过期扫描随 Run 结束：Run 返回前等它退出，调用方随后关库也不会撞上它
 	sweepCtx, stopSweep := context.WithCancel(ctx)
@@ -389,6 +406,9 @@ var (
 	shutdownTimeout   = 3 * time.Second
 	callbackStopGrace = time.Second
 )
+
+// readTimeout 是 http.Server.ReadTimeout（见 serve）。是变量只为测试能缩短它。
+var readTimeout = 30 * time.Second
 
 // bodyReadTimeout 是读 JSON 请求体的截止。是变量只为测试能缩短它。
 var bodyReadTimeout = 10 * time.Second

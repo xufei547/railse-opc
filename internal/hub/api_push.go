@@ -2,6 +2,7 @@ package hub
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/railse/railse-opc/internal/hub/push"
@@ -12,6 +13,8 @@ const (
 	pushBodyMax      = 8 << 10 // /api/push/* 的请求体：订阅 JSON 不到 1 KiB
 	pushEndpointMax  = 2048    // 推送端点的字节上限（Apple、FCM、Mozilla 的端点都在 500 字节以内）
 	pushUserAgentMax = 256
+	// maxPushSubscriptions 是推送订阅的条数上限：每条新请求要推给全部订阅。
+	maxPushSubscriptions = 20
 )
 
 // testPushMessage 是 POST /api/push/test 发的那一条。
@@ -58,7 +61,8 @@ type endpointBody struct {
 }
 
 // handlePushSubscribe 登记订阅：先过 push.ParseSubscription（https 端点、P-256 点、16 字节 auth）再入库，
-// 同一端点再登记是更新（幂等）。推送停用 503，坏订阅 400，成功 204。
+// 同一端点再登记是更新（幂等）。新端点在已有 maxPushSubscriptions 条时回 409（同一端点再登记不算新增）。
+// 推送停用 503，坏订阅 400，成功 204。
 func (s *Server) handlePushSubscribe(w http.ResponseWriter, r *http.Request) {
 	if !s.push.enabled {
 		writeErr(w, http.StatusServiceUnavailable, pushDisabledReason)
@@ -76,6 +80,23 @@ func (s *Server) handlePushSubscribe(w http.ResponseWriter, r *http.Request) {
 	// ParseSubscription 的错误只说哪一项不对，不带端点与密钥的内容
 	if _, err := push.ParseSubscription(body.Endpoint, body.Keys.P256dh, body.Keys.Auth); err != nil {
 		writeErr(w, http.StatusBadRequest, "订阅无效："+err.Error())
+		return
+	}
+	// 查上限与入库串行进行，并发的登记不会越过上限
+	s.push.subMu.Lock()
+	defer s.push.subMu.Unlock()
+	if _, err := s.store.GetPushSubscription(body.Endpoint); errors.Is(err, store.ErrNotFound) {
+		n, err := s.store.CountPushSubscriptions()
+		if err != nil {
+			s.internalErr(w, "统计推送订阅", err)
+			return
+		}
+		if n >= maxPushSubscriptions {
+			writeErr(w, http.StatusConflict, fmt.Sprintf("推送订阅已达上限 %d 个，请先在别的设备上关闭通知", maxPushSubscriptions))
+			return
+		}
+	} else if err != nil {
+		s.internalErr(w, "查推送订阅", err)
 		return
 	}
 	sub, err := s.store.UpsertPushSubscription(body.Endpoint, body.Keys.P256dh, body.Keys.Auth, truncate(r.UserAgent(), pushUserAgentMax))

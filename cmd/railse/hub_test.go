@@ -593,6 +593,27 @@ func TestHubRunServeShutdownTimeout(t *testing.T) {
 	}
 }
 
+// hub run 把构建时注入的 main.version 交给 hub：GET /api/version 回它。
+func TestHubRunInjectsVersion(t *testing.T) {
+	cancelledHubRun(t)
+	oldServe, oldVersion := serveHub, version
+	t.Cleanup(func() { serveHub, version = oldServe, oldVersion })
+	version = "1.2.3-test"
+	var got map[string]any
+	serveHub = func(_ context.Context, srv *hub.Server) error {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/api/version", nil))
+		return json.Unmarshal(rec.Body.Bytes(), &got)
+	}
+	var out, errOut bytes.Buffer
+	if code := runHub([]string{"run", "--dir", filepath.Join(tempDir(t), "hub")}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("hub run = %d: %s", code, errOut.String())
+	}
+	if got["version"] != "1.2.3-test" {
+		t.Fatalf("/api/version = %v", got)
+	}
+}
+
 func TestHubVapidPrintsAndRotates(t *testing.T) {
 	cancelledHubRun(t)
 	dir := filepath.Join(tempDir(t), "hub")

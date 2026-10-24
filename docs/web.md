@@ -10,7 +10,7 @@
 - `make build`：先 `make web` 再 `go build -o railse ./cmd/railse`。直接 `go build` 也能编，但没有网页：hub 的网页路径回 503“网页未构建：在仓库里运行 make web 后重新构建 railse”，接口照常可用。
 - hub 不需要为网页做任何配置。HTML 带 CSP（脚本、样式、图片、连接只许同源，不许内联脚本、内联样式与 eval）与 `X-Frame-Options: DENY`；`assets/` 下带哈希的文件长期缓存，其余（`index.html`、`sw.js`、清单、图标）`no-cache`，升级 hub 后下次打开即是新版。
 - **要推送，必须** `railse hub run --public-url https://<hub 域名>`：只收 https 源（不带路径），localhost 也要 https；不设时推送停用，设置页会说明原因。**域名从第一天起固定**：推送订阅与主屏幕应用都绑在源上，换域名等于每台手机删掉图标、重新添加、重新开启通知。公网部署见 hub.md 的“部署与反向代理”（反向代理须保留原 Host，否则同源校验让写操作全部 403）。
-- **公网部署还要加 `--secure-cookies`**：hub 在 TLS 反向代理后面时自己看不到 TLS，不加的话登录 cookie 不带 Secure；在反向代理后面再加 `--trusted-proxy <代理地址>`，否则按 IP 的登录限速对所有人算成一个来源。完整命令例如 `railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com --secure-cookies --trusted-proxy 127.0.0.1`。
+- **登录 cookie 的 Secure**：hub 在 TLS 反向代理后面时自己看不到 TLS，设了 https 的 `--public-url` 时 cookie 自动加 Secure，没设时要加 `--secure-cookies`；在反向代理后面再加 `--trusted-proxy <代理地址>`，否则按 IP 的登录限速对所有人算成一个来源。完整命令例如 `railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com --secure-cookies --trusted-proxy 127.0.0.1`。
 
 ## 第一次使用（iPhone，iOS 16.4 起）
 

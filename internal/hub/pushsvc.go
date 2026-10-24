@@ -24,6 +24,7 @@ const (
 	// vapidSetting 是 settings 里 VAPID 私钥的键：32 字节标量的 base64url（无补位），明文（设计 5.3 例外），永不经接口返回。
 	vapidSetting    = "vapid_private"
 	pushQueueSize   = 256 // 推送队列满了就丢，记日志
+	pushWorkers     = 4   // 一条请求同时推给几条订阅
 	pushMaxFailures = 5   // 删订阅要连续失败至少这么多次（计数的失败，见 sendOne）……
 	// pushFailureSpan ……且这一轮的第一次失败已过去这么久：几秒、几小时的推送服务故障或 hub 断网不会删光好订阅。
 	pushFailureSpan = 24 * time.Hour
@@ -136,6 +137,8 @@ type pushService struct {
 	vapid  *push.VAPID
 	// sendMu：Send 持读锁，换 client.VAPID 持写锁（push.Client 要求 VAPID 不与 Send 同时改）。
 	sendMu sync.RWMutex
+	// subMu 串行化订阅登记的“查条数上限 → 入库”（handlePushSubscribe）。
+	subMu sync.Mutex
 }
 
 func newPushService(s *Server) (*pushService, error) {
@@ -262,8 +265,10 @@ func (p *pushService) run(ctx context.Context) {
 	}
 }
 
-// deliver 把一条请求推给全部订阅，按结果维护订阅，最后记一条审计 push_sent {"sent","gone","failed"}（没有订阅时不记）。
-// 先列订阅、再读密钥：列出的订阅若是换钥之后登记的，读到的一定是新密钥。ctx 取消（hub 关停）时剩下的不再发，算 failed。
+// deliver 把一条请求推给全部订阅（至多 pushWorkers 路并行，一个慢端点不拖住其余订阅），按结果维护订阅（sendOne 里
+// 按端点的单条库操作，并行安全），全部发完后记一条审计 push_sent {"sent","gone","failed"}（没有订阅时不记）。
+// 先列订阅、再读密钥：列出的订阅若是换钥之后登记的，读到的一定是新密钥。ctx 取消（hub 关停）时在途的中止、
+// 还没轮到的不再发，都算 failed。
 func (p *pushService) deliver(ctx context.Context, r store.Request) {
 	if ctx.Err() != nil {
 		return
@@ -289,13 +294,30 @@ func (p *pushService) deliver(ctx context.Context, r store.Request) {
 	if push.ValidTopic(r.ID) {
 		o.Topic = r.ID // 同一请求的未投递推送被替换
 	}
+	jobs := make(chan store.PushSubscription)
+	results := make(chan pushOutcome, len(subs))
+	var wg sync.WaitGroup
+	for range min(pushWorkers, len(subs)) {
+		wg.Go(func() {
+			for sub := range jobs {
+				if ctx.Err() != nil { // hub 关停：没轮到的不再发
+					results <- pushFailed
+					continue
+				}
+				out, _ := p.sendOne(ctx, sub, msg, o)
+				results <- out
+			}
+		})
+	}
+	for _, sub := range subs {
+		jobs <- sub
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
 	var sent, gone, failed int
-	for i, sub := range subs {
-		if ctx.Err() != nil {
-			failed += len(subs) - i
-			break
-		}
-		switch out, _ := p.sendOne(ctx, sub, msg, o); out {
+	for out := range results {
+		switch out {
 		case pushSent:
 			sent++
 		case pushGone:

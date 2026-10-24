@@ -148,7 +148,7 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	dir := fs.String("dir", "", "数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub")
 	listen := fs.String("listen", "", "监听地址，默认 127.0.0.1:8787")
-	secure := fs.Bool("secure-cookies", false, "cookie 加 Secure（hub 在 TLS 反向代理后面时打开）")
+	secure := fs.Bool("secure-cookies", false, "cookie 加 Secure（hub 在 TLS 反向代理后面而没设 --public-url 时打开；设了 https 的 --public-url 已自动加）")
 	foreground := fs.Bool("foreground", false, "日志同时写到 stderr")
 	ttl := fs.Duration("ttl", 10*time.Minute, "接入码有效期")
 	publicURL := fs.String("public-url", "", "hub 对外的 https 源，如 https://hub.example.com；不设则停用推送")
@@ -196,6 +196,7 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfg.SecureCookies = *secure
 	cfg.TrustedProxies = proxies
 	cfg.PublicURL = *publicURL
+	cfg.Version = version
 	if sub == "run" {
 		ctx, stop := hubRunContext()
 		defer stop()

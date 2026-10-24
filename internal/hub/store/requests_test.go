@@ -654,7 +654,7 @@ func TestClearCallbackToken(t *testing.T) {
 }
 
 // OpenQuestions 只列还在等回答的 question：recorded、不早于 since，且同一会话之后没有任何新行（done、新的 permission
-// 或 question 都说明 agent 已经不在等）；没有会话的视为仍在等；按创建时间倒序，受 limit 约束。
+// 或 question 都说明 agent 已经不在等）；没有会话的视为仍在等；已吊销机器的不列；按创建时间倒序，受 limit 约束。
 func TestOpenQuestions(t *testing.T) {
 	s := openTemp(t)
 	m, err := s.CreateMachine("mac", RandomToken(), "/home/u")
@@ -712,5 +712,12 @@ func TestOpenQuestions(t *testing.T) {
 	mk("q6", m2.ID, s3, "question", "recorded", at(8)) // 同会话又问了一个：q5 不再等，q6 在等
 	if got := ids(10); got != "q6,q3" {
 		t.Fatalf("有新 permission、新 question 后 = %s", got)
+	}
+	// 已吊销机器的问题不列：m2 吊销后 q6 消失
+	if err := s.RevokeMachine(m2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(10); got != "q3" {
+		t.Fatalf("吊销 mac2 后 = %s", got)
 	}
 }
