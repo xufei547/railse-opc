@@ -119,7 +119,8 @@ func ValidTopic(s string) bool {
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if !('A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '-' || c == '_') {
+		b64url := 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '-' || c == '_'
+		if !b64url {
 			return false
 		}
 	}
@@ -210,10 +211,10 @@ func (c *Client) newRequest(ctx context.Context, sub Subscription, payload []byt
 		return nil, errors.New("没有 VAPID 密钥")
 	}
 	if o.Topic != "" && !ValidTopic(o.Topic) {
-		return nil, errors.New("Topic 须是 1 到 32 个 base64url 字符")
+		return nil, errors.New("选项 Topic 须是 1 到 32 个 base64url 字符")
 	}
 	if o.Urgency != "" && !validUrgency(o.Urgency) {
-		return nil, fmt.Errorf("Urgency 只能是 very-low、low、normal、high，得到 %q", o.Urgency)
+		return nil, fmt.Errorf("选项 Urgency 只能是 very-low、low、normal、high，得到 %q", o.Urgency)
 	}
 	ttl := o.TTL
 	switch {

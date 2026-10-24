@@ -86,7 +86,7 @@ func (sp autostartSpec) args() []string {
 
 func xmlEscape(s string) string {
 	var b bytes.Buffer
-	xml.EscapeText(&b, []byte(s))
+	_ = xml.EscapeText(&b, []byte(s)) // 写 bytes.Buffer 不会失败
 	return b.String()
 }
 

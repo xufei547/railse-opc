@@ -32,7 +32,8 @@ func strp(s string) *string { return &s }
 // 普通路径原样返回，含空格等特殊字符时用单引号包起来。
 func ShellQuote(s string) string {
 	plain := s != "" && strings.IndexFunc(s, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+:@%,=", r))
+		safe := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+:@%,=", r)
+		return !safe
 	}) < 0
 	if plain {
 		return s

@@ -346,7 +346,7 @@ func TestAgentEnrollValidation(t *testing.T) {
 		{[]string{"--hub", "https://", "--token", "x"}, "http:// 或 https://"},
 		{[]string{"--hub", "127.0.0.1:8787", "--token", "x"}, "http:// 或 https://"},
 		{[]string{"--hub", "http://127.0.0.1:1", "--token", "x", "--name", "a\x1b[31mb"}, "名字"},
-		{[]string{"--hub", "http://127.0.0.1:1", "--token", "x", "--name", "a‮b"}, "名字"},
+		{[]string{"--hub", "http://127.0.0.1:1", "--token", "x", "--name", "a\u202eb"}, "名字"},
 		{[]string{"--hub", "http://127.0.0.1:1", "--token", "x", "--name", strings.Repeat("a", 129)}, "128"},
 		{[]string{"--hub", "http://127.0.0.1:1", "--token", "x", "extra"}, "extra"},
 	} {

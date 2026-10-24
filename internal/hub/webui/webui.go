@@ -73,7 +73,7 @@ func Handler(fsys fs.FS) http.Handler {
 		if isAPIPath(p) {
 			h.Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			io.WriteString(w, notFoundAPI)
+			_, _ = io.WriteString(w, notFoundAPI) // 写失败只会是客户端已断开
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -89,7 +89,7 @@ func Handler(fsys fs.FS) http.Handler {
 				h.Set("Cache-Control", "no-store")
 				h.Set("Content-Type", "text/plain; charset=utf-8")
 				w.WriteHeader(http.StatusServiceUnavailable)
-				io.WriteString(w, notBuiltMsg)
+				_, _ = io.WriteString(w, notBuiltMsg) // 写失败只会是客户端已断开
 				return
 			}
 		case strings.HasPrefix(name, "assets/"):

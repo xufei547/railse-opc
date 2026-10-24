@@ -206,26 +206,26 @@ func (s *Server) Close() error {
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // 只在连接已关时失败，随后的读会报错
 	// 关停时不必等满读超时：ctx 取消就让正在进行的读立即返回。
-	stopRead := context.AfterFunc(ctx, func() { conn.SetReadDeadline(time.Now()) })
+	stopRead := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
 	line, err := proto.ReadLine(bufio.NewReader(conn))
 	stopRead()
 	if err != nil {
 		s.log.Printf("读请求: %v", err)
 		return
 	}
-	conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{}) // 同上
 	kind, err := proto.PeekKind(line)
 	if err != nil {
-		proto.WriteLine(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误"})
+		s.reply(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误"})
 		return
 	}
 	switch kind {
 	case "permission":
 		var req proto.Request
 		if err := proto.Decode(line, &req); err != nil {
-			proto.WriteLine(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误: " + err.Error()})
+			s.reply(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误: " + err.Error()})
 			return
 		}
 		// 钩子不会再发数据；读到 EOF 或错误就表示它消失了。答复后连接关闭，这个 goroutine 随之退出。
@@ -233,30 +233,37 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		cctx, cancel := context.WithCancelCause(ctx)
 		go func() {
 			var b [1]byte
-			conn.Read(b[:])
+			_, _ = conn.Read(b[:]) // 读到什么都不要，只等它返回
 			cancel(errHookGone)
 		}()
 		resp := s.handlePermission(cctx, req)
 		cancel(nil)
 		if resp.Decision != "" { // 钩子已消失时 resp 为空，不写回
-			proto.WriteLine(conn, resp)
+			s.reply(conn, resp)
 		}
 	case "question", "done", "session_end":
 		var ev proto.Event
 		if err := proto.Decode(line, &ev); err != nil {
-			proto.WriteLine(conn, proto.EventAck{V: proto.Version, OK: false, Error: err.Error()})
+			s.reply(conn, proto.EventAck{V: proto.Version, OK: false, Error: err.Error()})
 			return
 		}
-		proto.WriteLine(conn, s.handleEvent(ev))
+		s.reply(conn, s.handleEvent(ev))
 	case "control":
 		var c proto.Control
 		if err := proto.Decode(line, &c); err != nil {
-			proto.WriteLine(conn, proto.ControlReply{V: proto.Version, OK: false, Error: err.Error()})
+			s.reply(conn, proto.ControlReply{V: proto.Version, OK: false, Error: err.Error()})
 			return
 		}
-		proto.WriteLine(conn, s.handleControl(c))
+		s.reply(conn, s.handleControl(c))
 	default:
-		proto.WriteLine(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "未知消息种类 " + kind})
+		s.reply(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "未知消息种类 " + kind})
+	}
+}
+
+// reply 把一行答复写回钩子。写不出去（钩子已断开、答复超长）只记日志：钩子读不到答复就 passthrough，交回 CLI 自己审批。
+func (s *Server) reply(conn net.Conn, v any) {
+	if err := proto.WriteLine(conn, v); err != nil {
+		s.log.Printf("回写钩子: %v", err)
 	}
 }
 

@@ -58,7 +58,7 @@ func TestSessionUpsertRefreshesLastEvent(t *testing.T) {
 	if err := s.db.QueryRow("SELECT started_at, last_event_at, cwd, project FROM sessions WHERE id = ?", id).Scan(&started, &last, &cwd, &project); err != nil {
 		t.Fatal(err)
 	}
-	if started != old || !(last > old) || cwd != "/p/sub" || project != "proj2" {
+	if started != old || last <= old || cwd != "/p/sub" || project != "proj2" {
 		t.Fatalf("再次 upsert 后 started=%s last=%s cwd=%s project=%s", started, last, cwd, project)
 	}
 }
@@ -252,7 +252,7 @@ func TestApplyAgentFinal(t *testing.T) {
 			t.Fatal(err)
 		}
 		if c.want {
-			if got.State != "expired" || got.DecidedBy != "hub_unreachable" || got.DecisionNote != "本机超时" || got.DecidedAt == nil || !(*got.DecidedAt > old) {
+			if got.State != "expired" || got.DecidedBy != "hub_unreachable" || got.DecisionNote != "本机超时" || got.DecidedAt == nil || *got.DecidedAt <= old {
 				t.Fatalf("%s/%s: 应被本机终态覆盖: %+v", c.state, c.decidedBy, got)
 			}
 		} else if got.State != c.state || got.DecidedBy != c.decidedBy || got.DecidedAt == nil || *got.DecidedAt != old {

@@ -42,6 +42,6 @@ func syncDir(dir string) {
 	if err != nil {
 		return
 	}
-	d.Sync()
+	_ = d.Sync() // 尽力而为，见上
 	d.Close()
 }

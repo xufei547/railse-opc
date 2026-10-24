@@ -40,7 +40,7 @@ func parseOpts(args []string, spec optSpec) (opts []parsedOpt, rest int, ok bool
 		if a == "--" {
 			return opts, i + 1, true
 		}
-		if len(a) < 2 || !(a[0] == '-' || spec.plus && a[0] == '+') {
+		if len(a) < 2 || (a[0] != '-' && (!spec.plus || a[0] != '+')) {
 			return opts, i, true
 		}
 		word := i

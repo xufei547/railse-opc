@@ -813,7 +813,8 @@ func isCFlag(w string) bool {
 		return false
 	}
 	for i := 1; i < len(w); i++ {
-		if !(w[i] >= 'a' && w[i] <= 'z' || w[i] >= 'A' && w[i] <= 'Z') {
+		letter := w[i] >= 'a' && w[i] <= 'z' || w[i] >= 'A' && w[i] <= 'Z'
+		if !letter {
 			return false
 		}
 	}
@@ -830,7 +831,8 @@ func isAssign(w string) bool {
 	}
 	for i := 0; i < len(name); i++ {
 		ch := name[i]
-		if !(ch == '_' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || i > 0 && ch >= '0' && ch <= '9') {
+		nameChar := ch == '_' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || i > 0 && ch >= '0' && ch <= '9'
+		if !nameChar {
 			return false
 		}
 	}

@@ -8,7 +8,7 @@ import (
 func TestRiskOrdering(t *testing.T) {
 	order := []Risk{RiskRead, RiskWriteInProject, RiskUnknown, RiskWriteOutside, RiskNetwork, RiskOutward, RiskDestructive}
 	for i := 1; i < len(order); i++ {
-		if !(order[i-1] < order[i]) {
+		if order[i-1] >= order[i] {
 			t.Fatalf("%s 应低于 %s", order[i-1], order[i])
 		}
 	}

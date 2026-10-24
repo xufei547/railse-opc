@@ -333,7 +333,7 @@ func TestTimeFormatSortsLexically(t *testing.T) {
 	early := time.Date(2026, 10, 22, 8, 0, 0, 123450000, time.UTC)
 	late := time.Date(2026, 10, 22, 8, 0, 0, 123456000, time.UTC)
 	a, b := fmtTime(early), fmtTime(late)
-	if !(a < b) {
+	if a >= b {
 		t.Fatalf("字典序与时间先后不一致: %q !< %q", a, b)
 	}
 	if len(a) != len(b) {

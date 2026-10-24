@@ -201,10 +201,10 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 			return false
 		}
 	}
-	if m.MCPServer != "" && !(p.Type == PayloadMCP && p.Server == m.MCPServer) {
+	if m.MCPServer != "" && (p.Type != PayloadMCP || p.Server != m.MCPServer) {
 		return false
 	}
-	if m.MCPTool != "" && !(p.Type == PayloadMCP && p.Tool == m.MCPTool) {
+	if m.MCPTool != "" && (p.Type != PayloadMCP || p.Tool != m.MCPTool) {
 		return false
 	}
 	if m.Domain != "" {

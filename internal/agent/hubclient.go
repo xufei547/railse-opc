@@ -310,7 +310,7 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 		}
 		return sessionEnd{err: scrubDialErr(err)}
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // 已关过时 CloseNow 报错，无害
 	conn.SetReadLimit(wire.MaxFrame)
 
 	var summaries []wire.PendingSummary
@@ -387,7 +387,7 @@ func (h *HubClient) readWelcome(ctx context.Context, conn *websocket.Conn) (wire
 		return w, nil
 	case wire.TError:
 		var e wire.Error
-		wire.Unmarshal(first, &e)
+		_ = wire.Unmarshal(first, &e) // 解析不了时 Message 为空，照样按 hub 报错处理
 		msg := clipText(e.Message, hubLogFieldMax)
 		_, err := readFrame(ctx, conn, hubHandshakeTimeout)
 		if websocket.CloseStatus(err) == websocket.StatusPolicyViolation {
@@ -588,7 +588,7 @@ func (h *HubClient) sendRaw(ctx context.Context, b []byte, closeOnFail bool) err
 		if !closeOnFail {
 			return fmt.Errorf("回执没写出去: %w", err)
 		}
-		conn.CloseNow()
+		_ = conn.CloseNow() // 只为断开重连，已关过时报错无害
 		return fmt.Errorf("%w: %v", ErrHubDisconnected, err)
 	}
 	return nil
@@ -785,7 +785,7 @@ func (h *HubClient) auditLoop(ctx context.Context, conn *websocket.Conn) {
 		if err := h.flushAudit(ctx, conn); err != nil {
 			if ctx.Err() == nil {
 				h.log.Printf("上报审计失败，断开重连后补发: %q", clipText(err.Error(), hubLogFieldMax))
-				conn.CloseNow()
+				_ = conn.CloseNow() // 只为断开重连，已关过时报错无害
 			}
 			return
 		}

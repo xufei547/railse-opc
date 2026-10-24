@@ -62,7 +62,7 @@ func (c Client) roundTrip(ctx context.Context, msg, out any) error {
 	}
 	defer conn.Close()
 	if dl, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(dl)
+		_ = conn.SetDeadline(dl) // 只在连接已关时失败，随后的写会报错；ctx 到期时下面的 AfterFunc 也会关连接
 	}
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
