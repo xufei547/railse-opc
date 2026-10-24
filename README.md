@@ -28,6 +28,8 @@ Railse 自身出任何故障都不会卡住 agent，也不会误批：守护进�
 curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sh
 ```
 
+支持 macOS（Apple Silicon）与 Linux（amd64、arm64）。脚本从 GitHub Releases 下载对应的包，按同一发布的 `checksums.txt` 校验 sha256，校验不过不安装；不调用 sudo：`/usr/local/bin` 可写就装那里，否则装到 `~/.local/bin`（不在 PATH 里时会提示）。指定版本或目录：`curl -fsSL … | RAILSE_VERSION=0.1.0 RAILSE_INSTALL_DIR=~/bin sh`。升级就是重跑一遍。
+
 或者用 Go 自己编译：`go install github.com/railse/railse-opc/cmd/railse@latest`。这样装出的二进制不带手机网页（网页路径回 503“网页未构建”），只适合工作机；跑 hub 的机器请用上面的安装脚本，或在仓库里 `make build`。
 
 ## 三步上手
