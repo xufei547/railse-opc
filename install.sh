@@ -9,7 +9,7 @@
 #   RAILSE_REPO         GitHub 仓库，默认 railse/railse-opc
 #   RAILSE_VERSION      要装的版本（如 0.1.0，前面带 v 也行），默认最新正式版
 #   RAILSE_INSTALL_DIR  安装目录（不存在就建）；不给时 /usr/local/bin 可写就装那里，否则装 ~/.local/bin
-#   RAILSE_BASE_URL     下载根地址（测试用），默认 https://github.com/$RAILSE_REPO/releases/download/v<版本>；
+#   RAILSE_BASE_URL     下载根地址（测试用，只接受 http:// 或 https://），默认 https://github.com/$RAILSE_REPO/releases/download/v<版本>；
 #                       给了它而没给 RAILSE_VERSION 时，版本号从 $RAILSE_BASE_URL/checksums.txt 里取
 #
 # 升级就是重跑一遍；新文件先写到安装目录里的临时名再改名替换，正在运行的旧二进制不受影响。
@@ -22,15 +22,22 @@ fail() {
   exit 1
 }
 
+# 只删本脚本自己建的东西：stage、tmp 在 main 开头先置空、装 trap 之后才由本脚本赋值
 cleanup() {
-  if [ -n "${stage:-}" ]; then rm -f "$stage"; fi
-  if [ -n "${tmp:-}" ]; then rm -rf "$tmp"; fi
+  if [ -n "$stage" ]; then rm -f "$stage"; fi
+  if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
 }
 
-# download <URL> <输出文件>：有 curl 用 curl，否则用 wget
+# download <URL> <输出文件>：有 curl 用 curl，否则用 wget；https 地址只走 https（重定向也是）、TLS 1.2 起
 download() {
   if [ "$downloader" = curl ]; then
-    curl -fsSL "$1" -o "$2"
+    if [ "$https_only" = 1 ]; then
+      curl -fsSL --proto '=https' --tlsv1.2 "$1" -o "$2"
+    else
+      curl -fsSL "$1" -o "$2"
+    fi
+  elif [ "$https_only" = 1 ] && [ "$wget_https_only" = 1 ]; then
+    wget -q --https-only -O "$2" "$1"
   else
     wget -q -O "$2" "$1"
   fi
@@ -59,19 +66,46 @@ latest_version() {
 }
 
 main() {
-  repo="${RAILSE_REPO:-railse/railse-opc}"
-  version="${RAILSE_VERSION:-}"
-  version="${version#v}"
-  base_url="${RAILSE_BASE_URL:-}"
-  base_url="${base_url%/}"
+  # 先把清理与条件赋值用到的变量置空再装 trap：环境里可能继承了同名变量（例如 stage=某个文件），
+  # 失败时不能删到它，也不能把它当成本脚本的值打印出来。
+  stage=""
+  tmp=""
+  note=""
+  version=""
+  trap cleanup EXIT
+  trap 'exit 1' HUP INT TERM
 
+  repo="${RAILSE_REPO:-railse/railse-opc}"
   case "$repo" in
     */*/* | /* | */ | *[!A-Za-z0-9._/-]*) fail "RAILSE_REPO 应形如 owner/name：$repo" ;;
     */*) ;;
     *) fail "RAILSE_REPO 应形如 owner/name：$repo" ;;
   esac
-  if [ -n "$version" ] && ! valid_version "$version"; then
-    fail "RAILSE_VERSION 不合法：$version（应形如 0.1.0）"
+  if [ -n "${RAILSE_VERSION:-}" ]; then
+    version="${RAILSE_VERSION#v}"
+    valid_version "$version" || fail "RAILSE_VERSION 不合法：$RAILSE_VERSION（应形如 0.1.0）"
+  fi
+
+  # 下载根地址：只接受 http:// 或 https://（不接受 file://、以 - 开头等）；明文 http 且不是本机时警告
+  base_url="${RAILSE_BASE_URL:-}"
+  base_url="${base_url%/}"
+  https_only=1
+  if [ -n "$base_url" ]; then
+    case "$base_url" in
+      *[[:space:][:cntrl:]]*) fail "RAILSE_BASE_URL 里有空白或控制字符" ;;
+      https://?*) ;;
+      http://?*)
+        https_only=0
+        host="${base_url#http://}"
+        host="${host%%[/?#]*}"
+        host="${host##*@}"
+        case "$host" in
+          127.0.0.1 | 127.0.0.1:* | localhost | localhost:* | '[::1]' | '[::1]:'*) ;;
+          *) printf '警告：RAILSE_BASE_URL 是明文 http 且不是本机（%s）：包与 checksums.txt 都可能在路上被换掉，校验挡不住\n' "$host" >&2 ;;
+        esac
+        ;;
+      *) fail "RAILSE_BASE_URL 只接受 http:// 或 https:// 开头的地址：$base_url" ;;
+    esac
   fi
 
   # 平台
@@ -96,10 +130,13 @@ main() {
   fi
 
   # 工具
+  wget_https_only=0
   if command -v curl >/dev/null 2>&1; then
     downloader=curl
   elif command -v wget >/dev/null 2>&1; then
     downloader=wget
+    # GNU wget 有 --https-only，BusyBox 的没有
+    if wget --help 2>&1 | grep -q -- '--https-only'; then wget_https_only=1; fi
   else
     fail "需要 curl 或 wget"
   fi
@@ -111,23 +148,24 @@ main() {
     fail "需要 sha256sum 或 shasum 来校验下载的包"
   fi
 
-  # 安装目录（下载之前先定下来，不可写就不必下载）：显式给的用它；否则 /usr/local/bin 可写就装那里，
-  # 再不然装 ~/.local/bin（不存在就建 0755）。不用 sudo。
+  # 安装目录：先定下来、已存在的先查可写（不可写就不必下载），不存在的等下载与校验都过了再建（失败不留空目录）。
+  # 显式给的用它；否则 /usr/local/bin 可写就装那里，再不然装 ~/.local/bin（新建时 0755）。不用 sudo。
   if [ -n "${RAILSE_INSTALL_DIR:-}" ]; then
     dir="$RAILSE_INSTALL_DIR"
-    [ -d "$dir" ] || mkdir -p "$dir" || fail "建不了安装目录 $dir"
-    [ -w "$dir" ] || fail "$dir 不可写（换一个 RAILSE_INSTALL_DIR）"
+    if [ -e "$dir" ]; then
+      [ -d "$dir" ] || fail "$dir 不是目录"
+      [ -w "$dir" ] || fail "$dir 不可写（换一个 RAILSE_INSTALL_DIR）"
+    fi
   elif [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
     dir=/usr/local/bin
   else
-    [ -n "${HOME:-}" ] || fail "/usr/local/bin 不可写且没有 HOME，请用 RAILSE_INSTALL_DIR 指定安装目录"
+    if [ -d /usr/local/bin ]; then why="/usr/local/bin 不可写"; else why="没有 /usr/local/bin"; fi
+    [ -n "${HOME:-}" ] || fail "$why，也没有 HOME，请用 RAILSE_INSTALL_DIR 指定安装目录"
     dir="$HOME/.local/bin"
-    if [ ! -d "$dir" ]; then
-      mkdir -p "$dir" || fail "建不了 $dir"
-      chmod 755 "$dir" || fail "设不了 $dir 的权限"
+    if [ -e "$dir" ] && { [ ! -d "$dir" ] || [ ! -w "$dir" ]; }; then
+      fail "$why，$dir 也不可写，请用 RAILSE_INSTALL_DIR 指定安装目录"
     fi
-    [ -w "$dir" ] || fail "/usr/local/bin 与 $dir 都不可写，请用 RAILSE_INSTALL_DIR 指定安装目录"
-    printf '/usr/local/bin 不可写，装到 %s\n' "$dir"
+    note="$why，装到 $dir"
   fi
   dest="$dir/railse"
   [ ! -d "$dest" ] || fail "$dest 是个目录"
@@ -135,8 +173,6 @@ main() {
   # 显式给模板：macOS 的 mktemp -d 不带模板时不看 TMPDIR
   tmpdir="${TMPDIR:-/tmp}"
   tmp="$(mktemp -d "${tmpdir%/}/railse-install.XXXXXX" 2>/dev/null || mktemp -d /tmp/railse-install.XXXXXX)" || fail "建不了临时目录"
-  trap cleanup EXIT
-  trap 'exit 1' HUP INT TERM
 
   # 版本：没指定时取最新发布（GitHub 的 latest/download 跳到最新正式版的产物），从 checksums.txt 的文件名里取版本号
   if [ -z "$version" ]; then
@@ -171,6 +207,14 @@ main() {
   if [ ! -f "$tmp/x/railse" ] || [ -L "$tmp/x/railse" ]; then
     fail "$file 里的 railse 不是普通文件"
   fi
+
+  # 校验都过了才建安装目录
+  if [ ! -d "$dir" ]; then
+    mkdir -p "$dir" || fail "建不了安装目录 $dir"
+    if [ -n "$note" ]; then chmod 755 "$dir" || fail "设不了 $dir 的权限"; fi
+  fi
+  [ -w "$dir" ] || fail "$dir 不可写"
+  if [ -n "$note" ]; then printf '%s\n' "$note"; fi
 
   # 先写临时名再改名：替换是原子的，正在运行的旧版本不受影响
   stage="$dir/.railse.install.$$"

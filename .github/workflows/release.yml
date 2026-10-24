@@ -12,9 +12,12 @@ jobs:
         with:
           # goreleaser 要完整历史与 tag 才能生成 changelog
           fetch-depth: 0
+      # 不按 go.mod 的 go 1.26.0 精确装：正式二进制（含直出 TLS 的 hub）要带上 1.26 系列最新补丁版的安全修复。
+      # go.mod 只表示最低版本，CI（ci.yml）仍按它测。
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.26"
+          check-latest: true
       - uses: actions/setup-node@v4
         with:
           node-version: 20

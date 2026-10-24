@@ -17,6 +17,15 @@ jobs:
       - run: go vet ./...
       - run: make lint
       - run: go test ./... -race -count=1
+  # install.sh 的本地发布测试（假发布 + 127.0.0.1 上的 HTTP 服务）；Linux 上走 sha256sum 分支，/bin/sh 是 dash
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: scripts/test-install.sh
   web:
     runs-on: ubuntu-latest
     steps:
