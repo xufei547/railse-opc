@@ -14,15 +14,15 @@ railse agent status              # 另开终端查看：paused、规则条数、
 
 `railse agent status` 的 `hub:` 行：没接入 hub（没有 `machine.json`）时是 `hub: none`；接入后是 `hub: connecting <地址>`（还没连上或等着重连）、`hub: connected <地址>`，或 `hub: disabled <地址>`（连续 3 次被 hub 以 401 拒绝，已停止连接，要 `railse agent enroll --force` 后重启守护进程，见 `docs/hub.md`）。
 
-配置目录取 `$RAILSE_HOME`，没设就是 `~/.railse`（权限 0700），里面有 `agent.sock`、`rules.yaml`、`audit.jsonl`、`state.json`、`agent.log`，socket 与审计为 0600。`agent` 子命令也接受 `--dir 目录`，但钩子只认 `$RAILSE_HOME` 或 `~/.railse`，所以 CLI 与守护进程要用同一个 `RAILSE_HOME`。开机自启与退出后自动拉起用 `railse setup autostart`（macOS launchd、Linux systemd 用户单元，见 [setup.md](setup.md)）；`railse doctor` 只读地检查目录与文件权限、守护进程在不在跑、钩子装没装好。
+配置目录取 `$RAILSE_HOME`，没设就是 `~/.railse`（权限 0700），里面有 `agent.sock`、`rules.yaml`、`audit.jsonl`、`state.json`、`agent.log`，socket 与审计为 0600。`agent` 子命令也接受 `--dir 目录`。钩子不带 `--socket` 时连 `$RAILSE_HOME` 或 `~/.railse` 里的 `agent.sock`（看的是 CLI 起钩子时的环境），所以守护进程不在默认目录时，装钩子要给同一个目录：`railse setup hooks --dir <目录>` 在钩子命令里写上 `--socket <目录>/agent.sock`（默认目录时不写，命令不变）。以前手工换过目录、钩子是不带 `--dir` 装的，重跑一次 `setup hooks --dir <目录>`；`railse doctor --dir <目录>` 会在 `hooks.*` 报出对不上的 socket。开机自启与退出后自动拉起用 `railse setup autostart`（macOS launchd、Linux systemd 用户单元，见 [setup.md](setup.md)）；`railse doctor` 只读地检查目录与文件权限、守护进程在不在跑、钩子装没装好。
 
 ## 装钩子
 
 ```sh
-railse setup hooks --project <目录> [--claude] [--codex] [--gemini] [--bin 路径] [--dry-run]
+railse setup hooks --project <目录> [--claude] [--codex] [--gemini] [--dir 目录] [--bin 路径] [--dry-run]
 ```
 
-不带 CLI 开关时三个都装。Claude 写 `<目录>/.claude/settings.local.json`，Gemini 写 `<目录>/.gemini/settings.json`，Codex 写用户级 `~/.codex/hooks.json`（`--codex-file` 可改）。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
+不带 CLI 开关时三个都装。Claude 写 `<目录>/.claude/settings.local.json`，Gemini 写 `<目录>/.gemini/settings.json`，Codex 写用户级 `~/.codex/hooks.json`（`--codex-file` 可改）。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dir` 是守护进程的数据目录，不是默认目录时钩子命令变成 `<railse> hook <cli> --socket <目录>/agent.sock`（打印的 Codex `notify` 那一行也带 `"--socket", "<路径>"`）；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
 
 Claude 的钩子放在 `settings.local.json`，因为钩子命令里是本机的 railse 路径，不该随项目入库；按 Claude Code 的约定这个文件不入库，若 `git status` 里看到它，把它加进 `.gitignore`。旧版写在 `.claude/settings.json` 的 Railse 钩子会在装 Claude 钩子时迁走：只删 Railse 自己的条目（`hooks` 删空了连键一起去掉），别人的钩子与其他设置保留，打印“已从 … 迁走 Railse 钩子”；`--dry-run` 两份都打印。`settings.json` 里没有 Railse 条目时不碰它；它不是合法 JSON 时只警告、不迁移，照样装好 `settings.local.json`，这时请手动删掉里面旧的 Railse 钩子，否则同一个事件会触发两次。
 

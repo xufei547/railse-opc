@@ -66,9 +66,10 @@ func fakeOpts(t *testing.T) (Options, string) {
 	}
 	return Options{
 		AgentDir: agentDir, Home: home, GOOS: "darwin", Version: "1.0.0", Now: time.Now(),
-		LookPath:    func(string) (string, error) { return "", errors.New("not found") },
-		RunCmd:      func(string, ...string) (string, error) { return "", errors.New("不该跑") },
-		AgentStatus: func(string) (proto.Status, error) { return proto.Status{Rules: 2, Hub: "none"}, nil },
+		DefaultSocket: sock, // 不看测试进程的 $RAILSE_HOME 与真实家目录：默认目录就是这个守护进程目录
+		LookPath:      func(string) (string, error) { return "", errors.New("not found") },
+		RunCmd:        func(string, ...string) (string, error) { return "", errors.New("不该跑") },
+		AgentStatus:   func(string) (proto.Status, error) { return proto.Status{Rules: 2, Hub: "none"}, nil },
 		// 固定成普通用户、家目录归自己：测试在 root 下跑也照常跑 --version 的分支
 		Geteuid:   func() int { return 1000 },
 		FileOwner: func(string) (int, bool) { return 1000, true },
@@ -307,10 +308,10 @@ func TestHubReachableProblems(t *testing.T) {
 	}
 }
 
-// planDoc 返回 hooksconf 为 cli 生成的整份钩子配置。
-func planDoc(t *testing.T, cli, bin string) []byte {
+// planDoc 返回 hooksconf 为 cli 生成的整份钩子配置；socket 可省（不带 --socket）。
+func planDoc(t *testing.T, cli, bin string, socket ...string) []byte {
 	t.Helper()
-	doc, err := hooksconf.Merge(nil, bin, hooksconf.Plan(cli, bin))
+	doc, err := hooksconf.Merge(nil, bin, hooksconf.Plan(cli, bin, strings.Join(socket, "")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,6 +402,79 @@ func TestHookChecks(t *testing.T) {
 	writeFile(t, cfg, []byte("model = \"x\"\n[mcp_servers.foo]\ncommand = \"foo\"\nnotify = [\"/usr/local/bin/railse\", \"hook\", \"codex-notify\"]\n"))
 	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, "[mcp_servers.foo]") {
 		t.Fatalf("notify 在表下面: %+v", c)
+	}
+}
+
+// 钩子连的 socket（命令里的 --socket，没有就是默认 socket）与 --dir 的守护进程对不上：warn 并给出带 --dir 的重装命令。
+func TestHookSocketMismatch(t *testing.T) {
+	o, home := fakeOpts(t)
+	proj := filepath.Join(home, "proj")
+	bin := "/usr/local/bin/railse"
+	o.Project, o.Bin = proj, bin
+	local, _ := hooksconf.ClaudePaths(proj)
+	codexCfg := filepath.Join(home, ".codex", "config.toml")
+	defSock := o.DefaultSocket
+	data := filepath.Join(home, "data dir")
+	os.MkdirAll(data, 0o700)
+	dataSock := filepath.Join(data, "agent.sock")
+	install := func(socket string) {
+		writeFile(t, local, planDoc(t, "claude", bin, socket))
+		writeFile(t, hooksconf.GeminiPath(proj), planDoc(t, "gemini", bin, socket))
+		writeFile(t, hooksconf.CodexPath(home), planDoc(t, "codex", bin, socket))
+		notify := fmt.Sprintf("notify = [%q, \"hook\", \"codex-notify\"", bin)
+		if socket != "" {
+			notify += fmt.Sprintf(", \"--socket\", %q", socket)
+		}
+		writeFile(t, codexCfg, []byte(notify+"]\n"))
+	}
+	ids := []string{"hooks.claude", "hooks.codex", "hooks.codex_notify", "hooks.gemini"}
+	expect := func(status Status, parts ...string) {
+		t.Helper()
+		r := Run(o)
+		for _, id := range ids {
+			c := find(t, r, id)
+			if c.Status != status {
+				t.Fatalf("%s 应为 %s: %+v", id, status, c)
+			}
+			for _, p := range parts {
+				if !strings.Contains(c.Detail+"\n"+c.Hint, p) {
+					t.Fatalf("%s 应提到 %q: %+v", id, p, c)
+				}
+			}
+		}
+	}
+	// 默认目录、不带 --socket：对得上
+	install("")
+	expect(OK)
+	// 守护进程在非默认目录，钩子还是旧的（不带 --socket，连默认 socket）：warn，提示带 --dir 重装
+	o.AgentDir = data
+	expect(Warn, "连的是 "+defSock, dataSock, "--dir "+hooksconf.ShellQuote(data))
+	// 按 --dir 重装（带 --socket）：ok
+	install(dataSock)
+	expect(OK)
+	// 带 --socket 指向 data，doctor 看的却是默认目录：warn，提示重装或给 doctor 加 --dir
+	o.AgentDir = filepath.Dir(defSock)
+	expect(Warn, "连的是 "+dataSock, defSock, "doctor 加 --dir "+hooksconf.ShellQuote(data))
+	if c := find(t, Run(o), "hooks.claude"); strings.Contains(c.Hint, "setup hooks --project "+hooksconf.ShellQuote(proj)+" --claude --dir") {
+		t.Fatalf("守护进程在默认目录时重装命令不带 --dir: %+v", c)
+	}
+	// 缺事件仍是 fail，不被 socket 的 warn 盖住
+	writeFile(t, local, []byte(`{"hooks":{}}`))
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Fail {
+		t.Fatalf("缺事件应 fail: %+v", c)
+	}
+	// 程序路径与 socket 都不对：两条都说，仍是 warn
+	writeFile(t, local, planDoc(t, "claude", "/old/railse", dataSock))
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "/old/railse") || !strings.Contains(c.Detail, dataSock) {
+		t.Fatalf("程序与 socket 都不对: %+v", c)
+	}
+	// DefaultSocket 推不出（没有家目录也没有 $RAILSE_HOME）：不带 --socket 的不比对
+	o.AgentDir, o.DefaultSocket = data, ""
+	t.Setenv("RAILSE_HOME", "")
+	t.Setenv("HOME", "")
+	install("")
+	if c := find(t, Run(o), "hooks.gemini"); c.Status != OK {
+		t.Fatalf("推不出默认 socket 时不比对: %+v", c)
 	}
 }
 

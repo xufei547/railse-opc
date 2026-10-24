@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 
+	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/hookclient"
 	"github.com/railse/railse-opc/internal/proto"
 )
@@ -65,6 +67,10 @@ type Options struct {
 
 	// HubDirRequired 表示 HubDir 是显式给的（--hub-dir）：它不存在或读不到时 hubsrv.dir 报 fail，而不是把 hub 侧整段跳过。
 	HubDirRequired bool
+
+	// DefaultSocket 是不带 --socket 的钩子会连的 socket：当前环境下 $RAILSE_HOME 或 ~/.railse 里的 agent.sock（钩子进程
+	// 的环境是 CLI 的，doctor 只能拿自己的环境推）。为空时 Run 按同样规则推；推不出（没有家目录）就不比对不带 --socket 的钩子。
+	DefaultSocket string
 
 	LookPath    func(file string) (string, error)
 	RunCmd      func(name string, args ...string) (string, error) // 只用来跑 `<cli> --version`
@@ -141,6 +147,11 @@ func (o *Options) defaults() {
 	}
 	if o.FileOwner == nil {
 		o.FileOwner = fileOwner
+	}
+	if o.DefaultSocket == "" { // 与 railse hook 不带 --socket 时同一个规则（agent.DefaultConfig）
+		if c, err := agent.DefaultConfig(); err == nil {
+			o.DefaultSocket, _ = filepath.Abs(c.SocketPath)
+		}
 	}
 }
 

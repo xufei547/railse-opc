@@ -342,6 +342,113 @@ func TestSetupHooksKeepsNonArrayValuesWeDoNotTouch(t *testing.T) {
 	}
 }
 
+// hookCommand 取 Claude 配置里 PermissionRequest 的那条钩子命令。
+func hookCommand(t *testing.T, path, event string) string {
+	t.Helper()
+	return readJSON(t, path)["hooks"].(map[string]any)[event].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"].(string)
+}
+
+// 守护进程数据目录不是默认的（$RAILSE_HOME 或 ~/.railse）时，钩子进程的环境里没有那个 RAILSE_HOME，
+// 钩子命令要带 --socket；是默认目录（含显式给出的）或没给 --dir 时命令保持原样。
+func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
+	home, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(home)
+	t.Setenv("HOME", home)
+	t.Setenv("RAILSE_HOME", "")
+	project := filepath.Join(home, "proj")
+	os.MkdirAll(project, 0o755)
+	codexFile := filepath.Join(home, "codex.json")
+	local := filepath.Join(project, ".claude", "settings.local.json")
+	gemini := hooksconf.GeminiPath(project)
+	data := filepath.Join(home, "data dir")
+	sock := filepath.Join(data, "agent.sock")
+	setup := func(extra ...string) string {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		args := append([]string{"setup", "hooks", "--project", project, "--codex-file", codexFile, "--bin", "/opt/railse"}, extra...)
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatalf("%v: %d %s", args, code, errOut.String())
+		}
+		return out.String()
+	}
+	out := setup("--dir", data)
+	q := hooksconf.ShellQuote(sock)
+	if got := hookCommand(t, local, "PermissionRequest"); got != "/opt/railse hook claude --socket "+q {
+		t.Fatalf("Claude 钩子命令应带 --socket: %q", got)
+	}
+	if got := hookCommand(t, gemini, "BeforeTool"); got != "/opt/railse hook gemini --socket "+q {
+		t.Fatalf("Gemini 钩子命令应带 --socket: %q", got)
+	}
+	if got := hookCommand(t, codexFile, "Stop"); got != "/opt/railse hook codex --socket "+q {
+		t.Fatalf("Codex 钩子命令应带 --socket: %q", got)
+	}
+	if want := fmt.Sprintf(`notify = ["/opt/railse", "hook", "codex-notify", "--socket", %q]`, sock); !strings.Contains(out, want) {
+		t.Fatalf("Codex notify 的建议也应带 --socket（%s）:\n%s", want, out)
+	}
+	if !strings.Contains(out, "--socket") || !strings.Contains(out, data) {
+		t.Fatalf("应说明为什么带 --socket:\n%s", out)
+	}
+	// 相对路径的 --dir 按当前目录取绝对路径
+	t.Chdir(home)
+	setup("--dir", "data dir")
+	if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude --socket "+q {
+		t.Fatalf("相对 --dir 应写成绝对路径的 socket: %q", got)
+	}
+	// 显式给默认目录、不给 --dir：都不带 --socket，并把上次带 --socket 的条目换掉
+	for _, extra := range [][]string{{"--dir", filepath.Join(home, ".railse")}, nil} {
+		out = setup(extra...)
+		for _, p := range []string{local, gemini, codexFile} {
+			if b := readFile(t, p); strings.Contains(string(b), "--socket") {
+				t.Fatalf("%v: 默认目录时 %s 不应带 --socket:\n%s", extra, p, b)
+			}
+		}
+		if !strings.Contains(out, `notify = ["/opt/railse", "hook", "codex-notify"]`) {
+			t.Fatalf("%v: 默认目录时 notify 建议不带 --socket:\n%s", extra, out)
+		}
+	}
+	// 设了 $RAILSE_HOME：它就是默认，不带 --socket（钩子从 CLI 的环境里读同一个 RAILSE_HOME）；别的目录照样带
+	t.Setenv("RAILSE_HOME", data)
+	setup("--dir", data)
+	if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude" {
+		t.Fatalf("--dir 与 $RAILSE_HOME 相同时不带 --socket: %q", got)
+	}
+	setup("--dir", filepath.Join(home, ".railse"))
+	if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude --socket "+filepath.Join(home, ".railse", "agent.sock") {
+		t.Fatalf("--dir 不是 $RAILSE_HOME 时应带 --socket: %q", got)
+	}
+}
+
+// 写进配置的钩子命令经 shell 执行后的参数，交给 railse hook 能连上非默认目录里的守护进程（钩子环境里没有 RAILSE_HOME）。
+func TestSetupHooksSocketCommandReachesDaemon(t *testing.T) {
+	needUnixShell(t)
+	_, repo, cfg := startTestAgent(t)
+	home, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(home)
+	t.Setenv("HOME", home)
+	t.Setenv("RAILSE_HOME", "")
+	// 假的 railse：把收到的参数逐行记下来
+	argsFile := filepath.Join(home, "args")
+	bin := filepath.Join(home, "my bin", "railse")
+	os.MkdirAll(filepath.Dir(bin), 0o755)
+	os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+hooksconf.ShellQuote(argsFile)+"\n"), 0o755)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--project", repo, "--claude", "--bin", bin, "--dir", cfg.Dir}, &out, &errOut); code != 0 {
+		t.Fatalf("setup hooks: %d %s", code, errOut.String())
+	}
+	cmd := hookCommand(t, filepath.Join(repo, ".claude", "settings.local.json"), "PermissionRequest")
+	if b, err := exec.Command("sh", "-c", cmd).CombinedOutput(); err != nil {
+		t.Fatalf("sh -c %q: %v %s", cmd, err, b)
+	}
+	args := strings.Split(strings.TrimSuffix(string(readFile(t, argsFile)), "\n"), "\n")
+	if want := []string{"hook", "claude", "--socket", cfg.SocketPath}; !slices.Equal(args, want) {
+		t.Fatalf("钩子收到的参数 = %q, 想要 %q", args, want)
+	}
+	got, stderr, code := runHookWith(t, claudePermission(repo, "git status"), args[1:]...)
+	if code != 0 || !strings.Contains(got, `"behavior":"allow"`) {
+		t.Fatalf("钩子应连上 %s 的守护进程并放行: %d %q %q", cfg.Dir, code, got, stderr)
+	}
+}
+
 // needUnixShell 在找不到 sh 或非 Unix 时跳过依赖 shell 与 shebang 的断言。
 func needUnixShell(t *testing.T) {
 	t.Helper()
@@ -415,7 +522,7 @@ func TestSetupHooksWritesLocalAndMigratesShared(t *testing.T) {
 	os.MkdirAll(filepath.Join(proj, ".claude"), 0o755)
 	bin := filepath.Join(dir, "railse")
 	// 旧版 setup 写进 settings.json 的条目，加一条别人的
-	old, _ := hooksconf.Merge([]byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/opt/x","timeout":5}]}]}}`), bin, hooksconf.Plan("claude", bin))
+	old, _ := hooksconf.Merge([]byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/opt/x","timeout":5}]}]}}`), bin, hooksconf.Plan("claude", bin, ""))
 	os.WriteFile(filepath.Join(proj, ".claude", "settings.json"), old, 0o644)
 	var out, errOut bytes.Buffer
 	if code := run([]string{"setup", "hooks", "--project", proj, "--claude", "--bin", bin}, &out, &errOut); code != 0 {
@@ -482,7 +589,7 @@ func TestSetupHooksMigrationDropsEmptiedHooksKey(t *testing.T) {
 	project := t.TempDir()
 	shared := filepath.Join(project, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(shared), 0o755)
-	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse"))
+	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
 	os.WriteFile(shared, old, 0o644)
 	var out, errOut bytes.Buffer
 	if code := run([]string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
@@ -558,7 +665,7 @@ func TestSetupHooksDryRunShowsMigration(t *testing.T) {
 	project := t.TempDir()
 	shared := filepath.Join(project, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(shared), 0o755)
-	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse"))
+	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
 	os.WriteFile(shared, old, 0o644)
 	var out, errOut bytes.Buffer
 	if code := run([]string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse", "--dry-run"}, &out, &errOut); code != 0 {
@@ -591,7 +698,7 @@ func TestSetupHooksMigrationWritesThroughSymlinkAndKeepsMode(t *testing.T) {
 	}
 	project := t.TempDir()
 	real := filepath.Join(t.TempDir(), "dotfiles-claude.json")
-	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse"))
+	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
 	os.WriteFile(real, old, 0o600)
 	os.Chmod(real, 0o600)
 	link := filepath.Join(project, ".claude", "settings.json")
@@ -622,7 +729,7 @@ func TestSetupHooksBadTargetStopsMigration(t *testing.T) {
 	project := t.TempDir()
 	shared := filepath.Join(project, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(shared), 0o755)
-	old, _ := hooksconf.Merge(nil, "/opt/railse", hooksconf.Plan("claude", "/opt/railse"))
+	old, _ := hooksconf.Merge(nil, "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
 	os.WriteFile(shared, old, 0o644)
 	os.MkdirAll(filepath.Join(project, ".gemini"), 0o755)
 	os.WriteFile(filepath.Join(project, ".gemini", "settings.json"), []byte("{not json"), 0o644)
@@ -642,7 +749,7 @@ func TestSetupHooksOnlyCodexDoesNotMigrateClaude(t *testing.T) {
 	project := t.TempDir()
 	shared := filepath.Join(project, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(shared), 0o755)
-	old, _ := hooksconf.Merge(nil, "/opt/railse", hooksconf.Plan("claude", "/opt/railse"))
+	old, _ := hooksconf.Merge(nil, "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
 	os.WriteFile(shared, old, 0o644)
 	var out, errOut bytes.Buffer
 	if code := run([]string{"setup", "hooks", "--project", project, "--codex", "--codex-file", filepath.Join(t.TempDir(), "hooks.json"), "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
@@ -661,7 +768,7 @@ func TestSetupHooksLocalLinkedToSharedIsNotMigratedAway(t *testing.T) {
 	project := t.TempDir()
 	shared := filepath.Join(project, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(shared), 0o755)
-	old, _ := hooksconf.Merge(nil, "/old/railse", hooksconf.Plan("claude", "/old/railse"))
+	old, _ := hooksconf.Merge(nil, "/old/railse", hooksconf.Plan("claude", "/old/railse", ""))
 	os.WriteFile(shared, old, 0o644)
 	if err := os.Symlink("settings.json", filepath.Join(project, ".claude", "settings.local.json")); err != nil {
 		t.Skipf("无法创建符号链接: %v", err)
@@ -795,6 +902,13 @@ func TestSetupAllEnrollsHooksAutostartAndDoctor(t *testing.T) {
 	if !strings.Contains(string(readFile(t, local)), f.bin+" hook claude") {
 		t.Fatal("应已装 Claude 钩子，且指向 --bin")
 	}
+	// --dir 不是默认目录：钩子命令带 --socket 指向它，才连得上托管的（带 RAILSE_HOME=--dir 的）守护进程
+	sockArg := " --socket " + hooksconf.ShellQuote(filepath.Join(f.dir, "agent.sock"))
+	for p, ev := range map[string]string{local: "PermissionRequest", hooksconf.CodexPath(f.home): "PermissionRequest", hooksconf.GeminiPath(f.proj): "BeforeTool"} {
+		if got := hookCommand(t, p, ev); !strings.HasSuffix(got, sockArg) {
+			t.Fatalf("%s 的钩子命令应带 --socket（%s）: %q", p, sockArg, got)
+		}
+	}
 	for _, p := range []string{hooksconf.CodexPath(f.home), hooksconf.GeminiPath(f.proj)} {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("应已装钩子 %s", p)
@@ -813,7 +927,8 @@ func TestSetupAllEnrollsHooksAutostartAndDoctor(t *testing.T) {
 		t.Fatalf("托管文件应带上 --dir 与 --bin:\n%s", job)
 	}
 	s := out.String()
-	for _, want := range []string{"已接入", "已写入", "已托管", "[ok]", "守护进程数据目录：" + f.dir, "[fail]", "体检有失败项", "下一步", h.http.URL, "docs/web.md"} {
+	for _, want := range []string{"已接入", "已写入", "已托管", "[ok]", "守护进程数据目录：" + f.dir, "[fail]", "体检有失败项", "下一步", h.http.URL, "docs/web.md",
+		"[ok]    Claude Code 钩子：", "[ok]    Codex 钩子：", "[ok]    Gemini 钩子："} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("输出缺 %q:\n%s", want, s)
 		}

@@ -6,13 +6,16 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/railse/railse-opc/internal/hooksconf"
 )
 
-// codexNotifyRe 认 notify = [..., "hook", "codex-notify"]；数组可以跨行（[^\]]* 不越出这个数组）。
-var codexNotifyRe = regexp.MustCompile(`(?m)^[ \t]*notify[ \t]*=[ \t]*\[[^\]]*["']hook["'][ \t\r\n]*,[ \t\r\n]*["']codex-notify["']`)
+// codexNotifyRe 认 notify = [..., "hook", "codex-notify"]，后面可以再跟 "--socket", "<路径>"（第 1 个子匹配是带引号的路径）；
+// 数组可以跨行（[^\]]* 不越出这个数组）。
+var codexNotifyRe = regexp.MustCompile(`(?m)^[ \t]*notify[ \t]*=[ \t]*\[[^\]]*["']hook["'][ \t\r\n]*,[ \t\r\n]*["']codex-notify["']` +
+	`(?:[ \t\r\n]*,[ \t\r\n]*["']--socket["'][ \t\r\n]*,[ \t\r\n]*("(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*'))?`)
 
 // tomlTableRe 认 TOML 的表头行（[x] 或 [[x]]）：顶层键必须写在第一个表头之前。
 var tomlTableRe = regexp.MustCompile(`(?m)^[ \t]*\[[^\r\n]*`)
@@ -42,12 +45,51 @@ func hookChecks(o Options) []Check {
 	}
 }
 
-// setupHint 是重装某个 CLI 钩子的命令。Codex 的钩子是用户级的，不用 --project。
+// setupHint 是重装某个 CLI 钩子的命令。Codex 的钩子是用户级的，不用 --project。守护进程不在默认目录时带上 --dir
+// （setup hooks 据此在钩子命令里写 --socket）。
 func setupHint(o Options, cli string) string {
 	if cli == "codex" {
-		return "railse setup hooks --codex"
+		return "railse setup hooks --codex" + dirFlag(o)
 	}
-	return "railse setup hooks --project " + hooksconf.ShellQuote(o.Project) + " --" + cli
+	return "railse setup hooks --project " + hooksconf.ShellQuote(o.Project) + " --" + cli + dirFlag(o)
+}
+
+// agentSocket 是 --dir 那个守护进程的 socket。
+func agentSocket(o Options) string { return filepath.Join(o.AgentDir, "agent.sock") }
+
+// dirFlag 是重装钩子的命令里的 --dir：守护进程的 socket 就是默认 socket 时为空，否则（含推不出默认的）带上。
+func dirFlag(o Options) string {
+	if o.DefaultSocket != "" && samePath(agentSocket(o), o.DefaultSocket) {
+		return ""
+	}
+	return " --dir " + hooksconf.ShellQuote(o.AgentDir)
+}
+
+// socketMismatch 看钩子连的 socket 与 --dir 的守护进程对不对得上。explicit 是命令里 --socket 给的路径（空表示没带，
+// 连默认 socket）；对得上或推不出默认 socket 时 ok 为真。对不上时返回钩子实际连的 socket。
+func socketMismatch(o Options, explicit string) (connects string, ok bool) {
+	connects = explicit
+	if connects == "" {
+		connects = o.DefaultSocket
+	}
+	if connects == "" || samePath(connects, agentSocket(o)) {
+		return "", true
+	}
+	return connects, false
+}
+
+// socketDetail 与 socketHint 说钩子（或 notify）连的 socket 对不上守护进程：重装命令带 --dir；有显式 --socket 的，
+// 也可能是 doctor 自己没给对 --dir。
+func socketDetail(what string, socks []string, o Options) string {
+	return fmt.Sprintf("%s连的是 %s，守护进程在 %s", what, strings.Join(socks, "、"), agentSocket(o))
+}
+
+func socketHint(fix string, explicitDirs []string, o Options) string {
+	h := fix + "，让它连 " + o.AgentDir + " 里的守护进程"
+	if len(explicitDirs) > 0 {
+		h += "；守护进程确实在 " + strings.Join(explicitDirs, "、") + " 的话，railse doctor 加 --dir " + hooksconf.ShellQuote(explicitDirs[0])
+	}
+	return h
 }
 
 // hasOurs 报告 path 是一份读得了、解析得了、里面有我们条目的钩子配置。
@@ -126,7 +168,7 @@ func hookFileCheck(id, name, cli, path string, o Options) Check {
 	if err != nil {
 		return Check{ID: id, Name: name, Status: Fail, Detail: path + "：" + err.Error(), Hint: "修好 JSON 后再 " + hint}
 	}
-	var missing, short, others []string
+	var missing, short, others, socks, explicitDirs []string
 	seen := map[string]bool{}
 	for ev, min := range hooksconf.Expected(cli) {
 		st := ins.Events[ev]
@@ -140,10 +182,22 @@ func hookFileCheck(id, name, cli, path string, o Options) Check {
 			seen[st.Program] = true
 			others = append(others, st.Program)
 		}
+		// 认不出命令形状的（别人改过的、只按 name 认的）不比对 socket
+		if st.Present && (st.Program != "" || st.Socket != "") {
+			if s, ok := socketMismatch(o, st.Socket); !ok && !seen["socket:"+s] {
+				seen["socket:"+s] = true
+				socks = append(socks, s)
+				if st.Socket != "" {
+					explicitDirs = append(explicitDirs, filepath.Dir(st.Socket))
+				}
+			}
+		}
 	}
 	sort.Strings(missing)
 	sort.Strings(short)
 	sort.Strings(others)
+	sort.Strings(socks)
+	sort.Strings(explicitDirs)
 	if len(missing) > 0 || len(short) > 0 {
 		var parts []string
 		if len(missing) > 0 {
@@ -154,8 +208,17 @@ func hookFileCheck(id, name, cli, path string, o Options) Check {
 		}
 		return Check{ID: id, Name: name, Status: Fail, Detail: path + "：" + strings.Join(parts, "；"), Hint: hint}
 	}
-	if len(others) > 0 {
-		return Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf("%s：钩子指向 %s，当前程序是 %s", path, strings.Join(others, "、"), o.Bin), Hint: "换过安装路径就重新 " + hint}
+	if len(others) > 0 || len(socks) > 0 {
+		var parts []string
+		h := "换过安装路径就重新 " + hint
+		if len(others) > 0 {
+			parts = append(parts, fmt.Sprintf("钩子指向 %s，当前程序是 %s", strings.Join(others, "、"), o.Bin))
+		}
+		if len(socks) > 0 {
+			parts = append(parts, socketDetail("钩子", socks, o))
+			h = socketHint("运行 "+hint+" 重装钩子", explicitDirs, o)
+		}
+		return Check{ID: id, Name: name, Status: Warn, Detail: path + "：" + strings.Join(parts, "；"), Hint: h}
 	}
 	return Check{ID: id, Name: name, Status: OK, Detail: path}
 }
@@ -180,7 +243,18 @@ func codexNotifyCheck(o Options) Check {
 	if header != nil {
 		top = b[:header[0]]
 	}
-	if codexNotifyRe.Match(top) {
+	if m := codexNotifyRe.FindSubmatch(top); m != nil {
+		explicit, known := tomlString(string(m[1]))
+		if known {
+			if s, ok := socketMismatch(o, explicit); !ok {
+				var dirs []string
+				if explicit != "" {
+					dirs = []string{filepath.Dir(explicit)}
+				}
+				fix := "把 railse setup hooks --codex" + dirFlag(o) + " 打印的 notify = [...] 那一行换进 ~/.codex/config.toml"
+				return Check{ID: id, Name: name, Status: Warn, Detail: path + "：" + socketDetail("notify ", []string{s}, o), Hint: socketHint(fix, dirs, o)}
+			}
+		}
 		return Check{ID: id, Name: name, Status: OK, Detail: path}
 	}
 	if loc := codexNotifyRe.FindIndex(b); loc != nil {
@@ -192,4 +266,17 @@ func codexNotifyCheck(o Options) Check {
 		return Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf("%s 里的 notify 写在了 %s 下面，Codex 读不到", path, table), Hint: "把 notify 那一行挪到文件开头（第一个 [表] 之前）"}
 	}
 	return Check{ID: id, Name: name, Status: Warn, Detail: path + ` 里没有 notify = ["…/railse", "hook", "codex-notify"]，Codex 的完成与提问事件不会进收件箱`, Hint: hint}
+}
+
+// tomlString 解出 TOML 的一个字符串：基本字符串（双引号，转义与 Go 的一致到普通路径够用）或字面字符串（单引号，不转义）。
+// 空串表示没有（返回 "", true）；解不出时 known 为 false，调用方不据此下结论。
+func tomlString(q string) (s string, known bool) {
+	switch {
+	case q == "":
+		return "", true
+	case strings.HasPrefix(q, "'"):
+		return strings.Trim(q, "'"), true
+	}
+	s, err := strconv.Unquote(q)
+	return s, err == nil
 }

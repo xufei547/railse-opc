@@ -23,9 +23,10 @@ const setupAllUsage = `  railse setup all --hub URL --token 接入码 [--name �
 
 const setupUsage = `用法:
 ` + setupAllUsage + `
-  railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--bin 路径] [--dry-run]
+  railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--dir 目录] [--bin 路径] [--dry-run]
     默认三个都装。Claude 写项目级 .claude/settings.local.json（不入库；旧版写在 settings.json 的会迁走），
     Gemini 写项目级 .gemini/settings.json，Codex 写用户级 ~/.codex/hooks.json。
+    --dir 是守护进程的数据目录（默认 $RAILSE_HOME 或 ~/.railse）：不是默认目录时钩子命令带 --socket 指向它。
   railse setup autostart [--hub] [--uninstall] [--status] [--dir 目录] [--bin 路径] [--system] [--user 名字] [--dry-run] [-- hub run 的额外参数]
     开机自启并在退出后自动拉起（macOS launchd、Linux systemd），默认托管守护进程，--hub 托管 hub；详见 railse setup autostart -h。`
 
@@ -131,6 +132,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	doCodex := fs.Bool("codex", false, "只装 Codex")
 	doGemini := fs.Bool("gemini", false, "只装 Gemini")
 	codexFile := fs.String("codex-file", "", "Codex 钩子文件，默认 ~/.codex/hooks.json")
+	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse；不是默认目录时钩子命令带 --socket")
 	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
 	dryRun := fs.Bool("dry-run", false, "只打印不写")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -142,6 +144,11 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	}
 	if !*doClaude && !*doCodex && !*doGemini {
 		*doClaude, *doCodex, *doGemini = true, true, true
+	}
+	socket, defDir, err := hookSocket(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
 	if *bin == "" {
 		exe, err := os.Executable()
@@ -186,7 +193,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		merged, err := hooksconf.Merge(existing, *bin, hooksconf.Plan(tg.cli, *bin))
+		merged, err := hooksconf.Merge(existing, *bin, hooksconf.Plan(tg.cli, *bin, socket))
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", tg.path, err)
 			return 1
@@ -218,14 +225,61 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "已写入 %s\n", w.show)
 		}
 	}
+	if socket != "" && len(writes) > 0 {
+		def := "默认的 " + defDir
+		if defDir == "" {
+			def = "默认目录（取不到家目录）"
+		}
+		fmt.Fprintf(stdout, "钩子命令带 --socket %s：守护进程数据目录 %s 不是%s，CLI 起的钩子进程里没有指向它的 RAILSE_HOME\n", hooksconf.ShellQuote(socket), filepath.Dir(socket), def)
+	}
 	if *doCodex {
-		// notify 是 argv 数组，bin 必须单独作为第一个元素；%q 的转义对普通路径与 TOML 基本字符串一致
-		fmt.Fprintf(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify 需手动写在用户级 ~/.codex/config.toml：notify = [%q, \"hook\", \"codex-notify\"]。\n", *bin)
+		// notify 是 argv 数组，bin 必须单独作为第一个元素（Codex 把 JSON 追加在最后）；%q 的转义对普通路径与 TOML 基本字符串一致
+		notify := fmt.Sprintf("%q, \"hook\", \"codex-notify\"", *bin)
+		if socket != "" {
+			notify += fmt.Sprintf(", \"--socket\", %q", socket)
+		}
+		fmt.Fprintf(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify 需手动写在用户级 ~/.codex/config.toml：notify = [%s]。\n", notify)
 	}
 	if *doGemini {
 		fmt.Fprintln(stdout, "提醒 Gemini：钩子只能拒绝不能放行，需要 Gemini CLI 0.65.0 以上，不要开 yolo 模式。")
 	}
 	return 0
+}
+
+// hookSocket 定钩子命令里的 --socket：dir（--dir，空则取默认）是守护进程的数据目录，它不是当前环境下的默认目录
+// （$RAILSE_HOME 或 ~/.railse，即不带 --socket 的钩子会连的那个）时返回它的 socket 的绝对路径：托管的守护进程带着
+// RAILSE_HOME=dir 跑，CLI 起的钩子进程环境里却没有，不写明就连到默认 socket 上、所有请求交回终端。是默认目录时返回空，
+// 命令保持原样（已有用户的配置不变）。defDir 是默认目录的绝对路径（给提示用；取不到家目录时为空，这时总带 --socket）。
+func hookSocket(dir string) (socket, defDir string, err error) {
+	if dir == "" {
+		return "", "", nil
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", "", err
+	}
+	if def, derr := agent.DefaultConfig(); derr == nil {
+		if defDir, err = filepath.Abs(def.Dir); err != nil {
+			return "", "", err
+		}
+		if sameDir(abs, defDir) {
+			return "", defDir, nil
+		}
+	}
+	return agent.ConfigIn(abs).SocketPath, defDir, nil
+}
+
+// sameDir 报告两个绝对路径是不是同一个目录：字面相同（清理后），或都存在且是同一个文件（中间有符号链接）。
+func sameDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	sa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	sb, err := os.Stat(b)
+	return err == nil && os.SameFile(sa, sb)
 }
 
 // setupDaemonWait 是 setup all 托管之后探守护进程应答的时长：launchd、systemd 拉起它要一点时间，等到了体检才看得到它在跑。
@@ -405,7 +459,8 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	if *noHooks {
 		fmt.Fprintln(stdout, "已跳过（--no-hooks）")
 	} else {
-		if code := runSetup([]string{"hooks", "--project", proj, "--bin", b}, stdout, stderr); code != 0 {
+		// --dir 也交给钩子：不是默认目录时钩子命令带 --socket，才连得上下面托管的、带 RAILSE_HOME=<目录> 的守护进程
+		if code := runSetup([]string{"hooks", "--project", proj, "--bin", b, "--dir", cfg.Dir}, stdout, stderr); code != 0 {
 			return fail(2, "钩子文件的问题见上面（已写入的会列出来）。")
 		}
 		done = append(done, steps[1])

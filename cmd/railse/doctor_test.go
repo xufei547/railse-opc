@@ -260,13 +260,26 @@ func TestDoctorProjectBinAndCLIHook(t *testing.T) {
 	base, _ := os.MkdirTemp("", "rs")
 	defer os.RemoveAll(base)
 	t.Setenv("HOME", base)
+	t.Setenv("RAILSE_HOME", "")
 	t.Setenv("RAILSE_HUB_HOME", filepath.Join(base, "nohub"))
-	agentDir := filepath.Join(base, "h")
+	agentDir := filepath.Join(base, "h") // 不是默认的 ~/.railse
 	proj := filepath.Join(base, "proj")
 	bin := filepath.Join(base, "bin", "railse")
 	var out, errOut bytes.Buffer
+	// 旧装法：不给 --dir，钩子连默认 socket，对不上 --dir 的守护进程 → warn，提示带 --dir 重装
 	if code := run([]string{"setup", "hooks", "--project", proj, "--bin", bin}, &out, &errOut); code != 0 {
 		t.Fatalf("setup hooks: %d %s", code, errOut.String())
+	}
+	_, checks := doctorJSON(t, "--dir", agentDir, "--project", proj, "--bin", bin)
+	for _, id := range []string{"hooks.claude", "hooks.codex", "hooks.gemini"} {
+		if c := mustCheck(t, checks, id); c.Status != "warn" || !strings.Contains(c.Detail, filepath.Join(base, ".railse", "agent.sock")) ||
+			!strings.Contains(c.Hint, "setup hooks") || !strings.Contains(c.Hint, "--dir "+agentDir) {
+			t.Fatalf("钩子连默认 socket、守护进程在 --dir 时 %s 应 warn: %+v", id, c)
+		}
+	}
+	// 按提示带 --dir 重装：钩子命令带 --socket，对得上
+	if code := run([]string{"setup", "hooks", "--project", proj, "--bin", bin, "--dir", agentDir}, &out, &errOut); code != 0 {
+		t.Fatalf("setup hooks --dir: %d %s", code, errOut.String())
 	}
 	var ran []string
 	setDoctorOptions(t, func(o *doctor.Options) {
@@ -281,7 +294,7 @@ func TestDoctorProjectBinAndCLIHook(t *testing.T) {
 			return "2.1.280 (Claude Code)\n", nil
 		}
 	})
-	_, checks := doctorJSON(t, "--dir", agentDir, "--project", proj, "--bin", bin)
+	_, checks = doctorJSON(t, "--dir", agentDir, "--project", proj, "--bin", bin)
 	for _, id := range []string{"hooks.claude", "hooks.codex", "hooks.gemini"} {
 		if c := mustCheck(t, checks, id); c.Status != "ok" {
 			t.Fatalf("装好钩子后 %s 应 ok: %+v", id, c)
@@ -305,7 +318,7 @@ func TestDoctorProjectBinAndCLIHook(t *testing.T) {
 
 	// 不给 --bin：两边都默认当前程序，对得上
 	proj2 := filepath.Join(base, "proj2")
-	if code := run([]string{"setup", "hooks", "--project", proj2, "--claude"}, &out, &errOut); code != 0 {
+	if code := run([]string{"setup", "hooks", "--project", proj2, "--claude", "--dir", agentDir}, &out, &errOut); code != 0 {
 		t.Fatalf("setup hooks: %d %s", code, errOut.String())
 	}
 	_, checks = doctorJSON(t, "--dir", agentDir, "--project", proj2)
@@ -384,11 +397,12 @@ func TestDoctorExitsZeroWithoutFailures(t *testing.T) {
 	_, _, cfg := startTestAgent(t)
 	home := cfg.HomeDir
 	t.Setenv("HOME", home)
+	t.Setenv("RAILSE_HOME", "")
 	t.Setenv("RAILSE_HUB_HOME", filepath.Join(home, "nohub"))
 	proj := filepath.Join(home, "proj")
 	bin := filepath.Join(home, "bin", "railse")
 	var out, errOut bytes.Buffer
-	if code := run([]string{"setup", "hooks", "--project", proj, "--bin", bin}, &out, &errOut); code != 0 {
+	if code := run([]string{"setup", "hooks", "--project", proj, "--bin", bin, "--dir", cfg.Dir}, &out, &errOut); code != 0 {
 		t.Fatalf("setup hooks: %d %s", code, errOut.String())
 	}
 	out.Reset()
@@ -400,8 +414,10 @@ func TestDoctorExitsZeroWithoutFailures(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--json 没有 fail 时应退出 0: %d %+v", code, checks)
 	}
-	if c := mustCheck(t, checks, "agent.running"); c.Status != "ok" {
-		t.Fatalf("agent.running: %+v", c)
+	for _, id := range []string{"agent.running", "hooks.claude", "hooks.codex", "hooks.gemini"} {
+		if c := mustCheck(t, checks, id); c.Status != "ok" {
+			t.Fatalf("%s: %+v", id, c)
+		}
 	}
 }
 

@@ -10,7 +10,7 @@ import (
 
 func TestInspectAndExpected(t *testing.T) {
 	bin := "/usr/local/bin/railse"
-	doc, err := Merge(nil, bin, Plan("claude", bin))
+	doc, err := Merge(nil, bin, Plan("claude", bin, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestInspectAndExpected(t *testing.T) {
 
 func TestMergeRemoveOnly(t *testing.T) {
 	bin := "/usr/local/bin/railse"
-	doc, _ := Merge([]byte(`{"permissions":{"allow":["Bash"]}}`), bin, Plan("claude", bin))
+	doc, _ := Merge([]byte(`{"permissions":{"allow":["Bash"]}}`), bin, Plan("claude", bin, ""))
 	out, err := Merge(doc, bin, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +130,82 @@ func TestCommandProgram(t *testing.T) {
 	}
 }
 
+// 守护进程不在默认目录时，钩子命令带 --socket：Plan 写得出、ParseCommand 认得回、IsOurs 与 Inspect 照常认。
+func TestPlanSocketAndParseCommand(t *testing.T) {
+	bin, sock := "/my apps/railse", "/data dir/agent.sock"
+	want := `'/my apps/railse' hook claude --socket '/data dir/agent.sock'`
+	for ev, groups := range Plan("claude", bin, sock) {
+		if got := groups[0].Hooks[0].Command; got != want {
+			t.Fatalf("%s 的命令 = %q, 想要 %q", ev, got, want)
+		}
+	}
+	if got := Plan("gemini", "/opt/railse", "/d/agent.sock")["BeforeTool"][0].Hooks[0].Command; got != "/opt/railse hook gemini --socket /d/agent.sock" {
+		t.Fatalf("Gemini 的命令 = %q", got)
+	}
+	if got := Plan("codex", "/opt/railse", "")["Stop"][0].Hooks[0].Command; got != "/opt/railse hook codex" {
+		t.Fatalf("socket 为空时命令保持原样: %q", got)
+	}
+	for cmd, wantC := range map[string]Command{
+		"/opt/railse hook claude":                       {Program: "/opt/railse", CLI: "claude"},
+		"/opt/railse hook codex --socket /d/agent.sock": {Program: "/opt/railse", CLI: "codex", Socket: "/d/agent.sock"},
+		want: {Program: bin, CLI: "claude", Socket: sock},
+		`/opt/railse hook gemini --socket '/it'\''s/agent.sock'`: {Program: "/opt/railse", CLI: "gemini", Socket: "/it's/agent.sock"},
+	} {
+		got, ok := ParseCommand(cmd)
+		if !ok || got != wantC {
+			t.Errorf("ParseCommand(%q) = %+v,%v, 想要 %+v", cmd, got, ok, wantC)
+		}
+		if p, ok := CommandProgram(cmd); !ok || p != wantC.Program {
+			t.Errorf("CommandProgram(%q) = %q,%v", cmd, p, ok)
+		}
+	}
+	for _, cmd := range []string{
+		"/opt/railse hook claude --socket",
+		"/opt/railse hook claude --socket ",
+		"/opt/railse hook claude --socket /a /b",
+		"/opt/railse hook claude --socket /a --x",
+		"/opt/railse hook claude  --socket /a",
+		"/opt/railse hook claude --sock /a",
+		"/opt/railse hook claude --socket '/a",
+		"/opt/railse hook claude --socket '/a'x",
+		"/opt/railse hook claude --socket ''",
+	} {
+		if got, ok := ParseCommand(cmd); ok {
+			t.Errorf("ParseCommand(%q) 不应认出, 得到 %+v", cmd, got)
+		}
+	}
+	// 往返：ShellQuote 写出的 socket 都能认回
+	for _, s := range []string{"/d/agent.sock", "/my dir/agent.sock", "/it's/agent.sock"} {
+		if got, ok := ParseCommand("/opt/railse hook claude --socket " + ShellQuote(s)); !ok || got.Socket != s {
+			t.Errorf("往返 %q 得到 %+v,%v", s, got, ok)
+		}
+	}
+	// 换过安装路径的旧条目带 --socket 也认得是我们的；Merge 换掉它，Inspect 报出 socket
+	old := map[string]any{"type": "command", "command": "/old/railse hook claude --socket /d/agent.sock"}
+	if !IsOurs(old, "") || !IsOurs(old, "/opt/railse") {
+		t.Fatal("带 --socket 的旧条目应认作我们的")
+	}
+	doc, err := Merge(nil, "/old/railse", Plan("claude", "/old/railse", "/d/agent.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err = Merge(doc, "/opt/railse", Plan("claude", "/opt/railse", ""))
+	if err != nil || strings.Contains(string(doc), "/old/railse") || strings.Contains(string(doc), "--socket") {
+		t.Fatalf("应换掉带 --socket 的旧条目: %s err=%v", doc, err)
+	}
+	doc, _ = Merge(doc, "/opt/railse", Plan("claude", "/opt/railse", sock))
+	ins, err := Inspect(doc, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := ins.Events["PermissionRequest"]; !st.Present || st.Program != "/opt/railse" || st.Socket != sock {
+		t.Fatalf("Inspect 应报出 socket: %+v\n%s", st, doc)
+	}
+	if strings.Count(string(doc), "hook claude") != 4 {
+		t.Fatalf("重装后每个事件只应有一条: %s", doc)
+	}
+}
+
 func TestIsOurs(t *testing.T) {
 	entry := func(name, cmd string) any {
 		m := map[string]any{"type": "command", "command": cmd}
@@ -170,31 +246,31 @@ func TestIsOurs(t *testing.T) {
 func TestPlan(t *testing.T) {
 	bin := "/my apps/railse"
 	quoted := `'/my apps/railse'`
-	claude := Plan("claude", bin)
+	claude := Plan("claude", bin, "")
 	pr := claude["PermissionRequest"]
 	if len(claude) != 4 || len(pr) != 1 || pr[0].Matcher == nil || *pr[0].Matcher != "" ||
 		pr[0].Hooks[0].Command != quoted+" hook claude" || pr[0].Hooks[0].Timeout != 86400 || pr[0].Hooks[0].Type != "command" {
 		t.Fatalf("Claude: %+v", claude)
 	}
-	codex := Plan("codex", bin)
+	codex := Plan("codex", bin, "")
 	if len(codex) != 3 || codex["SessionEnd"][0].Hooks[0].Timeout != 3 || codex["Stop"][0].Matcher != nil {
 		t.Fatalf("Codex: %+v", codex)
 	}
-	gemini := Plan("gemini", bin)
+	gemini := Plan("gemini", bin, "")
 	bt := gemini["BeforeTool"][0]
 	if len(gemini) != 4 || *bt.Matcher != ".*" || bt.Hooks[0].Name != "railse-before-tool" || bt.Hooks[0].Timeout != 86400000 ||
 		gemini["AfterAgent"][0].Hooks[0].Name != "railse-after-agent" {
 		t.Fatalf("Gemini: %+v", gemini)
 	}
-	if Plan("other", bin) != nil {
+	if Plan("other", bin, "") != nil {
 		t.Fatal("不认识的 CLI 应返回 nil")
 	}
 	// JSON 形状与旧版 setup 写出的一致：matcher 只在设了时出现，name、timeout 为零值时省略
-	b, _ := json.Marshal(Plan("claude", "/opt/railse")["Stop"])
+	b, _ := json.Marshal(Plan("claude", "/opt/railse", "")["Stop"])
 	if string(b) != `[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}]` {
 		t.Fatalf("Stop 的 JSON: %s", b)
 	}
-	b, _ = json.Marshal(Plan("claude", "/opt/railse")["PermissionRequest"])
+	b, _ = json.Marshal(Plan("claude", "/opt/railse", "")["PermissionRequest"])
 	if string(b) != `[{"matcher":"","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}]` {
 		t.Fatalf("PermissionRequest 的 JSON: %s", b)
 	}
@@ -203,7 +279,7 @@ func TestPlan(t *testing.T) {
 func TestExpectedMatchesPlan(t *testing.T) {
 	// Expected 是 doctor 的检查标准：事件集合与 Plan 写出的一致，Plan 写的超时满足下限
 	for _, cli := range []string{"claude", "codex", "gemini"} {
-		plan, exp := Plan(cli, "/opt/railse"), Expected(cli)
+		plan, exp := Plan(cli, "/opt/railse", ""), Expected(cli)
 		if len(plan) != len(exp) {
 			t.Fatalf("%s: Plan 有 %d 个事件, Expected 有 %d 个", cli, len(plan), len(exp))
 		}
@@ -225,11 +301,11 @@ func TestExpectedMatchesPlan(t *testing.T) {
 func TestMergeIntoEmptyAndIdempotent(t *testing.T) {
 	bin := "/opt/railse"
 	for _, empty := range [][]byte{nil, []byte(""), []byte("  \n")} {
-		first, err := Merge(empty, bin, Plan("gemini", bin))
+		first, err := Merge(empty, bin, Plan("gemini", bin, ""))
 		if err != nil {
 			t.Fatal(err)
 		}
-		second, err := Merge(first, bin, Plan("gemini", bin))
+		second, err := Merge(first, bin, Plan("gemini", bin, ""))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -249,7 +325,7 @@ func TestMergeKeepsOthersAndReplacesOldBin(t *testing.T) {
 	existing := `{"big":12345678901234567890,"hooks":{"enabled":true,` +
 		`"PermissionRequest":[{"matcher":"","hooks":[{"type":"command","command":"/old/railse hook claude","timeout":86400},{"type":"command","command":"my-logger"}]}],` +
 		`"PreToolUse":[{"hooks":[{"type":"command","command":"npm test && echo ok > /tmp/x"}]}]}}`
-	out, err := Merge([]byte(existing), "/opt/railse", Plan("claude", "/opt/railse"))
+	out, err := Merge([]byte(existing), "/opt/railse", Plan("claude", "/opt/railse", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +341,7 @@ func TestMergeKeepsOthersAndReplacesOldBin(t *testing.T) {
 }
 
 func TestMergeRejectsBroken(t *testing.T) {
-	plan := Plan("claude", "/opt/railse")
+	plan := Plan("claude", "/opt/railse", "")
 	for _, existing := range []string{
 		`{not json`,
 		`{} {}`,
@@ -290,7 +366,7 @@ func TestMergeRejectsBroken(t *testing.T) {
 func TestMergeRemoveOnlyKeepsOthers(t *testing.T) {
 	bin := "/opt/railse"
 	// 别人的条目还在：hooks 键保留，只去掉我们的
-	doc, _ := Merge([]byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/opt/x","timeout":5}]}]}}`), bin, Plan("claude", bin))
+	doc, _ := Merge([]byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/opt/x","timeout":5}]}]}}`), bin, Plan("claude", bin, ""))
 	out, err := Merge(doc, bin, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -338,7 +414,7 @@ func TestInspectDetails(t *testing.T) {
 		t.Fatalf("非数组事件应跳过: %+v err=%v", ins, err)
 	}
 	// 引号路径解出原路径；Gemini 按名字认；超时取我们条目里最小的
-	doc, _ := Merge(nil, bin, Plan("gemini", bin))
+	doc, _ := Merge(nil, bin, Plan("gemini", bin, ""))
 	ins, err = Inspect(doc, bin)
 	if err != nil {
 		t.Fatal(err)

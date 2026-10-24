@@ -41,9 +41,19 @@ func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// Plan 给出每个 CLI 要写入的事件与条目。
-func Plan(cli, bin string) map[string][]Group {
+// HookCommand 是钩子命令“<bin> hook <cli>”；socket 非空时再加“ --socket <socket>”（守护进程不在默认目录时，
+// 钩子进程的环境里没有那个 RAILSE_HOME，要靠它找到 socket）。路径都经 ShellQuote。
+func HookCommand(bin, cli, socket string) string {
 	cmd := ShellQuote(bin) + " hook " + cli
+	if socket != "" {
+		cmd += " --socket " + ShellQuote(socket)
+	}
+	return cmd
+}
+
+// Plan 给出每个 CLI 要写入的事件与条目；socket 见 HookCommand，为空时命令不带 --socket。
+func Plan(cli, bin, socket string) map[string][]Group {
+	cmd := HookCommand(bin, cli, socket)
 	one := func(name string, timeout int) []Group {
 		return []Group{{Hooks: []Entry{{Name: name, Type: "command", Command: cmd, Timeout: timeout}}}}
 	}
@@ -74,7 +84,7 @@ func Plan(cli, bin string) map[string][]Group {
 
 // IsOurs 判断单个钩子条目是不是 Railse 写的：name 以 railse- 开头，
 // 或命令是“<程序> hook …”且程序是本次的 bin，
-// 或命令恰好是“<程序> hook claude|codex|gemini”且程序文件名是 railse（换过安装路径时留下的旧条目）。
+// 或命令恰好是 Plan 写的形状（见 ParseCommand）且程序文件名是 railse（换过安装路径时留下的旧条目）。
 // bin 为空时（doctor 不知道当前程序路径）第二条不用，只按 name 前缀与程序文件名认。
 func IsOurs(entry any, bin string) bool {
 	m, ok := entry.(map[string]any)
@@ -119,39 +129,76 @@ func withoutOurs(group any, bin string) (kept any, drop bool) {
 	return gm, false
 }
 
-// CommandProgram 认出 Plan 写过的命令形状“<一个词> hook claude|codex|gemini”，返回去掉引号的程序路径。
-// “一个词”是不含空白的裸词，或 ShellQuote 产生的单引号词（内部单引号按 ShellQuote 的写法转义）。其他形状一律不认。
+// Command 是从 Plan 写的钩子命令里认出的各部分（都已去掉引号）。Socket 为空表示命令不带 --socket（连默认 socket）。
+type Command struct {
+	Program, CLI, Socket string
+}
+
+// ParseCommand 认出 Plan 写过的命令形状“<词> hook claude|codex|gemini”，后面可以再跟“ --socket <词>”（见 HookCommand）。
+// “词”是不含空白的裸词，或 ShellQuote 产生的单引号词（内部单引号按 ShellQuote 的写法转义）。其他形状一律不认。
+func ParseCommand(cmd string) (Command, bool) {
+	prog, rest, ok := shellWord(cmd)
+	if !ok {
+		return Command{}, false
+	}
+	var c Command
+	for _, cli := range []string{"claude", "codex", "gemini"} {
+		if r, found := strings.CutPrefix(rest, " hook "+cli); found && (r == "" || strings.HasPrefix(r, " --socket ")) {
+			c, rest = Command{Program: prog, CLI: cli}, r
+			break
+		}
+	}
+	if c.CLI == "" {
+		return Command{}, false
+	}
+	if rest == "" {
+		return c, true
+	}
+	sock, tail, ok := shellWord(strings.TrimPrefix(rest, " --socket "))
+	if !ok || tail != "" {
+		return Command{}, false
+	}
+	c.Socket = sock
+	return c, true
+}
+
+// shellWord 从 s 的开头取一个词（见 ParseCommand），返回去掉引号的词与其后的剩余部分；不是这两种词或词为空时 ok 为 false。
+func shellWord(s string) (word, rest string, ok bool) {
+	if !strings.HasPrefix(s, "'") {
+		i := strings.IndexAny(s, " \t\r\n")
+		if i < 0 {
+			i = len(s)
+		}
+		if i == 0 {
+			return "", "", false
+		}
+		return s[:i], s[i:], true
+	}
+	var b strings.Builder
+	i := 1
+	for {
+		j := strings.IndexByte(s[i:], '\'')
+		if j < 0 {
+			return "", "", false
+		}
+		b.WriteString(s[i : i+j])
+		i += j + 1
+		if !strings.HasPrefix(s[i:], `\''`) {
+			break
+		}
+		b.WriteByte('\'')
+		i += 3
+	}
+	if b.Len() == 0 || i < len(s) && !strings.ContainsRune(" \t\r\n", rune(s[i])) {
+		return "", "", false
+	}
+	return b.String(), s[i:], true
+}
+
+// CommandProgram 是 ParseCommand 认出的程序路径。
 func CommandProgram(cmd string) (string, bool) {
-	var prog, rest string
-	if strings.HasPrefix(cmd, "'") {
-		var b strings.Builder
-		i := 1
-		for {
-			j := strings.IndexByte(cmd[i:], '\'')
-			if j < 0 {
-				return "", false
-			}
-			b.WriteString(cmd[i : i+j])
-			i += j + 1
-			if !strings.HasPrefix(cmd[i:], `\''`) {
-				break
-			}
-			b.WriteByte('\'')
-			i += 3
-		}
-		prog, rest = b.String(), cmd[i:]
-	} else {
-		i := strings.IndexAny(cmd, " \t\r\n")
-		if i <= 0 {
-			return "", false
-		}
-		prog, rest = cmd[:i], cmd[i:]
-	}
-	switch rest {
-	case " hook claude", " hook codex", " hook gemini":
-		return prog, true
-	}
-	return "", false
+	c, ok := ParseCommand(cmd)
+	return c.Program, ok
 }
 
 // parse 解析一份钩子配置：返回整份文档与其中的 hooks 对象（没有 hooks 键时 hooks 为 nil）。
@@ -269,6 +316,7 @@ type EventState struct {
 	Present bool
 	Timeout int    // 我们的条目的 timeout；同一事件有多条时取最小的（超时下限要每条都满足）
 	Program string // 从命令里认出的程序路径；命令不是 Plan 写的形状时为空
+	Socket  string // 命令里 --socket 给的路径；不带 --socket（连默认 socket）或命令不是 Plan 写的形状时为空
 }
 
 // Installed 是一份钩子配置里我们的条目，按事件名索引；没有我们条目的事件不在里面。
@@ -296,7 +344,9 @@ func Inspect(doc []byte, bin string) (Installed, error) {
 				em := e.(map[string]any)
 				st := EventState{Present: true}
 				if cmd, _ := em["command"].(string); cmd != "" {
-					st.Program, _ = CommandProgram(cmd)
+					if c, ok := ParseCommand(cmd); ok {
+						st.Program, st.Socket = c.Program, c.Socket
+					}
 				}
 				if n, ok := em["timeout"].(json.Number); ok {
 					if i, err := n.Int64(); err == nil {
