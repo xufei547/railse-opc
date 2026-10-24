@@ -202,7 +202,7 @@ type builder struct {
 	nests      []string
 }
 
-// char 追加逻辑字符 i 的原文，视图里第一个字节是 rep，其余是 vMask。
+// char 追加逻辑字符 i 的原文，视图里第一个字节是 rep，其余是 vMask（rep 是空白时补的也是这个空白）。
 func (b *builder) char(t *text, i int, rep byte) {
 	if t.ch == nil {
 		b.orig = append(b.orig, t.raw[i])
@@ -212,8 +212,13 @@ func (b *builder) char(t *text, i int, rep byte) {
 	s := t.slice(i, i+1)
 	b.orig = append(b.orig, s...)
 	b.view = append(b.view, rep)
+	pad := byte(vMask)
+	if rep == ' ' || rep == '\t' || rep == '\n' {
+		// 空白的原文里并进了外层去掉的续行（\⏎ 加空格）：补位也记成这个空白，免得补位字节在空白后面被当成值
+		pad = rep
+	}
 	for k := 1; k < len(s); k++ {
-		b.view = append(b.view, vMask)
+		b.view = append(b.view, pad)
 	}
 }
 
@@ -820,8 +825,15 @@ func (c *ctx) escape() {
 	}
 	nx := t.at(i + 1)
 	if nx == '\n' {
-		c.b.char(t, i, vMask)
-		c.b.char(t, i+1, vCont)
+		if c.inWord {
+			c.b.char(t, i, vMask)
+			c.b.char(t, i+1, vCont)
+		} else {
+			// 词与词之间的续行（-p \⏎pw）与空白等价，bash 把它整个去掉：视图里记成两个空格，值不从它开始。
+			// 否则 -p \⏎# 会把续行本身当值抹成占位符，再脱敏一次时 # 接在占位符后面不再是注释，结果不幂等
+			c.b.char(t, i, ' ')
+			c.b.char(t, i+1, ' ')
+		}
 		sc.i += 2
 		return
 	}
