@@ -54,11 +54,14 @@ fail() {
 command -v claude >/dev/null || fail "没有找到 claude"
 command -v python3 >/dev/null || fail "没有找到 python3（选端口、解析 JSON 用）"
 command -v curl >/dev/null || fail "没有找到 curl"
-# 超时包在 env -i 外层（shell 函数经 env 调用不起作用）：timeout、gtimeout（coreutils），都没有时用 macOS 自带的 perl
+# hub 只在本机：每次请求至多 5 秒，不走环境里的 HTTP 代理
+CURL=(curl -fs --max-time 5 --noproxy '*')
+# 超时包在 env -i 外层（shell 函数经 env 调用不起作用）：timeout、gtimeout（coreutils），都没有时用 macOS 自带的 perl。
+# --foreground 让 Ctrl-C 照样传给 claude（代价是超时只杀 claude 本身，不杀它的子进程）。
 if command -v timeout >/dev/null 2>&1; then
-  TO=(timeout 120)
+  TO=(timeout --foreground 120)
 elif command -v gtimeout >/dev/null 2>&1; then
-  TO=(gtimeout 120)
+  TO=(gtimeout --foreground 120)
 else
   TO=(perl -e 'alarm shift; exec @ARGV or die "exec $ARGV[0]: $!\n"' 120)
 fi
@@ -77,8 +80,8 @@ HUB="http://127.0.0.1:$port"
 printf '%s\n' "$PW" | "$R" hub password >/dev/null || fail "railse hub password 失败"
 "$R" hub run --listen "127.0.0.1:$port" >"$WORK/hub.stderr" 2>&1 &
 HUB_PID=$!
-for _ in $(seq 1 100); do curl -fs "$HUB/api/version" >/dev/null 2>&1 && break; sleep 0.1; done
-curl -fs "$HUB/api/version" >/dev/null 2>&1 || fail "hub 没起来"
+for _ in $(seq 1 100); do "${CURL[@]}" "$HUB/api/version" >/dev/null 2>&1 && break; sleep 0.1; done
+"${CURL[@]}" "$HUB/api/version" >/dev/null 2>&1 || fail "hub 没起来"
 
 TOKEN="$("$R" hub token | sed -n 's/^接入码: //p')"
 [ -n "$TOKEN" ] || fail "railse hub token 没有给出接入码"
@@ -97,10 +100,10 @@ for _ in $(seq 1 100); do "$R" agent status 2>/dev/null | grep -q '^hub: connect
 # 批准前先把 id 写下：claude 拿到决定后很快结束，最后的断言以 hub 里该请求的状态为准。
 CK="$WORK/cookie"
 (umask 077 && : >"$CK")
-printf '{"password":"%s"}' "$PW" | curl -fs -c "$CK" -H 'Content-Type: application/json' --data-binary @- "$HUB/api/login" || fail "登录 hub 失败"
+printf '{"password":"%s"}' "$PW" | "${CURL[@]}" -c "$CK" -H 'Content-Type: application/json' --data-binary @- "$HUB/api/login" || fail "登录 hub 失败"
 (
   for _ in $(seq 1 600); do
-    next="$(curl -fs -b "$CK" "$HUB/api/inbox" 2>/dev/null | CMD="$CMD" python3 -c '
+    next="$("${CURL[@]}" -b "$CK" "$HUB/api/inbox" 2>/dev/null | CMD="$CMD" python3 -c '
 import json, os, sys
 p = json.load(sys.stdin)["pending"]
 if p:
@@ -112,7 +115,7 @@ if p:
       "allow "*)
         id="${next#allow }"
         echo "$id" >"$WORK/approved-id"
-        curl -fs -b "$CK" -H 'Content-Type: application/json' -H "Origin: $HUB" -d '{"action":"allow","note":"冒烟自动批准"}' \
+        "${CURL[@]}" -b "$CK" -H 'Content-Type: application/json' -H "Origin: $HUB" -d '{"action":"allow","note":"冒烟自动批准"}' \
           "$HUB/api/requests/$id/decide" >/dev/null || echo "批准 $id 失败" >&2
         exit 0
         ;;
@@ -120,7 +123,7 @@ if p:
         id="${next#deny }"
         echo "拒绝了意料之外的待审批 $id" >&2
         echo "$id" >>"$WORK/denied-ids"
-        curl -fs -b "$CK" -H 'Content-Type: application/json' -H "Origin: $HUB" -d '{"action":"deny","note":"冒烟只批准 git push origin main"}' \
+        "${CURL[@]}" -b "$CK" -H 'Content-Type: application/json' -H "Origin: $HUB" -d '{"action":"deny","note":"冒烟只批准 git push origin main"}' \
           "$HUB/api/requests/$id/decide" >/dev/null || echo "拒绝 $id 失败" >&2
         ;;
     esac
@@ -129,10 +132,19 @@ if p:
 ) &
 APPROVER_PID=$!
 
+# 默认不透传 API key 与代理：宿主应用（IDE、桌面端）常注入同名变量，会改变 claude 走的登录与网络。真要用时设
+# RAILSE_SMOKE_PASS_ENV=1，只透传下面这几个已设置的变量（只打印名字，不打印值）。
+PASS=()
+if [ "${RAILSE_SMOKE_PASS_ENV:-}" = 1 ]; then
+  for v in ANTHROPIC_API_KEY HTTPS_PROXY HTTP_PROXY NO_PROXY ALL_PROXY https_proxy http_proxy no_proxy all_proxy; do
+    if [ -n "${!v+x}" ]; then PASS+=("$v=${!v}"); echo "透传给 claude: $v"; fi
+  done
+fi
+
 # env -i 隔离掉宿主应用注入的变量，但 USER/LOGNAME/TMPDIR/SHELL 必须保留，否则 claude 找不到钥匙串里的登录态。
 # --setting-sources project,local：钩子在 .claude/settings.local.json（local 来源）；不加 user（见文件开头）。
 (cd "$WORK/proj" && "${TO[@]}" env -i HOME="$HOME" PATH="$PATH" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" \
-  TMPDIR="${TMPDIR:-/tmp}" SHELL="${SHELL:-/bin/sh}" LANG="${LANG:-C}" TERM=dumb RAILSE_HOME="$RAILSE_HOME" \
+  TMPDIR="${TMPDIR:-/tmp}" SHELL="${SHELL:-/bin/sh}" LANG="${LANG:-C}" TERM=dumb RAILSE_HOME="$RAILSE_HOME" ${PASS[@]+"${PASS[@]}"} \
   claude -p "Run exactly this shell command with the Bash tool and nothing else: $CMD . Then reply DONE." \
   --setting-sources project,local --output-format json </dev/null >"$WORK/claude.json")
 CLAUDE_EXIT=$?
@@ -155,7 +167,7 @@ id="$(cat "$WORK/approved-id" 2>/dev/null || true)"
 # 送达回执是守护进程异步报给 hub 的：最多等 5 秒
 state=""
 for _ in $(seq 1 50); do
-  state="$(curl -fs -b "$CK" "$HUB/api/requests/$id" | python3 -c '
+  state="$("${CURL[@]}" -b "$CK" "$HUB/api/requests/$id" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)["request"]
 print(r["state"], r["decided_by"], "delivered" if r["delivered_at"] else "undelivered")

@@ -20,7 +20,7 @@ railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com
 - 收到 SIGINT、SIGTERM 后 5 秒内退出：断开守护进程、等在途请求、长连接处理、webhook 回调与推送收尾（正在发的推送中止，不计失败）；等不到它们退出时（含被强制断开、处理还没结束的普通请求）退出码 1，日志写“不关数据库”。
 - `railse hub webhook-token` 生成 webhook 来源令牌，明文只显示这一次，再生成一次旧的就失效。
 - `railse hub vapid [--rotate]` 打印推送公钥（库里没有就生成，hub 第一次启动时也会生成）；`--rotate` 换新密钥并在同一事务里删除全部推送订阅，提示所有手机要重新开启通知。在跑的 hub 不用重启：下一次推送、下一次网页取公钥时就从库里读到新密钥。
-- **开机自启。** `railse setup autostart --hub -- <hub run 的参数>` 用 launchd（macOS）或 systemd 用户单元（Linux）托管 hub，退出后自动拉起。Linux 上直出 443/80 时装成系统单元，以普通用户运行、只给 `CAP_NET_BIND_SERVICE`，数据目录默认 `/var/lib/railse-hub`：`sudo railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com`（railse 要装在服务用户能执行、sudo 找得到的地方，如 `/usr/local/bin`，见 [setup.md](setup.md)）。`--status` 看是否在跑，`--uninstall` 移除托管（数据目录保留），`--dry-run` 只打印。
+- **开机自启。** `railse setup autostart --hub -- <hub run 的参数>` 用 launchd（macOS）或 systemd 用户单元（Linux）托管 hub，退出后自动拉起。Linux 上直出 443/80 时装成系统单元，以普通用户运行、只给 `CAP_NET_BIND_SERVICE`，数据目录默认 `/var/lib/railse-hub`：`sudo /usr/local/bin/railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com`（railse 先用 `curl … | sudo sh` 装进 `/usr/local/bin`，服务用户才执行得了；sudo 时写绝对路径，RHEL 系的 sudo 默认不在 `/usr/local/bin` 里找命令，见 [setup.md](setup.md)）。`--status` 看是否在跑，`--uninstall` 移除托管（数据目录保留），`--dry-run` 只打印。
 - **体检。** `railse doctor --hub-dir <数据目录>`（只读）检查数据目录与 `hub.db` 的权限、库版本、网页密码、推送密钥、`acme/` 的权限与托管文件；不给 `--hub-dir` 时看 `$RAILSE_HUB_HOME`、`~/.railse-hub`，Linux 上再看 `/var/lib/railse-hub`。以跑 hub 的用户身份运行。各检查项见 [setup.md](setup.md) 的“railse doctor”。
 
 ## 网页
@@ -161,10 +161,10 @@ railse hub run --acme-domain hub.example.com --acme-email me@example.com
 
 - **前提。** 域名的 A/AAAA 记录已指向这台机器，443 与 80 对公网开放（云厂商的安全组、防火墙都要放行）：Let's Encrypt 从公网连进来验证域名，用 443 上的 TLS-ALPN-01 或 80 上的 HTTP-01。
 - **监听。** hub 在 `--listen`（给了 `--acme-domain` 时默认 `:443`）直出 TLS（最低 TLS 1.2，支持 HTTP/2；WebSocket 照常）。`--acme-http`（默认 `:80`）答 HTTP-01 挑战，并把明文 http 的 GET、HEAD 302 跳到对外源加原路径与查询（不看请求的 Host），别的方法回 400；`--acme-http none` 不监听 80，只能靠 443 上的 TLS-ALPN-01 签发，也没有 http 跳转。443 或 80 被占（比如还跑着 nginx）、证书目录建不了时启动即退出 1，日志“hub 监听失败”。
-- **签发与续期。** 证书在第一次 https 访问时签发，约需 1 到 2 分钟，这一次访问可能超时，稍后刷新即可；到期前 30 天自动续期，不用重启。只给 `--acme-domain` 这一个域名签：别的 SNI 与按 IP 访问在握手时就被拒，不会替它们申请。只用 Let's Encrypt 的生产目录，它对同一域名的签发有频率限制，不要反复删掉 `acme/` 重来。
+- **签发与续期。** 证书在第一次 https 访问时签发，约需 1 到 2 分钟，这一次访问可能超时，稍后刷新即可；之后由 autocert 在到期前自动续期（默认提前 30 天或有效期的 1/3，取较小者），不用重启。只给 `--acme-domain` 这一个域名签：别的 SNI 与按 IP 访问在握手时就被拒，不会替它们申请。只用 Let's Encrypt 的生产目录，它对同一域名的签发有频率限制，不要反复删掉 `acme/` 重来。
 - **对外源与 cookie。** 对外源（`--public-url`）默认 `https://<域名>`，手机推送随之启用；要显式写时主机名必须就是这个域名，否则退出 2（端口可以不同，例如 `--listen :8443 --public-url https://hub.example.com:8443`，这时 Let's Encrypt 只能经 80 端口验证）。cookie 一律加 Secure。
 - **私钥。** 账户私钥与证书私钥明文存在数据目录的 `acme/`（目录 0700、文件 0600，启动时收紧目录），`--acme-email` 是 Let's Encrypt 账户的联系邮箱，只用于账户与政策通知，可不填：Let's Encrypt 已于 2025 年停发证书到期提醒邮件，续期失败没有邮件提醒，要看 hub 的 stderr（见“故障排查”），证书过期后工作机上 `railse doctor` 的 `hub.reachable` 会报证书错误。见“安全要点”。
-- **权限。** Linux 上绑定 443/80 需要 `CAP_NET_BIND_SERVICE`：用 `sudo railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com` 装成系统服务，以普通用户运行、只给这一项能力（railse 先用 `curl … | sudo sh` 装进 `/usr/local/bin`：sudo 找不到 `~/.local/bin` 里的程序，服务用户也要能执行它，见 [setup.md](setup.md)）；macOS 绑定 443/80 不需要特权。hub 不要以 root 运行，以 root 启动时 hub 会醒目警告（不拒绝）。
+- **权限。** Linux 上绑定 443/80 需要 `CAP_NET_BIND_SERVICE`：用 `sudo /usr/local/bin/railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com` 装成系统服务，以普通用户运行、只给这一项能力（railse 先用 `curl … | sudo sh` 装进 `/usr/local/bin`，服务用户才执行得了；sudo 的 `secure_path` 不含 `~/.local/bin`，RHEL 系连 `/usr/local/bin` 也不含，所以写绝对路径，见 [setup.md](setup.md)）；macOS 绑定 443/80 不需要特权。hub 不要以 root 运行，以 root 启动时 hub 会醒目警告（不拒绝）。
 - 前面已有反向代理终止 TLS 时不要用它，用 B。
 
 ### B. 反向代理
@@ -213,9 +213,9 @@ server {
 | `railse hub password` 回显密码 | 用 `read -s PW; printf '%s\n' "$PW" \| railse hub password` |
 | hub 退出码 1、日志“不关数据库” | 关停时有在途请求、长连接处理或回调没在时限内退出，或服务出错结束；直接重启即可 |
 | `railse hub run` 启动即退出 1、日志“监听失败” | 端口被占或 `--listen` 地址无效，换个地址。用 `--acme-domain` 时还可能是 80 端口被占（`--acme-http` 换地址或 `none`）、证书目录建不了，或 Linux 上没有 `CAP_NET_BIND_SERVICE`（`permission denied`，见“部署与反向代理”的 A） |
-| `--acme-domain` 时网页打不开、证书签不下来 | 域名没解析到这台机器，或 443、80 没对公网开放。签发失败的原因在 hub 的 stderr（`--foreground` 时在终端；systemd 系统服务看 `journalctl -u railse-hub`，launchd 看数据目录的 `launchd.log`）里，形如 “http: TLS handshake error … acme/autocert: …”；撞上 Let's Encrypt 的频率限制时只能等，别反复删 `acme/` |
+| `--acme-domain` 时网页打不开、证书签不下来 | 域名没解析到这台机器，或 443、80 没对公网开放。签发失败的原因在 hub 进程的 stderr（不进 `hub.log`；前台跑时就在终端里，与 `--foreground` 无关；systemd 系统服务看 `journalctl -u railse-hub`，launchd 看数据目录的 `launchd.log`）里，形如 “http: TLS handshake error … acme/autocert: …”；撞上 Let's Encrypt 的频率限制时只能等，别反复删 `acme/` |
 | `railse hub run` 退出 2、提示 acme-domain、acme-http 或 acme-email | `--acme-domain` 要写小写主机名（`hub.example.com`，不带 `https://`、端口、路径，不能是 IP）；`--acme-http` 写 `host:port` 或 `none`；`--acme-email`、`--acme-http` 要和 `--acme-domain` 一起用；同时给 `--public-url` 时主机名要与域名一致 |
-| 日志或终端“hub 正以 root 运行” | hub 不需要 root：Linux 用 `sudo railse setup autostart --hub --system` 装成以普通用户运行的系统服务 |
+| 日志或终端“hub 正以 root 运行” | hub 不需要 root：Linux 用 `sudo /usr/local/bin/railse setup autostart --hub --system -- …` 装成以普通用户运行的系统服务（railse 装在别处时 `sudo "$(command -v railse)" …`） |
 | `railse hub run` 退出 2、提示 public-url | `--public-url` 要写成 `https://hub.example.com`（不带路径、结尾的 `/`、查询），http 不行 |
 | 网页说推送停用、`/api/push/vapid` 的 `enabled` 为 false | hub 没加 `--public-url` |
 | 收不到推送 | 看 `GET /api/requests/{id}` 的审计：没有 `push_sent` 是没有订阅、推送停用、或是事件时间太旧的 question；`push_sent` 里 `failed` 不为 0 时看 `hub.log` 的“推送到 … 失败（连续第 N 次）”（带推送服务给的原因，如 `BadJwtToken`；同一原因持续一天以上订阅会被删）；有 `push_subscription_removed` 说明订阅已失效被删，在网页里重新开启通知 |

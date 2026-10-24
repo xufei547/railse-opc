@@ -28,9 +28,13 @@ const autostartUsage = `用法:
     macOS 写 ~/Library/LaunchAgents/dev.railse.<agent|hub>.plist（launchd 用户代理，日志在数据目录的 launchd.log）；
     Linux 写 ~/.config/systemd/user/railse-<agent|hub>.service（用户单元，日志：journalctl --user -u railse-<agent|hub>）。
     hub 要直出 443/80 时在 Linux 上用系统单元（只给绑定特权端口的权限，hub 不以 root 运行）：
-      sudo railse setup autostart --hub --system [--user 名字] -- --acme-domain hub.example.com --acme-email me@example.com
+      ` + sudoSystemHubCmd + ` [--user 名字] -- --acme-domain hub.example.com --acme-email me@example.com
       写 /etc/systemd/system/railse-hub.service，以 --user（默认 $SUDO_USER）运行，数据目录默认 /var/lib/railse-hub。
     --uninstall 停止并移除托管（数据目录保留）；--status 看是否在跑；--dry-run 只打印要写的文件与要跑的命令。`
+
+// sudoSystemHubCmd 是提示里装 hub 系统单元的命令开头。写成 command -v 的形式：程序不知道自己装在哪儿，而 sudo 的
+// secure_path 不含 ~/.local/bin（RHEL 系连 /usr/local/bin 都不含），直接写 sudo railse 常常找不到命令。
+const sudoSystemHubCmd = `sudo "$(command -v railse)" setup autostart --hub --system`
 
 const (
 	// systemHubDir 是 hub 系统单元的默认数据目录，由 systemd 按 StateDirectory= 建好并交给运行用户。
@@ -228,10 +232,10 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 		fmt.Fprintln(stderr, "macOS 上不要用 sudo 跑：launchd 用户代理装在当前登录用户下，直接 railse setup autostart")
 		return 1
 	case uid == 0 && !*system:
-		fmt.Fprintln(stderr, "不要以 root 管用户级托管：守护进程与 hub 都以普通用户运行，请用普通用户跑本命令；hub 要直出 443/80 用 sudo railse setup autostart --hub --system --user 名字（只给绑定特权端口的权限）")
+		fmt.Fprintln(stderr, "不要以 root 管用户级托管：守护进程与 hub 都以普通用户运行，请用普通用户跑本命令；hub 要直出 443/80 用 "+sudoSystemHubCmd+" --user 名字（只给绑定特权端口的权限）")
 		return 1
 	case *system && !*status && uid != 0 && !*dryRun:
-		fmt.Fprintln(stderr, "--system 要写 /etc/systemd/system，需要 root：sudo railse setup autostart --hub --system …")
+		fmt.Fprintln(stderr, "--system 要写 /etc/systemd/system，需要 root："+sudoSystemHubCmd+" …")
 		return 1
 	}
 

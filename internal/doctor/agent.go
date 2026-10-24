@@ -129,7 +129,7 @@ func agentRunningChecks(o Options) []Check {
 }
 
 // autostartCheck 只看托管文件在不在，不跑 launchctl/systemctl。路径与 railse setup autostart 共用 internal/autostart。
-// hub 在 Linux 上也可能装成系统单元（sudo railse setup autostart --hub --system），那个存在也算。
+// hub 在 Linux 上也可能装成系统单元（以 root 跑 railse setup autostart --hub --system），那个存在也算。
 // 取不到家目录时只看系统单元，没有就 skip：不拼相对路径。
 func autostartCheck(id, name string, o Options, kind string) Check {
 	var paths []string

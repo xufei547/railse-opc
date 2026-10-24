@@ -105,7 +105,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 }
 
 // doctorHubDir 是不给 --hub-dir 时 doctor 看的 hub 数据目录：设了 $RAILSE_HUB_HOME 就只看它；否则 ~/.railse-hub，
-// Linux 上它不在时再看系统单元的数据目录（sudo railse setup autostart --hub --system 装的 hub，RAILSE_HUB_HOME
+// Linux 上它不在时再看系统单元的数据目录（以 root 跑 railse setup autostart --hub --system 装的 hub，RAILSE_HUB_HOME
 // 只写在单元的 Environment= 里，doctor 看不到）。都不在时仍返回第一个候选，报告里写明看的是哪里；
 // 连家目录都取不到又没有系统目录时返回空。是不是目录由 doctor 判断（不是目录就跳过 hub 侧）。
 func doctorHubDir() string {

@@ -266,11 +266,11 @@ func agentJobRunning() bool {
 // runSetupAll 是 railse setup all：依次接入 hub、装三个 CLI 的钩子、托管开机自启、体检。
 // 任一步失败立即退出 1 并说明停在哪一步、哪些已做完；体检只展示（刚托管的守护进程可能还没起来），不影响退出码。
 func runSetupAll(args []string, stdout, stderr io.Writer) int {
-	return runSetupAllAs(os.Geteuid(), args, stdout, stderr)
+	return runSetupAllAs(runtime.GOOS, os.Geteuid(), args, stdout, stderr)
 }
 
-// runSetupAllAs 是 runSetupAll 的可测版本：有效 uid 由调用方给。
-func runSetupAllAs(euid int, args []string, stdout, stderr io.Writer) int {
+// runSetupAllAs 是 runSetupAll 的可测版本：系统（只用于拒绝 root 时的提示）与有效 uid 由调用方给。
+func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("setup all", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
@@ -299,8 +299,12 @@ func runSetupAllAs(euid int, args []string, stdout, stderr io.Writer) int {
 	// 在动手之前拒绝 root：否则一次性接入码先被用掉，machine.json 与项目里、家目录下的钩子配置都成了 root 的文件，
 	// 到第 3 步才被 setup autostart 拒绝（加 --no-autostart 时更是以 root 一路跑完）
 	if euid == 0 {
-		fmt.Fprintln(stderr, "setup all 要用平时的用户身份运行，不要 sudo：以 root 跑会用掉一次性接入码，machine.json 与钩子配置也会成为 root 的文件；"+
-			"hub 机器用 sudo railse setup autostart --hub --system")
+		// hub 的提示按系统分：只有 Linux 的系统单元要 sudo；macOS 上 hub 也用平时的用户托管（launchd 用户代理）
+		hubHint := "hub 机器（Linux）用 " + sudoSystemHubCmd + " 装成系统服务"
+		if goos == "darwin" {
+			hubHint = "macOS 上 hub 也不用 sudo：railse setup autostart --hub"
+		}
+		fmt.Fprintln(stderr, "setup all 要用平时的用户身份运行，不要 sudo：以 root 跑会用掉一次性接入码，machine.json 与钩子配置也会成为 root 的文件；"+hubHint)
 		return 1
 	}
 	var hubBase string

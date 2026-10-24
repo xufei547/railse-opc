@@ -314,7 +314,7 @@ func TestDoctorProjectBinAndCLIHook(t *testing.T) {
 	}
 }
 
-// Linux 上没设 $RAILSE_HUB_HOME、~/.railse-hub 也不在时，回退到系统单元的 hub 数据目录（sudo railse setup autostart
+// Linux 上没设 $RAILSE_HUB_HOME、~/.railse-hub 也不在时，回退到系统单元的 hub 数据目录（以 root 跑 railse setup autostart
 // --hub --system 装的 hub），输出里写明用的是哪个目录；~/.railse-hub 在时优先它；设了 $RAILSE_HUB_HOME 就只看它；别的系统不回退。
 func TestDoctorLinuxSystemHubDir(t *testing.T) {
 	fakeDoctorCLIs(t)

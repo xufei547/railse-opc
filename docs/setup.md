@@ -10,29 +10,32 @@ curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh |
 
 - **平台。** macOS（Apple Silicon）、Linux amd64 与 arm64；不支持 Windows 与 Intel Mac。
 - **校验和。** 脚本从 GitHub Releases 下载 `railse_<版本>_<系统>_<架构>.tar.gz`，按同一发布的 `checksums.txt` 校验 sha256，不符就不装（只有校验和，没有签名：两者来自同一处）。新文件先写到安装目录里的临时名再改名替换，正在运行的旧二进制不受影响。
-- **安装目录。** 脚本不调用 sudo：`/usr/local/bin` 可写就装那里，否则装 `~/.local/bin`（不存在就建），它不在 `PATH` 里时打印要加进 shell 配置的那一行。
+- **安装目录。** 脚本不调用 sudo：`/usr/local/bin` 可写就装那里，否则装 `~/.local/bin`（不存在时等下载与校验都过了才建），它不在 `PATH` 里时打印要加进 shell 配置的那一行。
 - **环境变量**（经管道运行时写在 `sh` 前面）：`RAILSE_VERSION`（如 `0.1.0`，带 `v` 也行，默认最新正式版）、`RAILSE_INSTALL_DIR`（安装目录，不存在就建）、`RAILSE_REPO`（默认 `railse/railse-opc`）。例如：
   ```sh
   curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | RAILSE_VERSION=0.1.0 RAILSE_INSTALL_DIR="$HOME/bin" sh
   ```
-- **Linux 上的 hub 机器装到系统目录。** 系统单元（见下文）要用 `sudo` 跑 railse，而 sudo 的 `secure_path` 里没有 `~/.local/bin`（`sudo: railse: command not found`）；服务用户也必须能读、能执行这个二进制。所以 hub 机器用 root 装，脚本以 root 运行时 `/usr/local/bin` 可写，就装在那里（属主 root、0755，任何用户都能执行）：
+- **Linux 上的 hub 机器装到系统目录。** 系统单元（见下文）的服务用户必须能读、能执行这个二进制，所以 hub 机器用 root 装：脚本以 root 运行时 `/usr/local/bin` 可写，就装在那里（属主 root、0755，任何用户都能执行）。
   ```sh
   curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sudo sh
   ```
-  sudo 会清掉环境变量，要指定版本时写在 `sudo` 后面：`… | sudo RAILSE_VERSION=0.1.0 sh`；极少数没有 `/usr/local/bin` 的系统上，脚本会退到 root 的 `~/.local/bin`，这时加 `sudo RAILSE_INSTALL_DIR=/usr/local/bin sh`。
+  看输出里的“已安装 /usr/local/bin/railse”确认位置。sudo 会清掉环境变量，要指定版本时写在 `sudo` 后面：`… | sudo RAILSE_VERSION=0.1.0 sh`。没有 `/usr/local/bin` 的系统上脚本会退到 `$HOME/.local/bin`，而 sudo 下的 `HOME` 是 root 的还是你的取决于 sudo 的配置（老版本 Ubuntu 保留你的 `HOME`，会在你的 `~/.local/bin` 里留下 root 属主的文件），这时显式指定：`… | sudo RAILSE_INSTALL_DIR=/usr/local/bin sh`。
+- **sudo 时写绝对路径。** sudo 只在 `secure_path` 里找命令：它没有 `~/.local/bin`，RHEL 系（RHEL、CentOS、Rocky、Alma、Amazon Linux）默认连 `/usr/local/bin` 都没有（只有 `/sbin:/bin:/usr/sbin:/usr/bin`），`sudo railse …` 会报 `command not found`。所以下文凡要 sudo 的都写 `sudo /usr/local/bin/railse …`；railse 装在别处时写 `sudo "$(command -v railse)" …`。
 - **自己编译。** `go install github.com/railse/railse-opc/cmd/railse@latest` 装出的二进制不带手机网页（网页路径回 503“网页未构建”），只适合工作机；hub 用安装脚本，或在仓库里 `make build`。
 - **升级**就是重跑一遍安装脚本，再重启守护进程与 hub（见“升级”）。
 - **卸载。** 先停掉托管（数据目录保留），再删钩子与二进制：
   ```sh
   railse setup autostart --uninstall                 # 守护进程
   railse setup autostart --hub --uninstall           # 用户级托管的 hub
-  sudo railse setup autostart --hub --system --uninstall   # Linux 系统单元的 hub
+  sudo /usr/local/bin/railse setup autostart --hub --system --uninstall   # Linux 系统单元的 hub
   ```
-  没有卸载钩子的命令：删二进制之前，手动删掉各 CLI 配置里 Railse 的条目（命令是 `<railse 路径> hook claude|codex|gemini` 的那几条，在项目的 `.claude/settings.local.json`、`.gemini/settings.json` 与 `~/.codex/hooks.json` 里；`~/.codex/config.toml` 里的 `notify` 那一行也删掉），否则 CLI 每次调用钩子都会报错。最后 `rm "$(command -v railse)"`（以 root 装进 `/usr/local/bin` 的加 sudo）；不要的数据目录（`~/.railse`、`~/.railse-hub`，系统单元的 `/var/lib/railse-hub` 要 sudo）自己删。
+  没有卸载钩子的命令：删二进制之前，手动删掉各 CLI 配置里 Railse 的条目（命令是 `<railse 路径> hook claude|codex|gemini` 的那几条，在项目的 `.claude/settings.local.json`、`.gemini/settings.json` 与 `~/.codex/hooks.json` 里；`~/.codex/config.toml` 里的 `notify` 那一行也删掉），否则 CLI 每次调用钩子都会报错。最后删掉二进制：`rm "$(command -v railse)"`，以 root 装进去的用 `sudo rm /usr/local/bin/railse`；不要的数据目录（`~/.railse`、`~/.railse-hub`，系统单元的 `/var/lib/railse-hub` 要 sudo）自己删。
 
 ## hub 机器
 
-前提：域名的 A/AAAA 记录已指向这台机器，443 与 80 对公网开放（云厂商的安全组与防火墙都要放行）。三条命令：
+前提：域名的 A/AAAA 记录已指向这台机器，443 与 80 对公网开放（云厂商的安全组与防火墙都要放行）。
+
+**Linux 上直出 443/80 的，不要照下面三条跑，直接看后面的“Linux：装成系统服务”。** 下面三条适用于 macOS（绑定 443/80 不需要特权）；用反向代理时（Linux 上也一样，hub 只监听本机、不需要特权）把第三条换成 B 里的命令：
 
 ```sh
 railse hub password    # 从标准输入读一行设为网页登录密码（至少 8 个字符）；不回显：read -s PW; printf '%s\n' "$PW" | railse hub password; unset PW
@@ -40,11 +43,11 @@ railse hub token       # 打印一次性接入码，默认 10 分钟有效（--t
 railse hub run --acme-domain hub.example.com --acme-email me@example.com
 ```
 
-数据目录取 `--dir`，否则 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`（0700）。macOS 上绑定 443/80 不需要特权，上面的命令直接跑；要开机自启就把最后一条换成 `railse setup autostart --hub -- --acme-domain hub.example.com --acme-email me@example.com`。
+数据目录取 `--dir`，否则 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`（0700）。要开机自启就把最后一条换成 `railse setup autostart --hub -- --acme-domain hub.example.com --acme-email me@example.com`（用户级托管，不用 sudo）。
 
 ### TLS 的两种方式
 
-**A. 内置 ACME（推荐自用）。** `--acme-domain` 让 hub 自己向 Let's Encrypt（只用生产目录）申请证书并直出 TLS，`--listen` 默认 `:443`；`--acme-http`（默认 `:80`）答 HTTP-01 挑战并把 http 跳到 https，`--acme-http none` 不监听 80、只靠 443 上的 TLS-ALPN-01。只给这一个域名签：别的 SNI 与按 IP 访问在握手时被拒。证书在第一次 https 访问时签发（约 1 到 2 分钟），到期前 30 天自动续期。对外源默认 `https://<域名>`，手机推送随之启用，cookie 一律 Secure。账户私钥与证书私钥明文存在数据目录的 `acme/`（目录 0700、文件 0600），当私密数据备份。`--acme-email` 只用于 Let's Encrypt 的账户与政策通知，可不填：Let's Encrypt 已于 2025 年停发证书到期提醒邮件，续期失败不会有人发信提醒。签发、续期出错时，TLS 握手的报错（形如 `http: TLS handshake error … acme/autocert: …`）写在 hub 的 stderr：`--foreground` 时在终端，系统单元看 `journalctl -u railse-hub`，launchd 托管时看数据目录的 `launchd.log`；证书真过期了，工作机上 `railse doctor` 的 `hub.reachable` 会报证书错误。同一域名有签发频率限制，不要反复删 `acme/` 重来。Linux 上绑定 443/80 需要 `CAP_NET_BIND_SERVICE`，用下面的系统单元。
+**A. 内置 ACME（推荐自用）。** `--acme-domain` 让 hub 自己向 Let's Encrypt（只用生产目录）申请证书并直出 TLS，`--listen` 默认 `:443`；`--acme-http`（默认 `:80`）答 HTTP-01 挑战并把 http 跳到 https，`--acme-http none` 不监听 80、只靠 443 上的 TLS-ALPN-01。只给这一个域名签：别的 SNI 与按 IP 访问在握手时被拒。证书在第一次 https 访问时签发（约 1 到 2 分钟），之后由 autocert 在到期前自动续期（默认提前 30 天或有效期的 1/3，取较小者），不用重启。对外源默认 `https://<域名>`，手机推送随之启用，cookie 一律 Secure。账户私钥与证书私钥明文存在数据目录的 `acme/`（目录 0700、文件 0600），当私密数据备份。`--acme-email` 只用于 Let's Encrypt 的账户与政策通知，可不填：Let's Encrypt 已于 2025 年停发证书到期提醒邮件，续期失败不会有人发信提醒。签发、续期出错时，TLS 握手的报错（形如 `http: TLS handshake error … acme/autocert: …`）由 Go 标准库的 logger 写到 hub 进程的 stderr（不进 `hub.log`）：前台跑时就在终端里（与 `--foreground` 无关，它只决定 hub 自己的日志是否也打到终端），系统单元看 `journalctl -u railse-hub`，launchd 托管时看数据目录的 `launchd.log`；证书真过期了，工作机上 `railse doctor` 的 `hub.reachable` 会报证书错误。同一域名有签发频率限制，不要反复删 `acme/` 重来。Linux 上绑定 443/80 需要 `CAP_NET_BIND_SERVICE`，用下面的系统单元。
 
 **B. 反向代理。** 已有 nginx、Caddy 终止 TLS 时，hub 只监听本机：
 
@@ -60,16 +63,16 @@ railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com --tr
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sudo sh    # 装到 /usr/local/bin（见“安装”）
-sudo railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com
+sudo /usr/local/bin/railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com
 railse hub password --dir /var/lib/railse-hub     # 不加 sudo：以服务用户（默认就是执行 sudo 的你）运行
 railse hub token --dir /var/lib/railse-hub
 ```
 
 - 写 `/etc/systemd/system/railse-hub.service` 并 `daemon-reload`、`enable`、`restart`。`--system` 只给 `--hub` 用，只在 Linux 上有效；需要 systemd 240 以上（`Type=exec`）。
-- `User=` 默认取 `$SUDO_USER`，用 `--user 名字` 指定别的普通用户；root 与全数字的名字一律拒绝。用了别的用户时，后两条命令以那个用户身份跑：`sudo -u 名字 railse hub password --dir /var/lib/railse-hub`。
-- 数据目录默认 `/var/lib/railse-hub`，由 systemd 按 `StateDirectory=railse-hub` 在服务第一次启动时建好（0700）并交给服务用户，所以 `password`、`token` 要在 `setup autostart` 之后跑。显式给 `--dir` 时，目录要么已经属于服务用户（不替你 chown，只收紧为 0700），要么还不存在、由这次新建并交给服务用户：这要求它已有的那段祖先都属于 root 且别人不能写（如 `/srv/railse-hub`）。祖先不满足（例如在家目录下）时，先以服务用户身份建好再跑：`sudo -u 名字 mkdir -p -m 700 /home/名字/railse-hub`。
-- 单元里的 `ExecStart` 是 railse 的绝对路径（`--bin`，默认就是这次运行的程序），服务用户必须能读、能执行它。railse 已经装在 `~/.local/bin` 时，`sudo railse` 找不到命令，可以写成 `sudo "$(command -v railse)" setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com`（`--bin` 随之取这个路径）；但只有服务用户就是你自己时才这样做：用 `--user` 换成别的用户而程序在你的家目录（常是 0750）下时，服务用户执行不了它，单元会以 `203/EXEC` 反复重启。
-- 日志：`journalctl -u railse-hub`，数据目录里还有 `hub.log`。状态：`railse setup autostart --hub --system --status`（不用 sudo；或 `systemctl status railse-hub`）。卸载：`sudo railse setup autostart --hub --system --uninstall`（数据目录保留）。
+- `User=` 默认取 `$SUDO_USER`，用 `--user 名字` 指定别的普通用户；root 与全数字的名字一律拒绝。用了别的用户时，后两条命令以那个用户身份跑：`sudo -u 名字 /usr/local/bin/railse hub password --dir /var/lib/railse-hub`。
+- 数据目录默认 `/var/lib/railse-hub`，由 systemd 按 `StateDirectory=railse-hub` 在服务第一次启动时建好（0700）并交给服务用户，所以 `password`、`token` 要在 `setup autostart` 之后跑，而且都要带 `--dir /var/lib/railse-hub`：不带时会在服务用户的家目录里多建一个 `~/.railse-hub`，在跑的 hub 用不到它，`railse doctor` 默认也会改看它、不再回退到 `/var/lib/railse-hub`（多出来的删掉即可，或给 doctor 加 `--hub-dir /var/lib/railse-hub`）。显式给 `--dir` 时，目录要么已经属于服务用户（不替你 chown，只收紧为 0700），要么还不存在、由这次新建并交给服务用户：这要求它已有的那段祖先都属于 root 且别人不能写（如 `/srv/railse-hub`）。祖先不满足（例如在家目录下）时，先以服务用户身份建好再跑：`sudo -u 名字 mkdir -p -m 700 /home/名字/railse-hub`。
+- 单元里的 `ExecStart` 是 railse 的绝对路径（`--bin`，默认就是这次运行的程序），服务用户必须能读、能执行它。`/usr/local/bin/railse`（root 属主、0755）任何服务用户都能执行。railse 装在别处时写 `sudo "$(command -v railse)" setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com`（`--bin` 随之取这个路径），但要确认服务用户执行得了它：程序在你的家目录（常是 0750）下而 `--user` 换成了别的用户时，服务用户执行不了，单元会以 `203/EXEC` 反复重启。
+- 日志：`journalctl -u railse-hub`，数据目录里还有 `hub.log`。状态：`railse setup autostart --hub --system --status`（不用 sudo；或 `systemctl status railse-hub`）。卸载：`sudo /usr/local/bin/railse setup autostart --hub --system --uninstall`（数据目录保留）。
 
 ## 工作机
 
@@ -127,29 +130,30 @@ railse doctor [--project 目录] [--dir 目录] [--hub-dir 目录] [--bin 路径
 
 只读：不改配置、不建文件，数据库按只读打开；网络只访问 hub 的 `GET /api/version`（不带凭据）；唯一会起的进程是 `claude`、`codex`、`gemini` 的 `--version`（各 10 秒超时），sudo 下（euid 是 root，或家目录不归当前用户）不跑，`cli.*` 报 skip。每项结果是 `ok`、`warn`、`fail`、`skip` 之一，warn 与 fail 下一行给“修复：”；有任一项 fail 退出码 1；`--json` 输出机器可读的结果（ID 固定不变）。
 
-hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux 上两者都没有时再看 `/var/lib/railse-hub`（系统单元的）。默认目录都不在就跳过 hub 侧；显式给的 `--hub-dir` 不存在时报 fail。系统单元的 hub 要以服务用户身份检查（`railse doctor`，或 `sudo -u 名字 railse doctor --hub-dir /var/lib/railse-hub`），别的用户读不到 `hub.db`。
+hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux 上两者都没有时再看 `/var/lib/railse-hub`（系统单元的）。默认目录都不在就跳过 hub 侧；显式给的 `--hub-dir` 不存在时报 fail。系统单元的 hub 要以服务用户身份检查（`railse doctor`，或 `sudo -u 名字 /usr/local/bin/railse doctor --hub-dir /var/lib/railse-hub`），别的用户读不到 `hub.db`；服务用户的家目录里另有 `~/.railse-hub` 时，doctor 默认看的是它，这时显式给 `--hub-dir`。
 
-| ID | 看什么 | 不过时 |
-| --- | --- | --- |
-| `agent.dir` | 守护进程数据目录在、是 0700 | 先 `railse agent run` 建好；权限不对按提示 `chmod 700` |
-| `agent.files` | `rules.yaml`、`machine.json`、`audit.jsonl`、`state.json`（存在的）都是 0600 | 按提示 `chmod 600` |
-| `agent.socket` | `agent.sock` 在、是 socket、0600 | 守护进程没在跑：`railse agent run` 或 `railse setup autostart`；不是 socket 就移走它再重启 |
-| `agent.running` | 守护进程应答 status | 同上 |
-| `agent.hub` | 守护进程连 hub 的状态：`connected` 为 ok，`connecting`、`none`（未接入）为 warn，`disabled`（连续 3 次被 401 拒绝）为 fail | `connecting` 看 `agent.log`；`disabled` 要 `railse agent enroll --force` 后重启守护进程；没有报状态的是升级前起的旧进程，重启它 |
-| `agent.autostart` | 有没有守护进程的托管文件（只看文件，不问 launchd/systemd） | `railse setup autostart`（warn） |
-| `hub.reachable` | `machine.json` 里 hub 的 `/api/version` 答得上、协议号与本机一致；没接入时 skip | 连不上：看 hub 在不在跑、地址、证书；不是 200：hub 太旧或地址被重定向；协议不一致：升级较旧的一方 |
-| `hooks.claude` | `.claude/settings.local.json` 里四个事件都在，`PermissionRequest` 超时不低于 86400 秒，程序路径是当前程序 | 缺了或超时不够：`railse setup hooks --project <目录> --claude`；只在旧位置 `settings.json`，或两处都装了（会触发两次）：同一条命令迁走（warn） |
-| `hooks.codex` | `~/.codex/hooks.json` 同样检查（`PermissionRequest` ≥ 86400 秒） | `railse setup hooks --codex` |
-| `hooks.codex_notify` | `~/.codex/config.toml` 顶层有 `notify = [..., "hook", "codex-notify"]` | 把 `setup hooks` 打印的那一行加到文件开头（warn） |
-| `hooks.gemini` | `.gemini/settings.json` 四个事件都在，`BeforeTool` 超时不低于 86400000 毫秒 | `railse setup hooks --project <目录> --gemini` |
-| `cli.claude`、`cli.codex` | 版本是否与录制钩子样本时一致（Claude Code 2.1.280、Codex 0.145.0）；不在 PATH 里 skip | 不同时 warn：试一次需要审批的操作，确认请求经过 Railse |
-| `cli.gemini` | 版本不低于 0.65.0（更早的版本钩子在确认之后才触发） | 升级 Gemini CLI（fail） |
-| `hubsrv.dir` | hub 数据目录在、是 0700 | 显式 `--hub-dir` 写错了就改对；不跑 hub 的机器去掉它 |
-| `hubsrv.db` | `hub.db` 是 0600，库版本与程序一致 | 库比程序新（fail）：升级 railse；库旧（warn）：下次 `hub run` 自动升级，先备份；被锁：稍后重跑；hub 异常退出留下未恢复的 WAL（warn）：启动一次 `railse hub run`；真损坏才从备份恢复 |
-| `hubsrv.password` | 设过网页密码 | `railse hub password`（warn） |
-| `hubsrv.vapid` | 推送密钥在、解得开 | 还没有（warn）：首次 `railse hub run` 会生成；损坏（fail）：`railse hub vapid --rotate`，所有手机重新开启通知 |
-| `hubsrv.acme` | `acme/` 是 0700、里面的文件 0600；没有这个目录（没用 ACME）时 skip | 按提示 `chmod` |
-| `hubsrv.autostart` | 有没有 hub 的托管文件（plist、用户单元或系统单元） | `railse setup autostart --hub`（warn） |
+| ID | 名称（输出里的） | 看什么 | 不过时 |
+| --- | --- | --- | --- |
+| `agent.dir` | 守护进程数据目录 | 目录在、是 0700 | 先 `railse agent run` 建好；权限不对按提示 `chmod 700` |
+| `agent.files` | 配置与审计文件权限 | `rules.yaml`、`machine.json`、`audit.jsonl`、`state.json`（存在的）都是 0600 | 按提示 `chmod 600` |
+| `agent.socket` | socket 文件 | `agent.sock` 在、是 socket、0600 | 守护进程没在跑：`railse agent run` 或 `railse setup autostart`；不是 socket 就移走它再重启 |
+| `agent.running` | 守护进程在跑 | 守护进程应答 status | 同上 |
+| `agent.hub` | hub 连接 | 守护进程连 hub 的状态：`connected` 为 ok，`connecting`、`none`（未接入）为 warn，`disabled`（连续 3 次被 401 拒绝）为 fail | `connecting` 看 `agent.log`；`disabled` 要 `railse agent enroll --force` 后重启守护进程；没有报状态的是升级前起的旧进程，重启它 |
+| `agent.autostart` | 守护进程开机自启 | 有没有守护进程的托管文件（只看文件，不问 launchd/systemd） | `railse setup autostart`（warn） |
+| `hub.reachable` | hub 可达 | `machine.json` 里 hub 的 `/api/version` 答得上、协议号与本机一致；没接入时 skip | 连不上：看 hub 在不在跑、地址、证书；不是 200：hub 太旧或地址被重定向；协议不一致：升级较旧的一方 |
+| `hooks.claude` | Claude Code 钩子 | `.claude/settings.local.json` 里 `PermissionRequest`、`Notification`、`Stop`、`SessionEnd` 四个事件都在，`PermissionRequest` 超时不低于 86400 秒；程序路径不是当前程序时 warn | 缺了或超时不够：`railse setup hooks --project <目录> --claude`；只在旧位置 `settings.json`，或两处都装了（会触发两次）：同一条命令迁走（warn） |
+| `hooks.codex` | Codex 钩子 | `~/.codex/hooks.json` 里 `PermissionRequest`、`Stop`、`SessionEnd` 三个事件都在，`PermissionRequest` 超时不低于 86400 秒 | `railse setup hooks --codex` |
+| `hooks.codex_notify` | Codex notify | `~/.codex/config.toml` 顶层有 `notify = [..., "hook", "codex-notify"]` | 把 `setup hooks` 打印的那一行加到文件开头（warn） |
+| `hooks.gemini` | Gemini 钩子 | `.gemini/settings.json` 里 `BeforeTool`、`Notification`、`AfterAgent`、`SessionEnd` 四个事件都在，`BeforeTool` 超时不低于 86400000 毫秒 | `railse setup hooks --project <目录> --gemini` |
+| `cli.claude` | Claude Code 版本 | 版本是否与录制钩子样本时（2.1.280）一致；不在 PATH 里 skip | 不同时 warn：试一次需要审批的操作，确认请求经过 Railse |
+| `cli.codex` | Codex CLI 版本 | 版本是否与录制钩子样本时（0.145.0）一致；不在 PATH 里 skip | 同上 |
+| `cli.gemini` | Gemini CLI 版本 | 版本不低于 0.65.0（更早的版本钩子在确认之后才触发）；不在 PATH 里 skip | 升级 Gemini CLI（fail） |
+| `hubsrv.dir` | hub 数据目录 | 目录在、是 0700 | 显式 `--hub-dir` 写错了就改对；不跑 hub 的机器去掉它 |
+| `hubsrv.db` | hub 数据库 | `hub.db` 是 0600，库版本与程序一致 | 库比程序新（fail）：升级 railse；库旧（warn）：下次 `hub run` 自动升级，先备份；被锁：稍后重跑；hub 异常退出留下未恢复的 WAL（warn）：启动一次 `railse hub run`；真损坏才从备份恢复 |
+| `hubsrv.password` | 网页密码 | 设过网页密码 | `railse hub password`（warn） |
+| `hubsrv.vapid` | 推送密钥 | 推送密钥在、解得开 | 还没有（warn）：首次 `railse hub run` 会生成；损坏（fail）：`railse hub vapid --rotate`，所有手机重新开启通知 |
+| `hubsrv.acme` | ACME 证书目录 | `acme/` 是 0700、里面的文件 0600；没有这个目录（没用 ACME）时 skip | 按提示 `chmod` |
+| `hubsrv.autostart` | hub 开机自启 | 有没有 hub 的托管文件（plist、用户单元或系统单元） | `railse setup autostart --hub`（warn） |
 
 ## 升级
 
@@ -160,8 +164,8 @@ hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux
 
 ## 发布（维护者）
 
-1. `main` 上的 CI（Go、网页、e2e、三平台交叉编译四个作业）是绿的；本地 `make test`、`make e2e`、`make release-check`、`scripts/test-install.sh` 都过，再手动跑一次 `scripts/smoke-claude-hub.sh`（真实 Claude Code 经 hub 审批，要已登录，会消耗额度）。想先看一眼包：`GOTOOLCHAIN=local go run github.com/goreleaser/goreleaser/v2@v2.19.0 release --snapshot --clean --skip=publish`（产物在 `dist/`，不入库）。
-2. 打 tag 并推送，release 工作流（它不等 CI，所以第 1 步要先确认）用 goreleaser v2.19.0 出包并建 GitHub Release：
+1. `main` 上的 CI（`go`、`install-script`、`web`、`e2e`、`cross` 五个作业：Go 竞态测试与 lint、安装脚本测试、网页检查、Playwright、三平台交叉编译）是绿的；本地 `make test`、`make e2e`、`make release-check`、`scripts/test-install.sh` 都过，再手动跑一次 `scripts/smoke-claude-hub.sh`（真实 Claude Code 经 hub 审批，要已登录，会消耗额度）。想先看一眼包：`go run github.com/goreleaser/goreleaser/v2@v2.19.0 release --snapshot --clean --skip=publish`（产物在 `dist/`，不入库；goreleaser v2.19.0 要 Go ≥ 1.27.3 才编得出来，本机 Go 更旧时靠默认的 `GOTOOLCHAIN=auto` 自动取，同 `make release-check`）。
+2. 打 tag 并推送，release 工作流（它不等 CI，所以第 1 步要先确认）用 Go 1.26 系列的最新补丁版与 goreleaser v2.19.0 出包并建 GitHub Release：
    ```sh
    git tag v0.1.0 && git push origin v0.1.0
    ```

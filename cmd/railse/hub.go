@@ -37,7 +37,7 @@ const hubUsage = `用法:
   --acme-domain：域名先解析到这台机器，443 与 80 对公网开放；对外源默认 https://<域名>（--public-url 的主机名须与它一致），
     cookie 一律 Secure；账户与证书私钥明文存在数据目录的 acme/（0700）。--acme-http 是 HTTP-01 挑战与 http→https 跳转的
     监听地址，none 不监听（只靠 443 上的 TLS-ALPN-01 签发）。Linux 上监听 443/80 需要 CAP_NET_BIND_SERVICE
-    （sudo railse setup autostart --hub --system 会加）；macOS 不需要特权。hub 不要以 root 运行`
+    （` + sudoSystemHubCmd + ` 会加）；macOS 不需要特权。hub 不要以 root 运行`
 
 // 以下是变量只为测试能替换：hub run 的运行期（SIGINT、SIGTERM 时取消）、跑 hub 的那一步、hub run 打开数据库的那一步，
 // 与判断是否以 root 运行用的有效用户 id。
@@ -51,7 +51,7 @@ var (
 )
 
 // hubRootWarning 是 hub 以 root 运行时的警告：不拒绝（容器里常以 root 起），但 hub 不需要 root。
-const hubRootWarning = "警告：hub 正以 root 运行。hub 不需要 root：Linux 上用 sudo railse setup autostart --hub --system 装成系统服务" +
+const hubRootWarning = "警告：hub 正以 root 运行。hub 不需要 root：Linux 上用 " + sudoSystemHubCmd + " 装成系统服务" +
 	"（以普通用户运行，只给绑定 443/80 的 CAP_NET_BIND_SERVICE）；macOS 绑定 443/80 不需要特权"
 
 // hubFlags 是各 hub 子命令认的标志。

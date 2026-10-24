@@ -1216,13 +1216,19 @@ func TestSetupAllRefusesRoot(t *testing.T) {
 	f := setupAllEnv(t)
 	tok := newEnrollToken(t, h)
 	for _, extra := range [][]string{nil, {"--no-autostart"}, {"--no-autostart", "--no-hooks"}} {
-		var out, errOut bytes.Buffer
-		args := append(f.args("--hub", h.http.URL, "--token", tok), extra...)[2:] // 去掉 setup all
-		if code := runSetupAllAs(0, args, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "不要 sudo") || !strings.Contains(errOut.String(), "sudo railse setup autostart --hub --system") {
-			t.Fatalf("root %v: %d %q", extra, code, errOut.String())
-		}
-		if out.Len() != 0 {
-			t.Fatalf("root 时不该开始任何一步: %q", out.String())
+		for _, goos := range []string{"linux", "darwin"} {
+			var out, errOut bytes.Buffer
+			args := append(f.args("--hub", h.http.URL, "--token", tok), extra...)[2:] // 去掉 setup all
+			if code := runSetupAllAs(goos, 0, args, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "不要 sudo") {
+				t.Fatalf("root %s %v: %d %q", goos, extra, code, errOut.String())
+			}
+			// Linux 提示系统单元（sudo 用 command -v 找程序：secure_path 常不含安装目录）；macOS 不提 --system
+			if linux := strings.Contains(errOut.String(), `sudo "$(command -v railse)" setup autostart --hub --system`); linux != (goos == "linux") || (goos == "darwin" && (strings.Contains(errOut.String(), "--system") || !strings.Contains(errOut.String(), "railse setup autostart --hub"))) {
+				t.Fatalf("root %s %v 的 hub 提示不对: %q", goos, extra, errOut.String())
+			}
+			if out.Len() != 0 {
+				t.Fatalf("root 时不该开始任何一步: %q", out.String())
+			}
 		}
 	}
 	for _, p := range []string{f.dir, filepath.Join(f.home, ".railse"), filepath.Join(f.proj, ".claude"), filepath.Join(f.proj, ".gemini"), filepath.Join(f.home, ".codex")} {
