@@ -392,7 +392,8 @@ func onNetDevice(targets []string, flags []wordFlags, cwd string, ctx Context) b
 }
 
 // touchesSensitiveWords 判断参数里是否有敏感路径，读敏感文件和写一样按 destructive；flags 与 args 一一对应。
-// 调用方先用 withoutMessages 去掉含空白的参数（那是消息，不检查）。--name=value 形式的选项按 value 判断；
+// 自己不过滤含空白的词：命令参数由调用方先用 withoutMessages 去掉含空白的（那是提交说明之类的消息，不检查）；
+// 输入重定向的来源（seg.inputs）不过滤：含空格的就是文件名，照样要查。--name=value 形式的选项按 value 判断；
 // 无法静态解析的参数不在这里判断，由 hasUnresolvable 兜底。
 func touchesSensitiveWords(args []string, flags []wordFlags, cwd string, ctx Context) bool {
 	for i, a := range args {

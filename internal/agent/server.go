@@ -218,14 +218,14 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Time{}) // 同上
 	kind, err := proto.PeekKind(line)
 	if err != nil {
-		s.reply(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误"})
+		s.reply(conn, kind, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误"})
 		return
 	}
 	switch kind {
 	case "permission":
 		var req proto.Request
 		if err := proto.Decode(line, &req); err != nil {
-			s.reply(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误: " + err.Error()})
+			s.reply(conn, kind, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误: " + err.Error()})
 			return
 		}
 		// 钩子不会再发数据；读到 EOF 或错误就表示它消失了。答复后连接关闭，这个 goroutine 随之退出。
@@ -239,31 +239,36 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		resp := s.handlePermission(cctx, req)
 		cancel(nil)
 		if resp.Decision != "" { // 钩子已消失时 resp 为空，不写回
-			s.reply(conn, resp)
+			s.reply(conn, kind, resp)
 		}
 	case "question", "done", "session_end":
 		var ev proto.Event
 		if err := proto.Decode(line, &ev); err != nil {
-			s.reply(conn, proto.EventAck{V: proto.Version, OK: false, Error: err.Error()})
+			s.reply(conn, kind, proto.EventAck{V: proto.Version, OK: false, Error: err.Error()})
 			return
 		}
-		s.reply(conn, s.handleEvent(ev))
+		s.reply(conn, kind, s.handleEvent(ev))
 	case "control":
 		var c proto.Control
 		if err := proto.Decode(line, &c); err != nil {
-			s.reply(conn, proto.ControlReply{V: proto.Version, OK: false, Error: err.Error()})
+			s.reply(conn, kind, proto.ControlReply{V: proto.Version, OK: false, Error: err.Error()})
 			return
 		}
-		s.reply(conn, s.handleControl(c))
+		s.reply(conn, kind, s.handleControl(c))
 	default:
-		s.reply(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "未知消息种类 " + kind})
+		s.reply(conn, kind, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "未知消息种类 " + kind})
 	}
 }
 
 // reply 把一行答复写回钩子。写不出去（钩子已断开、答复超长）只记日志：钩子读不到答复就 passthrough，交回 CLI 自己审批。
-func (s *Server) reply(conn net.Conn, v any) {
+// 日志带消息种类（kind 来自钩子，截断后按 %q 记）与审批请求的 request_id（有时），便于对上审计。
+func (s *Server) reply(conn net.Conn, kind string, v any) {
 	if err := proto.WriteLine(conn, v); err != nil {
-		s.log.Printf("回写钩子: %v", err)
+		var id string
+		if r, ok := v.(proto.Response); ok {
+			id = r.RequestID
+		}
+		s.log.Printf("回写钩子（kind %q，request_id %q）: %v", clipText(kind, hubLogFieldMax), id, err)
 	}
 }
 

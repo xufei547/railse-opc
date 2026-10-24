@@ -554,7 +554,7 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, erro
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v) // 状态码已发出，写失败（客户端已断开）无从补救
+	_ = json.NewEncoder(w).Encode(v) // 状态码已发出，写失败（客户端已断开）或编码失败（现有调用方都传可编码的 map/struct）都无从补救
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {

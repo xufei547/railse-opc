@@ -1,7 +1,8 @@
 .PHONY: web build test gofmt lint release-check e2e
 
 # 工具版本钉死在这里；CI（.github/workflows）与发布 Action 用同一个值，升级时一起改。
-# 两个工具都只经 go run 使用，不进 go.mod。
+# 本地两个工具都经 go run 使用，不进 go.mod。goreleaser v2.19.0 要 Go ≥ 1.27.3 才编得出来（go.mod 是 1.26.0）：
+# make release-check 在更旧的 Go 上靠 GOTOOLCHAIN=auto 自动取新工具链；CI 发布用 goreleaser Action 的预编译二进制，不受影响。
 GOLANGCI_LINT_VERSION := v2.15.0
 GORELEASER_VERSION := v2.19.0
 
