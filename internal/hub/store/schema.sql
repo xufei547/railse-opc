@@ -1,4 +1,4 @@
--- 改动 schema 必须提高 store.go 的 schemaVersion 并写迁移（版本一致时不会重新执行建表）。
+-- 改动 schema 必须提高 store.go 的 SchemaVersion 并写迁移（版本一致时不会重新执行建表）。
 -- Railse OPC hub 数据库，版本 2。时间列一律定宽 UTC 文本（纳秒 9 位、以 Z 结尾，见 store.go 的 timeLayout），按字典序比较即按时间先后。
 CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
 

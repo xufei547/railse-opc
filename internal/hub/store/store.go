@@ -17,9 +17,10 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-const schemaVersion = 2
+// SchemaVersion 是本程序的数据库版本（schema_version 表的 v）。railse doctor 只读地拿库里的版本和它比。
+const SchemaVersion = 2
 
-// migrations 是逐版本升级的 SQL，键是升级后的版本号。改 schema.sql 时必须同时加一条迁移并提高 schemaVersion：
+// migrations 是逐版本升级的 SQL，键是升级后的版本号。改 schema.sql 时必须同时加一条迁移并提高 SchemaVersion：
 // 已有库只跑迁移，不再执行 schema.sql。
 var migrations = map[int]string{
 	// 2：push_subscriptions 的 endpoint 唯一，加 user_agent、failures 与 first_failed_at。旧库里重复的端点按 created_at 只留最早的一条。
@@ -95,7 +96,7 @@ func prepareFile(path string) error {
 }
 
 // migrate 在一个事务里检查并建表：schema_version 不存在时建全部表并写入版本；
-// 已存在时核对版本：比程序新就报错且不改动库，比程序旧就依次跑 migrations 升到 schemaVersion，
+// 已存在时核对版本：比程序新就报错且不改动库，比程序旧就依次跑 migrations 升到 SchemaVersion，
 // 任何一步出错整个事务回滚，库保持原版本。
 func (s *Store) migrate() error {
 	return s.Tx(func(tx *sql.Tx) error {
@@ -107,7 +108,7 @@ func (s *Store) migrate() error {
 			if _, err := tx.Exec(schemaSQL); err != nil {
 				return fmt.Errorf("建表: %w", err)
 			}
-			if _, err := tx.Exec("INSERT INTO schema_version(v) VALUES(?)", schemaVersion); err != nil {
+			if _, err := tx.Exec("INSERT INTO schema_version(v) VALUES(?)", SchemaVersion); err != nil {
 				return fmt.Errorf("写 schema_version: %w", err)
 			}
 			return nil
@@ -124,10 +125,10 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("读 schema_version: %w", err)
 		}
 		switch {
-		case v > schemaVersion:
-			return fmt.Errorf("数据库版本 %d 比程序（%d）新，请升级 railse", v, schemaVersion)
-		case v < schemaVersion:
-			for next := v + 1; next <= schemaVersion; next++ {
+		case v > SchemaVersion:
+			return fmt.Errorf("数据库版本 %d 比程序（%d）新，请升级 railse", v, SchemaVersion)
+		case v < SchemaVersion:
+			for next := v + 1; next <= SchemaVersion; next++ {
 				sqlText, ok := migrations[next]
 				if !ok {
 					return fmt.Errorf("缺少到版本 %d 的迁移", next)
