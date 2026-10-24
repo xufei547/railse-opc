@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux || darwin
 
 package main
 
@@ -14,4 +14,10 @@ func fileOwner(fi os.FileInfo) (uid int, ok bool) {
 		return 0, false
 	}
 	return int(st.Uid), true
+}
+
+// openDirNoFollow 打开一个目录，最后一段是符号链接时失败（O_NOFOLLOW）；之后经这个 fd 核对、chown、chmod，
+// 不会因为路径在中途被换成符号链接而改到别的文件上。
+func openDirNoFollow(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 }

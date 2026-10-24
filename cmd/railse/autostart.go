@@ -41,7 +41,7 @@ const (
 	bootstrapRetries = 5
 )
 
-// 以下是变量只为测试能替换：跑系统命令（合并输出）、bootstrap 重试的间隔、查用户、改属主。
+// 以下是变量只为测试能替换：跑系统命令（合并输出）、bootstrap 重试的间隔、查用户、经已打开的 fd 改属主。
 var (
 	runCommand = func(name string, args ...string) (string, error) {
 		out, err := exec.Command(name, args...).CombinedOutput()
@@ -49,7 +49,7 @@ var (
 	}
 	bootstrapRetryDelay = 500 * time.Millisecond
 	lookupUser          = user.Lookup
-	chownPath           = os.Chown
+	chownDir            = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
 )
 
 // autostartSpec 描述要托管的进程。
@@ -112,10 +112,11 @@ func launchdPlist(sp autostartSpec) []byte {
 }
 
 // systemdQuote 把一个值写成 systemd 单元里的一个词：% 写成 %%（不让 systemd 当说明符展开）；
-// 含空白、引号、反斜杠或为空时整个用双引号包起来，里面的 \ 与 " 转义。控制字符在解析参数时已拒绝。
+// 含空白、引号、反斜杠、为空或是单独的 ;（ExecStart 里的命令分隔符）时整个用双引号包起来，里面的 \ 与 " 转义。
+// 控制字符在解析参数时已拒绝。
 func systemdQuote(s string) string {
 	s = strings.ReplaceAll(s, "%", "%%")
-	if s != "" && !strings.ContainsAny(s, " \t\"'\\") {
+	if s != "" && s != ";" && !strings.ContainsAny(s, " \t\"'\\") {
 		return s
 	}
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
@@ -124,7 +125,8 @@ func systemdQuote(s string) string {
 // systemdExecArg 是 ExecStart 里程序名之后的一个参数：在 systemdQuote 之外把 $ 写成 $$（不让 systemd 当环境变量替换）。
 func systemdExecArg(s string) string { return strings.ReplaceAll(systemdQuote(s), "$", "$$") }
 
-// systemdUnit 生成用户单元或系统单元。崩溃后 2 秒拉起，不设启动次数上限（与 launchd 的 KeepAlive 一致）。
+// systemdUnit 生成用户单元或系统单元。Type=exec（systemd 240 起）让可执行文件起不来时 start 直接报错；
+// 崩溃后 2 秒拉起，不设启动次数上限（与 launchd 的 KeepAlive 一致）。
 // 系统单元只给 hub 用，按最小权限：指定的普通用户、只多一项绑定特权端口的能力、整个文件系统只读、只有数据目录可写、私有 /tmp。
 func systemdUnit(sp autostartSpec) []byte {
 	var b strings.Builder
@@ -137,7 +139,7 @@ func systemdUnit(sp autostartSpec) []byte {
 		// 用户实例里没有 network-online.target，只有系统单元写
 		b.WriteString("After=network-online.target\nWants=network-online.target\n")
 	}
-	b.WriteString("StartLimitIntervalSec=0\n\n[Service]\n")
+	b.WriteString("StartLimitIntervalSec=0\n\n[Service]\nType=exec\n")
 	parts := []string{systemdQuote(sp.Bin)}
 	for _, a := range sp.args() {
 		parts = append(parts, systemdExecArg(a))
@@ -220,21 +222,16 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 			return usageErr("数据目录用 setup autostart 自己的 --dir 指定，不要放在 -- 之后（托管文件里的环境变量、日志与可写目录都按它算）")
 		}
 	}
-	for _, s := range append([]string{*bin, *dir}, extra...) {
-		if strings.IndexFunc(s, unicode.IsControl) >= 0 {
-			return usageErr("参数里不能有换行等控制字符: %q", s)
-		}
-	}
 	install := !*status && !*uninstall
 	switch {
-	case goos == "darwin" && uid == 0:
+	case uid == 0 && !*system && goos == "darwin":
 		fmt.Fprintln(stderr, "macOS 上不要用 sudo 跑：launchd 用户代理装在当前登录用户下，直接 railse setup autostart")
+		return 1
+	case uid == 0 && !*system:
+		fmt.Fprintln(stderr, "不要以 root 管用户级托管：守护进程与 hub 都以普通用户运行，请用普通用户跑本命令；hub 要直出 443/80 用 sudo railse setup autostart --hub --system --user 名字（只给绑定特权端口的权限）")
 		return 1
 	case *system && !*status && uid != 0 && !*dryRun:
 		fmt.Fprintln(stderr, "--system 要写 /etc/systemd/system，需要 root：sudo railse setup autostart --hub --system …")
-		return 1
-	case install && *hubMode && !*system && uid == 0:
-		fmt.Fprintln(stderr, "hub 不以 root 运行：要直出 443/80 用 sudo railse setup autostart --hub --system --user 名字（只给绑定特权端口的权限）；否则用普通用户跑本命令")
 		return 1
 	}
 
@@ -278,13 +275,31 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 			return 1
 		}
 	}
-	var runAs *user.User
+	// 默认值（当前程序路径、RAILSE_HOME、RAILSE_HUB_HOME）也要查：换行会在托管文件里拆出新的一行
+	for _, s := range append([]string{sp.Bin, sp.Dir}, sp.Extra...) {
+		if strings.IndexFunc(s, unicode.IsControl) >= 0 {
+			return usageErr("路径与参数里不能有换行等控制字符（包括 RAILSE_HOME、RAILSE_HUB_HOME 给的默认值）: %q", s)
+		}
+	}
+	var runAs runUser
 	if sp.System && install {
 		if runAs, err = systemUnitUser(*userName); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		sp.User = runAs.Username
+		sp.User = runAs.Name
+	}
+	if install {
+		if err := checkExecutable(sp.Bin); err != nil {
+			if !*dryRun {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			fmt.Fprintf(stderr, "警告：%v\n", err)
+		}
+		if underTempDir(sp.Bin) {
+			fmt.Fprintf(stderr, "警告：托管文件会指向临时路径 %s，之后它可能就没了（go run 的产物？）；用 --bin 指定装好的 railse\n", sp.Bin)
+		}
 	}
 	switch {
 	case *status:
@@ -296,39 +311,99 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 	}
 }
 
+// runUser 是系统单元的运行用户。
+type runUser struct {
+	Name     string
+	UID, GID int
+}
+
 // systemUnitUser 定系统单元的运行用户：--user，没给就取 $SUDO_USER；必须是本机已有的、uid 不为 0 的用户。
-func systemUnitUser(name string) (*user.User, error) {
+// 全数字的名字也拒绝：systemd 会把 User=1000 当成 uid。uid 按数值比较（passwd 里写成 00、+0 也是 root）。
+func systemUnitUser(name string) (runUser, error) {
 	if name == "" {
 		name = os.Getenv("SUDO_USER")
 	}
 	if name == "" {
-		return nil, errors.New("--system 要指定 hub 的运行用户：--user 名字（默认取 $SUDO_USER，现在没有）")
+		return runUser{}, errors.New("--system 要指定 hub 的运行用户：--user 名字（默认取 $SUDO_USER，现在没有）")
+	}
+	if strings.IndexFunc(name, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return runUser{}, fmt.Errorf("用户名 %q 不合法", name)
+	}
+	if strings.Trim(name, "0123456789") == "" {
+		return runUser{}, fmt.Errorf("用户名 %s 全是数字：systemd 会把 User=%s 当成 uid，请用用户名", name, name)
 	}
 	u, err := lookupUser(name)
 	if err != nil {
-		return nil, fmt.Errorf("找不到用户 %s: %v", name, err)
+		return runUser{}, fmt.Errorf("找不到用户 %s: %v", name, err)
 	}
-	if name == "root" || u.Uid == "0" {
-		return nil, fmt.Errorf("hub 不以 root 运行（用户 %s 的 uid 是 0）：用 --user 指定一个普通用户", name)
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil || uid < 0 {
+		return runUser{}, fmt.Errorf("用户 %s 的 uid %q 不是合法的数字", name, u.Uid)
 	}
-	if _, err := strconv.Atoi(u.Uid); err != nil {
-		return nil, fmt.Errorf("用户 %s 的 uid %q 不是数字", name, u.Uid)
+	if uid == 0 || name == "root" {
+		return runUser{}, fmt.Errorf("hub 不以 root 运行（用户 %s 的 uid 是 0）：用 --user 指定一个普通用户", name)
 	}
-	if _, err := strconv.Atoi(u.Gid); err != nil {
-		return nil, fmt.Errorf("用户 %s 的 gid %q 不是数字", name, u.Gid)
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil || gid < 0 {
+		return runUser{}, fmt.Errorf("用户 %s 的 gid %q 不是合法的数字", name, u.Gid)
 	}
-	return u, nil
+	return runUser{Name: name, UID: uid, GID: gid}, nil
+}
+
+// checkExecutable 确认 --bin 是存在的、可执行的普通文件：托管文件指向用不了的程序时 launchd 与 systemd 会反复拉起反复失败。
+func checkExecutable(p string) error {
+	st, err := os.Stat(p)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("railse 可执行文件 %s 不存在：用 --bin 指定装好的 railse", p)
+	case err != nil:
+		return fmt.Errorf("railse 可执行文件 %s 用不了：%v", p, err)
+	case !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0:
+		return fmt.Errorf("%s 不是可执行文件：用 --bin 指定装好的 railse", p)
+	}
+	return nil
+}
+
+// underTempDir 判断 p 是否在临时目录（os.TempDir()、/tmp）下：go run 的产物就在那里，之后可能被清掉。两边都按原样与解开符号链接后各比一次。
+func underTempDir(p string) bool {
+	paths := []string{p}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		paths = append(paths, r)
+	}
+	for _, d := range []string{os.TempDir(), "/tmp"} {
+		dirs := []string{filepath.Clean(d)}
+		if r, err := filepath.EvalSymlinks(d); err == nil {
+			dirs = append(dirs, r)
+		}
+		for _, dd := range dirs {
+			for _, pp := range paths {
+				if dd != string(filepath.Separator) && strings.HasPrefix(pp, dd+string(filepath.Separator)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// execCmd 跑一条系统命令并返回合并输出；dry 时只打印，当作成功。
+func execCmd(dry bool, stdout io.Writer, name string, args ...string) (string, error) {
+	if dry {
+		fmt.Fprintf(stdout, "$ %s %s\n", name, strings.Join(args, " "))
+		return "", nil
+	}
+	return runCommand(name, args...)
+}
+
+// cmdError 把失败的命令连同它的输出写成一个错误。
+func cmdError(name string, args []string, out string, err error) error {
+	return fmt.Errorf("%s %s: %v\n%s", name, strings.Join(args, " "), err, strings.TrimSpace(out))
 }
 
 // runOrPrint 跑一条系统命令；dry 时只打印。失败时把命令的输出带进错误。
 func runOrPrint(dry bool, stdout io.Writer, name string, args ...string) error {
-	if dry {
-		fmt.Fprintf(stdout, "$ %s %s\n", name, strings.Join(args, " "))
-		return nil
-	}
-	out, err := runCommand(name, args...)
-	if err != nil {
-		return fmt.Errorf("%s %s: %v\n%s", name, strings.Join(args, " "), err, strings.TrimSpace(out))
+	if out, err := execCmd(dry, stdout, name, args...); err != nil {
+		return cmdError(name, args, out, err)
 	}
 	return nil
 }
@@ -364,20 +439,13 @@ func logHint(goos string, sp autostartSpec) string {
 	}
 }
 
-func autostartInstall(goos string, sp autostartSpec, runAs *user.User, dry bool, stdout, stderr io.Writer) int {
+func autostartInstall(goos string, sp autostartSpec, runAs runUser, dry bool, stdout, stderr io.Writer) int {
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	var path string
-	var content []byte
-	if goos == "darwin" {
-		path, content = launchdPlistPath(sp.Home, sp.Kind), launchdPlist(sp)
-	} else {
-		path, content = systemdUnitPath(sp.Home, sp.Kind, sp.System), systemdUnit(sp)
-	}
 	// 先建数据目录，出错就什么都不写。launchd 不会替 StandardOutPath（数据目录下的 launchd.log）建父目录，
-	// 首次安装时目录可能还没有，作业会起不来；系统单元显式给了 --dir 时由 root 建好并交给运行用户。
+	// 首次安装时目录可能还没有，作业会起不来；系统单元显式给了 --dir 时由 root 准备好（见 prepareSystemDir），单元里写它的真实路径。
 	switch {
 	case goos == "darwin" && dry:
 		fmt.Fprintf(stdout, "会建数据目录 %s（0700）\n", sp.Dir)
@@ -389,11 +457,20 @@ func autostartInstall(goos string, sp autostartSpec, runAs *user.User, dry bool,
 			return fail(err)
 		}
 	case sp.System && sp.StateDir == "" && dry:
-		fmt.Fprintf(stdout, "会建数据目录 %s（0700，属主 %s）\n", sp.Dir, sp.User)
+		fmt.Fprintf(stdout, "会准备数据目录 %s（已有的须已属于 %s；没有的新建为 0700 并交给 %s）\n", sp.Dir, sp.User, sp.User)
 	case sp.System && sp.StateDir == "":
-		if err := prepareSystemDir(sp.Dir, runAs); err != nil {
+		real, err := prepareSystemDir(sp.Dir, runAs)
+		if err != nil {
 			return fail(err)
 		}
+		sp.Dir = real
+	}
+	var path string
+	var content []byte
+	if goos == "darwin" {
+		path, content = launchdPlistPath(sp.Home, sp.Kind), launchdPlist(sp)
+	} else {
+		path, content = systemdUnitPath(sp.Home, sp.Kind, sp.System), systemdUnit(sp)
 	}
 	if dry {
 		fmt.Fprintf(stdout, "== %s ==\n%s", path, content)
@@ -405,7 +482,10 @@ func autostartInstall(goos string, sp autostartSpec, runAs *user.User, dry bool,
 	}
 	if goos == "darwin" {
 		target := fmt.Sprintf("gui/%d", sp.UID)
-		_ = runOrPrint(dry, stdout, "launchctl", "bootout", target+"/"+launchdLabel(sp.Kind)) // 还没装过时会失败，忽略
+		job := target + "/" + launchdLabel(sp.Kind)
+		_ = runOrPrint(dry, stdout, "launchctl", "bootout", job) // 还没装过时会失败，忽略
+		// 之前被 launchctl disable 过的作业 bootstrap 会一直报 “5: Input/output error”；失败忽略
+		_ = runOrPrint(dry, stdout, "launchctl", "enable", job)
 		if err := launchdBootstrap(dry, stdout, target, path); err != nil {
 			return fail(err)
 		}
@@ -450,59 +530,174 @@ func launchdBootstrap(dry bool, stdout io.Writer, target, path string) error {
 	return err
 }
 
-// prepareSystemDir 以 root 身份给系统单元准备 --dir 指定的数据目录：父目录按 0755 建（运行用户要能进去），
-// 目录本身 0700 并交给运行用户。已有的目录若不是空的、又不属于运行用户，就拒绝，免得把 /etc 之类的目录整个交出去。
-func prepareSystemDir(dir string, u *user.User) error {
-	uid, _ := strconv.Atoi(u.Uid)
-	gid, _ := strconv.Atoi(u.Gid)
-	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
-		return err
+// prepareSystemDir 以 root 身份给系统单元准备 --dir 指定的数据目录，返回解开符号链接后的真实路径（单元里写它）。
+//   - --dir 本身是符号链接：拒绝。
+//   - 已有的目录：必须已经属于运行用户，不替它 chown（免得把 /var/empty、/usr/local/sbin 之类的目录交出去），
+//     只经 O_NOFOLLOW 打开的 fd 收紧为 0700。
+//   - 没有的目录：已有的那段祖先（解开符号链接后）必须都属于 root 且别人不能写（粘滞位目录除外，同 sshd 的 StrictModes），
+//     否则运行用户能在 root 建目录与 chown 之间把路径换掉；缺的父目录建成 0755（显式 Chmod，不受 umask 影响），
+//     目录本身 0700，经 O_NOFOLLOW 打开的 fd 核对确是 root 刚建的之后再 chown 给运行用户。
+func prepareSystemDir(dir string, ru runUser) (string, error) {
+	st, err := os.Lstat(dir)
+	switch {
+	case err == nil && st.Mode()&os.ModeSymlink != 0:
+		return "", fmt.Errorf("%s 是符号链接：--dir 要给真实的目录", dir)
+	case err == nil && !st.IsDir():
+		return "", fmt.Errorf("%s 不是目录", dir)
+	case err == nil:
+		return tightenExistingDir(dir, ru)
+	case !errors.Is(err, os.ErrNotExist):
+		return "", err
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
-	}
-	st, err := os.Stat(dir)
+	return createSystemDir(dir, ru)
+}
+
+func tightenExistingDir(dir string, ru runUser) (string, error) {
+	f, err := openDirNoFollow(dir)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if !st.IsDir() {
-		return fmt.Errorf("%s 不是目录", dir)
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return "", err
 	}
-	if owner, ok := fileOwner(st); !ok || owner != uid {
-		ents, err := os.ReadDir(dir)
+	if owner, ok := fileOwner(st); !ok || owner != ru.UID {
+		return "", fmt.Errorf("%s 已存在但不属于 %s：不替它 chown；确认无误后自己 chown 给 %s 再重跑，或给一个还不存在的目录", dir, ru.Name, ru.Name)
+	}
+	if err := f.Chmod(0o700); err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(dir)
+}
+
+func createSystemDir(dir string, ru runUser) (string, error) {
+	// 从 dir 往上找到已存在的最深一层祖先，记下缺的几层
+	base, missing := filepath.Dir(dir), []string{filepath.Base(dir)}
+	for {
+		if _, err := os.Lstat(base); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		missing = append([]string{filepath.Base(base)}, missing...)
+		base = filepath.Dir(base)
+	}
+	real, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", err
+	}
+	if err := checkTrustedChain(real); err != nil {
+		return "", fmt.Errorf("不替你新建 %s：%v（运行用户可能在 root 建目录与 chown 之间把路径换掉）；请自己建好这个目录并 chown 给 %s 再重跑", dir, err, ru.Name)
+	}
+	cur := real
+	for _, name := range missing[:len(missing)-1] {
+		cur = filepath.Join(cur, name)
+		if err := os.Mkdir(cur, 0o755); err != nil {
+			return "", err
+		}
+		if err := os.Chmod(cur, 0o755); err != nil { // 祖先都可信，这里换不掉
+			return "", err
+		}
+	}
+	cur = filepath.Join(cur, missing[len(missing)-1])
+	if err := os.Mkdir(cur, 0o700); err != nil {
+		return "", err
+	}
+	f, err := openDirNoFollow(cur)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if owner, ok := fileOwner(st); !ok || owner != os.Geteuid() {
+		return "", fmt.Errorf("%s 不是刚建的目录（属主不对），不 chown", cur)
+	}
+	if err := chownDir(f, ru.UID, ru.GID); err != nil {
+		return "", err
+	}
+	if err := f.Chmod(0o700); err != nil {
+		return "", err
+	}
+	return cur, nil
+}
+
+// checkTrustedChain 确认 p（已解开符号链接）及其每一层祖先都是只有 root 能改的目录：属主是 root（以 root 跑时即当前用户；
+// 测试里是当前用户），别人不能写；粘滞位的公共目录（如 /tmp）除外，别人删不掉、换不掉不属于自己的条目。
+func checkTrustedChain(p string) error {
+	for {
+		st, err := os.Lstat(p)
 		if err != nil {
 			return err
 		}
-		if len(ents) > 0 {
-			return fmt.Errorf("%s 已存在、不是空目录且不属于 %s：确认无误后自己 chown 给它再重跑，或换一个目录", dir, u.Username)
+		if !st.IsDir() {
+			return fmt.Errorf("%s 不是目录", p)
 		}
+		if owner, ok := fileOwner(st); !ok || (owner != 0 && owner != os.Geteuid()) {
+			return fmt.Errorf("%s 不属于 root", p)
+		}
+		if st.Mode().Perm()&0o022 != 0 && st.Mode()&os.ModeSticky == 0 {
+			return fmt.Errorf("%s 别人也能写", p)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return nil
+		}
+		p = parent
 	}
-	if err := chownPath(dir, uid, gid); err != nil {
-		return err
-	}
-	return os.Chmod(dir, 0o700)
 }
 
-func autostartUninstall(goos string, sp autostartSpec, dry bool, stdout, stderr io.Writer) int {
-	var path string
-	if goos == "darwin" {
-		path = launchdPlistPath(sp.Home, sp.Kind)
-		_ = runOrPrint(dry, stdout, "launchctl", "bootout", fmt.Sprintf("gui/%d/%s", sp.UID, launchdLabel(sp.Kind))) // 没加载时会失败，忽略
-	} else {
-		path = systemdUnitPath(sp.Home, sp.Kind, sp.System)
-		_ = runOrPrint(dry, stdout, "systemctl", append(systemctlArgs(sp.System), "disable", "--now", autostart.UnitName(sp.Kind))...) // 没装过时会失败，忽略
+// launchdNotLoaded 判断 launchctl bootout 的失败是不是“本来就没加载”：退出码 3（No such process）或 113，或输出这么说。
+func launchdNotLoaded(out string, err error) bool {
+	var ec interface{ ExitCode() int }
+	if errors.As(err, &ec) && (ec.ExitCode() == 3 || ec.ExitCode() == 113) {
+		return true
 	}
-	existed := true
-	if dry {
-		fmt.Fprintf(stdout, "会删除 %s\n", path)
-	} else if err := os.Remove(path); errors.Is(err, os.ErrNotExist) {
-		existed = false
-	} else if err != nil {
-		fmt.Fprintln(stderr, err)
+	for _, s := range []string{"No such process", "Could not find service", "Could not find specified service"} {
+		if strings.Contains(out, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// autostartUninstall 先停再删：托管文件在而停不下来时报错退出 1、不删文件（删了文件，正在跑的进程也停不下来，还看不出来）。
+// launchd 的“本来就没加载”不算失败；托管文件本来就不在时，停止的失败也不算。
+func autostartUninstall(goos string, sp autostartSpec, dry bool, stdout, stderr io.Writer) int {
+	var path, name string
+	var args []string
+	if goos == "darwin" {
+		path, name, args = launchdPlistPath(sp.Home, sp.Kind), "launchctl", []string{"bootout", fmt.Sprintf("gui/%d/%s", sp.UID, launchdLabel(sp.Kind))}
+	} else {
+		path, name, args = systemdUnitPath(sp.Home, sp.Kind, sp.System), "systemctl", append(systemctlArgs(sp.System), "disable", "--now", autostart.UnitName(sp.Kind))
+	}
+	_, lerr := os.Lstat(path)
+	existed := lerr == nil
+	out, err := execCmd(dry, stdout, name, args...)
+	if err != nil && goos == "darwin" && launchdNotLoaded(out, err) {
+		err = nil
+	}
+	if err != nil && existed {
+		fmt.Fprintf(stderr, "停止 %s 失败，托管文件 %s 没删：\n%v\n", sp.Kind, path, cmdError(name, args, out, err))
 		return 1
 	}
+	if dry {
+		fmt.Fprintf(stdout, "会删除 %s\n", path)
+	} else if existed {
+		if err := os.Remove(path); errors.Is(err, os.ErrNotExist) {
+			existed = false
+		} else if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	}
 	if goos == "linux" {
-		_ = runOrPrint(dry, stdout, "systemctl", append(systemctlArgs(sp.System), "daemon-reload")...)
+		if err := runOrPrint(dry, stdout, "systemctl", append(systemctlArgs(sp.System), "daemon-reload")...); err != nil {
+			fmt.Fprintf(stderr, "警告：%v\n", err)
+		}
 	}
 	switch {
 	case dry:
@@ -534,7 +729,7 @@ func autostartStatus(goos string, sp autostartSpec, dry bool, stdout io.Writer) 
 		path, name, args = systemdUnitPath(sp.Home, sp.Kind, sp.System), "systemctl", append(systemctlArgs(sp.System), "is-active", autostart.UnitName(sp.Kind))
 	}
 	if dry {
-		_ = runOrPrint(true, stdout, name, args...)
+		_, _ = execCmd(true, stdout, name, args...)
 		return 0
 	}
 	out, err := runCommand(name, args...)
