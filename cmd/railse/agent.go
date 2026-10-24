@@ -72,16 +72,10 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "railse agent %s 不认 %s\n%s\n", args[0], bad, agentUsage)
 		return 2
 	}
-	var cfg agent.Config
-	if *dir != "" {
-		cfg = agent.ConfigIn(*dir)
-	} else {
-		c, err := agent.DefaultConfig()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		cfg = c
+	cfg, err := agentConfigFor(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
 	switch args[0] {
 	case "run":
@@ -121,6 +115,14 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	return 2 // 到不了：子命令已在开头核对过
+}
+
+// agentConfigFor 取守护进程配置：给了 --dir 用它，否则 $RAILSE_HOME 或 ~/.railse。只算路径，不建目录。
+func agentConfigFor(dir string) (agent.Config, error) {
+	if dir != "" {
+		return agent.ConfigIn(dir), nil
+	}
+	return agent.DefaultConfig()
 }
 
 // hubLine 显示到 hub 的连接：none（未接入；旧版守护进程不报时也按 none）、connecting/connected 加地址；
