@@ -1,26 +1,36 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/railse/railse-opc/internal/doctor"
 )
 
 const doctorUsage = `用法:
   railse doctor [--project 目录] [--dir 目录] [--hub-dir 目录] [--bin 路径] [--json]
-    只读检查：守护进程、hub 连接、三个 CLI 的钩子与版本、文件权限；这台机器有 hub 数据目录时还检查数据库、密码与推送密钥。
+    检查守护进程、hub 连接、三个 CLI 的钩子与版本、文件权限；这台机器有 hub 数据目录时还检查数据库、密码与推送密钥。
+    只读：不改配置、不建文件；唯一会起的进程是 claude、codex、gemini 的 --version（带超时，sudo 下不跑）。
+    hub 数据目录默认 $RAILSE_HUB_HOME，否则 ~/.railse-hub，Linux 上两者都没有时再看系统单元的 ` + systemHubDir + `；
+    默认目录都不在就跳过 hub 侧，显式给的 --hub-dir 不在则报失败。
     有任一项失败退出码 1。`
 
 // doctorOptions 在 doctor.Run 之前最后改一次检查的输入。是变量只为测试能把 LookPath、RunCmd 换成假的，
 // 不在开发机上真的跑 claude、codex、gemini 的 --version（经 runDoctor 体检的 setup all 也走这里）。
 var doctorOptions = func(*doctor.Options) {}
 
-// runDoctor 是 railse doctor：只读检查，不建目录与文件。
+// doctorGOOS 与 doctorSystemHubDir 决定不给 --hub-dir 时要不要回退到系统单元的 hub 数据目录（空目录表示不回退）。
+// 是变量只为测试能模拟 Linux，且不看本机真实的系统目录。
+var (
+	doctorGOOS         = runtime.GOOS
+	doctorSystemHubDir = systemHubDir
+)
+
+// runDoctor 是 railse doctor：只读检查（不改配置、不建文件），会跑三个 CLI 的 --version（sudo 下不跑）。
 func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -30,7 +40,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	project := fs.String("project", ".", "项目目录（检查项目级钩子）")
 	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse")
-	hubDir := fs.String("hub-dir", "", "hub 数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub（默认目录不存在则跳过 hub 侧）")
+	hubDir := fs.String("hub-dir", "", "hub 数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub，Linux 上再看 "+systemHubDir+"（默认目录都不在则跳过 hub 侧）")
 	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
 	asJSON := fs.Bool("json", false, "输出 JSON")
 	if err := fs.Parse(args); err != nil {
@@ -45,16 +55,21 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	// 默认的 hub 目录不存在就是这台机器不跑 hub，跳过 hub 侧；显式给的 --hub-dir 读不到多半是路径写错了，要报出来
-	hd := *hubDir
-	var hubErr error
+	// 细节与修复提示里都用绝对路径（--dir、$RAILSE_HOME 可能是相对路径）
+	agentDir, err := filepath.Abs(cfg.Dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	// 显式给的 --hub-dir 必须可用（读不到多半是路径写错了，报 fail）；默认目录不在就是这台机器不跑 hub，跳过 hub 侧
+	hd, hubRequired := *hubDir, *hubDir != ""
+	if !hubRequired {
+		hd = doctorHubDir()
+	}
 	if hd != "" {
-		if _, err := os.Stat(hd); err != nil {
-			hubErr = err
-		}
-	} else if d, err := defaultHubDir(); err == nil {
-		if st, err := os.Stat(d); err == nil && st.IsDir() {
-			hd = d
+		if hd, err = filepath.Abs(hd); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
 		}
 	}
 	// 与 setup hooks 的默认一致，钩子里的程序路径才对得上
@@ -70,12 +85,9 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	home, _ := os.UserHomeDir()
-	o := doctor.Options{AgentDir: cfg.Dir, Project: proj, HubDir: hd, Bin: b, Version: version, Home: home}
+	o := doctor.Options{AgentDir: agentDir, Project: proj, HubDir: hd, HubDirRequired: hubRequired, Bin: b, Version: version, Home: home}
 	doctorOptions(&o)
 	rep := doctor.Run(o)
-	if hubErr != nil {
-		markHubDirMissing(&rep, hd, hubErr)
-	}
 	if *asJSON {
 		j, err := rep.JSON()
 		if err != nil {
@@ -92,27 +104,27 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// markHubDirMissing 把显式 --hub-dir 读不到的情况报成 fail：doctor 对读不到的 hub 目录只会把 hub 侧整个跳过。
-func markHubDirMissing(rep *doctor.Report, dir string, err error) {
-	c := doctor.Check{ID: "hubsrv.dir", Name: "hub 数据目录", Status: doctor.Fail}
-	if errors.Is(err, os.ErrNotExist) {
-		c.Detail = "--hub-dir 指定的 " + dir + " 不存在"
-		c.Hint = "确认路径写对了（railse hub run --dir 用的那个目录）；这台机器不跑 hub 就去掉 --hub-dir"
-	} else {
-		why := err
-		var pe *os.PathError
-		if errors.As(err, &pe) { // 不重复路径
-			why = pe.Err
-		}
-		c.Detail = "--hub-dir 指定的 " + dir + " 读不到：" + why.Error()
-		c.Hint = "确认用跑 hub 的同一个用户运行 doctor"
+// doctorHubDir 是不给 --hub-dir 时 doctor 看的 hub 数据目录：设了 $RAILSE_HUB_HOME 就只看它；否则 ~/.railse-hub，
+// Linux 上它不在时再看系统单元的数据目录（sudo railse setup autostart --hub --system 装的 hub，RAILSE_HUB_HOME
+// 只写在单元的 Environment= 里，doctor 看不到）。都不在时仍返回第一个候选，报告里写明看的是哪里；
+// 连家目录都取不到又没有系统目录时返回空。是不是目录由 doctor 判断（不是目录就跳过 hub 侧）。
+func doctorHubDir() string {
+	if d := os.Getenv("RAILSE_HUB_HOME"); d != "" {
+		return d
 	}
-	for i := range rep.Checks {
-		if rep.Checks[i].ID == c.ID {
-			c.Name = rep.Checks[i].Name
-			rep.Checks[i] = c
-			return
-		}
+	isDir := func(p string) bool {
+		st, err := os.Stat(p)
+		return err == nil && st.IsDir()
 	}
-	rep.Checks = append(rep.Checks, c)
+	user, err := defaultHubDir()
+	if err == nil && isDir(user) {
+		return user
+	}
+	if doctorGOOS == "linux" && doctorSystemHubDir != "" && isDir(doctorSystemHubDir) {
+		return doctorSystemHubDir
+	}
+	if err != nil {
+		return ""
+	}
+	return user
 }

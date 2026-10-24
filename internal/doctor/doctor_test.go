@@ -1152,3 +1152,60 @@ func TestDefaultOwnerLookup(t *testing.T) {
 		t.Fatal("不存在的路径应查不到属主")
 	}
 }
+
+// HubDirRequired（显式给的 --hub-dir）而目录用不了：hubsrv.dir 按原因 fail 并给对得上的提示，依赖数据目录的四项
+// 用同一个原因 skip，hub 开机自启不依赖数据目录、照常检查；没要求时照旧整段 skip。
+func TestHubDirRequired(t *testing.T) {
+	o, home := fakeOpts(t)
+	o.HubDirRequired = true
+	file := filepath.Join(home, "plain")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, dir, detail, hint, cause string
+	}{
+		{"不存在", filepath.Join(home, "typo"), "不存在", "这台机器不跑 hub 就去掉 --hub-dir", "不存在"},
+		{"路径中间是文件", filepath.Join(file, "hub"), "不存在", "这台机器不跑 hub 就去掉 --hub-dir", "不存在"},
+		{"是文件", file, "不是目录", "railse hub run --dir", "不是目录"},
+	}
+	if os.Geteuid() != 0 {
+		locked := filepath.Join(home, "locked")
+		if err := os.Mkdir(locked, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		os.Chmod(locked, 0)
+		t.Cleanup(func() { os.Chmod(locked, 0o700) })
+		cases = append(cases, struct{ name, dir, detail, hint, cause string }{"读不到", filepath.Join(locked, "hub"), "读不到", "同一个用户", "读不到"})
+	}
+	for _, tc := range cases {
+		o.HubDir = tc.dir
+		r := Run(o)
+		c := find(t, r, "hubsrv.dir")
+		if c.Status != Fail || !strings.Contains(c.Detail, tc.detail) || strings.Count(c.Detail, tc.dir) != 1 || !strings.Contains(c.Hint, tc.hint) {
+			t.Fatalf("%s: hubsrv.dir = %+v", tc.name, c)
+		}
+		for _, id := range []string{"hubsrv.db", "hubsrv.password", "hubsrv.vapid", "hubsrv.acme"} {
+			if c := find(t, r, id); c.Status != Skip || c.Detail != "hub 数据目录 "+tc.dir+" "+tc.cause {
+				t.Fatalf("%s: %s = %+v", tc.name, id, c)
+			}
+		}
+		if c := find(t, r, "hubsrv.autostart"); c.Status != Warn || !strings.Contains(c.Detail, autostart.PlistPath(home, "hub")) {
+			t.Fatalf("%s: hub 开机自启应照常检查: %+v", tc.name, c)
+		}
+		if _, err := os.Stat(filepath.Join(home, "typo")); !os.IsNotExist(err) {
+			t.Fatalf("doctor 不该建目录: %v", err)
+		}
+	}
+	// 没要求（默认目录的情形）：不存在或不是目录就整段 skip，细节写明看的是哪里
+	o.HubDirRequired = false
+	for _, dir := range []string{filepath.Join(home, "typo"), file} {
+		o.HubDir = dir
+		r := Run(o)
+		for _, id := range []string{"hubsrv.dir", "hubsrv.db", "hubsrv.password", "hubsrv.vapid", "hubsrv.acme", "hubsrv.autostart"} {
+			if c := find(t, r, id); c.Status != Skip || !strings.Contains(c.Detail, dir) {
+				t.Fatalf("没要求时 %s 应 skip: %+v", id, c)
+			}
+		}
+	}
+}

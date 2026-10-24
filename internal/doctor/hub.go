@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -71,14 +72,44 @@ func hubServerChecks(o Options) []Check {
 	if o.HubDir == "" {
 		return skipAll("这台机器没有 hub 数据目录")
 	}
-	if _, err := os.Stat(o.HubDir); err != nil {
+	st, err := os.Stat(o.HubDir)
+	usable := err == nil && st.IsDir()
+	if !usable && !o.HubDirRequired { // 默认位置没有 hub 的数据目录：这台机器不跑 hub
 		return skipAll("没有 hub 数据目录 " + o.HubDir)
 	}
-	out := []Check{permCheck("hubsrv.dir", "hub 数据目录", o.HubDir, 0o700, true, "railse hub run 会建好")}
-	out = append(out, hubDBChecks(o)...)
-	out = append(out, acmeCheck(o))
+	var out []Check
+	if !usable {
+		// 目录用不了：只在 hubsrv.dir 报原因，依赖数据目录的几项按同一个原因跳过；开机自启不依赖它，照常看
+		dir, cause := hubDirUnusable(o.HubDir, err)
+		out = append(out, dir)
+		for _, it := range items[1:5] {
+			out = append(out, Check{ID: it.id, Name: it.name, Status: Skip, Detail: "hub 数据目录 " + o.HubDir + " " + cause})
+		}
+	} else {
+		out = append(out, permCheck("hubsrv.dir", "hub 数据目录", o.HubDir, 0o700, true, "railse hub run 会建好"))
+		out = append(out, hubDBChecks(o)...)
+		out = append(out, acmeCheck(o))
+	}
 	out = append(out, autostartCheck("hubsrv.autostart", "hub 开机自启", o, "hub"))
 	return out
+}
+
+// hubDirUnusable 给出显式给的 hub 数据目录用不了时 hubsrv.dir 的结论与简短原因（给其余几项的跳过说明）。
+// statErr 为 nil 表示路径在、但不是目录。路径中间有一段是文件（ENOTDIR）也算不存在。
+func hubDirUnusable(dir string, statErr error) (Check, string) {
+	const id, name = "hubsrv.dir", "hub 数据目录"
+	switch {
+	case statErr == nil:
+		return Check{ID: id, Name: name, Status: Fail, Detail: dir + " 不是目录", Hint: "--hub-dir 要指向 hub 的数据目录（railse hub run --dir 用的那个）"}, "不是目录"
+	case errors.Is(statErr, fs.ErrNotExist) || errors.Is(statErr, syscall.ENOTDIR):
+		return Check{ID: id, Name: name, Status: Fail, Detail: dir + " 不存在", Hint: "确认 --hub-dir 写对了（railse hub run --dir 用的那个目录）；这台机器不跑 hub 就去掉 --hub-dir"}, "不存在"
+	}
+	why := statErr
+	var pe *fs.PathError
+	if errors.As(statErr, &pe) { // 细节里不重复路径
+		why = pe.Err
+	}
+	return Check{ID: id, Name: name, Status: Fail, Detail: dir + " 读不到：" + why.Error(), Hint: "确认用跑 hub 的同一个用户运行 doctor"}, "读不到"
 }
 
 // 只读打开 hub.db 的两种 URI 参数。hub 没在跑（没有 -wal）时用 immutable：SQLite 不加锁、不建 -wal 与 -shm

@@ -7,17 +7,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/railse/railse-opc/internal/doctor"
 )
 
-// fakeDoctorCLIs 让测试里的 doctor 看不到任何 CLI：LookPath 一律找不到，RunCmd 被调到就算测试失败。
-// 免得在开发机上真的跑 claude、codex、gemini 的 --version（慢，还可能往临时 HOME 里建目录），CI 上又是另一种结果。
-// 经 runDoctor 体检的测试（如 setup all）都先调它。
+// fakeDoctorCLIs 让测试里的 doctor 不碰本机环境：看不到任何 CLI（LookPath 一律找不到，RunCmd 被调到就算测试失败），
+// 也不回退到本机的系统 hub 目录。免得在开发机上真的跑 claude、codex、gemini 的 --version（慢，还可能往临时 HOME
+// 里建目录），CI 上又是另一种结果。经 runDoctor 体检的测试（如 setup all）都先调它。
 func fakeDoctorCLIs(t *testing.T) {
 	t.Helper()
+	setDoctorHubFallback(t, runtime.GOOS, "")
 	setDoctorOptions(t, func(o *doctor.Options) {
 		o.LookPath = func(string) (string, error) { return "", exec.ErrNotFound }
 		o.RunCmd = func(name string, args ...string) (string, error) {
@@ -33,6 +35,14 @@ func setDoctorOptions(t *testing.T, f func(*doctor.Options)) {
 	old := doctorOptions
 	doctorOptions = f
 	t.Cleanup(func() { doctorOptions = old })
+}
+
+// setDoctorHubFallback 在本测试期间换掉认系统 hub 目录用的系统名与目录（空目录表示不回退），结束时换回。
+func setDoctorHubFallback(t *testing.T, goos, dir string) {
+	t.Helper()
+	oldGOOS, oldDir := doctorGOOS, doctorSystemHubDir
+	doctorGOOS, doctorSystemHubDir = goos, dir
+	t.Cleanup(func() { doctorGOOS, doctorSystemHubDir = oldGOOS, oldDir })
 }
 
 type doctorCheck struct {
@@ -116,6 +126,12 @@ func TestDoctorRunsAndExitCodes(t *testing.T) {
 	if code := run([]string{"doctor", "--bogus"}, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "railse doctor") {
 		t.Fatalf("坏标志: %d %q", code, errOut.String())
 	}
+	// 用法如实说明会跑三个 CLI 的 --version（sudo 下不跑），以及 Linux 上回退的系统 hub 目录
+	for _, want := range []string{"claude、codex、gemini 的 --version", "sudo 下不跑", systemHubDir} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("用法缺 %q: %s", want, errOut.String())
+		}
+	}
 	errOut.Reset()
 	if code := run([]string{"doctor", "extra"}, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "多余的参数") {
 		t.Fatalf("多余参数: %d %q", code, errOut.String())
@@ -170,11 +186,11 @@ func TestDoctorHubDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 默认目录（$RAILSE_HUB_HOME）不存在：hub 侧整个跳过
+	// 默认目录（$RAILSE_HUB_HOME）不存在：hub 侧整个跳过，细节写明看的是哪里
 	t.Setenv("RAILSE_HUB_HOME", filepath.Join(base, "nohub"))
 	_, checks := doctorJSON(t, "--dir", agentDir, "--project", base)
 	for _, id := range []string{"hubsrv.dir", "hubsrv.db", "hubsrv.password", "hubsrv.vapid", "hubsrv.acme", "hubsrv.autostart"} {
-		if c := mustCheck(t, checks, id); c.Status != "skip" {
+		if c := mustCheck(t, checks, id); c.Status != "skip" || !strings.Contains(c.Detail, filepath.Join(base, "nohub")) {
 			t.Fatalf("默认 hub 目录不存在时 %s 应 skip: %+v", id, c)
 		}
 	}
@@ -182,11 +198,16 @@ func TestDoctorHubDir(t *testing.T) {
 	// 显式给的 --hub-dir 不存在：多半是写错了路径，报 fail 并给提示，不悄悄跳过，也不建它
 	missing := filepath.Join(base, "typo")
 	_, checks = doctorJSON(t, "--dir", agentDir, "--project", base, "--hub-dir", missing)
-	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "fail" || c.Hint == "" || !strings.Contains(c.Detail, missing) || !strings.Contains(c.Detail, "--hub-dir") {
+	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "fail" || !strings.Contains(c.Hint, "--hub-dir") || c.Detail != missing+" 不存在" {
 		t.Fatalf("显式 --hub-dir 不存在应 fail: %+v", c)
 	}
-	if c := mustCheck(t, checks, "hubsrv.db"); c.Status != "skip" {
-		t.Fatalf("hub 目录不存在时其余 hub 侧应 skip: %+v", c)
+	for _, id := range []string{"hubsrv.db", "hubsrv.password", "hubsrv.vapid", "hubsrv.acme"} {
+		if c := mustCheck(t, checks, id); c.Status != "skip" || c.Detail != "hub 数据目录 "+missing+" 不存在" {
+			t.Fatalf("hub 目录不存在时 %s 应按同一原因 skip: %+v", id, c)
+		}
+	}
+	if c := mustCheck(t, checks, "hubsrv.autostart"); c.Status == "skip" {
+		t.Fatalf("hub 开机自启不依赖数据目录，应照常检查: %+v", c)
 	}
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {
 		t.Fatalf("doctor 不该建 --hub-dir: %v", err)
@@ -205,8 +226,11 @@ func TestDoctorHubDir(t *testing.T) {
 		os.Chmod(locked, 0)
 		defer os.Chmod(locked, 0o700)
 		_, checks = doctorJSON(t, "--dir", agentDir, "--project", base, "--hub-dir", filepath.Join(locked, "hub"))
-		if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "fail" || !strings.Contains(c.Detail, "读不到") || strings.Count(c.Detail, locked) != 1 || c.Hint == "" {
+		if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "fail" || !strings.Contains(c.Detail, "读不到") || strings.Count(c.Detail, locked) != 1 || !strings.Contains(c.Hint, "同一个用户") {
 			t.Fatalf("显式 --hub-dir 读不到应 fail: %+v", c)
+		}
+		if c := mustCheck(t, checks, "hubsrv.db"); c.Status != "skip" || !strings.Contains(c.Detail, "读不到") {
+			t.Fatalf("hub 目录读不到时其余几项应按同一原因 skip: %+v", c)
 		}
 	}
 
@@ -287,5 +311,125 @@ func TestDoctorProjectBinAndCLIHook(t *testing.T) {
 	_, checks = doctorJSON(t, "--dir", agentDir, "--project", proj2)
 	if c := mustCheck(t, checks, "hooks.claude"); c.Status != "ok" {
 		t.Fatalf("默认 --bin 应与 setup hooks 的默认一致: %+v", c)
+	}
+}
+
+// Linux 上没设 $RAILSE_HUB_HOME、~/.railse-hub 也不在时，回退到系统单元的 hub 数据目录（sudo railse setup autostart
+// --hub --system 装的 hub），输出里写明用的是哪个目录；~/.railse-hub 在时优先它；设了 $RAILSE_HUB_HOME 就只看它；别的系统不回退。
+func TestDoctorLinuxSystemHubDir(t *testing.T) {
+	fakeDoctorCLIs(t)
+	base, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(base)
+	t.Setenv("HOME", base)
+	t.Setenv("RAILSE_HUB_HOME", "")
+	agentDir := filepath.Join(base, "h")
+	sys := filepath.Join(base, "var-lib-railse-hub")
+	if err := os.Mkdir(sys, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setDoctorHubFallback(t, "linux", sys)
+
+	_, checks := doctorJSON(t, "--dir", agentDir, "--project", base)
+	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "ok" || c.Detail != sys {
+		t.Fatalf("Linux 上应回退到系统 hub 目录: %+v", c)
+	}
+	if c := mustCheck(t, checks, "hubsrv.db"); c.Status != "fail" || !strings.Contains(c.Detail, filepath.Join(sys, "hub.db")) {
+		t.Fatalf("应检查系统 hub 目录里的库: %+v", c)
+	}
+	var out, errOut bytes.Buffer
+	run([]string{"doctor", "--dir", agentDir, "--project", base}, &out, &errOut)
+	if !strings.Contains(out.String(), "[ok]    hub 数据目录："+sys+"\n") {
+		t.Fatalf("文本输出应写明用的是哪个 hub 目录: %s", out.String())
+	}
+
+	// ~/.railse-hub 在：优先它
+	userHub := filepath.Join(base, ".railse-hub")
+	if err := os.Mkdir(userHub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, checks = doctorJSON(t, "--dir", agentDir, "--project", base)
+	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "ok" || c.Detail != userHub {
+		t.Fatalf("~/.railse-hub 在时应优先它: %+v", c)
+	}
+	os.Remove(userHub)
+
+	// 设了 $RAILSE_HUB_HOME（哪怕不存在）：只看它，不回退
+	envHub := filepath.Join(base, "nohub")
+	t.Setenv("RAILSE_HUB_HOME", envHub)
+	_, checks = doctorJSON(t, "--dir", agentDir, "--project", base)
+	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "skip" || !strings.Contains(c.Detail, envHub) {
+		t.Fatalf("设了 $RAILSE_HUB_HOME 时不该回退: %+v", c)
+	}
+	t.Setenv("RAILSE_HUB_HOME", "")
+
+	// 不是 Linux：不看系统目录，细节写明看的是 ~/.railse-hub
+	setDoctorHubFallback(t, "darwin", sys)
+	_, checks = doctorJSON(t, "--dir", agentDir, "--project", base)
+	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "skip" || !strings.Contains(c.Detail, userHub) {
+		t.Fatalf("非 Linux 不该回退: %+v", c)
+	}
+	// 显式 --hub-dir 优先于一切默认
+	setDoctorHubFallback(t, "linux", sys)
+	other := filepath.Join(base, "other-hub")
+	os.Mkdir(other, 0o700)
+	_, checks = doctorJSON(t, "--dir", agentDir, "--project", base, "--hub-dir", other)
+	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "ok" || c.Detail != other {
+		t.Fatalf("显式 --hub-dir 应优先: %+v", c)
+	}
+}
+
+// 没有任何 fail 时退出 0：守护进程在跑、钩子按同一个 --bin 装好、没有 hub 数据目录、看不到 CLI。
+func TestDoctorExitsZeroWithoutFailures(t *testing.T) {
+	fakeDoctorCLIs(t)
+	_, _, cfg := startTestAgent(t)
+	home := cfg.HomeDir
+	t.Setenv("HOME", home)
+	t.Setenv("RAILSE_HUB_HOME", filepath.Join(home, "nohub"))
+	proj := filepath.Join(home, "proj")
+	bin := filepath.Join(home, "bin", "railse")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--project", proj, "--bin", bin}, &out, &errOut); code != 0 {
+		t.Fatalf("setup hooks: %d %s", code, errOut.String())
+	}
+	out.Reset()
+	code := run([]string{"doctor", "--dir", cfg.Dir, "--project", proj, "--bin", bin}, &out, &errOut)
+	if code != 0 || !strings.Contains(out.String(), "，0 项失败") || strings.Contains(out.String(), "[fail]") {
+		t.Fatalf("没有 fail 时应退出 0: %d\n%s", code, out.String())
+	}
+	code, checks := doctorJSON(t, "--dir", cfg.Dir, "--project", proj, "--bin", bin)
+	if code != 0 {
+		t.Fatalf("--json 没有 fail 时应退出 0: %d %+v", code, checks)
+	}
+	if c := mustCheck(t, checks, "agent.running"); c.Status != "ok" {
+		t.Fatalf("agent.running: %+v", c)
+	}
+}
+
+// --dir、显式 --hub-dir 与 $RAILSE_HOME、$RAILSE_HUB_HOME 给的相对路径都按当前目录取成绝对路径，细节里不出现相对路径。
+func TestDoctorAbsolutePaths(t *testing.T) {
+	fakeDoctorCLIs(t)
+	base, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(base)
+	t.Setenv("HOME", base)
+	t.Chdir(base)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, checks := doctorJSON(t, "--dir", "a", "--hub-dir", "b", "--project", ".")
+	if c := mustCheck(t, checks, "agent.dir"); c.Detail != filepath.Join(cwd, "a")+" 不存在" {
+		t.Fatalf("--dir 应取绝对路径: %+v", c)
+	}
+	if c := mustCheck(t, checks, "hubsrv.dir"); c.Detail != filepath.Join(cwd, "b")+" 不存在" {
+		t.Fatalf("--hub-dir 应取绝对路径: %+v", c)
+	}
+	t.Setenv("RAILSE_HOME", "c")
+	t.Setenv("RAILSE_HUB_HOME", "d")
+	_, checks = doctorJSON(t, "--project", ".")
+	if c := mustCheck(t, checks, "agent.dir"); c.Detail != filepath.Join(cwd, "c")+" 不存在" {
+		t.Fatalf("$RAILSE_HOME 应取绝对路径: %+v", c)
+	}
+	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "skip" || !strings.Contains(c.Detail, filepath.Join(cwd, "d")) {
+		t.Fatalf("$RAILSE_HUB_HOME 应取绝对路径: %+v", c)
 	}
 }

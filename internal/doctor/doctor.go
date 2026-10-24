@@ -63,6 +63,9 @@ type Options struct {
 	Home     string
 	GOOS     string
 
+	// HubDirRequired 表示 HubDir 是显式给的（--hub-dir）：它不存在或读不到时 hubsrv.dir 报 fail，而不是把 hub 侧整段跳过。
+	HubDirRequired bool
+
 	LookPath    func(file string) (string, error)
 	RunCmd      func(name string, args ...string) (string, error) // 只用来跑 `<cli> --version`
 	HTTP        *http.Client                                      // 只用来 GET hub 的 /api/version
