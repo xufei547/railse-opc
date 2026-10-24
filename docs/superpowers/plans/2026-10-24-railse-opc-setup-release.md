@@ -4,7 +4,7 @@
 
 **Goal:** 让第一版能被装起来、跑起来、查出问题、发出去：`curl` 一行装二进制；`railse setup` 一键接入 hub、装钩子、开机自启；`railse doctor` 按设计 5.5 检查守护进程、hub、三个 CLI 的钩子与版本、超时与文件权限；hub 内置 ACME 直出 TLS；GitHub Actions 跑 Go 竞态测试、lint、网页构建、Playwright 与三平台交叉编译，goreleaser 出包；同时把第 2、3、4 份留下的、影响安全或自用体验的遗留项修掉（脱敏的 MCP 命令字段与 sshpass 变体、`--public-url` 蕴含 Secure cookie、推送并行与上限、401 不再一次就永久停用、`railse agent status` 显示 hub 状态、Claude 钩子改写到 `.claude/settings.local.json`）。
 
-**Architecture:** 不加新的运行时依赖：ACME 用已依赖的 `golang.org/x/crypto/acme/autocert`；开机自启只生成 launchd plist 与 systemd unit 并调用系统命令；doctor 是只读检查器，放在 `internal/doctor`，钩子配置的读写抽到 `internal/hooksconf` 供 setup 与 doctor 共用；发布靠 goreleaser（CI 里用官方 Action，本机用 `go run` 调用，不进 go.mod）。所有新增命令都沿用现有的子命令模式（`flag.FlagSet`、`foreignFlags`、中文用法文本、退出码 2 表示用法错）。
+**Architecture:** 不加第三方运行时依赖：ACME 用已依赖的 `golang.org/x/crypto/acme/autocert`（它的传递依赖 x/net、x/text 以 indirect 进 go.mod）；开机自启只生成 launchd plist 与 systemd unit 并调用系统命令；doctor 是只读检查器，放在 `internal/doctor`，钩子配置的读写抽到 `internal/hooksconf` 供 setup 与 doctor 共用；发布靠 goreleaser（CI 里用官方 Action，本机用 `go run` 调用，不进 go.mod）。所有新增命令都沿用现有的子命令模式（`flag.FlagSet`、`foreignFlags`、中文用法文本、退出码 2 表示用法错）。
 
 **Tech Stack:** Go 1.26 标准库 + 既有依赖（`x/crypto/acme/autocert`）；launchd（macOS）、systemd（Linux）；GitHub Actions、goreleaser v2、golangci-lint v2（`go run` 调用，`.golangci.yml`）；bash 安装脚本。网页侧不改依赖。
 
@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- 模块路径 `github.com/railse/railse-opc`，`go 1.26.0`。Go 侧不新增 `require`；工具链（golangci-lint、goreleaser）只经 `go run <模块>@<版本>` 或 GitHub Action 使用，不进 go.mod。网页侧不改依赖。
+- 模块路径 `github.com/railse/railse-opc`，`go 1.26.0`。Go 侧不新增第三方或直接依赖；`x/crypto/acme/autocert` 的传递依赖 `golang.org/x/net`、`golang.org/x/text`（Go 官方 x 模块，按 x/crypto v0.58.0 的 go.mod 版本）以 `// indirect` 进 go.mod（2026-10-25 执行期决定 10）；工具链（golangci-lint、goreleaser）只经 `go run <模块>@<版本>` 或 GitHub Action 使用，不进 go.mod。网页侧不改依赖。
 - 平台：macOS arm64、Linux amd64、Linux arm64（设计 6.2）；`CGO_ENABLED=0`（modernc sqlite 纯 Go）。开机自启：macOS 用 launchd 用户代理，Linux 用 systemd（用户单元；hub 以 root 安装时用系统单元：只配 `--hub`，默认数据目录 `/var/lib/railse-hub`，单元加 `StateDirectory=railse-hub`、`StateDirectoryMode=0700`，显式 `--dir` 优先；hub 永远不以 root 运行，绑定 443/80 靠 `AmbientCapabilities=CAP_NET_BIND_SERVICE`，`hub run` 发现 euid 为 0 时警告但不拒绝）。Windows 不做。
 - 新增子命令沿用现有写法：`flag.FlagSet` 加 `foreignFlags` 拒绝不认的标志、`fs.NArg() != 0` 报多余参数、用法错退出 2、运行错退出 1、全部文案中文。写文件一律原子写（临时文件加 rename），私密文件 0600、目录 0700。
 - doctor 只读：不改任何配置、不启动守护进程或服务、不连 CLI 的账号（允许带 10 秒超时跑 `claude|codex|gemini --version`）；每项检查有 `ok`/`warn`/`fail`/`skip` 四种结果与一句修复提示；任一 `fail` 退出码 1。
