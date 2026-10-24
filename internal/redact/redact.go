@@ -82,6 +82,10 @@ type quoting struct {
 	// emptyQ 是空引号（''、""，命令行视图里还有 $''、$""）；quoted1 是至少含一个字符的引号段。sshpass 的 -p 紧贴的只是
 	// 空引号时，bash 给的就是 -p，密码是下一个词（见 build 的 pTail）
 	emptyQ, quoted1 string
+	// noStart：值不能从这些字节开始，但可以穿过它们延续（命令行视图里是 sshpass 命令名的标记 vCmd、vArg，文本语境为空）。
+	// sshpass 命令名本身不当 Bearer、--password 这类标志的值；值若从词里前面的部分开始（Bearer bin/sshpass），
+	// 就一直抹到词尾，不在标记前断开（断开的话第二遍 <redacted>sshpass 不再是 sshpass，结果不同）
+	noStart string
 }
 
 // textQuoting 是路径、文本、URL 等不经视图的语境：引号就是原文里的引号。open 为 true 时（只用于会被截断的文本）
@@ -107,12 +111,24 @@ func textQuoting(open bool) quoting {
 }
 
 // compile 用给定的“不带引号的值”字符类编译一套文本语境的规则。几种语境只在值到哪里为止上不同。
-func compile(bare string, open bool) []rule {
+// narrow 为 true 时 sshpass -p 只按窄规则认（见 litSshpass），用于引号里的字面文本、JSON 叶子与 heredoc 正文：
+// 它们可能交给扫描器不认的解释器执行（watch '…'、su -c '…'、{"command":"watch","args":[…]}），完整规则跳过别的工具的
+// 选项后会把那里的程序名当密码抹掉。只给人看的 Text（事件消息、diff_preview）仍用完整规则
+func compile(bare string, open, narrow bool) []rule {
 	q := textQuoting(open)
 	// 会被截断的文本不连：右引号丢了的值本来就抹到末尾，再连会把后面的引号也当成值的一部分
 	q.word = !open
+	if narrow {
+		q.sshpass, q.sshpassArg = "", litSshpass
+	}
 	return build(bare, q)
 }
+
+// litSshpass 是文本里按窄规则认的 sshpass（与命令行视图的 vArg 同一个口径）：小写，不带引号，可带不含 = : @ 的路径；
+// 在行首或 ; & | ( 之后（命令位置），或者前一个词不是选项（不以 - 或占位符 < 开头，单独的 -- 除外）。前一个词与它之间
+// 只认同一行的空白，前一个词连同前面的分隔字符算进第 1 组原样放回
+const litSshpass = `(?:^|[;&|(\n][ \t]*|(?:^|\s)(?:--|[^\s;&|()<>'"\-][^\s;&|()<>]*)[ \t]+)` +
+	`(?:[^\s;&|()<>'"=:@\-][^\s;&|()<>'"=:@]*/)?sshpass`
 
 // build 编译一套规则。顺序很重要：先处理带键名的形式，再处理裸 token。bare 必须是 [^…]+ 形式的字符类。
 //
@@ -120,7 +136,14 @@ func compile(bare string, open bool) []rule {
 // 放回，见 ${phend}）：hub 会对守护进程脱敏过的载荷再跑一次，mysql -p<redacted> -pX 不能让规则跳到后面的 -p。
 // 占位符后面还连着值字符时照原来的字符类整段抹，免得 password=<redacted>RealSecret 漏出后半截。
 func build(bare string, q quoting) []rule {
+	if !strings.HasPrefix(bare, "[^") || !strings.HasSuffix(bare, "]+") {
+		panic("redact: bare 必须是 [^…]+ 形式的字符类: " + bare) // 下面 stop、unknownChar 按这个形状切出字符类的内容
+	}
 	stop := `[` + bare[2:len(bare)-2] + `]` // 值字符类以外的字符
+	// bareStart 同 bare，只是第一个字节不能是 noStart；值的第一段都用它，后面延续的部分仍用 bare
+	bareStart := `[^` + bare[2:len(bare)-2] + q.noStart + `][^` + bare[2:len(bare)-2] + `]*`
+	// first 是值的第一段（引号段以外）：占位符加值字符，或者不以 noStart 开头的值字符
+	first := `(?:` + q.ph + bare + `|` + bareStart + `)`
 	// 选项与选项、选项与值之间只认同一行里的空白（空格、制表符）和反斜杠续行，不认换行：换行是命令分隔符，
 	// sshpass -p 后面直接换行时 -p 没有参数，下一行是另一条命令，不能把它的命令名当密码抹掉。
 	// sep 是词与词之间：至少一个空格或制表符（续行本身只是把两行接起来，x\⏎-p 是一个词 x-p）；gap 是选项与紧跟的值之间，可以没有
@@ -149,21 +172,22 @@ func build(bare string, q quoting) []rule {
 	unknownOpt := `-(?:` + fl + `*` + unknownChar + `|` + fl + `+-|-` + optPiece + `)` + optPiece + `*`
 	sshpassOpts := `(?:` + sep + `-` + fl + `*[fdP]` + gap + optArg + `|` + sep + `-` + fl + `+|` + sep + unknownOpt + `(?:` + sep + optArg + `)?)*`
 	phOnly := q.ph + `(?P<phend>` + stop + `|$)`
-	value := `(?:` + q.quoted + `|(?:` + phOnly + `|(?:` + q.ph + `)?` + bare + `))`
+	value := `(?:` + q.quoted + `|(?:` + phOnly + `|` + first + `))`
 	if q.word {
-		value = `(?:` + phOnly + `|(?:` + q.quoted + `|(?:` + q.ph + `)?` + bare + `)(?:` + q.quoted + `|` + bare + `)*)`
+		value = `(?:` + phOnly + `|(?:` + q.quoted + `|` + first + `)(?:` + q.quoted + `|` + bare + `)*)`
 	}
-	// pTail 接在 sshpass 的 -p 后面（闭合第 1 组）：要么 -p 与值隔开，中间可以先有只含空引号的部分（bash 里 -p''、-p""
-	// 就是 -p，密码是下一个词，与扫描器把 sshpass 当包装命令时的认法一致；-p'' 隔开的 '' 第 2 组原样放回）；要么值紧贴 -p，
-	// 紧贴的值不能只是空引号（-p'' 后面没有别的字符时不抹任何东西）。紧贴的值也可以只是占位符（同 phOnly，紧跟的字符放进
-	// phend2 放回）：-p\⏎<redacted> 再脱敏一次时不能退回去把续行本身当值
-	attached := `(?:` + q.emptyQ + `)*(?:` + q.quoted1 + `|(?:` + q.ph + `)?` + bare + `)`
+	// sshpass 规则写成 `(… -p` + pCont + `)` + pAlt：第 1 组到 -p 与紧跟的续行为止。pAlt 要么是 -p 与值隔开，中间可以先有
+	// 只含空引号的部分（bash 里 -p''、-p"" 就是 -p，密码是下一个词，与扫描器把 sshpass 当包装命令时的认法一致；-p'' 隔开的
+	// '' 第 2 组原样放回）；要么值紧贴 -p，紧贴的值不能只是空引号（-p'' 后面没有别的字符时不抹任何东西）。紧贴的值也可以
+	// 只是占位符（同 phOnly，紧跟的字符放进 phend2 放回）：-p\⏎<redacted> 再脱敏一次时不能退回去把续行本身当值
+	attached := `(?:` + q.emptyQ + `)*(?:` + q.quoted1 + `|` + first + `)`
 	if q.word {
 		attached += `(?:` + q.quoted + `|` + bare + `)*`
 	}
 	attached = `(?:` + q.ph + `(?P<phend2>` + stop + `|$)|` + attached + `)`
-	pTail := `(?:` + q.cont + `)*)(?:((?:` + q.emptyQ + `)*` + sep + `)` + value + `|` + attached + `)`
-	bare = `(?:` + phOnly + `|(?:` + q.ph + `)?` + bare + `)`
+	pCont := `(?:` + q.cont + `)*`
+	pAlt := `(?:((?:` + q.emptyQ + `)*` + sep + `)` + value + `|` + attached + `)`
+	bare = `(?:` + phOnly + `|` + first + `)`
 	x := q.excluded
 	rules := []rule{
 		// Authorization: Bearer xxx / Authorization: Basic xxx
@@ -193,18 +217,20 @@ func build(bare string, q quoting) []rule {
 			repl: "${1}${2}${4}${6}${8}" + placeholder + "${phend}${3}${5}${7}", need: "-"},
 		// mysql 系命令紧贴 -p 的密码（-pxxx、-p'xxx'）。-p 单独出现时 mysql 提示输入密码、后面的是库名；-P 是端口：都不动
 		{re: regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + q.sameCmd + `\s-p)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
+	}
+	if q.sshpass != "" {
 		// sshpass 的 -p 密码（-p pw、-p 'pw'、-p'pw'、-ppw，-p 可以在 -v 这类选项之后或组合在末尾，如 -vp）。只认 sshpass
 		// 自己的选项里的 -p：后面 ssh、scp、rsync 自己的 -p（端口、保留权限）不动。命令行视图里这条完整规则只认命令位置上的
 		// sshpass（行首、; | && ( $( 之后、VAR=值 之后、sudo env timeout nohup exec xargs 等包装命令之后，见 shell.go 的 endWord），
-		// 别的位置见下一条窄规则
-		{re: regexp.MustCompile(`(` + q.sshpass + sshpassOpts + sep + `-` + fl + `*p` + pTail), repl: "${1}${2}" + placeholder + "${phend}${phend2}", need: "-"},
+		// 别的位置见下一条窄规则；引号里的字面文本、JSON 叶子与 heredoc 正文不用这条（见 compile 的 narrow）
+		rules = append(rules, rule{re: regexp.MustCompile(`(` + q.sshpass + sshpassOpts + sep + `-` + fl + `*p` + pCont + `)` + pAlt), repl: "${1}${2}" + placeholder + "${phend}${phend2}", need: "-"})
 	}
 	if q.sshpassArg != "" {
 		// 命令行视图里不在命令位置的 sshpass（扫描器不认的前缀之后：ssh jump sshpass -p pw、docker exec ctr sshpass -p pw、
 		// watch sshpass -p pw）：只认小写、不带引号的 sshpass 紧跟 -p（-p 值、-p值，中间不跳任何选项），且前一个词不是选项
-		// （shell.go 的 vArg）。xargs -I sshpass -p curl、docker run -e sshpass -p 8080:80 里 sshpass 是选项的值，不认；
+		// （shell.go 的 vArg）；字面文本里同一个口径（litSshpass）。xargs -I sshpass -p curl、docker run -e sshpass -p 8080:80 里 sshpass 是选项的值，不认；
 		// 代价是 echo sshpass -p x 这类参数会多抹一个词，多抹的是参数，不藏命令
-		rules = append(rules, rule{re: regexp.MustCompile(`(` + q.sshpassArg + sep + `-p` + pTail), repl: "${1}${2}" + placeholder + "${phend}${phend2}", need: "-"})
+		rules = append(rules, rule{re: regexp.MustCompile(`(` + q.sshpassArg + sep + `-p` + pCont + `)` + pAlt), repl: "${1}${2}" + placeholder + "${phend}${phend2}", need: "-"})
 	}
 	// 裸 token：GitHub、OpenAI、Slack、AWS
 	return append(rules, rule{re: regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), repl: placeholder, need: "_-A"})
@@ -214,14 +240,14 @@ var (
 	// literalRules 用于命令行里元字符是普通字符的片段（引号里、注释，见 shell.go）：值只在空白、引号、反斜杠处停，
 	// 免得引号括住整个 KEY=值 时（"POSTGRES_PASSWORD=Xy7&kP(2)q"）强密码只抹掉前半截。排除反斜杠是为了处理 JSON 原文时
 	// 不吞掉 \" 转义，结果仍是合法 JSON。
-	literalRules = compile(`[^\s'"\\]+`, false)
+	literalRules = compile(`[^\s'"\\]+`, false, true)
 	// textRules 用于路径、JSON 字符串叶子和 heredoc 正文：没有 shell 语义，值一直抹到空白或引号，
 	// 免得含 & ( ; | 等符号的强密码只抹掉前半截。它们不会被截断，引号严格成对。
-	textRules = compile(`[^\s'"]+`, false)
+	textRules = compile(`[^\s'"]+`, false, true)
 	// truncRules 同 textRules，用于会被截断的文本（Text：diff_preview、事件消息）：未闭合的引号抹到末尾，见 quotedOpen。
-	truncRules = compile(`[^\s'"]+`, true)
+	truncRules = compile(`[^\s'"]+`, true, false)
 	// urlRules 用于 URL：值在 & 处停，保留后面的查询参数。
-	urlRules = compile(`[^\s'"&]+`, false)
+	urlRules = compile(`[^\s'"&]+`, false, false)
 )
 
 // redact 按给定规则集返回脱敏后的副本。

