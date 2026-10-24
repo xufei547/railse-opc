@@ -79,6 +79,9 @@ type quoting struct {
 	// sameLine：标志与值之间（--password 值、Bearer 值、Authorization: 值、"password": 值）只认同一行的空白与续行。
 	// 命令行视图为 true：换行是命令分隔符，跨过去就会把下一行的命令名当成值抹掉；文本语境为 false，照旧用 \s
 	sameLine bool
+	// emptyQ 是空引号（''、""，命令行视图里还有 $''、$""）；quoted1 是至少含一个字符的引号段。sshpass 的 -p 紧贴的只是
+	// 空引号时，bash 给的就是 -p，密码是下一个词（见 build 的 pTail）
+	emptyQ, quoted1 string
 }
 
 // textQuoting 是路径、文本、URL 等不经视图的语境：引号就是原文里的引号。open 为 true 时（只用于会被截断的文本）
@@ -94,9 +97,11 @@ func textQuoting(open bool) quoting {
 		// 大小写不论（macOS 默认的文件系统不分大小写，SSHPASS 照样能执行）
 		sshpass: `\b(?i:sshpass)['"]?`,
 	}
+	q.emptyQ, q.quoted1 = `''|""`, `"[^"]+"|'[^']+'|\\"(?:[^"\\]|\\.)+?\\"`
 	if open {
 		q.quoted, q.jsonStr = quotedOpen, `"(?:[^"\\]|\\.)*(?:"|$)`
 		q.sqEnd, q.dqEnd, q.jqEnd = `('|$)`, `("|$)`, `(\\"|$)`
+		q.quoted1 = `"[^"]+(?:"|$)|'[^']+(?:'|$)|\\"(?:[^"\\]|\\.)+?\\"`
 	}
 	return q
 }
@@ -148,6 +153,16 @@ func build(bare string, q quoting) []rule {
 	if q.word {
 		value = `(?:` + phOnly + `|(?:` + q.quoted + `|(?:` + q.ph + `)?` + bare + `)(?:` + q.quoted + `|` + bare + `)*)`
 	}
+	// pTail 接在 sshpass 的 -p 后面（闭合第 1 组）：要么 -p 与值隔开，中间可以先有只含空引号的部分（bash 里 -p''、-p""
+	// 就是 -p，密码是下一个词，与扫描器把 sshpass 当包装命令时的认法一致；-p'' 隔开的 '' 第 2 组原样放回）；要么值紧贴 -p，
+	// 紧贴的值不能只是空引号（-p'' 后面没有别的字符时不抹任何东西）。紧贴的值也可以只是占位符（同 phOnly，紧跟的字符放进
+	// phend2 放回）：-p\⏎<redacted> 再脱敏一次时不能退回去把续行本身当值
+	attached := `(?:` + q.emptyQ + `)*(?:` + q.quoted1 + `|(?:` + q.ph + `)?` + bare + `)`
+	if q.word {
+		attached += `(?:` + q.quoted + `|` + bare + `)*`
+	}
+	attached = `(?:` + q.ph + `(?P<phend2>` + stop + `|$)|` + attached + `)`
+	pTail := `(?:` + q.cont + `)*)(?:((?:` + q.emptyQ + `)*` + sep + `)` + value + `|` + attached + `)`
 	bare = `(?:` + phOnly + `|(?:` + q.ph + `)?` + bare + `)`
 	x := q.excluded
 	rules := []rule{
@@ -182,14 +197,14 @@ func build(bare string, q quoting) []rule {
 		// 自己的选项里的 -p：后面 ssh、scp、rsync 自己的 -p（端口、保留权限）不动。命令行视图里这条完整规则只认命令位置上的
 		// sshpass（行首、; | && ( $( 之后、VAR=值 之后、sudo env timeout nohup exec xargs 等包装命令之后，见 shell.go 的 endWord），
 		// 别的位置见下一条窄规则
-		{re: regexp.MustCompile(`(` + q.sshpass + sshpassOpts + sep + `-` + fl + `*p` + gap + `)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
+		{re: regexp.MustCompile(`(` + q.sshpass + sshpassOpts + sep + `-` + fl + `*p` + pTail), repl: "${1}${2}" + placeholder + "${phend}${phend2}", need: "-"},
 	}
 	if q.sshpassArg != "" {
 		// 命令行视图里不在命令位置的 sshpass（扫描器不认的前缀之后：ssh jump sshpass -p pw、docker exec ctr sshpass -p pw、
 		// watch sshpass -p pw）：只认小写、不带引号的 sshpass 紧跟 -p（-p 值、-p值，中间不跳任何选项），且前一个词不是选项
 		// （shell.go 的 vArg）。xargs -I sshpass -p curl、docker run -e sshpass -p 8080:80 里 sshpass 是选项的值，不认；
 		// 代价是 echo sshpass -p x 这类参数会多抹一个词，多抹的是参数，不藏命令
-		rules = append(rules, rule{re: regexp.MustCompile(`(` + q.sshpassArg + sep + `-p` + gap + `)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"})
+		rules = append(rules, rule{re: regexp.MustCompile(`(` + q.sshpassArg + sep + `-p` + pTail), repl: "${1}${2}" + placeholder + "${phend}${phend2}", need: "-"})
 	}
 	// 裸 token：GitHub、OpenAI、Slack、AWS
 	return append(rules, rule{re: regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), repl: placeholder, need: "_-A"})

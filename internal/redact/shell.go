@@ -93,6 +93,9 @@ var viewRules = func() []rule {
 	}
 	// 不在命令位置的 sshpass 按窄规则认（见 vArg）；标志与值之间不跨换行
 	q.sshpassArg, q.sameLine = `\x17+`, true
+	// 空引号：视图里 $'' 是 ' 加 vMask 加右引号；非空引号段要有一个不是 vMask 的字符
+	q.emptyQ = `'\x00?\x11|"\x00?\x12`
+	q.quoted1 = `"\x00?[^"` + s + `\x00][^"` + s + `]*\x12|'\x00?[^'` + s + `\x00][^'` + s + `]*\x11`
 	rules := build("[^\\s'\"\\\\;|&<>()`$"+x+"]+", q)
 	for i := range rules {
 		if rules[i].vrepl == "" {
@@ -1284,7 +1287,8 @@ func (c *ctx) singleQuoted() {
 	if k < c.hi {
 		end = k + 1
 	}
-	if c.recArgs() {
+	// 空引号交给解释器也什么都不执行，照字面处理（-p'' 在视图里是空引号，不是嵌套结构）
+	if c.recArgs() && k > i+1 {
 		sc.i = i + 1
 		sc.depth++
 		inner := sc.context(k, mShell, 0)
@@ -1321,7 +1325,7 @@ func (c *ctx) ansiQuoted() {
 	if k < c.hi {
 		end = k + 1
 	}
-	if c.recArgs() {
+	if c.recArgs() && k > i+2 {
 		sc.i = i + 2
 		sc.depth++
 		inner := sc.context(k, mShell, 0)
