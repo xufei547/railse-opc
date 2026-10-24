@@ -56,7 +56,7 @@
 
 **Interfaces:**
 - 导出接口不变（`String`、`Text`、`Payload`）。
-- `walk` 的行为变化：MCP 参数（合法 JSON）里键名匹配 `(?i)^(command|cmd|script|shell_command|bash|sh)$` 的字符串值按命令行语境处理（`String`），其余字符串仍按普通文本处理；敏感键整体抹掉的规则不变。嵌套对象与数组里同样生效。
+- `walk` 的行为变化：MCP 参数（合法 JSON）里键名匹配 `(?i)^(command|cmd|script|shell_command|bash|sh)$` 的字符串值按命令行语境处理（`String`）；该键的值是字符串数组时每个元素都按命令行语境处理；该键的值是 shell 解释器（`sh`、`bash`、`zsh`、`dash`、`ksh`，可带路径）时，同一对象里 `args`/`argv`/`arguments` 数组的字符串元素也按命令行语境处理（非 shell 解释器的 `args` 仍按文本整段抹）；其余字符串仍按普通文本处理；敏感键整体抹掉的规则不变。嵌套对象与数组里同样生效。（2026-10-25 执行期按审查补充数组形式。）
 - `shell.go` 的 `sshpass -p` 识别扩展到：命令名带引号（`"sshpass" -p pw`、`'sshpass' -p pw`）、大小写（`SSHPASS -p pw`，macOS 文件系统不分大小写时也能执行）、`-p` 前有其他选项（`sshpass -o StrictHostKeyChecking=no -p pw`、`sshpass -v -p pw`）、`-ppw` 紧贴写法；`curl -u user:'pw'` 已在第 4 份修好，本 Task 只加回归用例。
 - 命令行语境的裸值在 `\f`（换页）与单独的 `\r`（不跟 `\n`）处停止，与空白一样对待：bash 把 `\f` 当空白、把单独 `\r` 当普通字符，但两者都不是密码里会出现的字符，停下来只会多露不会多漏（第 4 份账本第 1 条）。
 
