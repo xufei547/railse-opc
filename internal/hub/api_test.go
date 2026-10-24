@@ -841,6 +841,34 @@ func TestRequestsListAndDetail(t *testing.T) {
 	}
 }
 
+// 整分支终审 m-1：has_redacted 也看标题（question 的消息、webhook 的标题都先脱敏再入库），与网页自己的判断一致。
+func TestRequestViewHasRedactedTitle(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	id, _ := enrollMachine(t, h, "mac")
+	insertReq(t, h.st, store.Request{ID: "w1", Kind: "webhook", State: "pending", Title: "部署 TOKEN=<redacted> 到生产",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "webhook"}})
+	insertReq(t, h.st, store.Request{ID: "q1", MachineID: id, Kind: "question", State: "recorded", Title: "要用 password=<redacted> 登录吗？"})
+	insertReq(t, h.st, store.Request{ID: "w2", Kind: "webhook", State: "pending", Title: "部署 v1.2（redacted 这个词本身不算）",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "webhook"}})
+	for rid, want := range map[string]bool{"w1": true, "q1": true, "w2": false} {
+		var detail struct {
+			Request map[string]any `json:"request"`
+		}
+		decodeBody(t, doReq(t, "GET", h.http.URL+"/api/requests/"+rid, nil, "", ck), &detail)
+		if detail.Request["has_redacted"] != want {
+			t.Errorf("%s 的 has_redacted 应为 %v: %+v", rid, want, detail.Request)
+		}
+	}
+	var requests []map[string]any
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/requests?limit=500", nil, "", ck), &requests)
+	for _, r := range requests {
+		if want := r["id"] != "w2"; r["has_redacted"] != want {
+			t.Errorf("/api/requests 里 %s 的 has_redacted 应为 %v", r["id"], want)
+		}
+	}
+}
+
 // decide 接口的错误码：坏 JSON、坏 action、备注超过 1000 字符 400；不存在 404；已过期 409。
 // 终审 I4：请求视图带派生字段 has_redacted（载荷任一字段含脱敏占位符时为 true，MCP 参数里存库时转义的写法也算），
 // /api/inbox、/api/requests、/api/requests/{id}、decide 的返回与 /ws/client 推送都带：网页据此醒目告警，展示的不是原文。

@@ -98,6 +98,11 @@ func payloadHasRedacted(p policy.Payload) bool {
 	return bytes.Contains(b, []byte(redactedMark)) || bytes.Contains(b, []byte(`\u003credacted\u003e`))
 }
 
+// requestHasRedacted 报告请求展示给人看的内容有没有脱敏占位符：载荷，或标题（question 的消息、webhook 的标题，入库前都已脱敏）。
+func requestHasRedacted(r store.Request) bool {
+	return strings.Contains(r.Title, redactedMark) || payloadHasRedacted(r.Payload)
+}
+
 // views 给请求配上机器名（每台机器只查一次；查不到时留空，读库出错记日志）、项目名与 has_redacted。
 func (s *Server) views(rs []store.Request) []requestView {
 	names := map[string]string{}
@@ -112,7 +117,7 @@ func (s *Server) views(rs []store.Request) []requestView {
 			}
 			names[r.MachineID] = name
 		}
-		out = append(out, requestView{Request: r, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: payloadHasRedacted(r.Payload)})
+		out = append(out, requestView{Request: r, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: requestHasRedacted(r)})
 	}
 	return out
 }
