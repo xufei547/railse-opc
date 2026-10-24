@@ -447,6 +447,55 @@ func TestAutostartSystemDefaultDir(t *testing.T) {
 	}
 }
 
+// Linux 上用户单元托管要绑 1024 以下端口的 hub（--acme-domain 默认 :443 与 :80，或 --listen 给了低端口）：照装，但醒目地警告
+// 它会起不来、被反复拉起，并给出 --system 的写法；不绑低端口、系统单元、macOS 都不警告。
+func TestAutostartWarnsUserUnitPrivilegedPorts(t *testing.T) {
+	home, rec := autostartEnv(t)
+	bin := filepath.Join(home, "railse")
+	install := func(goos string, uid int, args ...string) (string, string) {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		if code := runAutostartOS(goos, uid, append([]string{"--hub", "--bin", bin}, args...), &out, &errOut); code != 0 {
+			t.Fatalf("%v: %d %s", args, code, errOut.String())
+		}
+		return out.String(), errOut.String()
+	}
+	for _, c := range []struct {
+		args  []string
+		ports string
+	}{
+		{[]string{"--", "--acme-domain", "hub.example.com", "--acme-email", "me@example.com"}, ":443、:80"},
+		{[]string{"--", "--acme-domain=hub.example.com", "--acme-http", "none"}, ":443"},
+		{[]string{"--", "--acme-domain", "hub.example.com", "--listen", ":8443"}, ":80"},
+		{[]string{"--", "--listen=0.0.0.0:443", "--public-url", "https://hub.example.com"}, "0.0.0.0:443"},
+	} {
+		rec.calls = nil
+		out, errOut := install("linux", 1000, c.args...)
+		if !strings.Contains(errOut, "警告") || !strings.Contains(errOut, c.ports) || !strings.Contains(errOut, "--system") ||
+			!strings.Contains(errOut, sudoSystemHubCmd+" -- "+strings.Join(c.args[1:], " ")) {
+			t.Fatalf("%v 应警告绑不了 %s 并指向 --system: %q", c.args, c.ports, errOut)
+		}
+		if len(installCalls(rec.calls)) != 3 || !strings.Contains(out, "已托管") {
+			t.Fatalf("%v 只警告不拒绝: %v %q", c.args, rec.calls, out)
+		}
+	}
+	for _, c := range []struct {
+		goos string
+		uid  int
+		args []string
+	}{
+		{"linux", 1000, []string{"--", "--acme-domain", "hub.example.com", "--listen", ":8443", "--acme-http", "none"}},
+		{"linux", 1000, []string{"--", "--listen", "127.0.0.1:8787", "--public-url", "https://hub.example.com"}},
+		{"linux", 1000, nil},
+		{"darwin", 501, []string{"--", "--acme-domain", "hub.example.com"}},
+		{"linux", 0, []string{"--system", "--user", "alice", "--", "--acme-domain", "hub.example.com"}},
+	} {
+		if _, errOut := install(c.goos, c.uid, c.args...); strings.Contains(errOut, "1024") {
+			t.Fatalf("%s %v 不该警告低端口: %q", c.goos, c.args, errOut)
+		}
+	}
+}
+
 func TestAutostartLaunchdMakesDirBeforeBootstrap(t *testing.T) {
 	home, rec := autostartEnv(t)
 	dir := filepath.Join(home, "data", ".railse-hub")

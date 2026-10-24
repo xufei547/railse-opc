@@ -26,7 +26,7 @@ const hubUsage = `用法:
   railse hub run --acme-domain hub.example.com [--acme-email me@example.com] [--acme-http :80] [其余标志同上]
                                               直出 TLS（Let's Encrypt 自动签发与续期），--listen 默认 :443
   railse hub password [--dir 目录]            从标准输入读一行设为网页登录密码（至少 8 个字符）
-  railse hub token [--dir 目录] [--ttl 10m]   生成一次性接入码，给 railse agent enroll 用
+  railse hub token [--dir 目录] [--ttl 10m]   生成一次性接入码，给 railse setup all（或 railse agent enroll）用
   railse hub webhook-token [--dir 目录]       生成 webhook 来源令牌（明文只显示这一次）
   railse hub vapid [--dir 目录] [--rotate]    打印推送公钥；--rotate 换新密钥并删除全部推送订阅（所有手机要重新开启通知）
   目录默认 $RAILSE_HUB_HOME，否则 ~/.railse-hub
@@ -292,7 +292,8 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "接入码: %s\n有效期: %s（只能用一次）\n在要接入的机器上运行:\n  railse agent enroll --hub https://<hub 地址> --token %s\n", tok, a.ttl, tok)
+		fmt.Fprintf(stdout, "接入码: %s\n有效期: %s（只能用一次）\n在要接入的机器上、项目目录里运行（接入、装钩子、开机自启、体检一次做完）:\n"+
+			"  railse setup all --hub https://<hub 地址> --token %s\n只接入（钩子与开机自启自己装）:\n  railse agent enroll --hub https://<hub 地址> --token %s\n", tok, a.ttl, tok, tok)
 	case "webhook-token":
 		tok := store.RandomToken()
 		if err := st.SetSetting("webhook_token_hash", store.HashToken(tok)); err != nil {

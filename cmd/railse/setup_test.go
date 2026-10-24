@@ -786,6 +786,61 @@ func TestSetupHooksLocalLinkedToSharedIsNotMigratedAway(t *testing.T) {
 	}
 }
 
+// 在家目录里运行（项目就是 ~，或项目的 settings.json 链到 ~/.claude/settings.json）：那是 Claude Code 的用户级配置，
+// 迁走会让所有项目失去钩子，跳过迁移并警告，照样装好 settings.local.json。
+func TestSetupHooksDoesNotMigrateUserSettings(t *testing.T) {
+	home, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(home)
+	t.Setenv("HOME", home)
+	t.Setenv("RAILSE_HOME", "")
+	userSettings := filepath.Join(home, ".claude", "settings.json")
+	os.MkdirAll(filepath.Dir(userSettings), 0o755)
+	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
+	os.WriteFile(userSettings, old, 0o644)
+	setup := func(extra ...string) (string, string) {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		args := append([]string{"setup", "hooks", "--claude", "--bin", "/opt/railse"}, extra...)
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatalf("%v: %d %s", args, code, errOut.String())
+		}
+		return out.String(), errOut.String()
+	}
+	check := func(what, out, errOut, local string) {
+		t.Helper()
+		if b := readFile(t, userSettings); !bytes.Equal(b, old) {
+			t.Fatalf("%s: 用户级配置不该被改: %s", what, b)
+		}
+		if strings.Contains(out, "迁走") || !strings.Contains(errOut, "用户级配置") || !strings.Contains(errOut, "手动删") {
+			t.Fatalf("%s: 应跳过迁移并警告: out=%q err=%q", what, out, errOut)
+		}
+		if ins, _ := hooksconf.Inspect(readFile(t, local), "/opt/railse"); !ins.Events["PermissionRequest"].Present {
+			t.Fatalf("%s: settings.local.json 照样装好", what)
+		}
+	}
+	t.Chdir(home)
+	out, errOut := setup() // --project 默认是当前目录，即 ~
+	check("在 ~ 下运行", out, errOut, filepath.Join(home, ".claude", "settings.local.json"))
+	out, errOut = setup("--dry-run")
+	if strings.Contains(out, "迁走") || !strings.Contains(errOut, "用户级配置") {
+		t.Fatalf("dry-run 也不显示迁移: %q %q", out, errOut)
+	}
+	if runtime.GOOS != "windows" {
+		proj := filepath.Join(home, "proj")
+		os.MkdirAll(filepath.Join(proj, ".claude"), 0o755)
+		if err := os.Symlink(userSettings, filepath.Join(proj, ".claude", "settings.json")); err != nil {
+			t.Fatal(err)
+		}
+		out, errOut = setup("--project", proj)
+		check("项目的 settings.json 链到用户级配置", out, errOut, filepath.Join(proj, ".claude", "settings.local.json"))
+	}
+	// 用户级配置里没有 Railse 的条目：不警告
+	os.WriteFile(userSettings, []byte(`{"model":"opus"}`), 0o644)
+	if _, errOut = setup(); strings.Contains(errOut, "用户级配置") {
+		t.Fatalf("没有要迁的就不警告: %q", errOut)
+	}
+}
+
 func readFile(t *testing.T, path string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(path)

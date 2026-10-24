@@ -54,6 +54,8 @@ func resolveForWrite(path string) (target string, mode os.FileMode) {
 // claudeMigration 算出把 Railse 钩子从 Claude 的共享配置 settings.json 迁走后的内容；没有要迁的返回 false，文件不动。
 // settings.json 已不是写入目标：读不了、不是合法配置时只在 stderr 警告并跳过，不挡安装。
 // settings.local.json 与它是同一个文件（链接）时不迁，否则会把刚装进去的钩子删掉。
+// 它（解开链接后）就是用户级的 ~/.claude/settings.json 时（在家目录里运行，或项目的 settings.json 链到它）也不迁：
+// 那里的钩子对所有项目生效，迁走会让别的项目失去钩子；有 Railse 条目时警告，请用户自己决定。
 func claudeMigration(shared, localReal, bin string, stderr io.Writer) (pendingWrite, bool) {
 	target, mode := resolveForWrite(shared)
 	if a, err := os.Stat(target); err == nil {
@@ -72,6 +74,13 @@ func claudeMigration(shared, localReal, bin string, stderr io.Writer) (pendingWr
 	ins, err := hooksconf.Inspect(existing, bin)
 	if err == nil && len(ins.Events) == 0 {
 		return pendingWrite{}, false
+	}
+	if home, herr := os.UserHomeDir(); herr == nil {
+		if user := filepath.Join(home, ".claude", "settings.json"); samePath(target, user) {
+			fmt.Fprintf(stderr, "警告：没有迁走 %s 里的 Railse 钩子：它就是 %s，这是用户级配置，迁走会让所有项目失去钩子；如确要迁走请手动删"+
+				"（不删的话，在这个目录里它会和 settings.local.json 里的一起触发两次）\n", shared, user)
+			return pendingWrite{}, false
+		}
 	}
 	var data []byte
 	if err == nil {
@@ -262,15 +271,15 @@ func hookSocket(dir string) (socket, defDir string, err error) {
 		if defDir, err = filepath.Abs(def.Dir); err != nil {
 			return "", "", err
 		}
-		if sameDir(abs, defDir) {
+		if samePath(abs, defDir) {
 			return "", defDir, nil
 		}
 	}
 	return agent.ConfigIn(abs).SocketPath, defDir, nil
 }
 
-// sameDir 报告两个绝对路径是不是同一个目录：字面相同（清理后），或都存在且是同一个文件（中间有符号链接）。
-func sameDir(a, b string) bool {
+// samePath 报告两个绝对路径是不是同一个文件或目录：字面相同（清理后），或都存在且是同一个文件（中间有符号链接）。
+func samePath(a, b string) bool {
 	if filepath.Clean(a) == filepath.Clean(b) {
 		return true
 	}

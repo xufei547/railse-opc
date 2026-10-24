@@ -43,7 +43,7 @@ railse hub token       # 打印一次性接入码，默认 10 分钟有效（--t
 railse hub run --acme-domain hub.example.com --acme-email me@example.com
 ```
 
-数据目录取 `--dir`，否则 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`（0700）。要开机自启就把最后一条换成 `railse setup autostart --hub -- --acme-domain hub.example.com --acme-email me@example.com`（用户级托管，不用 sudo）。
+数据目录取 `--dir`，否则 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`（0700）。要开机自启就把最后一条换成 `railse setup autostart --hub -- --acme-domain hub.example.com --acme-email me@example.com`（用户级托管，不用 sudo）。这条只适用于 macOS：Linux 上的用户单元绑不了 1024 以下的端口，hub 会起不来、被 systemd 反复拉起，`setup autostart` 照装但会醒目地警告，并给出改用系统单元的命令。
 
 ### TLS 的两种方式
 
@@ -95,7 +95,7 @@ railse setup all --hub https://hub.example.com --token <接入码>
 
 **各 CLI 的钩子。** Claude 与 Gemini 的钩子是项目级的：别的项目再跑 `railse setup hooks --project <目录>`。
 
-- **Claude Code**：写 `<项目>/.claude/settings.local.json`（钩子命令里是本机的 railse 路径，不该入库）；旧版写在 `.claude/settings.json` 的 Railse 条目会自动迁走，别的设置原样保留。railse 新建的 `settings.local.json` 不一定被 git 忽略，`git status` 里看到它就加进 `.gitignore`（或全局的 `~/.config/git/ignore`）：`echo '.claude/settings.local.json' >> .gitignore`。
+- **Claude Code**：写 `<项目>/.claude/settings.local.json`（钩子命令里是本机的 railse 路径，不该入库）；旧版写在 `.claude/settings.json` 的 Railse 条目会自动迁走，别的设置原样保留；在家目录里跑（项目就是 `~`，或项目的 `settings.json` 链到 `~/.claude/settings.json`）时不迁：那是用户级配置，迁走会让所有项目失去钩子，只警告，要迁请手动删。railse 新建的 `settings.local.json` 不一定被 git 忽略，`git status` 里看到它就加进 `.gitignore`（或全局的 `~/.config/git/ignore`）：`echo '.claude/settings.local.json' >> .gitignore`。
 - **Codex CLI**：写用户级 `~/.codex/hooks.json`；只在交互会话里审批（`codex exec` 不触发）；首次使用在 Codex 里用 `/hooks` 审核；`notify` 要手动加到 `~/.codex/config.toml` 开头（第一个 `[表]` 之前），`setup hooks` 会打印那一行。
 - **Gemini CLI**：写 `<项目>/.gemini/settings.json`；需要 0.65.0 以上，不要开 yolo 模式。Gemini 的钩子只能拒绝不能放行：规则拒绝的照常自动拒绝，其余（规则放行的与定不了的）都交回终端，由 Gemini 自己的确认框处理，永远不进 hub 与手机。
 

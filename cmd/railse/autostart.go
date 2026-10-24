@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/autostart"
+	"github.com/railse/railse-opc/internal/hooksconf"
 )
 
 const autostartUsage = `用法:
@@ -293,6 +295,9 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 		}
 		sp.User = runAs.Name
 	}
+	if install && goos == "linux" && sp.Kind == "hub" && !sp.System {
+		warnUserUnitLowPorts(sp.Extra, stderr)
+	}
 	if install {
 		if err := checkExecutable(sp.Bin); err != nil {
 			if !*dryRun {
@@ -313,6 +318,73 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 	default:
 		return autostartInstall(goos, sp, runAs, *dryRun, stdout, stderr)
 	}
+}
+
+// hubRunFlag 在给 hub run 的额外参数里找 --name 的值（--name 值、--name=值，一个或两个横线都认），有多个时取最后一个
+// （同 flag 包）；没有时 ok 为 false。
+func hubRunFlag(extra []string, name string) (val string, ok bool) {
+	for i := 0; i < len(extra); i++ {
+		a := extra[i]
+		for _, p := range []string{"--" + name, "-" + name} {
+			if a == p && i+1 < len(extra) {
+				val, ok = extra[i+1], true
+				i++
+				break
+			}
+			if v, found := strings.CutPrefix(a, p+"="); found {
+				val, ok = v, true
+				break
+			}
+		}
+	}
+	return val, ok
+}
+
+// lowHubAddrs 是 hub run 带这些额外参数时要监听的、端口在 1024 以下的地址。默认值同 hub run：有 --acme-domain 时
+// --listen 默认 :443、--acme-http 默认 :80（none 不监听），没有时 --listen 默认 127.0.0.1:8787。
+func lowHubAddrs(extra []string) []string {
+	_, acme := hubRunFlag(extra, "acme-domain")
+	listen, ok := hubRunFlag(extra, "listen")
+	switch {
+	case !ok && acme:
+		listen = ":443"
+	case !ok:
+		listen = "127.0.0.1:8787"
+	}
+	addrs := []string{listen}
+	if acme {
+		if h, ok := hubRunFlag(extra, "acme-http"); !ok {
+			addrs = append(addrs, ":80")
+		} else if h != "none" {
+			addrs = append(addrs, h)
+		}
+	}
+	var low []string
+	for _, a := range addrs {
+		if _, port, err := net.SplitHostPort(a); err == nil {
+			if n, err := strconv.Atoi(port); err == nil && n > 0 && n < 1024 {
+				low = append(low, a)
+			}
+		}
+	}
+	return low
+}
+
+// warnUserUnitLowPorts 在 Linux 上用用户单元托管要绑 1024 以下端口的 hub 时醒目地警告（照装，不拒绝）：用户单元以普通用户
+// 运行、没有 CAP_NET_BIND_SERVICE，hub 起不来，会被 systemd 每 2 秒拉起一次，直出 443/80 要用系统单元。
+func warnUserUnitLowPorts(extra []string, stderr io.Writer) {
+	low := lowHubAddrs(extra)
+	if len(low) == 0 {
+		return
+	}
+	q := make([]string, len(extra))
+	for i, a := range extra {
+		q[i] = hooksconf.ShellQuote(a)
+	}
+	fmt.Fprintf(stderr, "\n!!! 警告：Linux 的用户单元以你的身份运行，没有绑定 1024 以下端口的权限，hub 绑不了 %s，会起不来并被 systemd 反复拉起。\n"+
+		"    照样装了；要直出 443/80 改用系统单元（只多给 CAP_NET_BIND_SERVICE，hub 不以 root 运行），先卸掉这个用户单元：\n"+
+		"      railse setup autostart --hub --uninstall\n      %s -- %s\n"+
+		"    用反向代理时改成 --listen 127.0.0.1:8787（不要 --acme-domain），见 docs/setup.md。\n\n", strings.Join(low, "、"), sudoSystemHubCmd, strings.Join(q, " "))
 }
 
 // runUser 是系统单元的运行用户。
@@ -567,7 +639,8 @@ func tightenExistingDir(dir string, ru runUser) (string, error) {
 		return "", err
 	}
 	if owner, ok := fileOwner(st); !ok || owner != ru.UID {
-		return "", fmt.Errorf("%s 已存在但不属于 %s：不替它 chown；确认无误后自己 chown 给 %s 再重跑，或给一个还不存在的目录", dir, ru.Name, ru.Name)
+		return "", fmt.Errorf("%s 已存在但不属于 %s，不替它 chown：换一个以 %s 身份建好的目录（sudo -u %s mkdir -p -m 700 <目录>）用 --dir 指向它，或不给 --dir 用默认的 %s",
+			dir, ru.Name, ru.Name, ru.Name, systemHubDir)
 	}
 	if err := f.Chmod(0o700); err != nil {
 		return "", err
@@ -592,7 +665,8 @@ func createSystemDir(dir string, ru runUser) (string, error) {
 		return "", err
 	}
 	if err := checkTrustedChain(real); err != nil {
-		return "", fmt.Errorf("不替你新建 %s：%v（运行用户可能在 root 建目录与 chown 之间把路径换掉）；请自己建好这个目录并 chown 给 %s 再重跑", dir, err, ru.Name)
+		return "", fmt.Errorf("不替你新建 %s：%v（运行用户可能在 root 建目录与 chown 之间把路径换掉）；先以 %s 身份建好再重跑：sudo -u %s mkdir -p -m 700 %s",
+			dir, err, ru.Name, ru.Name, hooksconf.ShellQuote(dir))
 	}
 	cur := real
 	for _, name := range missing[:len(missing)-1] {

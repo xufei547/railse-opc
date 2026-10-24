@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/railse/railse-opc/internal/autostart"
+	"github.com/railse/railse-opc/internal/hooksconf"
 )
 
 // systemDirEnv 在 autostartEnv 之上记下 chown 了哪些目录（经 fd，记 fd 的名字）。
@@ -105,7 +106,9 @@ func TestAutostartSystemDirExisting(t *testing.T) {
 	// 已存在的空目录、属于别人（测试用户不是 4242）：以前会被 chown，现在拒绝（--dir /var/empty 不能交出去）
 	empty := filepath.Join(home, "var-empty")
 	os.Mkdir(empty, 0o711)
-	if code, _, errOut := installSystemDir(home, empty); code != 1 || !strings.Contains(errOut, empty) {
+	// 提示以运行用户身份另建一个（与 docs/setup.md 一致），不叫人自己 chown，也不叫人给一个还不存在的目录
+	if code, _, errOut := installSystemDir(home, empty); code != 1 || !strings.Contains(errOut, empty) || !strings.Contains(errOut, "sudo -u alice mkdir -p -m 700 ") ||
+		strings.Contains(errOut, "chown 给") || strings.Contains(errOut, "还不存在的目录") {
 		t.Fatalf("别人的空目录应拒绝: %d %q", code, errOut)
 	}
 	if st, _ := os.Stat(empty); st.Mode().Perm() != 0o711 || len(*chowned) != 0 || len(rec.calls) != 0 {
@@ -149,8 +152,8 @@ func TestAutostartSystemDirUntrustedParent(t *testing.T) {
 	os.Chmod(open, 0o777)
 	dir := filepath.Join(open, "sub", "hub")
 	code, _, errOut := installSystemDir(home, dir)
-	if code != 1 || !strings.Contains(errOut, "chown") {
-		t.Fatalf("不可信的父目录应拒绝并提示自己建好再 chown: %d %q", code, errOut)
+	if code != 1 || !strings.Contains(errOut, "sudo -u alice mkdir -p -m 700 "+hooksconf.ShellQuote(dir)) || strings.Contains(errOut, "chown 给") {
+		t.Fatalf("不可信的父目录应拒绝并提示以运行用户身份建好: %d %q", code, errOut)
 	}
 	if _, err := os.Stat(filepath.Join(open, "sub")); !os.IsNotExist(err) || len(*chowned) != 0 || len(rec.calls) != 0 {
 		t.Fatalf("拒绝时不该建任何目录: %v %v %v", err, *chowned, rec.calls)

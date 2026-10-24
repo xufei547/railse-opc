@@ -156,8 +156,13 @@ func TestHubPasswordTokenAndWebhookToken(t *testing.T) {
 		t.Fatalf("token: %d %s", code, errOut.String())
 	}
 	tok := fieldAfter(t, out.String(), "接入码: ")
-	if !strings.Contains(out.String(), "railse agent enroll --hub") || !strings.Contains(out.String(), "有效期: 1m0s") {
+	// 下一步首推 setup all（一次做完接入、钩子、开机自启、体检），单独接入的 agent enroll 也给出
+	if !strings.Contains(out.String(), "railse setup all --hub https://<hub 地址> --token "+tok+"\n") ||
+		!strings.Contains(out.String(), "railse agent enroll --hub https://<hub 地址> --token "+tok+"\n") || !strings.Contains(out.String(), "有效期: 1m0s") {
 		t.Fatalf("应提示有效期与下一步命令: %q", out.String())
+	}
+	if strings.Index(out.String(), "setup all") > strings.Index(out.String(), "agent enroll") {
+		t.Fatalf("setup all 应写在前面: %q", out.String())
 	}
 	st, err := store.Open(filepath.Join(dir, "hub.db"))
 	if err != nil {
