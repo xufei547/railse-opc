@@ -43,9 +43,11 @@ Railse OPC 是给“用 AI agent 经营一人公司的人”用的公司层驾�
 | 技术栈 | 守护进程 Go 单二进制；网页 TypeScript，Vite 加 React |
 | 拓扑 | 一个 hub 跑在作者的云服务器上，各机器的守护进程向外连，手机只连 hub |
 | 作者现有环境 | Claude Code、Codex CLI、Gemini CLI 写代码；Claude Code 换 prompt、GPT-6、n8n 做内容运营；一台 Mac 加一台云服务器；手动开终端 |
-| 第 2 份计划执行中的偏离（2026-10-22 已拍板） | 接受：暂停自动审批时用户写的 deny 仍生效；审计与请求状态增加 `passthrough`；`setup hooks` 删旧钩子按条目而非按组。已改（2026-10-24，第 5 份）：Claude 的钩子改写到 `.claude/settings.local.json`，旧版写在 `settings.json` 的由 `setup hooks` 迁走 |
+| 第 2 份计划执行中的偏离（2026-10-22 已拍板） | 接受：暂停自动审批时用户写的 deny 仍生效；审计与请求状态增加 `passthrough`；`setup hooks` 删旧钩子按条目而非按组。已改（2026-10-25，第 5 份）：Claude 的钩子改写到 `.claude/settings.local.json`，旧版写在 `settings.json` 的由 `setup hooks` 迁走 |
 | 第 3 份计划执行前预检的五处取舍（2026-10-22 已拍板） | 请求已送到 hub 后断线：再等 30 秒，重连上继续等，否则交回终端，审计记 `expired`/`hub_unreachable`（守护进程侧加连接存活检测）。hub 下发的 `source: user` 规则可以放行 `outward`/`destructive`（网页导入即手写，见 5.2 的说明），守护进程不降级；hub 的“记住”永远不能生成这类放行，导入含这类放行时审计记录并在网页标出。手机上的备注第一版不回给 agent：钩子只收固定文案，备注只进审计。webhook 的回调令牌是出站令牌，明文存库作为“只存哈希”的例外，回调完成或重试用尽后清空。总开关生效值 = 本机暂停 ‖ hub 暂停，两者分开存，hub 的值不覆盖本机的。 |
 | 第 4 份计划动笔前的三件事（2026-10-23 已拍板） | 脱敏吞掉命令后半截要彻底修：shell 语境里不在引号与 heredoc 内的裸值遇到 `;`、`\|`、`&&`、反引号、`$(` 即停（裸词本就到此结束，不会多漏秘密），`has_redacted` 标记与网页告警保留做兜底，作为第 4 份的第一个 Task。出站与签名类密钥（webhook 回调令牌、VAPID 私钥、推送订阅密钥、第 5 份的 ACME 账户私钥与证书私钥）明文存储，作为“只存哈希”的通用例外，见 5.3。“批准并记住”的草案预览与范围选择按 4.4 在第 4 份实现；“七天三次建议建规则”延后到自用之后再定。 |
+| 第 5 份计划执行前的决策（2026-10-24） | 推送订阅删除要连续失败且满 24 小时（第 4 份）；连续 3 次 401 才停用守护进程的 hub 连接；Claude 钩子写 .claude/settings.local.json（已改）；ACME 只用 autocert 直出，证书与账户私钥明文存数据目录 acme/（出站与签名密钥例外）；hub 机器的系统单元用 AmbientCapabilities 绑 443/80，不以 root 运行 hub；MCP 参数里的命令字段按命令行语境脱敏。 |
+| 第 5 份计划执行中的决策（2026-10-25） | `railse doctor` 唯一会起的进程是三个 CLI 的 `--version`（10 秒超时，sudo 下不跑）。`--system` 只配 `--hub`，默认数据目录 `/var/lib/railse-hub`（`StateDirectory=railse-hub`），doctor 的默认 hub 目录在 Linux 上回退到它。hub 不以 root 运行：文案只提 `CAP_NET_BIND_SERVICE`，hub 以 euid 0 启动时警告不拒绝，`railse setup all` 拒绝 root。golangci-lint 的 errcheck 只对 `_test.go` 排除。发布归档带 `docs/*.md`。GitHub 仓库 `railse/railse-opc`。MCP 命令键下的 argv 数组与 shell 解释器的 args 按命令行语境脱敏。为 autocert 引入 `golang.org/x/net` 与 `golang.org/x/text` 作 indirect（`x/crypto` 的传递依赖，不算新增第三方依赖）。 |
 | Gemini CLI 最低版本 | 0.65.0。更早的版本在用户确认之后才触发 `BeforeTool`，钩子无法在审批前拦截（2026-10-21 实验）；`railse doctor` 对低于 0.65.0 的版本报警 |
 
 ## 1. 架构与组件
@@ -82,7 +84,10 @@ Railse OPC 是给“用 AI agent 经营一人公司的人”用的公司层驾�
   internal/policy/     # 纯引擎：分类器、规则匹配，无 IO
   internal/adapter/    # claude、codex、gemini、webhook 翻译
   internal/agent/      # 守护进程
+  internal/autostart/  # launchd/systemd 的命名与路径
+  internal/doctor/     # railse doctor 的检查项
   internal/hookclient/ # 钩子侧客户端
+  internal/hooksconf/  # 三个 CLI 钩子配置的生成、合并与检查
   internal/hub/        # hub 服务端：REST、/ws/agent、/ws/client、webhook、推送队列
   internal/hub/push/   # Web Push：RFC 8291 加密、RFC 8292 VAPID
   internal/hub/store/  # SQLite 存储
@@ -91,8 +96,11 @@ Railse OPC 是给“用 AI agent 经营一人公司的人”用的公司层驾�
   internal/proto/      # 钩子与守护进程之间的一行 JSON 协议（守护进程与 hub 的帧在 internal/hub/wire）
   internal/redact/     # 凭据脱敏
   web/                 # Vite + React PWA，构建产物嵌入 internal/hub/webui
-  scripts/             # 冒烟脚本与网页端到端（e2e-web.sh）
-  Makefile             # make web、build、test、e2e
+  scripts/             # 冒烟脚本（smoke-claude.sh、smoke-claude-hub.sh）、网页端到端（e2e-web.sh）、安装脚本测试（test-install.sh）
+  install.sh           # 一行安装
+  .github/workflows/   # CI 与发布
+  .goreleaser.yaml     # 三平台出包
+  Makefile             # make web、build、test、lint、e2e、release-check
   docs/
 ```
 
@@ -297,7 +305,7 @@ hub 需要验证的入站凭据（机器密钥、登录会话 token、webhook �
 
 ### 5.5 `railse doctor`
 
-检查：守护进程是否在跑、hub 是否可达、三个 CLI 配置中钩子是否装好、CLI 版本是否支持对应钩子事件、钩子超时是否设到位、socket 与配置文件权限。
+检查：守护进程是否在跑、hub 是否可达、三个 CLI 配置中钩子是否装好、CLI 版本是否支持对应钩子事件、钩子超时是否设到位、socket 与配置文件权限。检查项的完整清单与修复提示见 `docs/setup.md`。
 
 ## 6. 测试与第一版边界
 

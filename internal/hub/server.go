@@ -57,7 +57,7 @@ type Config struct {
 	// ACMEDomain 非空时 hub 自己向 Let's Encrypt 申请证书并直出 TLS（见 CheckACMEDomain）；PublicURL 默认 https://<域名>，
 	// 给了的话主机名必须就是这个域名；cookie 一律 Secure。
 	ACMEDomain string
-	// ACMEEmail 是给 Let's Encrypt 的联系邮箱（证书快到期没续上时它会发信），可空。
+	// ACMEEmail 是给 Let's Encrypt 的账户联系邮箱，只用于账户与政策通知（它已于 2025 年停发到期提醒邮件），可空。
 	ACMEEmail string
 	// ACMECacheDir 存 ACME 账户私钥与证书私钥（明文，设计 5.3 的例外），默认 Dir/acme，目录 0700、文件 0600。
 	ACMECacheDir string

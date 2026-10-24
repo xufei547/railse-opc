@@ -4,7 +4,7 @@
 
 `railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（PWA，由 hub 同源托管，见“网页”与 [web.md](web.md)）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对每条请求只能回答放行（allow）或拒绝（deny），没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、ping、pong、error 七种。
 
-hub 还托管手机网页（见“网页”），并能把新请求推到手机（Web Push，见“手机推送”）；TLS 可由 hub 内置的 ACME（Let's Encrypt）直出，也可交给反向代理（见“部署与反向代理”）；不含开机自启（见文末“已知限制”）。
+hub 还托管手机网页（见“网页”），并能把新请求推到手机（Web Push，见“手机推送”）；TLS 可由 hub 内置的 ACME（Let's Encrypt）直出，也可交给反向代理（见“部署与反向代理”）；开机自启用 `railse setup autostart --hub`，安装、托管与体检的完整步骤见 [setup.md](setup.md)。
 
 ## 启动
 
@@ -20,6 +20,8 @@ railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com
 - 收到 SIGINT、SIGTERM 后 5 秒内退出：断开守护进程、等在途请求、长连接处理、webhook 回调与推送收尾（正在发的推送中止，不计失败）；等不到它们退出时（含被强制断开、处理还没结束的普通请求）退出码 1，日志写“不关数据库”。
 - `railse hub webhook-token` 生成 webhook 来源令牌，明文只显示这一次，再生成一次旧的就失效。
 - `railse hub vapid [--rotate]` 打印推送公钥（库里没有就生成，hub 第一次启动时也会生成）；`--rotate` 换新密钥并在同一事务里删除全部推送订阅，提示所有手机要重新开启通知。在跑的 hub 不用重启：下一次推送、下一次网页取公钥时就从库里读到新密钥。
+- **开机自启。** `railse setup autostart --hub -- <hub run 的参数>` 用 launchd（macOS）或 systemd 用户单元（Linux）托管 hub，退出后自动拉起。Linux 上直出 443/80 时装成系统单元，以普通用户运行、只给 `CAP_NET_BIND_SERVICE`，数据目录默认 `/var/lib/railse-hub`：`sudo railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com`（railse 要装在服务用户能执行、sudo 找得到的地方，如 `/usr/local/bin`，见 [setup.md](setup.md)）。`--status` 看是否在跑，`--uninstall` 移除托管（数据目录保留），`--dry-run` 只打印。
+- **体检。** `railse doctor --hub-dir <数据目录>`（只读）检查数据目录与 `hub.db` 的权限、库版本、网页密码、推送密钥、`acme/` 的权限与托管文件；不给 `--hub-dir` 时看 `$RAILSE_HUB_HOME`、`~/.railse-hub`，Linux 上再看 `/var/lib/railse-hub`。以跑 hub 的用户身份运行。各检查项见 [setup.md](setup.md) 的“railse doctor”。
 
 ## 网页
 
@@ -47,7 +49,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 
    忘了也不会丢：守护进程第一次用 hub 规则覆盖不是 hub 下发的 `rules.yaml` 之前，先把它原样备份为同目录的 `rules.local-<UTC 时间>.yaml`（0600），`agent.log` 记一条“已备份为 …”，之后把备份文件按上面的方法导入即可。只备份这一次，之后的 `rules.yaml` 都是 hub 的缓存。
 3. 机器上：`railse agent enroll --hub https://hub.example.com --token <接入码> [--name 名字] [--force]`。名字默认主机名。`--hub` 只收 `http://`、`https://`，不能带 `user:pass`、`?` 查询或 `#` 片段；接入请求不跟随重定向；`http://` 且不是本机地址时警告明文传输密钥。本机已有不是 hub 下发的 `rules.yaml` 时，成功后提示“首次连上 hub 时本机 rules.yaml 会被 hub 规则覆盖（会自动备份），如有手写规则请先导入”。
-4. 重启 `railse agent run`。日志出现“已连接 hub”即接上。
+4. 重启守护进程（它只在启动时读 `machine.json`）：前台跑的停掉后重新 `railse agent run`，托管的重跑 `railse setup autostart`。日志出现“已连接 hub”即接上。第 3、4 步与装钩子、开机自启可以用 `railse setup all --hub … --token …` 一次做完（见 [setup.md](setup.md)）。
 
 `~/.railse/machine.json`（0600）存 `hub_url`、`machine_id`、`secret`（机器长期密钥）、`name`。已存在时 `enroll` 拒绝覆盖，换 hub 或重新接入要加 `--force`。文件损坏时守护进程拒绝启动（不会悄悄退回本地模式）；要退回本地闭环就删掉它再重启，残留的 hub 暂停随之清除。
 
@@ -161,8 +163,8 @@ railse hub run --acme-domain hub.example.com --acme-email me@example.com
 - **监听。** hub 在 `--listen`（给了 `--acme-domain` 时默认 `:443`）直出 TLS（最低 TLS 1.2，支持 HTTP/2；WebSocket 照常）。`--acme-http`（默认 `:80`）答 HTTP-01 挑战，并把明文 http 的 GET、HEAD 302 跳到对外源加原路径与查询（不看请求的 Host），别的方法回 400；`--acme-http none` 不监听 80，只能靠 443 上的 TLS-ALPN-01 签发，也没有 http 跳转。443 或 80 被占（比如还跑着 nginx）、证书目录建不了时启动即退出 1，日志“hub 监听失败”。
 - **签发与续期。** 证书在第一次 https 访问时签发，约需 1 到 2 分钟，这一次访问可能超时，稍后刷新即可；到期前 30 天自动续期，不用重启。只给 `--acme-domain` 这一个域名签：别的 SNI 与按 IP 访问在握手时就被拒，不会替它们申请。只用 Let's Encrypt 的生产目录，它对同一域名的签发有频率限制，不要反复删掉 `acme/` 重来。
 - **对外源与 cookie。** 对外源（`--public-url`）默认 `https://<域名>`，手机推送随之启用；要显式写时主机名必须就是这个域名，否则退出 2（端口可以不同，例如 `--listen :8443 --public-url https://hub.example.com:8443`，这时 Let's Encrypt 只能经 80 端口验证）。cookie 一律加 Secure。
-- **私钥。** 账户私钥与证书私钥明文存在数据目录的 `acme/`（目录 0700、文件 0600，启动时收紧目录），`--acme-email` 是 Let's Encrypt 的联系邮箱（证书快到期没续上时它会发信，可不填）。见“安全要点”。
-- **权限。** Linux 上绑定 443/80 需要 `CAP_NET_BIND_SERVICE`：用 `sudo railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com` 装成系统服务，以普通用户运行、只给这一项能力；macOS 绑定 443/80 不需要特权。hub 不要以 root 运行，以 root 启动时 hub 会醒目警告（不拒绝）。
+- **私钥。** 账户私钥与证书私钥明文存在数据目录的 `acme/`（目录 0700、文件 0600，启动时收紧目录），`--acme-email` 是 Let's Encrypt 账户的联系邮箱，只用于账户与政策通知，可不填：Let's Encrypt 已于 2025 年停发证书到期提醒邮件，续期失败没有邮件提醒，要看 hub 的 stderr（见“故障排查”），证书过期后工作机上 `railse doctor` 的 `hub.reachable` 会报证书错误。见“安全要点”。
+- **权限。** Linux 上绑定 443/80 需要 `CAP_NET_BIND_SERVICE`：用 `sudo railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com` 装成系统服务，以普通用户运行、只给这一项能力（railse 先用 `curl … | sudo sh` 装进 `/usr/local/bin`：sudo 找不到 `~/.local/bin` 里的程序，服务用户也要能执行它，见 [setup.md](setup.md)）；macOS 绑定 443/80 不需要特权。hub 不要以 root 运行，以 root 启动时 hub 会醒目警告（不拒绝）。
 - 前面已有反向代理终止 TLS 时不要用它，用 B。
 
 ### B. 反向代理
@@ -194,6 +196,8 @@ server {
 
 ## 故障排查
 
+先跑 `railse doctor`：工作机上直接跑（检查守护进程、hub 连接、钩子与 CLI 版本），hub 机器上以跑 hub 的用户身份加 `--hub-dir <数据目录>`。每个 warn、fail 下面都有一行“修复：”，各检查项的含义见 [setup.md](setup.md) 的“railse doctor”。doctor 说不清的再对照下表。
+
 | 现象 | 原因与处理 |
 | --- | --- |
 | 打开 hub 地址看到“网页未构建”（503） | 二进制是直接 `go build` 的，没有网页构建：在仓库里 `make build`（或先 `make web` 再 `go build`）后换上新二进制 |
@@ -223,7 +227,7 @@ server {
 
 ## 已知限制（后续计划，不算未完成）
 
-- 开机自启、`railse doctor`、本机 pause 反向同步到 hub。
+- 本机 pause 反向同步到 hub。
 - 复合命令不能“拒绝并记住”（422），需要手写规则。
 - 吊销机器的瞬间正在登记的请求可能没被取消，按期限过期。
 - hub 重启不恢复关停时正在进行的 webhook 回调，来源需重新提交。

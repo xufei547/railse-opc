@@ -1,5 +1,7 @@
 # 本机闭环：守护进程与钩子
 
+安装与接入（一行安装、`railse setup all`、开机自启、`railse doctor`）见 [setup.md](setup.md)。本文讲守护进程与钩子本身。
+
 没有 hub 时，Railse 在本机这样工作：CLI 的钩子把审批请求经 Unix socket 交给守护进程，守护进程用规则引擎自动放行或拒绝，判不了的交回终端，每一步都写本地审计。
 
 ## 起守护进程
@@ -12,7 +14,7 @@ railse agent status              # 另开终端查看：paused、规则条数、
 
 `railse agent status` 的 `hub:` 行：没接入 hub（没有 `machine.json`）时是 `hub: none`；接入后是 `hub: connecting <地址>`（还没连上或等着重连）、`hub: connected <地址>`，或 `hub: disabled <地址>`（连续 3 次被 hub 以 401 拒绝，已停止连接，要 `railse agent enroll --force` 后重启守护进程，见 `docs/hub.md`）。
 
-配置目录取 `$RAILSE_HOME`，没设就是 `~/.railse`（权限 0700），里面有 `agent.sock`、`rules.yaml`、`audit.jsonl`、`state.json`、`agent.log`，socket 与审计为 0600。`agent` 子命令也接受 `--dir 目录`，但钩子只认 `$RAILSE_HOME` 或 `~/.railse`，所以 CLI 与守护进程要用同一个 `RAILSE_HOME`。开机自启留到后续计划。
+配置目录取 `$RAILSE_HOME`，没设就是 `~/.railse`（权限 0700），里面有 `agent.sock`、`rules.yaml`、`audit.jsonl`、`state.json`、`agent.log`，socket 与审计为 0600。`agent` 子命令也接受 `--dir 目录`，但钩子只认 `$RAILSE_HOME` 或 `~/.railse`，所以 CLI 与守护进程要用同一个 `RAILSE_HOME`。开机自启与退出后自动拉起用 `railse setup autostart`（macOS launchd、Linux systemd 用户单元，见 [setup.md](setup.md)）；`railse doctor` 只读地检查目录与文件权限、守护进程在不在跑、钩子装没装好。
 
 ## 装钩子
 
@@ -84,7 +86,7 @@ Claude 的钩子放在 `settings.local.json`，因为钩子命令里是本机的
 
 ## 冒烟
 
-`scripts/smoke-claude.sh` 在临时目录里起守护进程、装 Claude 钩子，再让 `claude -p` 执行一条 `touch`，最后打印审计。需要本机 Claude Code 已登录，会消耗模型额度，不进 CI。脚本用 `--setting-sources project,local`：钩子在 `settings.local.json`（`local` 来源），只写 `project` 读不到；不加 `user`，免得用户级设置替人审批。
+`scripts/smoke-claude.sh` 在临时目录里起守护进程、装 Claude 钩子，再让 `claude -p` 执行一条 `touch`，最后打印审计。需要本机 Claude Code 已登录，会消耗模型额度，不进 CI。脚本用 `--setting-sources project,local`：钩子在 `settings.local.json`（`local` 来源），只写 `project` 读不到；不加 `user`，免得用户级设置替人审批。接入 hub 的那条链路由 `scripts/smoke-claude-hub.sh` 冒烟：临时的 hub 与守护进程，`claude -p` 跑一条 `git push`（引擎定不了，送 hub），脚本用 REST 当手机批准，断言 hub 里该请求是 `approved`、`decided_by: user` 且已送达，本机审计有 `approved`；发布前手动跑。
 
 ## 接入 hub 后
 
