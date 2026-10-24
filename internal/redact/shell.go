@@ -60,6 +60,8 @@ const (
 
 // viewRules 是命令行视图上的规则：裸值在空白、引号、反斜杠、shell 元字符和视图专用字节处停。
 // $ 开始展开，字面密码不可能未加引号地含它；反引号不能写进原始字符串，单独拼进去。
+// 空白用 RE2 的 \s，含换页 \f 与回车 \r：bash 把它们（单独的 \r）当普通字符、算进词里，值在这里停只会多露出后半截，
+// 不会多藏命令，密码里也不会有这两个字节。被反斜杠转义的 \r 在视图里是 vMask，值照样穿过它延续。
 var viewRules = func() []rule {
 	s, x := viewStruct, viewExcluded
 	q := quoting{
@@ -75,6 +77,7 @@ var viewRules = func() []rule {
 		cont:     `\x00\x15`, // 续行：\ 是 vMask，换行是 vCont（\ 加 CRLF 不是续行）
 		urlUser:  `[^/\s:@'"\\` + x + `]*`,
 		urlPass:  "[^\\s/?#'\"\\\\;|&<>()`$" + x + "]+",
+		nameEnd:  `[\x11\x12]`, // 视图里命令名的右引号是专用字节
 		excluded: x,
 		ph:       `[<\x13\x14]redacted>`, // 原文里的、本层插入的、引号里已抹过的占位符
 		word:     true,

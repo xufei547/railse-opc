@@ -68,6 +68,7 @@ type quoting struct {
 	cont     string // 反斜杠续行：同一条命令跨到下一行（真正的换行是命令分隔符，不算；\ 加 CRLF 在 bash 里也不是续行）
 	urlUser  string // URL userinfo 的用户名
 	urlPass  string // URL userinfo 的密码
+	nameEnd  string // 命令名的右引号（"sshpass"、'sshpass'）
 	excluded string // 视图专用字节，所有值字符类都排除（文本语境为空）
 	ph       string // 已经抹过的占位符
 	// word：值是整个词，引号段与值字符可以相连（"password":、'a'"b"），免得第一次只抹引号那段、第二次再连带后面的字符
@@ -83,7 +84,7 @@ func textQuoting(open bool) quoting {
 		sqUser: `('[^'":\s\\]*:)`, sqPass: `[^']*`, sqEnd: `(')`,
 		dqUser: `("[^'":\s\\]*:)`, dqPass: `(?:[^"\\]|\\.)*`, dqEnd: `(")`,
 		jqEnd: `(\\")`, user: `([^'":\s\\]*:)`, sameCmd: sameCmd, cont: `\\\n`,
-		urlUser: `[^/\s:@'"\\]*`, urlPass: `[^\s/?#'"\\]+`, ph: placeholder,
+		urlUser: `[^/\s:@'"\\]*`, urlPass: `[^\s/?#'"\\]+`, nameEnd: `['"]`, ph: placeholder,
 	}
 	if open {
 		q.quoted, q.jsonStr = quotedOpen, `"(?:[^"\\]|\\.)*(?:"|$)`
@@ -113,8 +114,17 @@ func build(bare string, q quoting) []rule {
 	sep := `(?:` + q.cont + `)*[ \t](?:[ \t]|` + q.cont + `)*`
 	gap := `(?:[ \t]|` + q.cont + `)*`
 	// sshpass 在 -p 之前的选项（getopt 的 + 模式只认命令之前的选项）：带参数的 -f 文件、-d 描述符、-P 提示词（参数紧贴或
-	// 隔空白，可以是引号段），不带参数的 -h -e -V -v（可组合）。参数不脱敏，只是跳过
-	sshpassOpts := `(?:` + sep + `-[ehVv]*[fdP]` + gap + `(?:` + q.quoted + `|` + bare + `)+|` + sep + `-[ehVv]+)*`
+	// 隔空白，可以是引号段），不带参数的 -h -e -V -v（可组合）；带参数的字母之后都是它的参数（-fp 是文件 p，不是 -p）。
+	// sshpass 不认的选项（常见的是把 ssh 的 -o StrictHostKeyChecking=no 写到了 sshpass 上）让它报错退出、什么都不执行：
+	// 这样的选项词连同后面至多一个词都跳过，-p 的密码照样抹（命令行上的密码会进通知，跳过的部分又不会执行，藏不住命令）。
+	// 参数不脱敏，只是跳过；参数里可以有前面的规则刚插入的占位符（-o PasswordAuthentication=<redacted>），否则跳不过去、
+	// 后面的 -p 就漏了
+	optPiece := `(?:` + q.quoted + `|` + q.ph + `|` + bare + `)`
+	optArg := optPiece + `+`
+	unknownOpt := `-[ehVv]*[a-cgi-oq-uw-zA-OQ-UW-Z]` + optPiece + `*` // 含 d e f h p P v V 以外的字母
+	sshpassOpts := `(?:` + sep + `-[ehVv]*[fdP]` + gap + optArg + `|` + sep + `-[ehVv]+|` + sep + unknownOpt + `(?:` + sep + optArg + `)?)*`
+	// 命令名可以带引号（"sshpass"、'sshpass'），大小写不论（macOS 默认的文件系统不分大小写，SSHPASS 照样能执行）
+	sshpassName := `\b(?i:sshpass)` + q.nameEnd + `?`
 	phOnly := q.ph + `(?P<phend>` + stop + `|$)`
 	value := `(?:` + q.quoted + `|(?:` + phOnly + `|(?:` + q.ph + `)?` + bare + `))`
 	if q.word {
@@ -151,8 +161,9 @@ func build(bare string, q quoting) []rule {
 		// mysql 系命令紧贴 -p 的密码（-pxxx、-p'xxx'）。-p 单独出现时 mysql 提示输入密码、后面的是库名；-P 是端口：都不动
 		{re: regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + q.sameCmd + `\s-p)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
 		// sshpass 的 -p 密码（-p pw、-p 'pw'、-p'pw'、-ppw，-p 可以在 -v 这类选项之后或组合在末尾，如 -vp）。只认 sshpass
-		// 自己的选项里的 -p：后面 ssh、scp、rsync 自己的 -p（端口、保留权限）不动
-		{re: regexp.MustCompile(`(\bsshpass` + sshpassOpts + sep + `-[ehVv]*p` + gap + `)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
+		// 自己的选项里的 -p：后面 ssh、scp、rsync 自己的 -p（端口、保留权限）不动。sshpass 不限命令位置（echo sshpass -p x
+		// 也抹）：sudo、env、timeout 之后同样认，多抹的只是参数里的一个词，值在空白与 shell 元字符处停，藏不住命令
+		{re: regexp.MustCompile(`(` + sshpassName + sshpassOpts + sep + `-[ehVv]*p` + gap + `)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
 		// 裸 token：GitHub、OpenAI、Slack、AWS
 		{re: regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), repl: placeholder, need: "_-A"},
 	}
@@ -226,14 +237,22 @@ func args(raw json.RawMessage) json.RawMessage {
 	return json.RawMessage(String(string(raw)))
 }
 
-// walk 递归处理 JSON 值：敏感键的值整体抹掉，其余字符串按普通文本逐个脱敏。
+// shellValueKey 是 MCP 参数里装 shell 命令的键名：这些值是会被执行的命令，按命令行语境脱敏，
+// 让裸值在 shell 元字符处停下，后半截命令露出来（第 4 份终审 m-4）。
+var shellValueKey = regexp.MustCompile(`(?i)^(command|cmd|script|shell_command|bash|sh)$`)
+
+// walk 递归处理 JSON 值：敏感键的值整体抹掉，装命令的键（字符串值）按命令行语境，其余字符串按普通文本逐个脱敏。
+// 嵌套对象与数组里同样生效。
 func walk(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
 		for k, e := range x {
-			if sensitiveKey.MatchString(k) {
+			switch s, ok := e.(string); {
+			case sensitiveKey.MatchString(k):
 				x[k] = placeholder
-			} else {
+			case ok && shellValueKey.MatchString(k):
+				x[k] = String(s)
+			default:
 				x[k] = walk(e)
 			}
 		}
