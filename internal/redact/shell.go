@@ -34,8 +34,9 @@ const (
 	vCloseDQ = 0x12 // 双引号（含 $"…"）的右引号
 	vPH      = 0x13 // 本层规则插入的占位符的第一个字节
 	vLit     = 0x14 // 引号里不参与匹配结构的字节：引号里的引号、<。整段引号值照样能配上，裸值不在这里开始或延续
-	// vCont 是引号外反斜杠续行里的换行（前面的 \ 与 \r 是 vMask）。对裸值它与 vMask 一样（值穿过它延续），
-	// 只是让 sshpass -p、curl -u 这类规则认得出“同一条命令跨行”：只有续行能跨，真正的换行不能
+	// vCont 是引号外反斜杠续行里的换行（前面的 \ 是 vMask）。对裸值它与 vMask 一样（值穿过它延续），
+	// 只是让 sshpass -p、curl -u 这类规则认得出“同一条命令跨行”：只有续行能跨，真正的换行不能。
+	// 反斜杠加 CRLF 不是续行：bash 里 \ 转义的是 CR，随后的 LF 照样分隔命令
 	vCont = 0x15
 )
 
@@ -68,9 +69,10 @@ var viewRules = func() []rule {
 		sqUser:  `('[^'":\s\\` + x + `]*:)`, sqPass: `[^'` + s + `]*`, sqEnd: `(\x11)`,
 		dqUser: `("[^'":\s\\` + x + `]*:)`, dqPass: `(?:[^"\\` + s + `]|\\[^` + s + `])*`, dqEnd: `(\x12)`,
 		jqEnd: `(\\")`, user: `([^'":\s\\` + x + `]*:)`,
-		// 同一条命令：引号按视图成对；嵌套结构（vNest）算在同一条命令里
-		sameCmd:  `(?:[^|;&\n'"\x11\x12]|'[^'\x11\x12]*\x11|"[^"\x11\x12]*\x12|&[^&\n'"\x11\x12]|\\\r?\n)*?`,
-		cont:     `\x00\x00?\x15`, // 续行：\ 与 \r 是 vMask，换行是 vCont
+		// 同一条命令：引号按视图成对；嵌套结构（vNest）算在同一条命令里；续行（\x00\x15）在字符类里。
+		// \ 加 CRLF（视图里是 \x00\x00 后跟换行）照旧算同一条命令，理由见 redact.go 里 sameCmd 的注释
+		sameCmd:  `(?:[^|;&\n'"\x11\x12]|'[^'\x11\x12]*\x11|"[^"\x11\x12]*\x12|&[^&\n'"\x11\x12]|\\\r?\n|\x00\x00\n)*?`,
+		cont:     `\x00\x15`, // 续行：\ 是 vMask，换行是 vCont（\ 加 CRLF 不是续行）
 		urlUser:  `[^/\s:@'"\\` + x + `]*`,
 		urlPass:  "[^\\s/?#'\"\\\\;|&<>()`$" + x + "]+",
 		excluded: x,
@@ -749,7 +751,8 @@ func (c *ctx) comment() {
 	c.b.nest(sc.lit(t.slice(start, k), literalRules))
 }
 
-// escape 处理引号外的反斜杠。\ 加换行是续行，不改变词的状态；被转义的字符是字面字符，裸值不在它那里停
+// escape 处理引号外的反斜杠。\ 紧跟换行是续行，不改变词的状态；\ 加 CRLF 不是（转义的是 CR，随后的换行照常分隔命令，
+// 与 bash 一致）。被转义的字符是字面字符，裸值不在它那里停
 // （password=abc\;rm 的值是 abc;rm），所以视图里反斜杠是 vMask，被转义的元字符也换成 vMask。
 func (c *ctx) escape() {
 	sc, t := c.sc, c.sc.t
@@ -764,12 +767,6 @@ func (c *ctx) escape() {
 		c.b.char(t, i, vMask)
 		c.b.char(t, i+1, vCont)
 		sc.i += 2
-		return
-	case nx == '\r' && i+2 < c.hi && t.at(i+2) == '\n':
-		c.b.char(t, i, vMask)
-		c.b.char(t, i+1, vMask)
-		c.b.char(t, i+2, vCont)
-		sc.i += 3
 		return
 	case c.cmd() && t.has(i+1, placeholder):
 		// 上一次脱敏留下的 \<redacted>：占位符当词的一部分，免得第二次把 > 后面读成注释

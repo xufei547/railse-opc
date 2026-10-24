@@ -33,8 +33,11 @@ const key = `[a-z0-9_.-]*(?:` +
 	`|[_.-]pwd|sshpass)`
 
 // sameCmd 是同一条命令里命令名之后、目标参数之前的部分：不越过换行、; |、&&（单个 & 放过，免得查询串里的 & 截断匹配），
-// 引号括起的整段当一个单位（其中的 ; | & 不算分隔），反斜杠紧跟换行（含 \r\n）是续行、仍算同一条命令。
+// 引号括起的整段当一个单位（其中的 ; | & 不算分隔），反斜杠紧跟换行是续行、仍算同一条命令。
 // curl 的 -u、mysql 的 -p 只在这样的范围里认，不误抹别的命令的同名选项。
+// 反斜杠加 CRLF 在 bash 里不是续行（转义的是 CR），这里仍当同一条命令：Windows 换行的脚本里续行写的 -u、-p 照样抹。
+// 这只会多抹下一行 -u user: 之后、-p 紧跟的值，不会抹掉命令名（值在空白与 shell 元字符处停），秘密一侧宁可多抹。
+// 选项与值之间（见 build 的 sep、gap）不这样跨：那里跨过去就会把下一行的命令名当成值。
 const sameCmd = `(?:[^|;&\n'"]|'[^']*'|"[^"]*"|&[^&\n'"]|\\\r?\n)*?`
 
 // sensitiveKey 判断 JSON 对象的键名是否敏感。
@@ -62,7 +65,7 @@ type quoting struct {
 	jqEnd    string // JSON 原文里转义过的 \" 值的右引号
 	user     string // curl -u 不带引号的用户名
 	sameCmd  string
-	cont     string // 反斜杠续行：同一条命令跨到下一行（真正的换行是命令分隔符，不算）
+	cont     string // 反斜杠续行：同一条命令跨到下一行（真正的换行是命令分隔符，不算；\ 加 CRLF 在 bash 里也不是续行）
 	urlUser  string // URL userinfo 的用户名
 	urlPass  string // URL userinfo 的密码
 	excluded string // 视图专用字节，所有值字符类都排除（文本语境为空）
@@ -79,7 +82,7 @@ func textQuoting(open bool) quoting {
 		quoted: quoted, jsonStr: `"(?:[^"\\]|\\.)*"`, keyEnd: `"`,
 		sqUser: `('[^'":\s\\]*:)`, sqPass: `[^']*`, sqEnd: `(')`,
 		dqUser: `("[^'":\s\\]*:)`, dqPass: `(?:[^"\\]|\\.)*`, dqEnd: `(")`,
-		jqEnd: `(\\")`, user: `([^'":\s\\]*:)`, sameCmd: sameCmd, cont: `\\\r?\n`,
+		jqEnd: `(\\")`, user: `([^'":\s\\]*:)`, sameCmd: sameCmd, cont: `\\\n`,
 		urlUser: `[^/\s:@'"\\]*`, urlPass: `[^\s/?#'"\\]+`, ph: placeholder,
 	}
 	if open {

