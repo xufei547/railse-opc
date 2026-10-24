@@ -4,6 +4,7 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,12 +12,18 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/netip"
+	"net/url"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/railse/railse-opc/internal/hub/store"
 	"github.com/railse/railse-opc/internal/hub/webui"
@@ -27,7 +34,8 @@ import (
 // Run 仍尽力收尾后才返回它；那些还在跑的可能继续碰存储，调用方不宜随即关库（进程即将退出时直接退出即可）。
 var ErrShutdownTimeout = errors.New("hub 关停超时：仍有请求处理、WebSocket 处理、webhook 回调或推送没有退出")
 
-// ErrListen 表示 Run 没能开始监听（端口被占、地址无效等）：什么都还没开始跑，调用方可以照常关库。
+// ErrListen 表示 Run 没能开始服务（端口被占、地址无效等；直出 TLS 时还有证书目录建不了、80 端口被占）：
+// 什么都还没开始跑，New 里起的推送工作协程也已停下，调用方可以照常关库。
 var ErrListen = errors.New("hub 监听失败")
 
 // Config 是 hub 的配置。
@@ -46,9 +54,44 @@ type Config struct {
 	PublicURL string
 	// Version 是 hub 的版本号（cmd 注入 main.version），GET /api/version 回它；空时显示 dev。
 	Version string
+	// ACMEDomain 非空时 hub 自己向 Let's Encrypt 申请证书并直出 TLS（见 CheckACMEDomain）；PublicURL 默认 https://<域名>，
+	// 给了的话主机名必须就是这个域名；cookie 一律 Secure。
+	ACMEDomain string
+	// ACMEEmail 是给 Let's Encrypt 的联系邮箱（证书快到期没续上时它会发信），可空。
+	ACMEEmail string
+	// ACMECacheDir 存 ACME 账户私钥与证书私钥（明文，设计 5.3 的例外），默认 Dir/acme，目录 0700、文件 0600。
+	ACMECacheDir string
+	// ACMEHTTPListen 是 HTTP-01 挑战与 http→https 跳转的监听地址，默认 :80；"none" 不监听（只靠 443 上的 TLS-ALPN-01 签发）。
+	ACMEHTTPListen string
 }
 
-// validate 检查时长为正、可信代理前缀有效、PublicURL 为空或是 https 源。
+// acmeHTTPNone 是 ACMEHTTPListen 表示“不监听 80”的值。
+const acmeHTTPNone = "none"
+
+// Effective 填上默认值并校验，返回 New 实际使用的配置。ACMEDomain 非空时：PublicURL 为空则取 https://<域名>，
+// SecureCookies 置真，ACMECacheDir 为空取 Dir/acme，ACMEHTTPListen 为空取 :80。不碰磁盘、不改调用方的值：
+// 命令行在建数据目录之前用它报用法错。
+func (c Config) Effective() (Config, error) {
+	if c.ACMEDomain != "" {
+		if c.PublicURL == "" {
+			c.PublicURL = "https://" + c.ACMEDomain
+		}
+		c.SecureCookies = true
+		if c.ACMECacheDir == "" {
+			c.ACMECacheDir = filepath.Join(c.Dir, "acme")
+		}
+		if c.ACMEHTTPListen == "" {
+			c.ACMEHTTPListen = ":80"
+		}
+	}
+	if err := c.validate(); err != nil {
+		return Config{}, err
+	}
+	return c, nil
+}
+
+// validate 检查时长为正、可信代理前缀有效、PublicURL 为空或是 https 源；启用 ACME 时还查域名、邮箱、80 端口地址，
+// 以及 PublicURL 的主机名就是这个域名（否则 cookie、同源检查与推送的源对不上证书）。
 func (c Config) validate() error {
 	for _, d := range []struct {
 		name string
@@ -63,10 +106,57 @@ func (c Config) validate() error {
 			return fmt.Errorf("可信代理前缀无效: %q", p)
 		}
 	}
+	// 先查域名：PublicURL 的默认值由它拼成，域名坏了报的应是域名
+	if c.ACMEDomain != "" {
+		if err := CheckACMEDomain(c.ACMEDomain); err != nil {
+			return err
+		}
+		if c.ACMEHTTPListen != acmeHTTPNone {
+			if _, _, err := net.SplitHostPort(c.ACMEHTTPListen); err != nil {
+				return fmt.Errorf("acme-http 应是 host:port（如 :80）或 none，得到 %q", c.ACMEHTTPListen)
+			}
+		}
+		if c.ACMEEmail != "" {
+			if a, err := mail.ParseAddress(c.ACMEEmail); err != nil || a.Name != "" || a.Address != c.ACMEEmail {
+				return fmt.Errorf("acme-email 应是邮箱地址（如 me@example.com），得到 %q", c.ACMEEmail)
+			}
+		}
+		if c.ACMECacheDir == "" {
+			return errors.New("启用 ACME 时证书目录不能为空")
+		}
+	}
 	if c.PublicURL != "" {
 		if err := CheckPublicURL(c.PublicURL); err != nil {
 			return err
 		}
+	}
+	if c.ACMEDomain != "" {
+		if u, err := url.Parse(c.PublicURL); err != nil || u.Hostname() != c.ACMEDomain {
+			return fmt.Errorf("public-url 的主机名应与 acme-domain 一致（cookie、同源检查与推送的源要对得上证书），得到 %q 与 %q", c.PublicURL, c.ACMEDomain)
+		}
+	}
+	return nil
+}
+
+// acmeDomainRe 是 ACMEDomain 的写法：小写字母、数字与中间的 -，至少两段，不带协议、端口、路径与结尾的点。
+var acmeDomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+
+// CheckACMEDomain 检查直出 TLS 的域名：小写主机名（见 acmeDomainRe），不是 IP 地址，总长至多 253、每段至多 63 个字符。
+// Config 的校验（New 与命令行在建目录之前调的 Effective）用它，正则只此一份。
+func CheckACMEDomain(s string) error {
+	ok := len(s) <= 253 && acmeDomainRe.MatchString(s)
+	if ok {
+		for _, label := range strings.Split(s, ".") {
+			if len(label) > 63 {
+				ok = false
+			}
+		}
+		if _, err := netip.ParseAddr(s); err == nil {
+			ok = false
+		}
+	}
+	if !ok {
+		return fmt.Errorf("acme-domain 必须是小写主机名（如 hub.example.com，不带协议、端口、路径，不能是 IP），得到 %q", s)
 	}
 	return nil
 }
@@ -138,6 +228,11 @@ type Server struct {
 	push *pushService
 	// web 托管网页（webui）：s.mux 没有路由的路径都交给它，见 serveRoot。New 里建，测试可在开始服务前换成自己的构建产物。
 	web http.Handler
+	// acme 是直出 TLS 的证书管理（ACMEDomain 为空时为 nil）。New 里建一个，TLS 握手与 80 端口的挑战处理共用它
+	// （HTTP-01 的令牌记在它的内存里，分成两个 Manager 就答不上挑战）。见 acme.go。
+	acme *autocert.Manager
+	// tlsConfigFn 给直出 TLS 的 tls.Config，默认是 defaultTLSConfig（autocert）；测试换成自签证书，不经 Let's Encrypt。
+	tlsConfigFn func() *tls.Config
 }
 
 // tracker 计在跑的后台工作（WebSocket handler、webhook 回调）。shutdown 之后不再接纳新的，并给出全部退出时关闭的通道。
@@ -209,7 +304,8 @@ func (s *Server) untrackWS() {
 // New 组装 hub：校验配置，确保有内置规则，读或生成 VAPID 密钥（推送启用时起推送工作协程），注册路由。
 // 起了后台工作（推送工作协程、之后的 webhook 回调）的 Server 由 Run 收尾；不调 Run 的调用方（测试）用 stopBackground。
 func New(cfg Config, st *store.Store, logger *log.Logger) (*Server, error) {
-	if err := cfg.validate(); err != nil {
+	cfg, err := cfg.Effective()
+	if err != nil {
 		return nil, err
 	}
 	cfg.TrustedProxies = normPrefixes(cfg.TrustedProxies)
@@ -219,6 +315,10 @@ func New(cfg Config, st *store.Store, logger *log.Logger) (*Server, error) {
 	s := &Server{cfg: cfg, store: st, log: logger, mux: http.NewServeMux(), limiter: newLimiter(), agents: newAgentHub(logger), clients: newClientHub(), start: time.Now(),
 		verify: VerifyPassword, verifyWait: loginVerifyWait, helloTimeout: defaultHelloTimeout,
 		callbackRetryWait: defaultCallbackRetryWait, callbackClient: newCallbackClient()}
+	if cfg.ACMEDomain != "" {
+		s.acme = newACMEManager(cfg)
+	}
+	s.tlsConfigFn = s.defaultTLSConfig
 	ps, err := newPushService(s)
 	if err != nil {
 		return nil, err
@@ -297,16 +397,25 @@ func (s *Server) routed(r *http.Request) bool {
 // 满足 errors.Is(err, ErrListen) 的错误（服务没开始，New 里起的推送工作协程也已停下，可以关库）；服务自己出错结束时返回那个错误；
 // 有没等到退出的（含 HTTP 收尾超时被强制断开的普通请求：断开连接不会停下它们的处理；开着却没有处理在跑的连接不算），
 // 收尾完照样返回，错误满足 errors.Is(err, ErrShutdownTimeout)。
+// 配了 ACMEDomain 时直出 TLS（serveTLS：证书目录、80 端口的挑战与跳转，再走同一个 serve）。
 func (s *Server) Run(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
-		// 推送工作协程在 New 里就起了：没开始服务也要停下它，调用方随后照常关库。此时没有请求在跑，也就没有回调，立即返回
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		s.stopBackground(ctx)
-		cancel()
-		return fmt.Errorf("%w: %w", ErrListen, err) // net 的错误已带地址
+		return s.notStarted(err) // net 的错误已带地址
+	}
+	if s.cfg.ACMEDomain != "" {
+		return s.serveTLS(ctx, ln)
 	}
 	return s.serve(ctx, ln)
+}
+
+// notStarted 是没能开始服务时的收尾：推送工作协程在 New 里就起了，没开始服务也要停下它，调用方随后照常关库
+// （此时没有请求在跑，也就没有回调，立即返回）。返回满足 errors.Is(err, ErrListen) 的错误。
+func (s *Server) notStarted(err error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	s.stopBackground(ctx)
+	cancel()
+	return fmt.Errorf("%w: %w", ErrListen, err)
 }
 
 // serve 是 Run 在监听之后的部分，测试可传入自己的监听器。

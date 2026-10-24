@@ -4,7 +4,7 @@
 
 `railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（PWA，由 hub 同源托管，见“网页”与 [web.md](web.md)）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对每条请求只能回答放行（allow）或拒绝（deny），没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、ping、pong、error 七种。
 
-hub 还托管手机网页（见“网页”），并能把新请求推到手机（Web Push，见“手机推送”）；不含 TLS 与开机自启（见文末“已知限制”）。
+hub 还托管手机网页（见“网页”），并能把新请求推到手机（Web Push，见“手机推送”）；TLS 可由 hub 内置的 ACME（Let's Encrypt）直出，也可交给反向代理（见“部署与反向代理”）；不含开机自启（见文末“已知限制”）。
 
 ## 启动
 
@@ -15,7 +15,7 @@ railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com
 ```
 
 - 数据目录取 `--dir`，否则 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；目录 0700，`hub.db`（SQLite，WAL 模式，`-wal`、`-shm` 沿用 0600；开 `secure_delete`，删改掉的内容如清空的回调令牌用零覆盖）与 `hub.log` 都是 0600，已有的文件启动时收紧。
-- `railse hub run` 的标志：`--listen`（默认 `127.0.0.1:8787`）、`--secure-cookies`（cookie 加 Secure，hub 在 TLS 反向代理后面而没设 `--public-url` 时打开；设了 https 的 `--public-url` 已自动加 Secure）、`--trusted-proxy <CIDR 或 IP>`（可重复或逗号分隔，见“部署与反向代理”）、`--public-url https://host[:port]`（hub 对外的 https 源，设了才启用手机推送，见“手机推送”）、`--foreground`（日志同时写到 stderr）。子命令不认的标志会报错退出 2；`--public-url` 不是 https 源（`http://`、带路径或结尾的 `/`、查询、片段、用户信息）也退出 2，localhost 也要 https。
+- `railse hub run` 的标志：`--listen`（默认 `127.0.0.1:8787`）、`--secure-cookies`（cookie 加 Secure，hub 在 TLS 反向代理后面而没设 `--public-url` 时打开；设了 https 的 `--public-url` 已自动加 Secure）、`--trusted-proxy <CIDR 或 IP>`（可重复或逗号分隔，见“部署与反向代理”）、`--public-url https://host[:port]`（hub 对外的 https 源，设了才启用手机推送，见“手机推送”）、`--foreground`（日志同时写到 stderr）、`--acme-domain`、`--acme-email`、`--acme-http`（hub 自己申请证书直出 TLS，见“部署与反向代理”的 A）。子命令不认的标志会报错退出 2；`--public-url` 不是 https 源（`http://`、带路径或结尾的 `/`、查询、片段、用户信息）也退出 2，localhost 也要 https。
 - 没设密码也能启动，日志提示“还没有设置网页密码”，网页登录回 503。换密码会让所有已登录的网页立即失效，并在同一事务里删除全部推送订阅（打印删了几条；各设备重新登录后要在设置里重新开启通知），见“安全要点”的“退出登录与设备丢失”。
 - 收到 SIGINT、SIGTERM 后 5 秒内退出：断开守护进程、等在途请求、长连接处理、webhook 回调与推送收尾（正在发的推送中止，不计失败）；等不到它们退出时（含被强制断开、处理还没结束的普通请求）退出码 1，日志写“不关数据库”。
 - `railse hub webhook-token` 生成 webhook 来源令牌，明文只显示这一次，再生成一次旧的就失效。
@@ -144,11 +144,30 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 - **hub 的权力被限死。** 对请求只能回 allow 或 deny，没有向机器下发命令的通道。“记住”永远不会生成放行 `outward`、`destructive`（以及 `unknown`、`write_outside`）的规则，`learned` 来源的这类放行在导入时也被拒绝。网页导入的 `user` 规则可以放行 `outward`、`destructive`（用户决定 B）：这类规则在 `/api/rules` 标 `elevated: true`，导入时审计 `rules_imported` 带上它们的 id，从停用改为启用时审计 `rule_enabled_elevated`。
 - **数据最小化。** 守护进程上报前对载荷与事件文本脱敏，hub 收到后再脱敏一次并截断各字段；hub 不信任守护进程送来的路径与命令，只存储与展示。审计里不含钩子进程的环境变量。
 - **明文接入会警告。** `railse agent enroll --hub http://…`（非本机地址）提示明文传输密钥。
+- **ACME 私钥明文存盘（设计 5.3 例外）。** 直出 TLS 时 Let's Encrypt 的账户私钥与证书私钥（autocert 的格式）明文存在数据目录的 `acme/`：目录 0700（hub 启动时建好并收紧），文件 0600（写临时文件再改名），`railse doctor` 检查两者的权限。它们只给 TLS 握手与 ACME 请求用，不经任何接口、日志或审计出现。拿到证书私钥就能冒充 hub：备份数据目录时把它当私密数据保管；疑似泄露时停掉 hub、删掉 `acme/` 再启动，重新签发（注意频率限制）。
 - **推送密钥明文存库（设计 5.3 例外）。** VAPID 私钥（settings 的 `vapid_private`）与订阅的 `keys.p256dh`、`keys.auth` 发推送时要用原值，明文存在 `hub.db`；它们与签好的 VAPID 令牌永不经任何接口、日志或审计出现：`/api/push/vapid` 只回公钥，`railse hub vapid` 只打印公钥。推送端点的路径本身也是凭据的一部分，日志与审计只记它的 scheme://host。订阅只有登录的用户能登记，端点只校验是 https，不限制内网地址。
 
 ## 部署与反向代理
 
-本计划不含 TLS（第 5 份计划提供内置 ACME）。公网部署时让 hub 只监听本机，由反向代理终止 TLS；配了 `--public-url` 时 cookie 自动加 Secure，没配才要给 hub 加 `--secure-cookies`。
+公网部署有两种方式：A. hub 内置 ACME 直出 TLS（推荐自用，一台机器只跑 hub 时最省事）；B. hub 只监听本机，由反向代理终止 TLS。
+
+### A. 内置 ACME 直出 TLS（推荐自用）
+
+```bash
+railse hub run --acme-domain hub.example.com --acme-email me@example.com
+```
+
+- **前提。** 域名的 A/AAAA 记录已指向这台机器，443 与 80 对公网开放（云厂商的安全组、防火墙都要放行）：Let's Encrypt 从公网连进来验证域名，用 443 上的 TLS-ALPN-01 或 80 上的 HTTP-01。
+- **监听。** hub 在 `--listen`（给了 `--acme-domain` 时默认 `:443`）直出 TLS（最低 TLS 1.2，支持 HTTP/2；WebSocket 照常）。`--acme-http`（默认 `:80`）答 HTTP-01 挑战，并把明文 http 的 GET、HEAD 302 跳到对外源加原路径与查询（不看请求的 Host），别的方法回 400；`--acme-http none` 不监听 80，只能靠 443 上的 TLS-ALPN-01 签发，也没有 http 跳转。443 或 80 被占（比如还跑着 nginx）、证书目录建不了时启动即退出 1，日志“hub 监听失败”。
+- **签发与续期。** 证书在第一次 https 访问时签发，约需 1 到 2 分钟，这一次访问可能超时，稍后刷新即可；到期前 30 天自动续期，不用重启。只给 `--acme-domain` 这一个域名签：别的 SNI 与按 IP 访问在握手时就被拒，不会替它们申请。只用 Let's Encrypt 的生产目录，它对同一域名的签发有频率限制，不要反复删掉 `acme/` 重来。
+- **对外源与 cookie。** 对外源（`--public-url`）默认 `https://<域名>`，手机推送随之启用；要显式写时主机名必须就是这个域名，否则退出 2（端口可以不同，例如 `--listen :8443 --public-url https://hub.example.com:8443`，这时 Let's Encrypt 只能经 80 端口验证）。cookie 一律加 Secure。
+- **私钥。** 账户私钥与证书私钥明文存在数据目录的 `acme/`（目录 0700、文件 0600，启动时收紧目录），`--acme-email` 是 Let's Encrypt 的联系邮箱（证书快到期没续上时它会发信，可不填）。见“安全要点”。
+- **权限。** Linux 上绑定 443/80 需要 `CAP_NET_BIND_SERVICE`：用 `sudo railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com` 装成系统服务，以普通用户运行、只给这一项能力；macOS 绑定 443/80 不需要特权。hub 不要以 root 运行，以 root 启动时 hub 会醒目警告（不拒绝）。
+- 前面已有反向代理终止 TLS 时不要用它，用 B。
+
+### B. 反向代理
+
+让 hub 只监听本机，由反向代理终止 TLS；配了 `--public-url` 时 cookie 自动加 Secure，没配才要给 hub 加 `--secure-cookies`。
 
 - **必须保留原 Host。** 同源检查拿浏览器的 Origin 与请求的 Host 比较，代理把 Host 改成 `127.0.0.1:8787` 时写接口与 `/ws/client` 全部 403。nginx 用 `proxy_set_header Host $host;`（对外不是 443/80 端口时用 `$http_host`，它带端口）。
 - **声明可信代理。** 只有来自 `--trusted-proxy` 的连接，hub 才看 `X-Forwarded-For`（从右往左取第一个不可信的地址）。不声明时所有请求都算代理的地址，按 IP 的登录限速退化成全局限速。代理必须追加而不是透传客户端给的 `X-Forwarded-For`（nginx：`$proxy_add_x_forwarded_for`）。`--trusted-proxy` 拒绝 `0.0.0.0/0` 这类覆盖全部地址的前缀。
@@ -189,7 +208,10 @@ server {
 | 请求不进收件箱、立即交回终端 | 看 `railse agent status` 是否暂停；看 `agent.log` 是否连着 hub；Gemini 的请求本来就不进 |
 | `railse hub password` 回显密码 | 用 `read -s PW; printf '%s\n' "$PW" \| railse hub password` |
 | hub 退出码 1、日志“不关数据库” | 关停时有在途请求、长连接处理或回调没在时限内退出，或服务出错结束；直接重启即可 |
-| `railse hub run` 启动即退出 1、日志“监听失败” | 端口被占或 `--listen` 地址无效，换个地址 |
+| `railse hub run` 启动即退出 1、日志“监听失败” | 端口被占或 `--listen` 地址无效，换个地址。用 `--acme-domain` 时还可能是 80 端口被占（`--acme-http` 换地址或 `none`）、证书目录建不了，或 Linux 上没有 `CAP_NET_BIND_SERVICE`（`permission denied`，见“部署与反向代理”的 A） |
+| `--acme-domain` 时网页打不开、证书签不下来 | 域名没解析到这台机器，或 443、80 没对公网开放。签发失败的原因在 hub 的 stderr（`--foreground` 时在终端；systemd 系统服务看 `journalctl -u railse-hub`，launchd 看数据目录的 `launchd.log`）里，形如 “http: TLS handshake error … acme/autocert: …”；撞上 Let's Encrypt 的频率限制时只能等，别反复删 `acme/` |
+| `railse hub run` 退出 2、提示 acme-domain、acme-http 或 acme-email | `--acme-domain` 要写小写主机名（`hub.example.com`，不带 `https://`、端口、路径，不能是 IP）；`--acme-http` 写 `host:port` 或 `none`；`--acme-email`、`--acme-http` 要和 `--acme-domain` 一起用；同时给 `--public-url` 时主机名要与域名一致 |
+| 日志或终端“hub 正以 root 运行” | hub 不需要 root：Linux 用 `sudo railse setup autostart --hub --system` 装成以普通用户运行的系统服务 |
 | `railse hub run` 退出 2、提示 public-url | `--public-url` 要写成 `https://hub.example.com`（不带路径、结尾的 `/`、查询），http 不行 |
 | 网页说推送停用、`/api/push/vapid` 的 `enabled` 为 false | hub 没加 `--public-url` |
 | 收不到推送 | 看 `GET /api/requests/{id}` 的审计：没有 `push_sent` 是没有订阅、推送停用、或是事件时间太旧的 question；`push_sent` 里 `failed` 不为 0 时看 `hub.log` 的“推送到 … 失败（连续第 N 次）”（带推送服务给的原因，如 `BadJwtToken`；同一原因持续一天以上订阅会被删）；有 `push_subscription_removed` 说明订阅已失效被删，在网页里重新开启通知 |
@@ -197,11 +219,11 @@ server {
 | 启动报“库里的 VAPID 密钥损坏” | `railse hub vapid --rotate` 换新密钥（所有手机重新开启通知） |
 | 换钥之后手机收不到 | 换钥删了全部订阅，每台手机都要在网页里重新开启通知 |
 
-日志：`hub.log` 里有“hub 监听 …”、“Web Push 已启用，对外源 …”（或“没有配置 --public-url，Web Push 停用”）、“推送到 https://… 失败（连续第 N 次）: …”、“推送订阅 … 已失效，删除”、“VAPID 密钥已换新”、“可信代理: …”、“机器 … 超过 … 没有 pong，断开”、“webhook 请求 … 回调 … 失败 3 次，放弃”、“hub 已停止”。守护进程的 `agent.log` 里有“接入 hub …”、“已连接 hub …，规则版本 N”、“与 hub … 的连接结束: …，N 后重连”、“hub … 回 HTTP 401（第 N/3 次），稍后重试…”、“规则更新到版本 N”、“与 hub 断线超过 30s，请求 … 交回终端”。`GET /api/status` 的 `machines[].online` 看各机器是否连着；`GET /api/requests/{id}` 的 `audit` 看一条请求经历了什么。
+日志：`hub.log` 里有“hub 监听 …”、“直出 TLS（ACME，Let's Encrypt）：域名 …，证书目录 …”、“ACME 挑战（HTTP-01）与 http→https 跳转监听 …”、“Web Push 已启用，对外源 …”（或“没有配置 --public-url，Web Push 停用”）、“推送到 https://… 失败（连续第 N 次）: …”、“推送订阅 … 已失效，删除”、“VAPID 密钥已换新”、“可信代理: …”、“机器 … 超过 … 没有 pong，断开”、“webhook 请求 … 回调 … 失败 3 次，放弃”、“hub 已停止”。守护进程的 `agent.log` 里有“接入 hub …”、“已连接 hub …，规则版本 N”、“与 hub … 的连接结束: …，N 后重连”、“hub … 回 HTTP 401（第 N/3 次），稍后重试…”、“规则更新到版本 N”、“与 hub 断线超过 30s，请求 … 交回终端”。`GET /api/status` 的 `machines[].online` 看各机器是否连着；`GET /api/requests/{id}` 的 `audit` 看一条请求经历了什么。
 
 ## 已知限制（后续计划，不算未完成）
 
-- TLS/ACME、开机自启、`railse doctor`、本机 pause 反向同步到 hub。
+- 开机自启、`railse doctor`、本机 pause 反向同步到 hub。
 - 复合命令不能“拒绝并记住”（422），需要手写规则。
 - 吊销机器的瞬间正在登记的请求可能没被取消，按期限过期。
 - hub 重启不恢复关停时正在进行的 webhook 回调，来源需重新提交。
