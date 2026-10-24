@@ -28,7 +28,8 @@ cleanup() {
   if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
 }
 
-# download <URL> <输出文件>：有 curl 用 curl，否则用 wget；https 地址只走 https（重定向也是）、TLS 1.2 起
+# download <URL> <输出文件>：有 curl 用 curl，否则用 wget。https 地址用 curl 时只走 https（--proto '=https'，重定向也算）、
+# TLS 1.2 起；用 wget 时加 --https-only（支持的话），但 GNU wget 的这个开关只管递归下载时跟的链接，管不了重定向
 download() {
   if [ "$downloader" = curl ]; then
     if [ "$https_only" = 1 ]; then
@@ -238,9 +239,11 @@ main() {
       ;;
   esac
 
-  printf '\n下一步：\n'
-  printf '  hub 机器：railse hub password && railse hub token，然后 railse hub run --acme-domain <域名>\n'
-  printf '  工作机：railse setup all --hub https://<hub 域名> --token <接入码>\n'
+  printf '\n下一步（详见 docs/setup.md）：\n'
+  printf '  工作机（在项目目录里）：railse setup all --hub https://<hub 域名> --token <接入码>\n'
+  printf '  hub 机器（macOS，或用反向代理）：railse hub password、railse hub token，再 railse hub run（macOS 直出 TLS 加 --acme-domain <域名>）\n'
+  printf '  hub 机器（Linux 直出 443/80）：装成系统服务，见 docs/setup.md 的“Linux：装成系统服务”：\n'
+  printf '    sudo /usr/local/bin/railse setup autostart --hub --system -- --acme-domain <域名> --acme-email <邮箱>\n'
   printf '  体检：railse doctor\n'
   printf '完整说明：https://github.com/%s#readme\n' "$repo"
 }

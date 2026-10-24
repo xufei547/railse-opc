@@ -8,6 +8,7 @@ permissions:
 jobs:
   go:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -20,6 +21,7 @@ jobs:
   # install.sh 的本地发布测试（假发布 + 127.0.0.1 上的 HTTP 服务）；Linux 上走 sha256sum 分支，/bin/sh 是 dash
   install-script:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -28,6 +30,7 @@ jobs:
       - run: scripts/test-install.sh
   web:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,6 +41,7 @@ jobs:
       - run: cd web && npm ci && npm run check && npm run build
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -51,7 +55,8 @@ jobs:
       - run: cd web && npm ci && npx playwright install --with-deps chromium
       # scripts/e2e-web.sh 失败时把 hub 与守护进程的日志复制到 web/test-results/logs/；html 报告在 web/playwright-report
       - run: make e2e
-      - if: failure()
+      # 超时被取消时也上传（cancelled() 为真），卡住的那次正是最需要日志的
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-results
@@ -60,6 +65,7 @@ jobs:
             web/playwright-report
   cross:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
