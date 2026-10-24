@@ -80,8 +80,10 @@ type quoting struct {
 	// 命令行视图为 true：换行是命令分隔符，跨过去就会把下一行的命令名当成值抹掉；文本语境为 false，照旧用 \s
 	sameLine bool
 	// emptyQ 是空引号（''、""，命令行视图里还有 $''、$""）；quoted1 是至少含一个字符的引号段。sshpass 的 -p 紧贴的只是
-	// 空引号时，bash 给的就是 -p，密码是下一个词（见 build 的 pTail）
+	// 空引号时，bash 给的就是 -p，密码是下一个词（见 build 的 pAlt）
 	emptyQ, quoted1 string
+	// sshpassBase：sshpass 按 daf6f11 的口径认（小写 sshpass，左边不限，只跳过 sshpass 自己的选项），见 compile
+	sshpassBase bool
 	// noStart：值不能从这些字节开始，但可以穿过它们延续（命令行视图里是 sshpass 命令名的标记 vCmd、vArg，文本语境为空）。
 	// sshpass 命令名本身不当 Bearer、--password 这类标志的值；值若从词里前面的部分开始（Bearer bin/sshpass），
 	// 就一直抹到词尾，不在标记前断开（断开的话第二遍 <redacted>sshpass 不再是 sshpass，结果不同）
@@ -111,24 +113,21 @@ func textQuoting(open bool) quoting {
 }
 
 // compile 用给定的“不带引号的值”字符类编译一套文本语境的规则。几种语境只在值到哪里为止上不同。
-// narrow 为 true 时 sshpass -p 只按窄规则认（见 litSshpass），用于引号里的字面文本、JSON 叶子与 heredoc 正文：
-// 它们可能交给扫描器不认的解释器执行（watch '…'、su -c '…'、{"command":"watch","args":[…]}），完整规则跳过别的工具的
-// 选项后会把那里的程序名当密码抹掉。只给人看的 Text（事件消息、diff_preview）仍用完整规则
-func compile(bare string, open, narrow bool) []rule {
+// base 为 true 时 sshpass -p 按 daf6f11 的口径认：小写的 sshpass（\b 边界，左边不限），只跳过 sshpass 自己的选项
+// （-f -d -P 带参数，-h -e -V -v），不认大小写变体、不跳 sshpass 不认的选项；-p 紧贴空引号的写法同样按 pAlt 处理。
+// 用于引号里的字面文本、注释、JSON 叶子与 heredoc 正文：写进文件、交给 watch、rsync -e 的命令都在这里，密码要抹；
+// 大写 SSHPASS、跳过别的工具的选项才找到的 -p 不认，免得把 env -u SSHPASS -u -p curl 这类的程序名当密码抹掉。
+// 代价（与 daf6f11 相同）：小写 sshpass 是别的工具的选项值时（xargs -I sshpass -p curl），后面的词会被抹。
+// 只给人看的 Text（事件消息、diff_preview）仍用完整规则
+func compile(bare string, open, base bool) []rule {
 	q := textQuoting(open)
 	// 会被截断的文本不连：右引号丢了的值本来就抹到末尾，再连会把后面的引号也当成值的一部分
 	q.word = !open
-	if narrow {
-		q.sshpass, q.sshpassArg = "", litSshpass
+	if base {
+		q.sshpass, q.sshpassBase = `\bsshpass`, true
 	}
 	return build(bare, q)
 }
-
-// litSshpass 是文本里按窄规则认的 sshpass（与命令行视图的 vArg 同一个口径）：小写，不带引号，可带不含 = : @ 的路径；
-// 在行首或 ; & | ( 之后（命令位置），或者前一个词不是选项（不以 - 或占位符 < 开头，单独的 -- 除外）。前一个词与它之间
-// 只认同一行的空白，前一个词连同前面的分隔字符算进第 1 组原样放回
-const litSshpass = `(?:^|[;&|(\n][ \t]*|(?:^|\s)(?:--|[^\s;&|()<>'"\-][^\s;&|()<>]*)[ \t]+)` +
-	`(?:[^\s;&|()<>'"=:@\-][^\s;&|()<>'"=:@]*/)?sshpass`
 
 // build 编译一套规则。顺序很重要：先处理带键名的形式，再处理裸 token。bare 必须是 [^…]+ 形式的字符类。
 //
@@ -171,6 +170,11 @@ func build(bare string, q quoting) []rule {
 	unknownChar := `[^` + bare[2:len(bare)-2] + `\\\x00\x15ehVv+fdpP*?\[\]{}-]` // 不是已知选项字母、- 与拿不准的字符
 	unknownOpt := `-(?:` + fl + `*` + unknownChar + `|` + fl + `+-|-` + optPiece + `)` + optPiece + `*`
 	sshpassOpts := `(?:` + sep + `-` + fl + `*[fdP]` + gap + optArg + `|` + sep + `-` + fl + `+|` + sep + unknownOpt + `(?:` + sep + optArg + `)?)*`
+	if q.sshpassBase {
+		// daf6f11 的口径：只跳过 sshpass 自己的选项，不跳不认的选项，选项字母里没有 +
+		fl = `[ehVv]`
+		sshpassOpts = `(?:` + sep + `-` + fl + `*[fdP]` + gap + optArg + `|` + sep + `-` + fl + `+)*`
+	}
 	phOnly := q.ph + `(?P<phend>` + stop + `|$)`
 	value := `(?:` + q.quoted + `|(?:` + phOnly + `|` + first + `))`
 	if q.word {
@@ -222,13 +226,13 @@ func build(bare string, q quoting) []rule {
 		// sshpass 的 -p 密码（-p pw、-p 'pw'、-p'pw'、-ppw，-p 可以在 -v 这类选项之后或组合在末尾，如 -vp）。只认 sshpass
 		// 自己的选项里的 -p：后面 ssh、scp、rsync 自己的 -p（端口、保留权限）不动。命令行视图里这条完整规则只认命令位置上的
 		// sshpass（行首、; | && ( $( 之后、VAR=值 之后、sudo env timeout nohup exec xargs 等包装命令之后，见 shell.go 的 endWord），
-		// 别的位置见下一条窄规则；引号里的字面文本、JSON 叶子与 heredoc 正文不用这条（见 compile 的 narrow）
+		// 别的位置见下一条窄规则；引号里的字面文本、JSON 叶子与 heredoc 正文用 daf6f11 的口径（见 compile 的 base）
 		rules = append(rules, rule{re: regexp.MustCompile(`(` + q.sshpass + sshpassOpts + sep + `-` + fl + `*p` + pCont + `)` + pAlt), repl: "${1}${2}" + placeholder + "${phend}${phend2}", need: "-"})
 	}
 	if q.sshpassArg != "" {
 		// 命令行视图里不在命令位置的 sshpass（扫描器不认的前缀之后：ssh jump sshpass -p pw、docker exec ctr sshpass -p pw、
 		// watch sshpass -p pw）：只认小写、不带引号的 sshpass 紧跟 -p（-p 值、-p值，中间不跳任何选项），且前一个词不是选项
-		// （shell.go 的 vArg）；字面文本里同一个口径（litSshpass）。xargs -I sshpass -p curl、docker run -e sshpass -p 8080:80 里 sshpass 是选项的值，不认；
+		// （shell.go 的 vArg）。xargs -I sshpass -p curl、docker run -e sshpass -p 8080:80 里 sshpass 是选项的值，不认；
 		// 代价是 echo sshpass -p x 这类参数会多抹一个词，多抹的是参数，不藏命令
 		rules = append(rules, rule{re: regexp.MustCompile(`(` + q.sshpassArg + sep + `-p` + pCont + `)` + pAlt), repl: "${1}${2}" + placeholder + "${phend}${phend2}", need: "-"})
 	}

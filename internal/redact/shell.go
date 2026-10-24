@@ -666,7 +666,7 @@ func (c *ctx) endWord() {
 	// prog：词像程序路径（不以 - 开头，不含 = : @），只有这样的词才按 sshpass 命令名标记；URL、KEY=值、选项词
 	// （-a/tmp/sshpass、--volume=/opt/sshpass）里最后一段是 sshpass 的不算，它们里面的凭据照样交给别的规则。
 	// optLike：以 - 或占位符开头。占位符多半是 --token、Bearer、Authorization: 这类规则把选项样的词抹掉留下的，
-	// 第二遍要与第一遍一样把它当选项，前后两遍的认法才一致
+	// 第二遍要与第一遍一样把它当选项，前后两遍的认法才一致（用于 prevOpt 与 prog；包装命令的选项判断不用它，见下）
 	optLike := len(w) > 0 && (w[0] == '-' || strings.HasPrefix(w, placeholder))
 	prog := !c.odd && !optLike
 	nested, quoted := c.nested, c.quoted
@@ -691,8 +691,9 @@ func (c *ctx) endWord() {
 		switch {
 		case c.wrapArg:
 			c.wrapArg = false
-		case len(w) > 1 && optLike:
-			// 占位符也当不带参数的选项（timeout --token -vp x：第一遍 -vp 是选项，第二遍 <redacted> 不能变成时长参数）
+		case len(w) > 1 && w[0] == '-':
+			// 只认真正以 - 开头的词。占位符不当选项（第 6 轮按计数取舍：当选项时 sudo --token x 'sshpass' -p pw 这类
+			// 不幂等更多；不当选项时 timeout --token -vp x 这类不幂等，记账）
 			if c.wrap == "sshpass" {
 				// sshpass 按 getopt 认组合的选项字母（-vp pw）：第一个带参数的字母在词尾时，下一个词是它的参数
 				// 紧贴的嵌套结构（-p"${PW}"、-p$(…)、-p${PW}）是已经带上的值，不算词尾
