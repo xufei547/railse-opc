@@ -348,8 +348,8 @@ func hookCommand(t *testing.T, path, event string) string {
 	return readJSON(t, path)["hooks"].(map[string]any)[event].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"].(string)
 }
 
-// 守护进程数据目录不是默认的（$RAILSE_HOME 或 ~/.railse）时，钩子进程的环境里没有那个 RAILSE_HOME，
-// 钩子命令要带 --socket；是默认目录（含显式给出的）或没给 --dir 时命令保持原样。
+// 守护进程数据目录不是 ~/.railse 时，CLI 起的钩子进程环境里不一定有指向它的 RAILSE_HOME，钩子命令要带 --socket；
+// 是 ~/.railse（显式给出或默认取到）时命令保持原样。基准与环境无关：只设了 $RAILSE_HOME 也带。
 func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 	home, _ := os.MkdirTemp("", "rs")
 	defer os.RemoveAll(home)
@@ -394,7 +394,7 @@ func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 	if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude --socket "+q {
 		t.Fatalf("相对 --dir 应写成绝对路径的 socket: %q", got)
 	}
-	// 显式给默认目录、不给 --dir：都不带 --socket，并把上次带 --socket 的条目换掉
+	// 显式给 ~/.railse、不给 --dir（也没有 $RAILSE_HOME）：都不带 --socket，并把上次带 --socket 的条目换掉
 	for _, extra := range [][]string{{"--dir", filepath.Join(home, ".railse")}, nil} {
 		out = setup(extra...)
 		for _, p := range []string{local, gemini, codexFile} {
@@ -406,15 +406,48 @@ func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 			t.Fatalf("%v: 默认目录时 notify 建议不带 --socket:\n%s", extra, out)
 		}
 	}
-	// 设了 $RAILSE_HOME：它就是默认，不带 --socket（钩子从 CLI 的环境里读同一个 RAILSE_HOME）；别的目录照样带
-	t.Setenv("RAILSE_HOME", data)
-	setup("--dir", data)
-	if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude" {
-		t.Fatalf("--dir 与 $RAILSE_HOME 相同时不带 --socket: %q", got)
+	// 设了 $RAILSE_HOME：基准仍是 ~/.railse（只在跑 setup 的命令上设的 RAILSE_HOME 不会进 CLI 的环境），
+	// 不给 --dir 时目录取 $RAILSE_HOME（相对路径按当前目录），照样带 --socket；--dir ~/.railse 不带
+	for _, env := range []string{data, "data dir"} {
+		t.Setenv("RAILSE_HOME", env)
+		for _, extra := range [][]string{nil, {"--dir", data}} {
+			out = setup(extra...)
+			if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude --socket "+q {
+				t.Fatalf("RAILSE_HOME=%s %v: 应带 --socket %s: %q", env, extra, q, got)
+			}
+			if !strings.Contains(out, fmt.Sprintf(`"--socket", %q]`, sock)) {
+				t.Fatalf("RAILSE_HOME=%s %v: notify 建议也应带 --socket:\n%s", env, extra, out)
+			}
+		}
 	}
 	setup("--dir", filepath.Join(home, ".railse"))
-	if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude --socket "+filepath.Join(home, ".railse", "agent.sock") {
-		t.Fatalf("--dir 不是 $RAILSE_HOME 时应带 --socket: %q", got)
+	if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude" {
+		t.Fatalf("--dir 是 ~/.railse 时不带 --socket（不管 $RAILSE_HOME）: %q", got)
+	}
+}
+
+// 只设了 $RAILSE_HOME、不给 --dir 的 setup all：托管与钩子用同一个目录，钩子命令带 --socket，体检里钩子都对得上。
+func TestSetupAllRailseHomeOnlyWritesSocket(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	t.Setenv("RAILSE_HOME", f.dir)
+	var out, errOut bytes.Buffer
+	args := []string{"setup", "all", "--project", f.proj, "--bin", f.bin, "--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"}
+	if code := run(args, &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	local, _ := hooksconf.ClaudePaths(f.proj)
+	sockArg := " --socket " + hooksconf.ShellQuote(filepath.Join(f.dir, "agent.sock"))
+	for p, ev := range map[string]string{local: "PermissionRequest", hooksconf.CodexPath(f.home): "Stop", hooksconf.GeminiPath(f.proj): "BeforeTool"} {
+		if got := hookCommand(t, p, ev); !strings.HasSuffix(got, sockArg) {
+			t.Fatalf("%s 的钩子命令应带 --socket（%s）: %q", p, sockArg, got)
+		}
+	}
+	for _, want := range []string{"[ok]    Claude Code 钩子：", "[ok]    Codex 钩子：", "[ok]    Gemini 钩子："} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("体检里应有 %q:\n%s", want, out.String())
+		}
 	}
 }
 
@@ -957,7 +990,7 @@ func TestSetupAllEnrollsHooksAutostartAndDoctor(t *testing.T) {
 	if !strings.Contains(string(readFile(t, local)), f.bin+" hook claude") {
 		t.Fatal("应已装 Claude 钩子，且指向 --bin")
 	}
-	// --dir 不是默认目录：钩子命令带 --socket 指向它，才连得上托管的（带 RAILSE_HOME=--dir 的）守护进程
+	// --dir 不是 ~/.railse：钩子命令带 --socket 指向它，才连得上托管的（带 RAILSE_HOME=--dir 的）守护进程
 	sockArg := " --socket " + hooksconf.ShellQuote(filepath.Join(f.dir, "agent.sock"))
 	for p, ev := range map[string]string{local: "PermissionRequest", hooksconf.CodexPath(f.home): "PermissionRequest", hooksconf.GeminiPath(f.proj): "BeforeTool"} {
 		if got := hookCommand(t, p, ev); !strings.HasSuffix(got, sockArg) {

@@ -45,7 +45,7 @@ func hookChecks(o Options) []Check {
 	}
 }
 
-// setupHint 是重装某个 CLI 钩子的命令。Codex 的钩子是用户级的，不用 --project。守护进程不在默认目录时带上 --dir
+// setupHint 是重装某个 CLI 钩子的命令。Codex 的钩子是用户级的，不用 --project。守护进程不在 ~/.railse 时带上 --dir
 // （setup hooks 据此在钩子命令里写 --socket）。
 func setupHint(o Options, cli string) string {
 	if cli == "codex" {
@@ -57,7 +57,7 @@ func setupHint(o Options, cli string) string {
 // agentSocket 是 --dir 那个守护进程的 socket。
 func agentSocket(o Options) string { return filepath.Join(o.AgentDir, "agent.sock") }
 
-// dirFlag 是重装钩子的命令里的 --dir：守护进程的 socket 就是默认 socket 时为空，否则（含推不出默认的）带上。
+// dirFlag 是重装钩子的命令里的 --dir：守护进程的 socket 就是基准（~/.railse/agent.sock）时为空，否则（含推不出基准的）带上。
 func dirFlag(o Options) string {
 	if o.DefaultSocket != "" && samePath(agentSocket(o), o.DefaultSocket) {
 		return ""
@@ -66,7 +66,7 @@ func dirFlag(o Options) string {
 }
 
 // socketMismatch 看钩子连的 socket 与 --dir 的守护进程对不对得上。explicit 是命令里 --socket 给的路径（空表示没带，
-// 连默认 socket）；对得上或推不出默认 socket 时 ok 为真。对不上时返回钩子实际连的 socket。
+// 按基准 DefaultSocket 算）；对得上或推不出基准时 ok 为真。对不上时返回钩子实际连的 socket。
 func socketMismatch(o Options, explicit string) (connects string, ok bool) {
 	connects = explicit
 	if connects == "" {

@@ -485,13 +485,19 @@ func TestHookSocketMismatch(t *testing.T) {
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "/old/railse") || !strings.Contains(c.Detail, dataSock) {
 		t.Fatalf("程序与 socket 都不对: %+v", c)
 	}
-	// DefaultSocket 推不出（没有家目录也没有 $RAILSE_HOME）：不带 --socket 的不比对
+	// 不给 DefaultSocket：基准是 Home 下的 ~/.railse/agent.sock，不看 $RAILSE_HOME（钩子进程的环境里不一定有它，按最坏情况算）
 	o.AgentDir, o.DefaultSocket = data, ""
+	t.Setenv("RAILSE_HOME", data)
+	install("")
+	if c := find(t, Run(o), "hooks.gemini"); c.Status != Warn || !strings.Contains(c.Detail, "连的是 "+filepath.Join(home, ".railse", "agent.sock")) {
+		t.Fatalf("不带 --socket 的钩子应按 ~/.railse/agent.sock 比对，不看 $RAILSE_HOME: %+v", c)
+	}
+	// 取不到家目录：推不出基准，不带 --socket 的不比对
+	o.Home = ""
 	t.Setenv("RAILSE_HOME", "")
 	t.Setenv("HOME", "")
-	install("")
 	if c := find(t, Run(o), "hooks.gemini"); c.Status != OK {
-		t.Fatalf("推不出默认 socket 时不比对: %+v", c)
+		t.Fatalf("推不出基准 socket 时不比对: %+v", c)
 	}
 }
 

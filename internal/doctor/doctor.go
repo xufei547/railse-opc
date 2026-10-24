@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/hookclient"
 	"github.com/railse/railse-opc/internal/proto"
 )
@@ -70,8 +69,9 @@ type Options struct {
 	// HubSkip 非空且 HubDir 为空时，hub 侧整段 skip，细节用它（如系统 hub 目录属于别的用户、查过哪些位置）。
 	HubSkip string
 
-	// DefaultSocket 是不带 --socket 的钩子会连的 socket：当前环境下 $RAILSE_HOME 或 ~/.railse 里的 agent.sock（钩子进程
-	// 的环境是 CLI 的，doctor 只能拿自己的环境推）。为空时 Run 按同样规则推；推不出（没有家目录）就不比对不带 --socket 的钩子。
+	// DefaultSocket 是不带 --socket 的钩子会连的 socket 的基准：~/.railse/agent.sock。钩子进程的环境是 CLI 的，那里不一定有
+	// RAILSE_HOME，按最坏情况（没有）算；setup hooks 也以 ~/.railse 为基准，目录不是它就写 --socket。为空时 Run 由 Home 推；
+	// 取不到家目录就不比对不带 --socket 的钩子。
 	DefaultSocket string
 
 	LookPath    func(file string) (string, error)
@@ -150,10 +150,8 @@ func (o *Options) defaults() {
 	if o.FileOwner == nil {
 		o.FileOwner = fileOwner
 	}
-	if o.DefaultSocket == "" { // 与 railse hook 不带 --socket 时同一个规则（agent.DefaultConfig）
-		if c, err := agent.DefaultConfig(); err == nil {
-			o.DefaultSocket, _ = filepath.Abs(c.SocketPath)
-		}
+	if o.DefaultSocket == "" && o.Home != "" { // 不看 $RAILSE_HOME：钩子进程的环境里不一定有它
+		o.DefaultSocket, _ = filepath.Abs(filepath.Join(o.Home, ".railse", "agent.sock"))
 	}
 }
 

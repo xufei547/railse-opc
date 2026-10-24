@@ -44,6 +44,14 @@ download() {
   fi
 }
 
+# shquote <字符串>：给人照抄的命令里的一个词。只含安全字符时原样，否则用单引号括起来（内部的 ' 写成 '\''）
+shquote() {
+  case "$1" in
+    '' | *[!A-Za-z0-9_./+:@%,=-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 # 版本号只接受 X.Y.Z 或 X.Y.Z-后缀 / X.Y.Z.后缀（后缀只含字母、数字与点）
 valid_version() {
   case "$1" in '' | *[!0-9A-Za-z.-]*) return 1 ;; esac
@@ -242,8 +250,13 @@ main() {
   printf '\n下一步（详见 docs/setup.md）：\n'
   printf '  工作机（在项目目录里）：railse setup all --hub https://<hub 域名> --token <接入码>\n'
   printf '  hub 机器（macOS，或用反向代理）：railse hub password、railse hub token，再 railse hub run（macOS 直出 TLS 加 --acme-domain <域名>）\n'
+  # 提示里写装好的绝对路径：sudo 的 secure_path 常常找不到 railse（RHEL 系连 /usr/local/bin 都没有）
+  absdir="$(CDPATH='' cd -- "$dir" && pwd)" || absdir="$dir"
   printf '  hub 机器（Linux 直出 443/80）：装成系统服务，见 docs/setup.md 的“Linux：装成系统服务”：\n'
-  printf '    sudo /usr/local/bin/railse setup autostart --hub --system -- --acme-domain <域名> --acme-email <邮箱>\n'
+  printf '    sudo %s setup autostart --hub --system -- --acme-domain <域名> --acme-email <邮箱>\n' "$(shquote "$absdir/railse")"
+  if [ "$absdir" != /usr/local/bin ]; then
+    printf '    （这次装在 %s：hub 机器要以 root 装到 /usr/local/bin，curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sudo sh；否则 --user 换成别的用户时，服务执行不了你目录里的 railse）\n' "$absdir" "$repo"
+  fi
   printf '  体检：railse doctor\n'
   printf '完整说明：https://github.com/%s#readme\n' "$repo"
 }

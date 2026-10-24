@@ -242,6 +242,15 @@ for shell in $shells; do
   expect_ok explicit RAILSE_BASE_URL="$URL" RAILSE_VERSION="$VERSION" RAILSE_INSTALL_DIR="$dir"
   check_installed "$dir/railse"
   if grep -qF "警告" "$tmp/log/$shell-explicit.err"; then show explicit; fail "$shell explicit：127.0.0.1 不该警告"; fi
+  # 下一步里装系统服务的命令用实际装好的路径；不在 /usr/local/bin 时提示 hub 机器用 | sudo sh 装到系统目录
+  grep -qF "sudo $dir/railse setup autostart --hub --system -- " "$tmp/log/$shell-explicit.out" || { show explicit; fail "$shell explicit：下一步没用实际安装路径"; }
+  grep -qF "install.sh | sudo sh" "$tmp/log/$shell-explicit.out" || { show explicit; fail "$shell explicit：没提示 hub 机器装到系统目录"; }
+  # 安装路径带空格与单引号：照抄得了（单引号括起来，内部的 ' 写成 '\''）
+  odd="$w/my bin's"
+  expect_ok odd-dir RAILSE_BASE_URL="$URL" RAILSE_VERSION="$VERSION" RAILSE_INSTALL_DIR="$odd"
+  check_installed "$odd/railse"
+  grep -qF "sudo '$w/my bin'\\''s/railse' setup autostart --hub --system -- " "$tmp/log/$shell-odd-dir.out" || { show odd-dir; fail "$shell odd-dir：下一步里的路径没有正确加引号"; }
+  rm -rf "$odd"
   # 2. 覆盖安装；版本号前带 v
   expect_ok v-prefix RAILSE_BASE_URL="$URL" RAILSE_VERSION="v$VERSION" RAILSE_INSTALL_DIR="$dir"
   check_installed "$dir/railse"

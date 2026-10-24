@@ -26,7 +26,7 @@ const setupUsage = `用法:
   railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--dir 目录] [--bin 路径] [--dry-run]
     默认三个都装。Claude 写项目级 .claude/settings.local.json（不入库；旧版写在 settings.json 的会迁走），
     Gemini 写项目级 .gemini/settings.json，Codex 写用户级 ~/.codex/hooks.json。
-    --dir 是守护进程的数据目录（默认 $RAILSE_HOME 或 ~/.railse）：不是默认目录时钩子命令带 --socket 指向它。
+    --dir 是守护进程的数据目录（默认 $RAILSE_HOME 或 ~/.railse）：不是 ~/.railse 时钩子命令带 --socket 指向它。
   railse setup autostart [--hub] [--uninstall] [--status] [--dir 目录] [--bin 路径] [--system] [--user 名字] [--dry-run] [-- hub run 的额外参数]
     开机自启并在退出后自动拉起（macOS launchd、Linux systemd），默认托管守护进程，--hub 托管 hub；详见 railse setup autostart -h。`
 
@@ -141,7 +141,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	doCodex := fs.Bool("codex", false, "只装 Codex")
 	doGemini := fs.Bool("gemini", false, "只装 Gemini")
 	codexFile := fs.String("codex-file", "", "Codex 钩子文件，默认 ~/.codex/hooks.json")
-	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse；不是默认目录时钩子命令带 --socket")
+	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse；不是 ~/.railse 时钩子命令带 --socket")
 	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
 	dryRun := fs.Bool("dry-run", false, "只打印不写")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -154,7 +154,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	if !*doClaude && !*doCodex && !*doGemini {
 		*doClaude, *doCodex, *doGemini = true, true, true
 	}
-	socket, defDir, err := hookSocket(*dir)
+	socket, base, err := hookSocket(*dir)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -235,11 +235,10 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if socket != "" && len(writes) > 0 {
-		def := "默认的 " + defDir
-		if defDir == "" {
-			def = "默认目录（取不到家目录）"
+		if base == "" {
+			base = "~/.railse（取不到家目录）"
 		}
-		fmt.Fprintf(stdout, "钩子命令带 --socket %s：守护进程数据目录 %s 不是%s，CLI 起的钩子进程里没有指向它的 RAILSE_HOME\n", hooksconf.ShellQuote(socket), filepath.Dir(socket), def)
+		fmt.Fprintf(stdout, "钩子命令带 --socket %s：守护进程数据目录 %s 不是 %s，CLI 起钩子时的环境里不一定有指向它的 RAILSE_HOME\n", hooksconf.ShellQuote(socket), filepath.Dir(socket), base)
 	}
 	if *doCodex {
 		// notify 是 argv 数组，bin 必须单独作为第一个元素（Codex 把 JSON 追加在最后）；%q 的转义对普通路径与 TOML 基本字符串一致
@@ -255,27 +254,29 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// hookSocket 定钩子命令里的 --socket：dir（--dir，空则取默认）是守护进程的数据目录，它不是当前环境下的默认目录
-// （$RAILSE_HOME 或 ~/.railse，即不带 --socket 的钩子会连的那个）时返回它的 socket 的绝对路径：托管的守护进程带着
-// RAILSE_HOME=dir 跑，CLI 起的钩子进程环境里却没有，不写明就连到默认 socket 上、所有请求交回终端。是默认目录时返回空，
-// 命令保持原样（已有用户的配置不变）。defDir 是默认目录的绝对路径（给提示用；取不到家目录时为空，这时总带 --socket）。
-func hookSocket(dir string) (socket, defDir string, err error) {
-	if dir == "" {
+// hookSocket 定钩子命令里的 --socket。dir 是守护进程的数据目录（--dir；空则同 agent 子命令，取 $RAILSE_HOME 或 ~/.railse）。
+// 不带 --socket 的钩子连哪里，看的是 CLI 起钩子时的环境，那里不一定有 RAILSE_HOME（托管的守护进程带的、只在跑 setup 的
+// 那条命令上设的都进不去），所以基准取与环境无关的 ~/.railse：dir 不是它时返回 dir 里 socket 的绝对路径，是它时返回空，
+// 命令保持原样（已有用户的配置不变）。base 是 ~/.railse 的绝对路径（给提示用；取不到家目录时为空，这时总带 --socket）。
+// 既没有 $RAILSE_HOME 又取不到家目录、也没给 --dir 时没有目录可指，不带 --socket。
+func hookSocket(dir string) (socket, base string, err error) {
+	cfg, err := agentConfigFor(dir)
+	if err != nil {
 		return "", "", nil
 	}
-	abs, err := filepath.Abs(dir)
+	abs, err := filepath.Abs(cfg.Dir)
 	if err != nil {
 		return "", "", err
 	}
-	if def, derr := agent.DefaultConfig(); derr == nil {
-		if defDir, err = filepath.Abs(def.Dir); err != nil {
+	if home, herr := os.UserHomeDir(); herr == nil {
+		if base, err = filepath.Abs(filepath.Join(home, ".railse")); err != nil {
 			return "", "", err
 		}
-		if samePath(abs, defDir) {
-			return "", defDir, nil
+		if samePath(abs, base) {
+			return "", base, nil
 		}
 	}
-	return agent.ConfigIn(abs).SocketPath, defDir, nil
+	return agent.ConfigIn(abs).SocketPath, base, nil
 }
 
 // samePath 报告两个绝对路径是不是同一个文件或目录：字面相同（清理后），或都存在且是同一个文件（中间有符号链接）。
@@ -468,7 +469,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	if *noHooks {
 		fmt.Fprintln(stdout, "已跳过（--no-hooks）")
 	} else {
-		// --dir 也交给钩子：不是默认目录时钩子命令带 --socket，才连得上下面托管的、带 RAILSE_HOME=<目录> 的守护进程
+		// --dir 也交给钩子：目录不是 ~/.railse 时钩子命令带 --socket，才连得上下面托管的、带 RAILSE_HOME=<目录> 的守护进程
 		if code := runSetup([]string{"hooks", "--project", proj, "--bin", b, "--dir", cfg.Dir}, stdout, stderr); code != 0 {
 			return fail(2, "钩子文件的问题见上面（已写入的会列出来）。")
 		}
