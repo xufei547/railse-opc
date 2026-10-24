@@ -51,11 +51,13 @@ type fakeFrame struct {
 }
 
 // fakeHub 是只认 /ws/agent 协议外形的假 hub：status 非零时直接回该 HTTP 状态；否则升级、读 hello、交给 script。
+// statuses 非空时第 n 次拨号先用 statuses[n-1]（同样 0 表示升级），用完再用 status。
 type fakeHub struct {
-	http   *httptest.Server
-	status int
-	script func(f *fakeHub, conn *websocket.Conn, hello wire.Hello)
-	conns  chan *websocket.Conn // script 可把连接交给测试，由测试发帧
+	http     *httptest.Server
+	status   int
+	statuses []int
+	script   func(f *fakeHub, conn *websocket.Conn, hello wire.Hello)
+	conns    chan *websocket.Conn // script 可把连接交给测试，由测试发帧
 
 	dials  atomic.Int32
 	mu     sync.Mutex
@@ -67,20 +69,29 @@ type fakeHub struct {
 
 func newFakeHub(t *testing.T, status int, script func(f *fakeHub, conn *websocket.Conn, hello wire.Hello)) *fakeHub {
 	t.Helper()
-	f := &fakeHub{status: status, script: script, conns: make(chan *websocket.Conn, 16)}
+	return newFakeHubSeq(t, nil, status, script)
+}
+
+// newFakeHubSeq 同 newFakeHub，但前 len(statuses) 次拨号依次回 statuses 里的状态（0 表示升级、交给 script），之后回 status。
+func newFakeHubSeq(t *testing.T, statuses []int, status int, script func(f *fakeHub, conn *websocket.Conn, hello wire.Hello)) *fakeHub {
+	t.Helper()
+	f := &fakeHub{status: status, statuses: statuses, script: script, conns: make(chan *websocket.Conn, 16)}
 	f.http = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.http.Close)
 	return f
 }
 
 func (f *fakeHub) serve(w http.ResponseWriter, r *http.Request) {
-	f.dials.Add(1)
+	status := f.status
+	if i := int(f.dials.Add(1)) - 1; i < len(f.statuses) {
+		status = f.statuses[i]
+	}
 	f.mu.Lock()
 	f.uris = append(f.uris, r.URL.RequestURI())
 	f.auths = append(f.auths, r.Header.Get("Authorization"))
 	f.mu.Unlock()
-	if f.status != 0 {
-		http.Error(w, "拒绝", f.status)
+	if status != 0 {
+		http.Error(w, "拒绝", status)
 		return
 	}
 	conn, err := websocket.Accept(w, r, nil)
@@ -193,6 +204,13 @@ func setHubTimings(t *testing.T, backoff []time.Duration, idle, protoWait, audit
 		hubAuditInterval = auditEvery
 	}
 	t.Cleanup(func() { hubBackoff, hubIdleTimeout, hubProtoBackoff, hubAuditInterval = ob, oi, op, oa })
+}
+
+// SetHubBackoffForTest 让 package agent_test 的测试缩短重连退避（定义在 _test.go 里，只在测试二进制中存在），
+// 测试结束时还原。要在 NewHubClient 之前调。
+func SetHubBackoffForTest(t *testing.T, backoff ...time.Duration) {
+	t.Helper()
+	setHubTimings(t, backoff, 0, 0, 0)
 }
 
 type testClient struct {
@@ -384,25 +402,82 @@ func TestHubClientPolicyCloseWithoutErrorRetriesNormally(t *testing.T) {
 	waitFor(t, func() bool { return f.dials.Load() >= 3 })
 }
 
-// 握手被 401 拒绝：醒目记日志，永久停用，Run 返回且不再拨号。
-func TestHubClientUnauthorizedDisables(t *testing.T) {
+// 握手被 401 拒绝：前两次照常退避重连并记日志，连续第 3 次才醒目记日志、永久停用，Run 返回且不再拨号。
+func TestHubClientDisablesOnlyAfterThree401(t *testing.T) {
 	setHubTimings(t, []time.Duration{20 * time.Millisecond}, 0, 0, 0)
 	f := newFakeHub(t, http.StatusUnauthorized, nil)
 	tc := startTestClient(t, f)
 	select {
 	case <-tc.done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("401 后 Run 应返回")
+		t.Fatal("连续 3 次 401 后 Run 应返回")
 	}
 	time.Sleep(200 * time.Millisecond)
-	if n := f.dials.Load(); n != 1 {
-		t.Fatalf("401 后不应再拨号: %d 次", n)
+	if n := f.dials.Load(); n != 3 {
+		t.Fatalf("应在连续第 3 次 401 后停用、不再拨号: 拨号 %d 次", n)
 	}
 	if !tc.c.Disabled() || tc.c.Connected() {
-		t.Fatal("401 后应停用")
+		t.Fatal("连续 3 次 401 后应停用")
 	}
-	if !strings.Contains(tc.logs.String(), "railse agent enroll") {
-		t.Fatalf("应提示重新接入: %s", tc.logs.String())
+	if s := tc.c.State(); s != "disabled" {
+		t.Fatalf("State = %q，应为 disabled", s)
+	}
+	logs := tc.logs.String()
+	// 日志里的 hub 地址带端口，可能含 401，所以数完整的片段
+	for _, want := range []string{"回 HTTP 401（第 1/3 次）", "回 HTTP 401（第 2/3 次）", "以 HTTP 401 拒绝了本机密钥", "railse agent enroll"} {
+		if n := strings.Count(logs, want); n != 1 {
+			t.Fatalf("日志里 %q 应出现 1 次，得到 %d 次:\n%s", want, n, logs)
+		}
+	}
+	if strings.Contains(logs, "第 3/3 次") {
+		t.Fatalf("第 3 次 401 直接停用，不记“稍后重试”: %s", logs)
+	}
+}
+
+// 连续 401 的计数遇到任何别的结果（5xx 等失败、连上过）都归零：中间夹着别的结果的 401 不累计。
+func TestHubClientUnauthorizedCountResets(t *testing.T) {
+	setHubTimings(t, []time.Duration{20 * time.Millisecond}, 0, 0, 0)
+	// 401 401 503 | 401 401 连上（welcome 后断开）| 401 401 401：第 9 次拨号后才停用。
+	// 503 不归零会在第 4 次停用，连上不归零会在第 7 次停用。
+	f := newFakeHubSeq(t, []int{401, 401, 503, 401, 401, 0, 401, 401}, http.StatusUnauthorized, func(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
+		f.welcome(conn, 1, defaultRulesYAML(), false)
+		conn.Close(websocket.StatusNormalClosure, "bye")
+	})
+	tc := startTestClient(t, f)
+	select {
+	case <-tc.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("最后连续 3 次 401 后 Run 应返回: 拨号 %d 次", f.dials.Load())
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := f.dials.Load(); n != 9 {
+		t.Fatalf("应在第 9 次拨号（连续第 3 次 401）后停用: 拨号 %d 次", n)
+	}
+	if !tc.c.Disabled() || tc.c.State() != "disabled" {
+		t.Fatalf("最后连续 3 次 401 后应停用: %q", tc.c.State())
+	}
+	if n := strings.Count(tc.logs.String(), "回 HTTP 401（第 2/3 次）"); n != 3 {
+		t.Fatalf("三轮各到第 2 次: 得到 %d 次", n)
+	}
+}
+
+// State：没连上时 connecting，连上后 connected，断开后回到 connecting（停用见上）。
+func TestHubClientState(t *testing.T) {
+	setHubTimings(t, []time.Duration{time.Hour}, 0, 0, 0)
+	f := newFakeHub(t, 0, welcomeThenHandOver)
+	tc := newTestClient(t, f.http.URL)
+	if s := tc.c.State(); s != "connecting" {
+		t.Fatalf("还没连上时 State = %q", s)
+	}
+	tc.run(t)
+	tc.waitConnected(t)
+	if s := tc.c.State(); s != "connected" {
+		t.Fatalf("连上后 State = %q", s)
+	}
+	(<-f.conns).CloseNow()
+	waitFor(t, func() bool { return !tc.c.Connected() })
+	if s := tc.c.State(); s != "connecting" {
+		t.Fatalf("断开后（等着重连）State = %q", s)
 	}
 }
 

@@ -104,7 +104,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		}
 		if args[0] == "status" && reply.Status != nil {
 			st := reply.Status
-			fmt.Fprintf(stdout, "%s\nrules: %d\npending: %d\nmachine: %s\nrules_path: %s\nuptime: %s\n", pausedLine(st), st.Rules, st.Pending, st.MachineID, st.RulesPath, st.Uptime)
+			fmt.Fprintf(stdout, "%s\nrules: %d\npending: %d\nmachine: %s\n%s\nrules_path: %s\nuptime: %s\n", pausedLine(st), st.Rules, st.Pending, st.MachineID, hubLine(st), st.RulesPath, st.Uptime)
 			return 0
 		}
 		fmt.Fprintln(stdout, "ok")
@@ -121,6 +121,18 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	return 2 // 到不了：子命令已在开头核对过
+}
+
+// hubLine 显示到 hub 的连接：none（未接入；旧版守护进程不报时也按 none）、connecting/connected 加地址；
+// disabled（连续被 hub 以 401 拒绝）时说明怎么恢复。
+func hubLine(st *proto.Status) string {
+	switch st.Hub {
+	case "", "none":
+		return "hub: none"
+	case "disabled":
+		return fmt.Sprintf("hub: disabled %s（本机密钥被拒，请 railse agent enroll --force 后重启守护进程）", st.HubURL)
+	}
+	return fmt.Sprintf("hub: %s %s", st.Hub, st.HubURL)
 }
 
 // pausedLine 显示总开关的生效值；暂停时在括号里注明来源：本机（local）、hub，或两者都有。
@@ -337,6 +349,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 		decider := &agent.HubDecider{Client: client, Grace: cfg.HubGrace, Log: logger}
 		srv.SetDecider(decider)
 		srv.SetAuditSink(client)
+		srv.SetHubStatus(func() (string, string) { return client.State(), machine.HubURL })
 		// 送达回执在后台发：在审批服务停下（下面登记的 srv.Close，后登记先执行）之后、关审计与日志之前等它们发完
 		defer decider.Wait()
 	}
@@ -356,7 +369,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 		}
 	}
 	// hub 客户端在 LoadState 之后才开始收帧：welcome 设的 hub 暂停不能被磁盘上的旧值盖掉。它与 Serve 共用同一个关停 ctx
-	// （派生自 ctx），返回前等它退出：它会写审计、改 state.json。被 hub 以 401 停用时 Run 自己返回并记日志（要重新 enroll），
+	// （派生自 ctx），返回前等它退出：它会写审计、改 state.json。连续被 hub 以 401 拒绝而停用时 Run 自己返回并记日志（要重新 enroll），
 	// 这里不当致命错误、也不重启：HubDecider 见停用即交回终端，守护进程照常服务。
 	hubCtx, stopHub := context.WithCancel(ctx)
 	hubDone := make(chan struct{})

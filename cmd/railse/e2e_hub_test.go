@@ -179,6 +179,17 @@ func TestEndToEndHubApproval(t *testing.T) {
 	cfg.HubGrace = 5 * time.Second
 	serveAgent(t, cfg)
 	waitUntil(t, func() bool { ms, _ := h.st.ListMachines(); return len(ms) == 1 && ms[0].LastSeen != nil })
+	// hub 记下 hello 时守护进程可能还没处理 welcome：等 status 显示已连上
+	for end := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		var out, errOut bytes.Buffer
+		run([]string{"agent", "status", "--dir", cfgDir}, &out, &errOut)
+		if strings.Contains(out.String(), "\nhub: connected "+h.http.URL+"\n") {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("status 应显示已连上 hub: %q %q", out.String(), errOut.String())
+		}
+	}
 	repo := filepath.Join(dir, "repo")
 	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
 	gitPush := sampleWithCwd(t, "claude/2.1.280/PermissionRequest.json", repo)

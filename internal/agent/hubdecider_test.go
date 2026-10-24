@@ -240,6 +240,7 @@ func TestHubDeciderCancelAndExpire(t *testing.T) {
 
 // 预检 12-10、决定 3 与 10：hub 以 401 停用本机后立即交回终端，不等 Grace——等待中被停用、停用后再来的请求都一样。
 func TestHubDeciderDisabledFallsBackAtOnce(t *testing.T) {
+	agent.SetHubBackoffForTest(t, 50*time.Millisecond) // 连续 3 次 401 才停用，默认退避下要 1+2+4 秒
 	h := startHub(t)
 	m := enroll(t, h)
 	env := newClient(t, h, m, nil)

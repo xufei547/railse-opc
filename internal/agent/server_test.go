@@ -628,3 +628,27 @@ func TestReportedPayloadKeepsEmptyCwd(t *testing.T) {
 		}
 	}
 }
+
+// status 带上 hub 连接状态：没装 SetHubStatus（未接入 hub）时 hub 为 none、不带地址；装了时每次 status 现取。
+func TestStatusReportsHub(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	raw := roundTrip(t, env.cfg.SocketPath, control("status"))
+	var reply proto.ControlReply
+	if err := json.Unmarshal(raw, &reply); err != nil || reply.Status == nil {
+		t.Fatalf("status 回复: %s %v", raw, err)
+	}
+	if reply.Status.Hub != "none" || reply.Status.HubURL != "" || !strings.Contains(string(raw), `"hub":"none"`) || strings.Contains(string(raw), "hub_url") {
+		t.Fatalf("未接入 hub 时应为 none、不带地址: %s", raw)
+	}
+	// 另起一个不监听的服务直接调 handleControl：SetHubStatus 只能在 Listen 之前装
+	srv := New(env.cfg, env.srv.rules, env.srv.audit, LocalDecider{}, log.New(io.Discard, "", 0))
+	state := "connecting"
+	srv.SetHubStatus(func() (string, string) { return state, "https://hub.example.com" })
+	for _, want := range []string{"connecting", "connected", "disabled"} {
+		state = want
+		st := srv.handleControl(control("status")).Status
+		if st == nil || st.Hub != want || st.HubURL != "https://hub.example.com" {
+			t.Fatalf("应现取 hub 状态 %s: %+v", want, st)
+		}
+	}
+}

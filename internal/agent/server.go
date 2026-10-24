@@ -49,6 +49,8 @@ type Server struct {
 	start   time.Time
 	wg      sync.WaitGroup          // 进行中的连接
 	sink    atomic.Pointer[sinkBox] // 审计转发目标，nil 表示只写本地；可在 Serve 运行中替换
+	// hubStatus 给 status 报 hub 连接状态与地址；nil 表示未接入 hub。Listen 之前装好，之后只读。
+	hubStatus func() (state, url string)
 
 	// 暂停分开存：本机 pause/resume 与 hub 下发的总开关，生效值取或交给 rules。
 	// pauseMu 同时串行化 state.json 的写入，两个字段总是一起写。
@@ -90,6 +92,10 @@ func isNil(v any) bool {
 
 // Pending 返回未完成请求表，hub 客户端重连时枚举用。只能在 Listen 之前调用（不加锁）。
 func (s *Server) Pending() *Pending { return s.pending }
+
+// SetHubStatus 装上 hub 连接状态的来源（守护进程里传 HubClient.State 与 hub 地址），status 每次现取；
+// 没装时 status 报 none。只能在 Listen 之前调用（不加锁）；fn 会在处理连接的 goroutine 里并发调用。
+func (s *Server) SetHubStatus(fn func() (state, url string)) { s.hubStatus = fn }
 
 // SetDecider 换决定来源（装 hub 客户端用）。只能在 Listen 之前调用（不加锁）。
 func (s *Server) SetDecider(d Decider) { s.decider = d }
@@ -430,7 +436,12 @@ func (s *Server) status() *proto.Status {
 	s.pauseMu.Lock()
 	paused, local, hub := s.rules.Paused(), s.localPaused, s.hubPaused
 	s.pauseMu.Unlock()
-	return &proto.Status{Paused: paused, LocalPaused: local, HubPaused: hub, Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String()}
+	hubState, hubURL := "none", ""
+	if s.hubStatus != nil {
+		hubState, hubURL = s.hubStatus()
+	}
+	return &proto.Status{Paused: paused, LocalPaused: local, HubPaused: hub, Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String(),
+		Hub: hubState, HubURL: hubURL}
 }
 
 // SetHubPaused 设置 hub 下发的总开关（hub 客户端收到 welcome、paused 帧时调用）。只改 hub 这一侧，

@@ -22,7 +22,7 @@ import (
 // ErrHubDisconnected 表示此刻没有到 hub 的连接。
 var ErrHubDisconnected = errors.New("未连接 hub")
 
-// ErrHubDisabled 表示 hub 以 401 拒绝了本机密钥（机器被吊销或密钥无效），客户端已停止连接，直到进程重启。
+// ErrHubDisabled 表示 hub 连续 hubUnauthorizedMax 次以 401 拒绝了本机密钥（机器被吊销或密钥无效），客户端已停止连接，直到进程重启。
 var ErrHubDisabled = errors.New("hub 拒绝了本机密钥，已停止连接 hub")
 
 // ErrGeminiNotForHub 表示试图把 Gemini 会话的请求送去 hub 等待（Gemini 只作审计上报）。
@@ -52,6 +52,10 @@ const (
 	hubHandshakeTimeout = 10 * time.Second // 拨号握手与等 welcome 的上限
 	hubErrorReasonMax   = 200              // hub 拒收某条请求时，转给等待者的文案字符上限
 	hubLogFieldMax      = 200              // 日志里来自 hub 的字段的字符上限
+
+	// hubUnauthorizedMax：握手连续被 401 拒绝（中间没有任何别的结果）这么多次才停用。hub 重启、反向代理切换时
+	// 偶发的一两次 401 不该让守护进程断开到下次重启；机器真被吊销时，按默认退避几秒内就停用。
+	hubUnauthorizedMax = 3
 
 	auditQueueMax = 2000 // 审计积压上限，满了丢最旧
 	auditBatchMax = 50   // 每帧至多这么多条；攒够就立即发
@@ -149,7 +153,7 @@ func wsURL(raw string) (string, error) {
 // noRedirectClient 拨号不跟随重定向：Authorization 头里的机器密钥只发给配置的 hub。
 var noRedirectClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
-// ConnState 返回当前是否连着 hub，以及一个在下一次状态变化（连上、断开，或被 401 停用）时关闭的通道。
+// ConnState 返回当前是否连着 hub，以及一个在下一次状态变化（连上、断开，或连续被 401 拒绝而停用）时关闭的通道。
 // 要同时关心停用的调用方，先调 ConnState 取通道、再查 Disabled：停用也会关闭这个通道，按这个顺序不会漏掉
 // 两次调用之间发生的停用（反过来先查 Disabled 再取通道，拿到的可能是停用之后的新通道，永远不会关闭）。
 func (h *HubClient) ConnState() (connected bool, changed <-chan struct{}) {
@@ -164,11 +168,26 @@ func (h *HubClient) Connected() bool {
 	return c
 }
 
-// Disabled 报告客户端是否已被永久停用（握手被 401 拒绝：机器被吊销或密钥无效）。停用后不再重连，直到进程重启。
+// Disabled 报告客户端是否已被永久停用（握手连续 hubUnauthorizedMax 次被 401 拒绝：机器被吊销或密钥无效）。
+// 停用后不再重连，直到进程重启。
 func (h *HubClient) Disabled() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.disabled
+}
+
+// State 报告到 hub 的连接状态，给 railse agent status 显示：disabled（已停用）、connected（连着），
+// 其余都是 connecting（还没连上、断线后等着重连，或握手被 401 拒绝但还没到停用的次数）。
+func (h *HubClient) State() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	switch {
+	case h.disabled:
+		return "disabled"
+	case h.conn != nil:
+		return "connected"
+	}
+	return "connecting"
 }
 
 // WaitConnected 等到连上或 ctx 结束；客户端已停用时立即返回 ErrHubDisabled。
@@ -216,15 +235,23 @@ type sessionEnd struct {
 	err           error // 其他原因；ctx 取消时不看
 }
 
-// Run 一直重连直到 ctx 取消；握手被 401 拒绝时停用并返回。同一客户端只能有一个 Run。
+// Run 一直重连直到 ctx 取消；握手连续 hubUnauthorizedMax 次被 401 拒绝时停用并返回，之前的 401 照常退避重连。
+// 同一客户端只能有一个 Run。
 func (h *HubClient) Run(ctx context.Context) {
-	attempt := 0
+	// unauthorized 是连续被 401 拒绝的次数：任何别的结果（连上过、连不上、5xx、协议版本不一致）都归零。
+	// 只在本 goroutine 里读写，不加锁。
+	attempt, unauthorized := 0, 0
 	for {
 		end := h.session(ctx)
 		if ctx.Err() != nil {
 			return
 		}
 		if end.unauthorized {
+			unauthorized++
+		} else {
+			unauthorized = 0
+		}
+		if unauthorized >= hubUnauthorizedMax {
 			h.disable()
 			h.log.Printf("！！hub %s 以 HTTP 401 拒绝了本机密钥：本机可能已被吊销，或 machine.json 里的密钥无效。"+
 				"已停止连接 hub，请求一律交回终端；请重新 railse agent enroll 后重启守护进程", h.addr)
@@ -239,7 +266,11 @@ func (h *HubClient) Run(ctx context.Context) {
 		} else {
 			wait = h.backoff[min(attempt, len(h.backoff)-1)]
 			attempt++
-			if end.err != nil {
+			switch {
+			case end.unauthorized:
+				h.log.Printf("hub %s 回 HTTP 401（第 %d/%d 次），稍后重试；若持续，本机可能已被吊销或 machine.json 里的密钥无效",
+					h.addr, unauthorized, hubUnauthorizedMax)
+			case end.err != nil:
 				h.log.Printf("与 hub %s 的连接结束: %q，%s 后重连", h.addr, clipText(end.err.Error(), hubLogFieldMax), wait)
 			}
 		}
