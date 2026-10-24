@@ -53,7 +53,7 @@ const (
 	hubErrorReasonMax   = 200              // hub 拒收某条请求时，转给等待者的文案字符上限
 	hubLogFieldMax      = 200              // 日志里来自 hub 的字段的字符上限
 
-	// hubUnauthorizedMax：握手连续被 401 拒绝（中间没有任何别的结果）这么多次才停用。hub 重启、反向代理切换时
+	// hubUnauthorizedMax：握手连续被 401 拒绝（中间没有成功握手）这么多次才停用。hub 重启、反向代理切换时
 	// 偶发的一两次 401 不该让守护进程断开到下次重启；机器真被吊销时，按默认退避几秒内就停用。
 	hubUnauthorizedMax = 3
 
@@ -229,6 +229,7 @@ func (h *HubClient) disable() {
 
 // sessionEnd 说明一次连接为什么结束。
 type sessionEnd struct {
+	welcomed      bool  // 握手成功过（收到 welcome、标为已连接）：连续 401 的计数归零
 	stable        bool  // 连接稳定过（收到 hub 的 ping，或持续了 stableAfter）：之后退避归零
 	unauthorized  bool  // 握手被 401 拒绝
 	protoMismatch bool  // hub 回 Error 帧后以 PolicyViolation 关闭（协议版本不一致）
@@ -238,8 +239,8 @@ type sessionEnd struct {
 // Run 一直重连直到 ctx 取消；握手连续 hubUnauthorizedMax 次被 401 拒绝时停用并返回，之前的 401 照常退避重连。
 // 同一客户端只能有一个 Run。
 func (h *HubClient) Run(ctx context.Context) {
-	// unauthorized 是连续被 401 拒绝的次数：任何别的结果（连上过、连不上、5xx、协议版本不一致）都归零。
-	// 只在本 goroutine 里读写，不加锁。
+	// unauthorized 是连续被 401 拒绝的次数，只在成功握手（welcome）后归零；连不上、5xx、超时、协议版本不一致
+	// 都不改它（否则 401 与 502 交替时永远停不下来）。只在本 goroutine 里读写，不加锁。
 	attempt, unauthorized := 0, 0
 	for {
 		end := h.session(ctx)
@@ -248,7 +249,7 @@ func (h *HubClient) Run(ctx context.Context) {
 		}
 		if end.unauthorized {
 			unauthorized++
-		} else {
+		} else if end.welcomed {
 			unauthorized = 0
 		}
 		if unauthorized >= hubUnauthorizedMax {
@@ -333,8 +334,9 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 	defer h.setConn(nil)
 	h.log.Printf("已连接 hub %s，规则版本 %d", h.addr, welcome.RulesVersion)
 	connectedAt, pinged := time.Now(), false
+	// setConn 之后的每条返回路径都经 ended，都算握手成功过
 	ended := func(err error) sessionEnd {
-		return sessionEnd{stable: pinged || time.Since(connectedAt) >= h.stableAfter, err: err}
+		return sessionEnd{welcomed: true, stable: pinged || time.Since(connectedAt) >= h.stableAfter, err: err}
 	}
 
 	// 重发本机全部 pending（Gemini 除外）；hub 对已知 id 不重复登记，已决定的再发一次决定。

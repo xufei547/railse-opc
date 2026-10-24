@@ -474,7 +474,8 @@ func TestHubClientDisabledOnRevoke(t *testing.T) {
 	if err := c.SendPending(shellPending("r9", "claude")); !errors.Is(err, agent.ErrHubDisconnected) {
 		t.Fatalf("停用后发送应报未连接: %v", err)
 	}
-	if !strings.Contains(env.logs.String(), "401") {
+	// 只数停用时的醒目日志：前两次 401 的“第 N/3 次”日志也含 401
+	if !strings.Contains(env.logs.String(), "以 HTTP 401 拒绝了本机密钥") {
 		t.Fatalf("应醒目记下 401: %s", env.logs.String())
 	}
 }

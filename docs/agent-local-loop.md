@@ -7,8 +7,10 @@
 ```sh
 go build -o ~/bin/railse ./cmd/railse
 railse agent run --foreground    # 前台运行，--foreground 让日志同时打到 stderr；Ctrl-C 退出
-railse agent status              # 另开终端查看：paused、规则条数、待决请求数
+railse agent status              # 另开终端查看：paused、规则条数、待决请求数、hub 连接
 ```
+
+`railse agent status` 的 `hub:` 行：没接入 hub（没有 `machine.json`）时是 `hub: none`；接入后是 `hub: connecting <地址>`（还没连上或等着重连）、`hub: connected <地址>`，或 `hub: disabled <地址>`（连续 3 次被 hub 以 401 拒绝，已停止连接，要 `railse agent enroll --force` 后重启守护进程，见 `docs/hub.md`）。
 
 配置目录取 `$RAILSE_HOME`，没设就是 `~/.railse`（权限 0700），里面有 `agent.sock`、`rules.yaml`、`audit.jsonl`、`state.json`、`agent.log`，socket 与审计为 0600。`agent` 子命令也接受 `--dir 目录`，但钩子只认 `$RAILSE_HOME` 或 `~/.railse`，所以 CLI 与守护进程要用同一个 `RAILSE_HOME`。开机自启留到后续计划。
 
