@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/railse/railse-opc/internal/agent"
+	"github.com/railse/railse-opc/internal/autostart"
 	"github.com/railse/railse-opc/internal/hooksconf"
 )
 
@@ -682,4 +685,380 @@ func readFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// needUserAutostart 在装不了用户级托管的环境里跳过：开机自启只有 macOS 与 Linux，root 装用户级托管会被拒绝。
+func needUserAutostart(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("开机自启只在 macOS 与 Linux 上有")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root 装用户级托管会被拒绝")
+	}
+}
+
+// setupAllFixture 是 setup all 测试的环境：假家目录 home（里面有可执行的假 railse）、带 .git 的项目、守护进程数据目录。
+type setupAllFixture struct {
+	home, proj, dir, bin string
+	rec                  *cmdRec
+}
+
+// setupAllEnv 先换掉 doctor 看到的 CLI（不真跑 claude、codex、gemini 的 --version），再用 autostartEnv 给假家目录与
+// 记录命令的 runCommand（不跑真实的 launchctl、systemctl），托管后不等守护进程应答。绝不碰真实的家目录。
+func setupAllEnv(t *testing.T) setupAllFixture {
+	t.Helper()
+	fakeDoctorCLIs(t)
+	home, rec := autostartEnv(t)
+	t.Setenv("RAILSE_HUB_HOME", filepath.Join(home, "nohub"))
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(proj, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := setupDaemonWait
+	setupDaemonWait = 0
+	t.Cleanup(func() { setupDaemonWait = old })
+	return setupAllFixture{home: home, proj: proj, dir: filepath.Join(home, "h"), bin: filepath.Join(home, "railse"), rec: rec}
+}
+
+// args 是带上本环境 --project、--dir、--bin 的 railse setup all 命令行。
+func (f setupAllFixture) args(extra ...string) []string {
+	return append([]string{"setup", "all", "--project", f.proj, "--dir", f.dir, "--bin", f.bin}, extra...)
+}
+
+// agentJobPath 是本系统上守护进程的托管文件。
+func (f setupAllFixture) agentJobPath() string {
+	if runtime.GOOS == "darwin" {
+		return autostart.PlistPath(f.home, "agent")
+	}
+	return autostart.UnitPath(f.home, "agent", false)
+}
+
+func newEnrollToken(t *testing.T, h *testHub) string {
+	t.Helper()
+	tok, err := h.st.CreateEnrollToken(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+func TestSetupAllEnrollsHooksAutostartAndDoctor(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	var out, errOut bytes.Buffer
+	code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--name", "mac"), &out, &errOut)
+	// doctor 会因守护进程没在跑（测试里只托管不真起）而 fail，setup all 把 doctor 结果当信息不当失败
+	if code != 0 {
+		t.Fatalf("setup all: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	m, err := agent.LoadMachine(filepath.Join(f.dir, "machine.json"))
+	if err != nil || m.Name != "mac" {
+		t.Fatalf("应已接入: %+v %v", m, err)
+	}
+	local, _ := hooksconf.ClaudePaths(f.proj)
+	if !strings.Contains(string(readFile(t, local)), f.bin+" hook claude") {
+		t.Fatal("应已装 Claude 钩子，且指向 --bin")
+	}
+	for _, p := range []string{hooksconf.CodexPath(f.home), hooksconf.GeminiPath(f.proj)} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("应已装钩子 %s", p)
+		}
+	}
+	if len(f.rec.calls) == 0 {
+		t.Fatal("应已调用 launchctl/systemctl 托管")
+	}
+	for _, c := range f.rec.calls {
+		if c[0] != "launchctl" && c[0] != "systemctl" {
+			t.Fatalf("不该跑 %v", c)
+		}
+	}
+	job := string(readFile(t, f.agentJobPath()))
+	if !strings.Contains(job, f.dir) || !strings.Contains(job, f.bin) {
+		t.Fatalf("托管文件应带上 --dir 与 --bin:\n%s", job)
+	}
+	s := out.String()
+	for _, want := range []string{"已接入", "已写入", "已托管", "[ok]", "守护进程数据目录：" + f.dir, "[fail]", "体检有失败项", "下一步", h.http.URL, "docs/web.md"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("输出缺 %q:\n%s", want, s)
+		}
+	}
+	last := -1
+	for i := 1; i <= 4; i++ {
+		at := strings.Index(s, fmt.Sprintf("== %d. ", i))
+		if at <= last {
+			t.Fatalf("第 %d 步的标题缺失或顺序不对:\n%s", i, s)
+		}
+		last = at
+	}
+	if strings.Index(s, "下一步") < last {
+		t.Fatalf("下一步应在体检之后:\n%s", s)
+	}
+	// 再跑一次：已接入则跳过接入，不报错；--no-autostart 不再托管
+	calls := len(f.rec.calls)
+	out.Reset()
+	if code := run(f.args("--hub", h.http.URL, "--token", "used", "--no-autostart"), &out, &errOut); code != 0 || !strings.Contains(out.String(), "已接入过") {
+		t.Fatalf("第二次: %d %q %q", code, out.String(), errOut.String())
+	}
+	if len(f.rec.calls) != calls || !strings.Contains(out.String(), "--no-autostart") {
+		t.Fatalf("--no-autostart 不该托管: %v\n%s", f.rec.calls[calls:], out.String())
+	}
+	// 已接入时不必再给 --hub、--token；下一步里的地址取自 machine.json
+	out.Reset()
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 0 || !strings.Contains(out.String(), "已接入过") || !strings.Contains(out.String(), h.http.URL) {
+		t.Fatalf("已接入、不给 --hub: %d %q %q", code, out.String(), errOut.String())
+	}
+	if code := run([]string{"setup", "all", "--project", f.proj}, &out, &errOut); code != 2 {
+		t.Fatalf("缺 --hub/--token 应退出 2: %d", code)
+	}
+}
+
+func TestSetupAllUsageErrors(t *testing.T) {
+	f := setupAllEnv(t)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{f.args(), "需要 --hub 与 --token"},
+		{f.args("--hub", "https://hub.example.com"), "需要 --hub 与 --token"},
+		{f.args("--token", "t"), "需要 --hub 与 --token"},
+		{f.args("--hub", "ftp://hub.example.com", "--token", "t"), "--hub 必须是"},
+		{f.args("--hub", "https://hub.example.com", "--token", "t", "extra"), "多余的参数"},
+		{f.args("--bogus"), "railse setup all"},
+		{[]string{"setup", "all", "-h"}, "railse setup all"},
+	} {
+		var out, errOut bytes.Buffer
+		if code := run(tc.args, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), tc.want) {
+			t.Fatalf("%v: %d %q", tc.args, code, errOut.String())
+		}
+		if !strings.Contains(errOut.String(), "railse setup all --hub URL") {
+			t.Fatalf("%v: 应打印 setup all 的用法: %q", tc.args, errOut.String())
+		}
+	}
+	if _, err := os.Stat(f.dir); !os.IsNotExist(err) {
+		t.Fatal("用法错不该建数据目录")
+	}
+	if _, err := os.Stat(filepath.Join(f.proj, ".claude")); !os.IsNotExist(err) {
+		t.Fatal("用法错不该装钩子")
+	}
+	if len(f.rec.calls) != 0 {
+		t.Fatalf("用法错不该托管: %v", f.rec.calls)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup"}, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "railse setup all") {
+		t.Fatalf("setup 的用法应列出 all: %d %q", code, errOut.String())
+	}
+}
+
+// 输入一看就不对（--bin 不能执行、项目目录不存在）时一步都不做。
+func TestSetupAllChecksInputsBeforeAnyStep(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	tok := newEnrollToken(t, h)
+	var out, errOut bytes.Buffer
+	if code := run(append(f.args("--hub", h.http.URL, "--token", tok), "--bin", filepath.Join(f.home, "nope")), &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "不存在") {
+		t.Fatalf("--bin 不存在: %d %q", code, errOut.String())
+	}
+	errOut.Reset()
+	if code := run(append(f.args("--hub", h.http.URL, "--token", tok), "--project", filepath.Join(f.home, "nope")), &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "项目目录") {
+		t.Fatalf("项目目录不存在: %d %q", code, errOut.String())
+	}
+	if _, err := os.Stat(f.dir); !os.IsNotExist(err) {
+		t.Fatal("输入不对时不该接入")
+	}
+	if strings.Contains(out.String(), "== 1.") || len(f.rec.calls) != 0 {
+		t.Fatalf("输入不对时一步都不该做: %q %v", out.String(), f.rec.calls)
+	}
+}
+
+func TestSetupAllEnrollFailureStopsAtStep1(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", "not-a-token"), &out, &errOut); code != 1 {
+		t.Fatalf("接入码不对应退出 1: %d %q", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "第 1 步（接入 hub）") || !strings.Contains(errOut.String(), "接入失败") {
+		t.Fatalf("应说明停在第 1 步: %q", errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "machine.json")); !os.IsNotExist(err) {
+		t.Fatal("接入失败不该有 machine.json")
+	}
+	if _, err := os.Stat(filepath.Join(f.proj, ".claude")); !os.IsNotExist(err) {
+		t.Fatal("接入失败后不该装钩子")
+	}
+	if len(f.rec.calls) != 0 || strings.Contains(out.String(), "下一步") || strings.Contains(out.String(), "项通过") {
+		t.Fatalf("接入失败后不该托管、体检: %v %q", f.rec.calls, out.String())
+	}
+}
+
+func TestSetupAllHooksFailureStopsAtStep2(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	local, _ := hooksconf.ClaudePaths(f.proj)
+	os.MkdirAll(filepath.Dir(local), 0o755)
+	os.WriteFile(local, []byte("{bad"), 0o644)
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h)), &out, &errOut); code != 1 {
+		t.Fatalf("钩子装不了应退出 1: %d %q", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "第 2 步（安装钩子）") || !strings.Contains(errOut.String(), "已完成：接入 hub") {
+		t.Fatalf("应说明停在第 2 步、已接入: %q", errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "machine.json")); err != nil {
+		t.Fatal("第 1 步应已完成")
+	}
+	if len(f.rec.calls) != 0 || strings.Contains(out.String(), "下一步") || strings.Contains(out.String(), "项通过") {
+		t.Fatalf("钩子失败后不该托管、体检: %v %q", f.rec.calls, out.String())
+	}
+}
+
+func TestSetupAllAutostartFailureStopsAtStep3(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	f.rec.respond = func([]string) (string, error) { return "boom", exitErr(1) }
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h)), &out, &errOut); code != 1 {
+		t.Fatalf("托管失败应退出 1: %d %q", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "第 3 步（开机自启）") || !strings.Contains(errOut.String(), "已完成：接入 hub、安装钩子") || !strings.Contains(errOut.String(), "railse agent run") {
+		t.Fatalf("应说明停在第 3 步: %q", errOut.String())
+	}
+	local, _ := hooksconf.ClaudePaths(f.proj)
+	if _, err := os.Stat(local); err != nil {
+		t.Fatal("第 2 步应已完成")
+	}
+	if strings.Contains(out.String(), "下一步") || strings.Contains(out.String(), "项通过") {
+		t.Fatalf("托管失败后不该体检: %q", out.String())
+	}
+}
+
+func TestSetupAllNoHooksAndNoAutostart(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-hooks"), &out, &errOut); code != 0 {
+		t.Fatalf("--no-hooks: %d %q", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(f.proj, ".claude")); !os.IsNotExist(err) {
+		t.Fatal("--no-hooks 不该装 Claude 钩子")
+	}
+	if _, err := os.Stat(hooksconf.CodexPath(f.home)); !os.IsNotExist(err) {
+		t.Fatal("--no-hooks 不该装 Codex 钩子")
+	}
+	if len(f.rec.calls) == 0 || !strings.Contains(out.String(), "--no-hooks") || !strings.Contains(out.String(), "项通过") {
+		t.Fatalf("--no-hooks 仍应托管与体检: %v %q", f.rec.calls, out.String())
+	}
+	calls := len(f.rec.calls)
+	out.Reset()
+	if code := run(f.args("--no-hooks", "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("--no-hooks --no-autostart: %d %q", code, errOut.String())
+	}
+	if len(f.rec.calls) != calls || !strings.Contains(out.String(), "项通过") || !strings.Contains(out.String(), "下一步") {
+		t.Fatalf("两个都跳过时只体检: %v %q", f.rec.calls[calls:], out.String())
+	}
+	// 没托管时体检的失败不是“还没起来”
+	if !strings.Contains(out.String(), "按上面的“修复：”处理") || strings.Contains(out.String(), "过几秒") {
+		t.Fatalf("没托管时的体检说明不对: %q", out.String())
+	}
+}
+
+func TestSetupAllSkipsEnrollWhenMachineExists(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	// 先接入一次
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("首次: %d %q", code, errOut.String())
+	}
+	mpath := filepath.Join(f.dir, "machine.json")
+	before := readFile(t, mpath)
+	// 已接入、--hub 换了地址：跳过接入、不动 machine.json，提醒地址不一样；下一步用 machine.json 里的地址
+	out.Reset()
+	if code := run(f.args("--hub", "https://other.example.com", "--token", "x", "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("已接入: %d %q", code, errOut.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "https://other.example.com") || !strings.Contains(s, "--force") || !strings.Contains(s[strings.Index(s, "下一步"):], h.http.URL) {
+		t.Fatalf("已接入时应跳过并提醒地址不同: %q", s)
+	}
+	if !bytes.Equal(readFile(t, mpath), before) {
+		t.Fatal("跳过接入不该改 machine.json")
+	}
+	// --force 重新接入
+	out.Reset()
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--force", "--no-autostart"), &out, &errOut); code != 0 || !strings.Contains(out.String(), "已接入 hub") {
+		t.Fatalf("--force: %d %q %q", code, out.String(), errOut.String())
+	}
+	if bytes.Equal(readFile(t, mpath), before) {
+		t.Fatal("--force 应重新接入、换掉 machine.json")
+	}
+	// machine.json 坏了：不当已接入，停在第 1 步
+	os.WriteFile(mpath, []byte("{"), 0o600)
+	os.RemoveAll(filepath.Join(f.proj, ".claude"))
+	errOut.Reset()
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "第 1 步") || !strings.Contains(errOut.String(), "--force") {
+		t.Fatalf("坏的 machine.json: %d %q", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(f.proj, ".claude")); !os.IsNotExist(err) {
+		t.Fatal("第 1 步失败后不该装钩子")
+	}
+}
+
+// 手动起的守护进程在跑、又没有托管时不托管（第二个实例抢不到 socket，会被 launchd/systemd 反复拉起），照常体检；
+// 已经托管过的照常重装（bootout+bootstrap、restart 会换掉在跑的那个）。
+func TestSetupAllSkipsAutostartWhenUnmanagedDaemonRuns(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	serveAgent(t, agent.ConfigIn(f.dir))
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h)), &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d %q %q", code, out.String(), errOut.String())
+	}
+	if len(f.rec.calls) != 0 {
+		t.Fatalf("手动起的守护进程在跑时不该托管: %v", f.rec.calls)
+	}
+	s := out.String()
+	for _, want := range []string{"已在运行", "Ctrl-C", "railse setup autostart --dir " + f.dir + " --bin " + f.bin, "[ok]    守护进程在跑", "没有托管开机自启", "下一步"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("输出缺 %q:\n%s", want, s)
+		}
+	}
+	if _, err := os.Stat(f.agentJobPath()); !os.IsNotExist(err) {
+		t.Fatal("不该写托管文件")
+	}
+	// 已有托管文件：照常重装，并等到守护进程应答
+	os.MkdirAll(filepath.Dir(f.agentJobPath()), 0o755)
+	os.WriteFile(f.agentJobPath(), []byte("old"), 0o644)
+	setupDaemonWait = 2 * time.Second
+	out.Reset()
+	if code := run(f.args(), &out, &errOut); code != 0 {
+		t.Fatalf("已托管时重跑: %d %q %q", code, out.String(), errOut.String())
+	}
+	if len(f.rec.calls) == 0 || !strings.Contains(out.String(), "已托管") || !strings.Contains(out.String(), "守护进程已应答") {
+		t.Fatalf("已托管时应重装: %v %q", f.rec.calls, out.String())
+	}
+}
+
+// 托管后守护进程迟迟不应答：等到上限就照常体检，并说明体检里的失败可能只是还没起来。
+func TestSetupAllWaitsForDaemonThenReports(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	setupDaemonWait = 300 * time.Millisecond
+	var out, errOut bytes.Buffer
+	start := time.Now()
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h)), &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d %q", code, errOut.String())
+	}
+	if time.Since(start) < 300*time.Millisecond {
+		t.Fatal("应等守护进程应答到上限")
+	}
+	if !strings.Contains(out.String(), "还没有应答") || !strings.Contains(out.String(), "过几秒再跑 railse doctor --project "+f.proj+" --dir "+f.dir+" --bin "+f.bin) {
+		t.Fatalf("应说明守护进程还没起来: %q", out.String())
+	}
 }
