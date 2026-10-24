@@ -15,13 +15,14 @@
 ## Global Constraints
 
 - 模块路径 `github.com/railse/railse-opc`，`go 1.26.0`。Go 侧不新增 `require`；工具链（golangci-lint、goreleaser）只经 `go run <模块>@<版本>` 或 GitHub Action 使用，不进 go.mod。网页侧不改依赖。
-- 平台：macOS arm64、Linux amd64、Linux arm64（设计 6.2）；`CGO_ENABLED=0`（modernc sqlite 纯 Go）。开机自启：macOS 用 launchd 用户代理，Linux 用 systemd（用户单元；hub 以 root 安装时用系统单元）。Windows 不做。
+- 平台：macOS arm64、Linux amd64、Linux arm64（设计 6.2）；`CGO_ENABLED=0`（modernc sqlite 纯 Go）。开机自启：macOS 用 launchd 用户代理，Linux 用 systemd（用户单元；hub 以 root 安装时用系统单元：只配 `--hub`，默认数据目录 `/var/lib/railse-hub`，单元加 `StateDirectory=railse-hub`、`StateDirectoryMode=0700`，显式 `--dir` 优先；hub 永远不以 root 运行，绑定 443/80 靠 `AmbientCapabilities=CAP_NET_BIND_SERVICE`，`hub run` 发现 euid 为 0 时警告但不拒绝）。Windows 不做。
 - 新增子命令沿用现有写法：`flag.FlagSet` 加 `foreignFlags` 拒绝不认的标志、`fs.NArg() != 0` 报多余参数、用法错退出 2、运行错退出 1、全部文案中文。写文件一律原子写（临时文件加 rename），私密文件 0600、目录 0700。
-- doctor 只读：不改任何配置、不起任何进程、不连 CLI 的账号；每项检查有 `ok`/`warn`/`fail`/`skip` 四种结果与一句修复提示；任一 `fail` 退出码 1。
+- doctor 只读：不改任何配置、不启动守护进程或服务、不连 CLI 的账号（允许带 10 秒超时跑 `claude|codex|gemini --version`）；每项检查有 `ok`/`warn`/`fail`/`skip` 四种结果与一句修复提示；任一 `fail` 退出码 1。
 - ACME：只支持 Let's Encrypt 生产目录（autocert 默认），账户与证书私钥明文存在 hub 数据目录 `acme/`（0700，文件 0600，设计 5.3 的出站与签名密钥例外）；直出 TLS 时 `http.Server` 设 `ReadTimeout`。
 - 每个 Task 结束时 `make test` 全过（gofmt、vet、`go test ./... -race`、网页检查）；改了 CI 或发布配置的 Task 还要本地校验 YAML 能解析（`ruby -ryaml -e 'YAML.load_file(ARGV[0])' 文件`，macOS 自带 ruby）与 goreleaser 配置能通过 `check`。测试里的目录用 `os.MkdirTemp("", "rs")`。提交信息用中文。
-- 发布产物：`railse_<version>_<os>_<arch>.tar.gz`（内含 `railse`、`LICENSE`、`README.md`）与 `checksums.txt`；版本号来自 git tag `vX.Y.Z`，经 `-X main.version` 注入。GitHub 仓库 `railse/railse-opc`（与模块路径一致；安装脚本可用环境变量改）。
-- 许可证 Apache 2.0（仓库目前没有 LICENSE 文件，本计划补上）。
+- 发布产物：`railse_<version>_<os>_<arch>.tar.gz`（内含 `railse`、`LICENSE`、`README.md`、`docs/*.md`，离线可读）与 `checksums.txt`；版本号来自 git tag `vX.Y.Z`，经 `-X main.version` 注入。GitHub 仓库 `railse/railse-opc`（与模块路径一致；安装脚本可用 `RAILSE_REPO` 改，goreleaser 的 owner/name 待用户确认 GitHub 账号后定）。
+- 许可证 Apache 2.0（`LICENSE` 已在仓库首个提交里，Task 10 只核对首行，不再下载）。
+- golangci-lint：`errcheck` 只对 `_test.go` 排除，非测试代码逐条修，不放宽其他配置（2026-10-25 预检决定）。
 
 ---
 
