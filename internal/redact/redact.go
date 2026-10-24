@@ -25,11 +25,12 @@ const quotedOpen = `"[^"]*(?:"|$)|'[^']*(?:'|$)|\\"(?:[^"\\]|\\.)*?\\"`
 // key 是敏感键名，前面可带任意前缀。token 不认 tokens，auth 只认 auth、auth_token、
 // auth-key、authorization 这类，免得误抹 max_tokens、author。pwd 只认作后缀且前面要有 _ . - 分隔
 // （MYSQL_PWD、db.pwd）：PWD、OLDPWD 是 shell 的目录变量，cwd 是工作目录，都不是凭据；代价是单独的 pwd=xxx 不抹。
+// sshpass 认作后缀：SSHPASS 是 sshpass -e 读的密码环境变量。
 const key = `[a-z0-9_.-]*(?:` +
 	`token(?:[a-rt-z0-9_.-][a-z0-9_.-]*)?` +
 	`|auth(?:orization|[_-]?(?:token|key))?` +
 	`|(?:api[-_]?key|secret|password|passwd)[a-z0-9_.-]*` +
-	`|[_.-]pwd)`
+	`|[_.-]pwd|sshpass)`
 
 // sameCmd 是同一条命令里命令名之后、目标参数之前的部分：不越过换行、; |、&&（单个 & 放过，免得查询串里的 & 截断匹配），
 // 引号括起的整段当一个单位（其中的 ; | & 不算分隔），反斜杠紧跟换行（含 \r\n）是续行、仍算同一条命令。
@@ -102,6 +103,9 @@ func compile(bare string, open bool) []rule {
 // 占位符后面还连着值字符时照原来的字符类整段抹，免得 password=<redacted>RealSecret 漏出后半截。
 func build(bare string, q quoting) []rule {
 	stop := `[` + bare[2:len(bare)-2] + `]` // 值字符类以外的字符
+	// sshpass 在 -p 之前的选项（getopt 的 + 模式只认命令之前的选项）：带参数的 -f 文件、-d 描述符、-P 提示词（参数紧贴或
+	// 隔空白，可以是引号段），不带参数的 -h -e -V -v（可组合）。参数不脱敏，只是跳过
+	sshpassOpts := `(?:\s+-[ehVv]*[fdP]\s*(?:` + q.quoted + `|` + bare + `)+|\s+-[ehVv]+)*`
 	phOnly := q.ph + `(?P<phend>` + stop + `|$)`
 	value := `(?:` + q.quoted + `|(?:` + phOnly + `|(?:` + q.ph + `)?` + bare + `))`
 	if q.word {
@@ -129,13 +133,17 @@ func build(bare string, q quoting) []rule {
 		// URL 里的 user:pass@（任意 scheme）：用户名留着，只抹密码。密码里的 @ 算在密码里（取 / ? # 之前最后一个 @）
 		{re: regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://` + q.urlUser + `:)` + q.urlPass + `@`), repl: "${1}" + placeholder + "@", need: ":"},
 		// curl 的 -u/--user、-U/--proxy-user 的 user:pass（-u、-U 可以在组合短选项末尾，如 -sSu）：用户名与引号留着，
-		// 只抹密码；不带冒号的（curl 会提示输入密码）不动。引号值要成对（open 时允许缺右引号），双引号里认转义的 \"
+		// 只抹密码；不带冒号的（curl 会提示输入密码）不动。整段带引号的（'user:pass'、"user:pass"）引号要成对（open 时允许
+		// 缺右引号），双引号里认转义的 \"；用户名不带引号时密码与别的值一样，可以是引号段（user:'pass'），整个词抹成占位符
 		{re: regexp.MustCompile(`(\bcurl\b` + q.sameCmd + `\s(?:-[A-Za-z]*[uU]\s*|--user\s+|--proxy-user\s+))` +
 			`(?:` + q.sqUser + q.sqPass + q.sqEnd + `|` + q.dqUser + q.dqPass + q.dqEnd +
-			`|(\\"[^'":\s\\` + x + `]*:)(?:[^"\\` + x + `]|\\[^"` + x + `])*` + q.jqEnd + `|` + q.user + bare + `)`),
+			`|(\\"[^'":\s\\` + x + `]*:)(?:[^"\\` + x + `]|\\[^"` + x + `])*` + q.jqEnd + `|` + q.user + value + `)`),
 			repl: "${1}${2}${4}${6}${8}" + placeholder + "${phend}${3}${5}${7}", need: "-"},
 		// mysql 系命令紧贴 -p 的密码（-pxxx、-p'xxx'）。-p 单独出现时 mysql 提示输入密码、后面的是库名；-P 是端口：都不动
 		{re: regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + q.sameCmd + `\s-p)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
+		// sshpass 的 -p 密码（-p pw、-p 'pw'、-p'pw'、-ppw，-p 可以在 -v 这类选项之后或组合在末尾，如 -vp）。只认 sshpass
+		// 自己的选项里的 -p：后面 ssh、scp、rsync 自己的 -p（端口、保留权限）不动
+		{re: regexp.MustCompile(`(\bsshpass` + sshpassOpts + `\s+-[ehVv]*p\s*)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
 		// 裸 token：GitHub、OpenAI、Slack、AWS
 		{re: regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), repl: placeholder, need: "_-A"},
 	}

