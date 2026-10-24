@@ -39,9 +39,14 @@ const (
 	// 反斜杠加 CRLF 不是续行：bash 里 \ 转义的是 CR，随后的 LF 照样分隔命令
 	vCont = 0x15
 	// vCmd 是命令位置上的 sshpass 命令名（"sshpass"、SSHPASS、/usr/bin/sshpass、ss''hpass……）：扫描时认出命令名后，
-	// 整个词在视图里换成它（词里的 vNest 保留）。sshpass -p 规则在视图里只从这里开始认，别的工具参数里的 sshpass 不认
-	// （env -u SSHPASS -u -p curl 的 -p 是 env -u 的参数，curl 才是程序，不能当密码抹掉）
+	// 整个词在视图里换成它（词里的 vNest 保留）。sshpass -p 的完整规则（认引号、大小写、跳过 sshpass 不认的选项）只从这里
+	// 开始认；别的工具参数里的 sshpass 最多按 vArg 的窄规则认（env -u SSHPASS -u -p curl 的 -p 是 env -u 的参数，
+	// curl 才是程序，不能当密码抹掉）
 	vCmd = 0x16
+	// vArg 是不在命令位置、按窄规则认的 sshpass 词：小写、不带引号与转义（可带路径），前一个词不是选项（不以 - 开头，
+	// 单独的 -- 除外）。ssh jump sshpass -p pw、docker exec ctr sshpass -p pw 这类扫描器不认的前缀之后照样抹密码，
+	// xargs -I sshpass -p curl、docker run -e sshpass -p 8080:80 里 sshpass 是选项的值，不认
+	vArg = 0x17
 )
 
 // viewPlaceholder 是占位符在视图里的样子，与 placeholder 等长。
@@ -50,7 +55,7 @@ const viewPlaceholder = "\x13redacted>"
 // viewStruct 是视图里的结构字节，引号值也不能跨过；viewExcluded 另含占位符和引号里屏蔽的字节，裸值、用户名、URL 密码都排除。
 const (
 	viewStruct   = `\x10\x11\x12`
-	viewExcluded = `\x10\x11\x12\x13\x14\x16`
+	viewExcluded = `\x10\x11\x12\x13\x14\x16\x17`
 )
 
 // maxDepth 是嵌套结构的层数上限，超过的不再展开（开头的字符当普通字符），免得对抗输入把递归压得太深。
@@ -86,6 +91,8 @@ var viewRules = func() []rule {
 		ph:       `[<\x13\x14]redacted>`, // 原文里的、本层插入的、引号里已抹过的占位符
 		word:     true,
 	}
+	// 不在命令位置的 sshpass 按窄规则认（见 vArg）；标志与值之间不跨换行
+	q.sshpassArg, q.sameLine = `\x17+`, true
 	rules := build("[^\\s'\"\\\\;|&<>()`$"+x+"]+", q)
 	for i := range rules {
 		if rules[i].vrepl == "" {
@@ -239,16 +246,16 @@ func (b *builder) nest(s string) {
 	b.nests = append(b.nests, s)
 }
 
-// markCmd 把视图里从 from 到末尾的这个命令名换成 vCmd，其中的 vNest 保留（个数与顺序不能变）。原文不动。
-func (b *builder) markCmd(from int) {
+// mark 把视图里从 from 到末尾的这个词换成 v（vCmd 或 vArg），其中的 vNest 保留（个数与顺序不能变）。原文不动。
+func (b *builder) mark(from int, v byte) {
 	for i := from; i < len(b.view); i++ {
 		if b.view[i] != vNest {
-			b.view[i] = vCmd
+			b.view[i] = v
 		}
 	}
 }
 
-func isViewByte(c byte) bool { return c >= vNest && c <= vCmd }
+func isViewByte(c byte) bool { return c >= vNest && c <= vArg }
 
 // viewByte 是引号外普通字符在视图里的样子。
 func viewByte(c byte) byte {
@@ -376,6 +383,8 @@ type ctx struct {
 	shellOpts int
 	pipe      []*heredoc // 当前管道里登记的 heredoc：后面的管道段是 shell 时，正文也是喂给它的
 	pending   []*heredoc // 等下一个换行读正文的 heredoc，按出现顺序
+	// prevOpt：当前简单命令里的上一个词是选项（以 - 开头，单独的 -- 除外），见 vArg
+	prevOpt bool
 }
 
 // context 从 sc.i 起扫描一层文本，到 closer（不消费）或 hi 为止，返回这层脱敏后的原文。
@@ -602,7 +611,7 @@ func (c *ctx) operator(ch byte) {
 func (c *ctx) endCmd(pipeEnd bool) {
 	c.cflag, c.eval, c.ssh, c.feeds, c.here, c.shellOpts = false, false, false, false, false, 0
 	c.wrap, c.wrapArg, c.wrapPos = "", false, 0
-	c.cmdPos, c.start = true, true
+	c.cmdPos, c.start, c.prevOpt = true, true, false
 	if pipeEnd {
 		c.pipe = c.pipe[:0]
 	}
@@ -613,7 +622,8 @@ var reservedWords = map[string]bool{"!": true, "{": true, "if": true, "then": tr
 	"do": true, "while": true, "until": true, "time": true}
 
 // endWord 结束当前词，按词的内容更新命令状态。只有命令位置上的词才当命令名认：命令开头、VAR=值 之后、
-// 包装命令及其选项之后、find 的 -exec 之后。参数里出现的 bash、eval、ssh 不算（echo ssh '…'）。
+// 包装命令（含 sshpass）及其选项之后、find 的 -exec 之后。参数里出现的 bash、eval、ssh 不算（echo ssh '…'）。
+// 不在命令位置的 sshpass 词按窄规则标成 vArg。
 func (c *ctx) endWord() {
 	if !c.inWord {
 		return
@@ -630,6 +640,9 @@ func (c *ctx) endWord() {
 	if c.mode != mShell {
 		return
 	}
+	prevOpt := c.prevOpt
+	c.prevOpt = len(w) > 0 && w[0] == '-' && w != "--"
+	isCmd := false
 	switch {
 	case c.cmdPos:
 		if reservedWords[kw] || !long && isAssign(w) {
@@ -637,18 +650,26 @@ func (c *ctx) endWord() {
 		}
 		c.cmdPos = false
 		c.command(name, kw)
+		isCmd = true
 	case c.wrap != "":
 		switch {
 		case c.wrapArg:
 			c.wrapArg = false
 		case len(w) > 1 && w[0] == '-':
-			c.wrapArg = len(w) == 2 && strings.IndexByte(wrapperArgs[c.wrap], w[1]) >= 0
+			if c.wrap == "sshpass" {
+				// sshpass 按 getopt 认组合的选项字母（-vp pw）：第一个带参数的字母在词尾时，下一个词是它的参数
+				k := strings.IndexAny(w[1:], wrapperArgs[c.wrap])
+				c.wrapArg = w[1] != '-' && k == len(w)-2
+			} else {
+				c.wrapArg = len(w) == 2 && strings.IndexByte(wrapperArgs[c.wrap], w[1]) >= 0
+			}
 		case c.wrap == "env" && isAssign(w):
 		case c.wrapPos > 0:
 			c.wrapPos--
 		default:
 			c.wrap = ""
 			c.command(name, kw)
+			isCmd = true
 		}
 	case w == "-exec" || w == "-execdir" || w == "-ok" || w == "-okdir":
 		c.cmdPos = true
@@ -670,6 +691,9 @@ func (c *ctx) endWord() {
 		c.shellOpts = 1
 		c.feed()
 	}
+	if !isCmd && !prevOpt && kw != "" && name == "sshpass" {
+		c.b.mark(c.wstart, vArg)
+	}
 }
 
 // isShellName 判断去掉引号、取路径最后一段后的命令名是不是 sh/bash/zsh/dash/ksh 或 $SHELL。
@@ -685,7 +709,7 @@ func isShellName(name string) bool {
 // 结果是不当解释器、引号里的值整段抹，这是可接受的失败方向。
 var wrapperArgs = map[string]string{
 	"sudo": "ughpCDRTUrt", "env": "uCS", "xargs": "InPLdEsa", "nice": "n", "timeout": "sk", "exec": "a",
-	"command": "", "builtin": "", "nohup": "",
+	"command": "", "builtin": "", "nohup": "", "sshpass": "fdpP",
 }
 
 // command 按命令位置上的词更新状态：name 是去掉引号、取路径最后一段的命令名，kw 是不带引号与转义的原词（认保留字用）。
@@ -701,8 +725,10 @@ func (c *ctx) command(name, kw string) {
 		return
 	}
 	if strings.EqualFold(name, "sshpass") {
-		// sshpass -p 规则只从命令位置上的 sshpass 开始认（见 vCmd）。大小写不论：macOS 默认的文件系统不分大小写
-		c.b.markCmd(c.wstart)
+		// sshpass -p 的完整规则只从命令位置上的 sshpass 开始认（见 vCmd）。大小写不论：macOS 默认的文件系统不分大小写。
+		// sshpass 也是包装命令：-f -d -p -P 的参数之后的词是它执行的命令（sshpass -p pw ssh h '…' 的引号参数交给远端 shell）
+		c.b.mark(c.wstart, vCmd)
+		name = "sshpass"
 	}
 	if isShellName(name) {
 		c.shellOpts = 1

