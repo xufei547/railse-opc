@@ -158,6 +158,10 @@ func CheckACMEDomain(s string) error {
 	if !ok {
 		return fmt.Errorf("acme-domain 必须是小写主机名（如 hub.example.com，不带协议、端口、路径，不能是 IP），得到 %q", s)
 	}
+	// 再让 autocert 自己的 HostWhitelist（按 IDNA 规则规整）认一次：ab--cd、xn--zz 这类过得了上面的检查，却永远签不到证书
+	if autocert.HostWhitelist(s)(context.Background(), s) != nil {
+		return fmt.Errorf("acme-domain %q 不合 IDNA 规则，autocert 不会给它签证书（标签的第 3、4 位不能是 --，xn-- 开头的要是合法的 punycode）", s)
+	}
 	return nil
 }
 
@@ -231,7 +235,7 @@ type Server struct {
 	// acme 是直出 TLS 的证书管理（ACMEDomain 为空时为 nil）。New 里建一个，TLS 握手与 80 端口的挑战处理共用它
 	// （HTTP-01 的令牌记在它的内存里，分成两个 Manager 就答不上挑战）。见 acme.go。
 	acme *autocert.Manager
-	// tlsConfigFn 给直出 TLS 的 tls.Config，默认是 defaultTLSConfig（autocert）；测试换成自签证书，不经 Let's Encrypt。
+	// tlsConfigFn 给直出 TLS 的 tls.Config：启用 ACME 时是 defaultTLSConfig（autocert），没启用时为空；测试换成自签证书，不经 Let's Encrypt。
 	tlsConfigFn func() *tls.Config
 }
 
@@ -315,10 +319,10 @@ func New(cfg Config, st *store.Store, logger *log.Logger) (*Server, error) {
 	s := &Server{cfg: cfg, store: st, log: logger, mux: http.NewServeMux(), limiter: newLimiter(), agents: newAgentHub(logger), clients: newClientHub(), start: time.Now(),
 		verify: VerifyPassword, verifyWait: loginVerifyWait, helloTimeout: defaultHelloTimeout,
 		callbackRetryWait: defaultCallbackRetryWait, callbackClient: newCallbackClient()}
-	if cfg.ACMEDomain != "" {
+	if cfg.ACMEDomain != "" { // 只有启用 ACME 才直出 TLS（Run 只在这时走 serveTLS），tlsConfigFn 也只在这时给
 		s.acme = newACMEManager(cfg)
+		s.tlsConfigFn = s.defaultTLSConfig
 	}
-	s.tlsConfigFn = s.defaultTLSConfig
 	ps, err := newPushService(s)
 	if err != nil {
 		return nil, err

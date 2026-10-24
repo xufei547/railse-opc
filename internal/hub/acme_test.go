@@ -158,10 +158,13 @@ func TestACMEConfigDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("tlsConfig: %+v", tc)
 	}
 
-	// 不启用 ACME 时不动 SecureCookies、PublicURL，也没有 Manager
+	// 不启用 ACME 时不动 SecureCookies、PublicURL，也没有 Manager 与直出 TLS 的配置
 	plain, err := newHubForConfig(t, DefaultConfig(tempDirT(t)))
 	if err != nil || plain.acmeManager() != nil || plain.cfg.SecureCookies || plain.cfg.PublicURL != "" || plain.cfg.ACMECacheDir != "" {
 		t.Fatalf("没启用 ACME: %v %+v", err, plain.cfg)
+	}
+	if plain.tlsConfigFn != nil {
+		t.Fatal("没启用 ACME 时不应有 tlsConfigFn")
 	}
 
 	// 显式的 PublicURL（主机名与域名一致，端口可不同）保留；邮箱、挑战端口照给的
@@ -173,7 +176,9 @@ func TestACMEConfigDefaultsAndValidation(t *testing.T) {
 	}
 
 	for _, bad := range []string{"https://hub.example.com", "hub.example.com:443", "Hub.Example.com", "localhost", "hub.example.com/x", "-bad.example.com",
-		"hub.example.com.", "1.2.3.4", "hub..example.com", "hub_x.example.com", " hub.example.com", strings.Repeat("a", 64) + ".example.com"} {
+		"hub.example.com.", "1.2.3.4", "hub..example.com", "hub_x.example.com", " hub.example.com", strings.Repeat("a", 64) + ".example.com",
+		// 正则放得过、autocert 的 HostWhitelist（IDNA 规则）却永远不认的：第 3、4 位是 --，或不合法的 punycode
+		"ab--cd.example.com", "xn--zz.example.com"} {
 		cfg := DefaultConfig(tempDirT(t))
 		cfg.ACMEDomain = bad
 		if _, err := newHubForConfig(t, cfg); err == nil || !strings.Contains(err.Error(), "acme-domain") {
@@ -514,6 +519,35 @@ func TestACMECacheFilesPrivate(t *testing.T) {
 	ents, _ := os.ReadDir(h.srv.cfg.ACMECacheDir)
 	if len(ents) != 1 {
 		t.Fatalf("不应留下临时文件: %v", ents)
+	}
+}
+
+// 证书目录已存在（如旧版建的、手工拷来的）：目录收紧为 0700，里面已有的普通文件收紧为 0600；符号链接不跟随，指向的文件不动。
+func TestEnsurePrivateDirTightensExistingFiles(t *testing.T) {
+	base := tempDirT(t)
+	dir := filepath.Join(base, "acme")
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(dir, 0o755)
+	key := filepath.Join(dir, "acme_account+key")
+	cert := filepath.Join(dir, "hub.example.com")
+	outside := filepath.Join(base, "outside")
+	for _, p := range []string{key, cert, outside} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePrivateDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]os.FileMode{dir: 0o700, key: 0o600, cert: 0o600, outside: 0o644, filepath.Join(dir, "sub"): 0o755} {
+		if st, err := os.Stat(p); err != nil || st.Mode().Perm() != want {
+			t.Errorf("%s 权限应为 %04o: %v %v", p, want, st, err)
+		}
 	}
 }
 

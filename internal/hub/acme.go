@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -113,10 +114,31 @@ func (s *Server) serveACMEHTTP(ctx context.Context, ln net.Listener) (wait func(
 	return func() { <-stopped }
 }
 
-// ensurePrivateDir 建目录并收紧为 0700（已有的目录也收紧）。
+// ensurePrivateDir 建目录并收紧为 0700（已有的目录也收紧），目录里已有的普通文件（账户与证书私钥）收紧为 0600：
+// 旧版建的、手工拷来的证书目录也合 doctor 的 hubsrv.acme。只看 Lstat 是普通文件的，符号链接与子目录不动、不跟随
+// （目录已先收紧为 0700，别人换不了里面的条目）。
 func ensurePrivateDir(d string) error {
 	if err := os.MkdirAll(d, 0o700); err != nil {
 		return err
 	}
-	return os.Chmod(d, 0o700)
+	if err := os.Chmod(d, 0o700); err != nil {
+		return err
+	}
+	ents, err := os.ReadDir(d)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		p := filepath.Join(d, e.Name())
+		st, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if st.Mode().IsRegular() && st.Mode().Perm() != 0o600 {
+			if err := os.Chmod(p, 0o600); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
