@@ -13,7 +13,9 @@ import (
 const setupUsage = `用法:
   railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--bin 路径] [--dry-run]
     默认三个都装。Claude 写项目级 .claude/settings.local.json（不入库；旧版写在 settings.json 的会迁走），
-    Gemini 写项目级 .gemini/settings.json，Codex 写用户级 ~/.codex/hooks.json。`
+    Gemini 写项目级 .gemini/settings.json，Codex 写用户级 ~/.codex/hooks.json。
+  railse setup autostart [--hub] [--uninstall] [--status] [--dir 目录] [--bin 路径] [--system] [--user 名字] [--dry-run] [-- hub run 的额外参数]
+    开机自启并在退出后自动拉起（macOS launchd、Linux systemd），默认托管守护进程，--hub 托管 hub；详见 railse setup autostart -h。`
 
 // pendingWrite 是算好、待写的一个配置文件。
 type pendingWrite struct {
@@ -100,6 +102,9 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 }
 
 func runSetup(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "autostart" {
+		return runAutostart(args[1:], stdout, stderr)
+	}
 	if len(args) == 0 || args[0] != "hooks" {
 		fmt.Fprintln(stderr, setupUsage)
 		return 2

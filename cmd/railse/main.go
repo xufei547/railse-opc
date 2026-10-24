@@ -21,7 +21,7 @@ const usage = `用法: railse <子命令> [参数]
   hook      各 CLI 钩子调用的翻译器（claude、codex、codex-notify、gemini）
   agent     守护进程（run、status、pause、resume、reload、enroll）
   hub       云端服务（run、password、token、webhook-token）
-  setup     安装钩子（hooks）`
+  setup     安装钩子与开机自启（hooks、autostart）`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

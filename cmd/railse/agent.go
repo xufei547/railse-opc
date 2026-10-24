@@ -26,7 +26,7 @@ import (
 )
 
 const agentUsage = `用法:
-  railse agent run [--dir 目录] [--foreground]   启动守护进程（前台运行；有 machine.json 时接 hub；开机自启在第 5 份计划）
+  railse agent run [--dir 目录] [--foreground]   启动守护进程（前台运行；有 machine.json 时接 hub；开机自启用 railse setup autostart）
   railse agent status|pause|resume|reload [--dir 目录]
   railse agent enroll --hub URL --token 接入码 [--name 名字] [--dir 目录] [--force]   接入 hub，写 machine.json`
 
