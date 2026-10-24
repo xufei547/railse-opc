@@ -22,12 +22,15 @@ import (
 
 const (
 	decideBodyMax    = 16 << 10 // decide 请求体：备注至多 1000 字符，JSON 转义后也远小于它
+	proposeBodyMax   = 1 << 10  // propose 请求体只有 action 与 scope
 	patchBodyMax     = 4 << 10
 	rulesImportMax   = 1 << 20 // 导入的 YAML 至多 1 MiB
 	requestsLimit    = 50      // GET /api/requests 的默认条数
 	requestsLimitMax = 500
 	inboxLimit       = 500
-	requestAuditMax  = 200 // GET /api/requests/{id} 带的审计条数
+	questionsLimit   = 100            // 收件箱里“等你回答”的条数上限
+	questionsWindow  = 24 * time.Hour // 收件箱只列这么久之内还在等回答的 question
+	requestAuditMax  = 200            // GET /api/requests/{id} 带的审计条数
 )
 
 // apiRoutes 注册网页用的接口。全部要登录 cookie；改状态的（POST、PATCH、DELETE）先过 sameOrigin。
@@ -40,6 +43,7 @@ func (s *Server) apiRoutes() {
 	s.mux.HandleFunc("GET /api/inbox", read(s.handleInbox))
 	s.mux.HandleFunc("GET /api/requests", read(s.handleRequests))
 	s.mux.HandleFunc("GET /api/requests/{id}", read(s.handleRequest))
+	s.mux.HandleFunc("POST /api/requests/{id}/propose", write(s.handlePropose))
 	s.mux.HandleFunc("POST /api/requests/{id}/decide", write(s.handleDecide))
 	s.mux.HandleFunc("GET /api/rules", read(s.handleRules))
 	s.mux.HandleFunc("PATCH /api/rules/{id}", write(s.handleRulePatch))
@@ -69,7 +73,8 @@ func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // requestView 是接口与网页看到的请求：请求本身（不含载荷哈希与 webhook 回调）加机器名、项目名与 has_redacted。
-// REST（/api/inbox、/api/requests、/api/requests/{id}、decide 的返回）与 /ws/client 的 request_new、request_updated 都用它。
+// REST（/api/inbox 的 pending 与 questions、/api/requests、/api/requests/{id}、decide 的返回）与 /ws/client 的 request_new、
+// request_updated 都用它。
 // HasRedacted 为 true 表示载荷里有被脱敏抹掉的部分：网页展示的不是原文（命令行语境的脱敏可能连带吞掉紧贴的后半截命令），
 // 必须醒目告警，建议去终端核对。
 type requestView struct {
@@ -93,6 +98,11 @@ func payloadHasRedacted(p policy.Payload) bool {
 	return bytes.Contains(b, []byte(redactedMark)) || bytes.Contains(b, []byte(`\u003credacted\u003e`))
 }
 
+// requestHasRedacted 报告请求展示给人看的内容有没有脱敏占位符：载荷，或标题（question 的消息、webhook 的标题，入库前都已脱敏）。
+func requestHasRedacted(r store.Request) bool {
+	return strings.Contains(r.Title, redactedMark) || payloadHasRedacted(r.Payload)
+}
+
 // views 给请求配上机器名（每台机器只查一次；查不到时留空，读库出错记日志）、项目名与 has_redacted。
 func (s *Server) views(rs []store.Request) []requestView {
 	names := map[string]string{}
@@ -107,7 +117,7 @@ func (s *Server) views(rs []store.Request) []requestView {
 			}
 			names[r.MachineID] = name
 		}
-		out = append(out, requestView{Request: r, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: payloadHasRedacted(r.Payload)})
+		out = append(out, requestView{Request: r, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: requestHasRedacted(r)})
 	}
 	return out
 }
@@ -139,8 +149,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	for _, m := range machines {
 		ms = append(ms, map[string]any{"id": m.ID, "name": m.Name, "online": s.agents.connected(m.ID), "last_seen": m.LastSeen, "revoked": m.Revoked})
 	}
+	subs, err := s.store.CountPushSubscriptions()
+	if err != nil {
+		s.log.Printf("统计推送订阅: %v", err) // 不影响其余状态，按 0 回
+		subs = 0
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"paused": paused, "pending": pending, "rules_version": version, "machines": ms,
-		"uptime": time.Since(s.start).Round(time.Second).String()})
+		"uptime": time.Since(s.start).Round(time.Second).String(), "push_enabled": s.push.enabled, "push_subscriptions": subs})
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, paused bool) {
@@ -151,13 +166,20 @@ func (s *Server) handlePause(w http.ResponseWriter, paused bool) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleInbox 返回 {"pending":[…],"questions":[…]}，都是请求视图、按创建时间倒序：pending 是全部待审批（至多 500 条），
+// questions 是最近 24 小时还在等回答的 question（至多 100 条，见 store.OpenQuestions）。没有时是空数组，不是 null。
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
-	rs, err := s.store.ListRequests("pending", inboxLimit)
+	pending, err := s.store.ListRequests("pending", inboxLimit)
 	if err != nil {
 		s.internalErr(w, "列待审批", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.views(rs))
+	questions, err := s.store.OpenQuestions(time.Now().Add(-questionsWindow), questionsLimit)
+	if err != nil {
+		s.internalErr(w, "列待回答", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pending": s.views(pending), "questions": s.views(questions)})
 }
 
 // handleRequests 按创建时间倒序列请求：state 为空表示全部；limit 默认 50、最大 500，≤0 或不是数字时按默认。
@@ -197,13 +219,15 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"request": s.view(req), "audit": events})
 }
 
-// handleDecide 是网页的决定入口：{"action":"allow|deny","note":"…","remember":true}。
-// 200 返回决定后的请求；坏请求体、坏 action、备注超过 1000 字符 400；没有这条请求 404；已处理、已过期或机器已吊销 409；记不住 422。
+// handleDecide 是网页的决定入口：{"action":"allow|deny","note":"…","remember":true,"scope":"project|global"}。
+// scope 只在 remember 时起作用，缺省时有项目根记成项目、没有记成全局。
+// 200 返回决定后的请求；坏请求体、坏 action、坏 scope、备注超过 1000 字符 400；其余错误见 writeDecideErr。
 func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Action   string `json:"action"`
 		Note     string `json:"note"`
 		Remember bool   `json:"remember"`
+		Scope    string `json:"scope"`
 	}
 	if err := decodeJSON(w, r, decideBodyMax, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体不是 JSON")
@@ -213,11 +237,51 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "备注至多 1000 个字符")
 		return
 	}
-	req, err := s.Decide(DecideInput{RequestID: r.PathValue("id"), Action: body.Action, Note: body.Note, Remember: body.Remember})
+	req, err := s.Decide(DecideInput{RequestID: r.PathValue("id"), Action: body.Action, Note: body.Note, Remember: body.Remember, Scope: body.Scope})
+	if err != nil {
+		s.writeDecideErr(w, "决定请求", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.view(req))
+}
+
+// handlePropose 只计算“记住”会生成的规则，不入库、不审计、不改请求：网页在保存前展示草案并让用户选范围。
+// 请求体 {"action":"allow|deny","scope":"project|global"}，scope 缺省时有项目根为 project、没有为 global。
+// 200 返回 {"rule_id","scope","yaml","summary":{"action","payload","anchor"}}，scope 是草案实际的范围，yaml 与入库后
+// /api/rules 里这条的 yaml 相同（rule_id 与已有规则重名时入库会加 -2 之类的后缀）。坏请求体、坏 action、坏 scope 400；
+// 其余错误与 decide 相同（见 writeDecideErr）。
+func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Action string `json:"action"`
+		Scope  string `json:"scope"`
+	}
+	if err := decodeJSON(w, r, proposeBodyMax, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是 JSON")
+		return
+	}
+	rule, err := s.propose(r.PathValue("id"), body.Action, body.Scope)
+	if err != nil {
+		s.writeDecideErr(w, "生成规则草案", err)
+		return
+	}
+	y, err := yaml.Marshal(rule)
+	if err != nil {
+		s.internalErr(w, "编码规则草案", err)
+		return
+	}
+	scope := scopeProject
+	if rule.Scope.IsGlobal() {
+		scope = scopeGlobal
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rule_id": rule.ID, "scope": scope, "yaml": string(y),
+		"summary": map[string]string{"action": string(rule.Action), "payload": string(rule.Match.Payload), "anchor": ruleAnchor(rule)}})
+}
+
+// writeDecideErr 把 Decide 与 propose 的错误写成 HTTP 回应：坏 action、坏 scope 400；没有这条请求 404；
+// 机器已吊销、已过期、已处理 409；记不住 422（文案以“不能记住：”开头）；其余记日志回 500（what 说明在做什么）。
+func (s *Server) writeDecideErr(w http.ResponseWriter, what string, err error) {
 	switch {
-	case err == nil:
-		writeJSON(w, http.StatusOK, s.view(req))
-	case errors.Is(err, errBadAction):
+	case errors.Is(err, errBadAction), errors.Is(err, errBadScope):
 		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "没有这条请求")
@@ -230,7 +294,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, errLearn):
 		writeErr(w, http.StatusUnprocessableEntity, err.Error())
 	default:
-		s.internalErr(w, "决定请求", err)
+		s.internalErr(w, what, err)
 	}
 }
 

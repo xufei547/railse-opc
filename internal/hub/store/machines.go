@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -198,17 +199,54 @@ func (s *Store) ValidateClientSession(raw string) (bool, error) {
 	return n == 1, nil
 }
 
-// SetPasswordHash 在一个事务里写入网页登录密码哈希（settings 的 password_hash）并删掉全部登录会话：
-// 换密码后旧 cookie 立即失效；任一步失败整体回滚，密码不变。
+// PasswordChange 是换密码时一并删掉的登录会话与推送订阅的条数。
+type PasswordChange struct {
+	Sessions          int
+	PushSubscriptions int
+}
+
+// SetPasswordHash 在一个事务里写入网页登录密码哈希（settings 的 password_hash）、删掉全部登录会话与全部推送订阅，
+// 并记审计 push_subscriptions_cleared（actor system，detail 只有 {"reason":"password_changed","count":n}，
+// 不含端点与密钥）：换密码后旧 cookie 立即失效，所有设备也不再收到推送——设备丢了时换密码就切断它，
+// 其余设备重新登录后在网页里重新开启通知。任一步失败整体回滚，密码、会话、订阅都不变。
 // 自开事务，不得在 Tx 回调里调用（单连接会永久自锁）。
-func (s *Store) SetPasswordHash(encoded string) error {
-	return s.Tx(func(tx *sql.Tx) error {
+func (s *Store) SetPasswordHash(encoded string) (PasswordChange, error) {
+	var ch PasswordChange
+	err := s.Tx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec("INSERT INTO settings(key, value) VALUES('password_hash', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", encoded); err != nil {
 			return err
 		}
-		_, err := tx.Exec("DELETE FROM client_sessions")
+		var err error
+		if ch.Sessions, err = deleteAll(tx, "client_sessions"); err != nil {
+			return err
+		}
+		if ch.PushSubscriptions, err = deleteAll(tx, "push_subscriptions"); err != nil {
+			return err
+		}
+		detail, err := json.Marshal(struct {
+			Reason string `json:"reason"`
+			Count  int    `json:"count"`
+		}{"password_changed", ch.PushSubscriptions})
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec("INSERT INTO audit_events(ts, actor, action, detail) VALUES(?, 'system', 'push_subscriptions_cleared', ?)", Now(), string(detail))
 		return err
 	})
+	if err != nil {
+		return PasswordChange{}, err
+	}
+	return ch, nil
+}
+
+// deleteAll 删光表 table（只用于代码里的常量表名）并返回删了几行。
+func deleteAll(tx *sql.Tx, table string) (int, error) {
+	res, err := tx.Exec("DELETE FROM " + table)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }
 
 // DeleteClientSession 登出。

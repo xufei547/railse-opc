@@ -125,7 +125,7 @@ func callbackTarget(raw string) string {
 }
 
 // handleWebhookIngest 收外部系统（如 n8n）的审批请求：{"title","description","callback_url","callback_token","expires_in"}。
-// 登记一条 kind webhook 的 pending（标题与描述先脱敏），审计、广播 request_new，回 {"id"}。
+// 登记一条 kind webhook 的 pending（标题与描述先脱敏），审计、广播 request_new 并推到手机，回 {"id"}。
 // 坏请求体或字段不合格 400，超过 64 KiB 413。
 func (s *Server) handleWebhookIngest(w http.ResponseWriter, r *http.Request) {
 	if !s.authWebhook(w, r) {
@@ -161,7 +161,7 @@ func (s *Server) handleWebhookIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(webhookMachineID, "system", req.ID, "request_pending", map[string]string{"title": title, "callback": callbackTarget(body.CallbackURL)})
-	s.clients.broadcast("request_new", s.view(req))
+	s.announceNew(req)
 	writeJSON(w, http.StatusOK, map[string]string{"id": req.ID})
 }
 

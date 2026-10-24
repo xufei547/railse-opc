@@ -60,9 +60,9 @@ func newTestHubWith(t *testing.T, mod func(*Config), srvMod func(*Server)) *test
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		hs.Close()
-		// 先停回调（取消并等后台回调退出），再关库：回调不会在测试结束后还碰存储
+		// 先停后台工作（取消并等回调与推送工作协程退出），再关库：它们不会在测试结束后还碰存储
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		srv.stopCallbacks(ctx)
+		srv.stopBackground(ctx)
 		cancel()
 		st.Close()
 		if t.Failed() {
@@ -202,14 +202,14 @@ func TestVerifyPasswordStrict(t *testing.T) {
 // password_hash 只存 argon2id 编码串，不存原文；太短的密码被拒且不改动已有密码。
 func TestSetPasswordStoresHashOnly(t *testing.T) {
 	h := newTestHub(t)
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	enc, ok, err := h.st.GetSetting("password_hash")
 	if err != nil || !ok || !strings.HasPrefix(enc, "argon2id$v=19$m=65536,t=1,p=4$") || strings.Contains(enc, "hunter22") || !VerifyPassword(enc, "hunter22") {
 		t.Fatalf("password_hash = %q, %v, %v", enc, ok, err)
 	}
-	if err := h.srv.SetPassword("short"); err == nil {
+	if _, err := h.srv.SetPassword("short"); err == nil {
 		t.Fatal("太短的密码应被拒")
 	}
 	if got, _, _ := h.st.GetSetting("password_hash"); got != enc {
@@ -222,7 +222,7 @@ func TestLoginFlow(t *testing.T) {
 	if resp := postJSON(t, h.http.URL+"/api/login", map[string]string{"password": "x"}, nil); resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("未设密码应 503, 得到 %d", resp.StatusCode)
 	}
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	if resp := postJSON(t, h.http.URL+"/api/login", map[string]string{"password": "wrong"}, nil); resp.StatusCode != http.StatusUnauthorized {
@@ -271,7 +271,7 @@ func TestLoginFlow(t *testing.T) {
 // 请求体不是 JSON、缺 password 或超长时回 400。
 func TestLoginBadBody(t *testing.T) {
 	h := newTestHub(t)
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	big, _ := json.Marshal(map[string]string{"password": strings.Repeat("a", 5000)})
@@ -285,7 +285,7 @@ func TestLoginBadBody(t *testing.T) {
 // SecureCookies 打开或请求经 TLS 时，登录与登出的 cookie 都带 Secure。
 func TestSessionCookieSecure(t *testing.T) {
 	h := newTestHubWith(t, func(c *Config) { c.SecureCookies = true }, nil)
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	if c := login(t, h, "hunter22"); !c.Secure {
@@ -293,7 +293,7 @@ func TestSessionCookieSecure(t *testing.T) {
 	}
 
 	h = newTestHub(t)
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/api/login", "/api/logout"} {
@@ -309,7 +309,7 @@ func TestSessionCookieSecure(t *testing.T) {
 
 func TestLoginRateLimit(t *testing.T) {
 	h := newTestHub(t)
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 5; i++ {
@@ -549,7 +549,7 @@ func TestLoginArgonConcurrencyCap(t *testing.T) {
 	})
 	// 在 hub 的清理（hs.Close 会等在途请求）之后注册，先于它运行：测试中途失败也不会卡在被阻塞的校验上
 	t.Cleanup(unblock)
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	codes := make(chan int, 2)
@@ -587,7 +587,7 @@ func TestLoginArgonConcurrencyCap(t *testing.T) {
 // 换密码后已有会话全部失效：旧 cookie 访问需要登录的接口得 401；旧密码登录 401，新密码 204。
 func TestSetPasswordRevokesSessions(t *testing.T) {
 	h := newTestHub(t)
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	c := login(t, h, "hunter22")
@@ -599,7 +599,7 @@ func TestSetPasswordRevokesSessions(t *testing.T) {
 	if code := status(); code != http.StatusOK {
 		t.Fatalf("换密码前应 200, 得到 %d", code)
 	}
-	if err := h.srv.SetPassword("another-pass"); err != nil {
+	if _, err := h.srv.SetPassword("another-pass"); err != nil {
 		t.Fatal(err)
 	}
 	if code := status(); code != http.StatusUnauthorized {
@@ -611,13 +611,44 @@ func TestSetPasswordRevokesSessions(t *testing.T) {
 	login(t, h, "another-pass")
 }
 
+// 换密码删掉全部推送订阅（丢了的设备随之切断），返回删掉的会话与订阅数，日志只记条数（不记端点）。
+func TestSetPasswordClearsPushSubscriptions(t *testing.T) {
+	h := newTestHub(t)
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
+		t.Fatal(err)
+	}
+	login(t, h, "hunter22")
+	for _, ep := range []string{"https://web.push.apple.com/lost-phone", "https://fcm.googleapis.com/fcm/send/other"} {
+		if _, err := h.st.UpsertPushSubscription(ep, "p", "a", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ch, err := h.srv.SetPassword("another-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch.Sessions != 1 || ch.PushSubscriptions != 2 {
+		t.Fatalf("换密码删掉的 = %+v", ch)
+	}
+	if n, _ := h.st.CountPushSubscriptions(); n != 0 {
+		t.Fatalf("换密码后订阅数 = %d，应为 0", n)
+	}
+	logs := h.logs.String()
+	if !strings.Contains(logs, "已换网页登录密码：删除了 1 个登录会话、2 条推送订阅") {
+		t.Fatalf("日志应记条数: %q", logs)
+	}
+	if strings.Contains(logs, "lost-phone") || strings.Contains(logs, "another-pass") {
+		t.Fatalf("日志不能有端点或密码: %q", logs)
+	}
+}
+
 // 密码长度按字符（rune）计，不按字节：7 个汉字 21 字节也不够 8 个字符。
 func TestSetPasswordCountsRunes(t *testing.T) {
 	h := newTestHub(t)
-	if err := h.srv.SetPassword("密码密码密码密"); err == nil {
+	if _, err := h.srv.SetPassword("密码密码密码密"); err == nil {
 		t.Fatal("7 个字符应被拒")
 	}
-	if err := h.srv.SetPassword("密码密码密码密码"); err != nil {
+	if _, err := h.srv.SetPassword("密码密码密码密码"); err != nil {
 		t.Fatalf("8 个字符应通过: %v", err)
 	}
 }
@@ -919,7 +950,7 @@ func TestLoginBusyDoesNotCountTowardRateLimit(t *testing.T) {
 		}
 	})
 	t.Cleanup(unblock) // 先于 hub 的清理运行，测试中途失败也不会卡在被阻塞的校验上
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	codes := make(chan int, 2)

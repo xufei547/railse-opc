@@ -14,11 +14,15 @@ import (
 	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/hub/store"
 	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/railse/railse-opc/internal/policy"
 	"github.com/railse/railse-opc/internal/proto"
 	"github.com/railse/railse-opc/internal/redact"
 )
 
 var errBadAction = errors.New("action 只能是 allow 或 deny")
+
+// errBadScope 表示“记住”的范围不是 project、global 或空。
+var errBadScope = errors.New("scope 只能是 project 或 global")
 
 // errExpired 表示决定时请求已过 expires_at（hub 已把它改成 expired）。它也满足 errors.Is(err, store.ErrNotPending)。
 var errExpired = fmt.Errorf("%w：已过期", store.ErrNotPending)
@@ -49,6 +53,9 @@ type DecideInput struct {
 	Action    string
 	Note      string
 	Remember  bool
+	// Scope 是“记住”的范围：project、global，或空（有项目根记成项目，没有记成全局）。只在 Remember 时起作用，
+	// 但不认识的取值无论记不记住都回 errBadScope。
+	Scope string
 }
 
 // machineLocks 给每台机器一把锁，让同一机器的重连对齐串行执行。零值可用。
@@ -258,7 +265,7 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 		}
 	}
 	s.audit(m.ID, "agent", r.ID, "request_pending", map[string]string{"risk": r.Risk, "tool": r.ToolName})
-	s.clients.broadcast("request_new", s.view(r))
+	s.announceNew(r)
 }
 
 // pendingAgain 处理守护进程从连接 c 再次送来的、hub 已有的请求 id（重连后重发）。回的 Error 帧只发给 c
@@ -444,11 +451,14 @@ func (s *Server) sendDecision(r store.Request) bool {
 // Decide 是用户的决定入口（网页或 CLI）：只能 allow 或 deny，请求必须仍 pending、所属机器未吊销且未过期。
 // Remember 时先学规则（学不了时请求保持 pending，错误包 errLearn），再改状态；成功后审计学到的规则并下发规则快照，
 // 再审计决定、下发决定（未连接时留给重连对齐补发；webhook 请求改为回调来源）、广播。快照先于决定排进同一连接的队列，守护进程先拿到规则。
-// 错误：errBadAction、store.ErrNotFound、store.ErrNotPending（机器已吊销时为 errRevoked、已过期时为 errExpired，
+// 错误：errBadAction、errBadScope、store.ErrNotFound、store.ErrNotPending（机器已吊销时为 errRevoked、已过期时为 errExpired，
 // 都满足 errors.Is(err, store.ErrNotPending)）、errLearn；其余是存储错误。
 func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	if in.Action != "allow" && in.Action != "deny" {
 		return store.Request{}, errBadAction
+	}
+	if !validScope(in.Scope) {
+		return store.Request{}, errBadScope
 	}
 	note := truncate(in.Note, maxTextLen)
 	state := "denied"
@@ -521,7 +531,7 @@ func (s *Server) commitDecision(in DecideInput, state, note string) (store.Reque
 	}
 	ruleID := ""
 	if in.Remember {
-		id, err := s.learnRule(r, in.Action)
+		id, err := s.learnRule(r, in.Action, in.Scope)
 		if err != nil {
 			return store.Request{}, "", err
 		}
@@ -537,6 +547,45 @@ func (s *Server) commitDecision(in DecideInput, state, note string) (store.Reque
 		return store.Request{}, "", err
 	}
 	return r, ruleID, nil
+}
+
+// propose 算出“记住”会生成的规则草案（draftRule），不入库。前置条件与 Decide 一致、错误也一样：没有这条请求
+// store.ErrNotFound，已不是 pending store.ErrNotPending，机器已吊销 errRevoked，已过期 errExpired，
+// 记不住 errLearn（含规则集放不下这条，见 checkFits），action、scope 不认识 errBadAction、errBadScope。
+// 与 commitDecision 不同，它只读不写：已吊销、已过期的请求不在这里改状态（吊销时 hub 已取消该机器的 pending，
+// 过期留给过期扫描或之后的 decide），不审计、不广播；也不拿 decideMu、rulesMu（预览可能与之后的保存结果不同，保存时会重查）。
+func (s *Server) propose(id, action, scope string) (policy.Rule, error) {
+	if action != "allow" && action != "deny" {
+		return policy.Rule{}, errBadAction
+	}
+	if !validScope(scope) {
+		return policy.Rule{}, errBadScope
+	}
+	r, err := s.store.GetRequest(id)
+	if err != nil {
+		return policy.Rule{}, err
+	}
+	if r.State != "pending" {
+		return policy.Rule{}, store.ErrNotPending
+	}
+	revoked, err := s.machineRevoked(r.MachineID)
+	if err != nil {
+		return policy.Rule{}, err
+	}
+	if revoked {
+		return policy.Rule{}, errRevoked
+	}
+	if r.ExpiresAt != nil && *r.ExpiresAt <= store.FormatTime(time.Now()) {
+		return policy.Rule{}, errExpired
+	}
+	rule, err := s.draftRule(r, action, scope)
+	if err != nil {
+		return policy.Rule{}, err
+	}
+	if err := s.checkFits(rule); err != nil {
+		return policy.Rule{}, err
+	}
+	return rule, nil
 }
 
 // machineRevoked 报告请求所属机器是否已吊销。webhook 请求与库里没有的机器不算。
@@ -672,7 +721,8 @@ func eventID(machineID string, e agent.AuditEntry, detail []byte) string {
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
-// recordEvent 把 question/done 存成一行 recorded（第 4 份的收件箱靠它列出谁在等回答），刷新会话并广播 request_new。
+// recordEvent 把 question/done 存成一行 recorded（第 4 份的收件箱靠它列出谁在等回答），刷新会话并广播 request_new
+// （新 question 还推到手机，见 announceNew）。
 // e 已经过 cleanEntry：Message 已脱敏。同一条目再来（批次重发，含两条连接并发处理同一批）时该行已存在，静默跳过。
 func (s *Server) recordEvent(m store.Machine, e agent.AuditEntry, ts time.Time, detail []byte) {
 	r := store.Request{ID: eventID(m.ID, e, detail), MachineID: m.ID, SessionID: s.upsertSession(m.ID, e.Session, ""), Kind: e.Kind, ToolName: e.ToolName,
@@ -683,7 +733,7 @@ func (s *Server) recordEvent(m store.Machine, e agent.AuditEntry, ts time.Time, 
 		return
 	}
 	if inserted {
-		s.clients.broadcast("request_new", s.view(r))
+		s.announceNew(r)
 	}
 }
 

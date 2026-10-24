@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -17,14 +18,18 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/coder/websocket"
 	"gopkg.in/yaml.v3"
 
+	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/railse/railse-opc/internal/hub/webui"
 	"github.com/railse/railse-opc/internal/hub/wire"
 	"github.com/railse/railse-opc/internal/policy"
+	"github.com/railse/railse-opc/internal/proto"
 )
 
 // doReq 发一个请求；响应体读进内存后关掉原连接，调用方可再读 resp.Body。
@@ -56,7 +61,7 @@ func doReqHdr(t *testing.T, method, url string, body []byte, ct string, cookie *
 // loggedIn 设密码并登录，返回会话 cookie。
 func loggedIn(t *testing.T, h *testHub) *http.Cookie {
 	t.Helper()
-	if err := h.srv.SetPassword("hunter22"); err != nil {
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	return login(t, h, "hunter22")
@@ -123,8 +128,11 @@ func TestInboxDecideRemember(t *testing.T) {
 	c.send(pendingFrame("r1", "s1", "t1", "npm run build"))
 	waitFor(t, "r1 登记", func() bool { n, _ := h.st.CountPending(); return n == 1 })
 
-	var inbox []map[string]any
-	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/inbox", nil, "", ck), &inbox)
+	var body struct {
+		Pending []map[string]any `json:"pending"`
+	}
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/inbox", nil, "", ck), &body)
+	inbox := body.Pending
 	if len(inbox) != 1 || inbox[0]["id"] != "r1" || inbox[0]["machine_name"] != "mac" || inbox[0]["project"] != "p" {
 		t.Fatalf("inbox = %+v", inbox)
 	}
@@ -621,6 +629,7 @@ func TestStateChangingRoutesCheckOrigin(t *testing.T) {
 		{"POST", "/api/pause", "", ""},
 		{"POST", "/api/resume", "", ""},
 		{"POST", "/api/requests/r1/decide", "application/json", `{"action":"deny"}`},
+		{"POST", "/api/requests/r1/propose", "application/json", `{"action":"deny"}`},
 		{"PATCH", "/api/rules/builtin-readonly", "application/json", `{"enabled":false}`},
 		{"DELETE", "/api/rules/builtin-readonly", "", ""},
 		{"POST", "/api/rules/import", "application/yaml", "version: 1\nrules: []\n"},
@@ -820,13 +829,43 @@ func TestRequestsListAndDetail(t *testing.T) {
 	if resp := doReq(t, "GET", h.http.URL+"/api/requests/nope", nil, "", ck); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("不存在应 404, 得到 %d", resp.StatusCode)
 	}
-	var inbox []map[string]any
+	var inbox struct {
+		Pending []map[string]any `json:"pending"`
+	}
 	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/inbox", nil, "", ck), &inbox)
-	if len(inbox) != 259 {
-		t.Fatalf("收件箱应列出全部 pending, 得到 %d", len(inbox))
+	if len(inbox.Pending) != 259 {
+		t.Fatalf("收件箱应列出全部 pending, 得到 %d", len(inbox.Pending))
 	}
 	if resp := doReq(t, "GET", h.http.URL+"/api/inbox", nil, "", nil); resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("未登录应 401, 得到 %d", resp.StatusCode)
+	}
+}
+
+// 整分支终审 m-1：has_redacted 也看标题（question 的消息、webhook 的标题都先脱敏再入库），与网页自己的判断一致。
+func TestRequestViewHasRedactedTitle(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	id, _ := enrollMachine(t, h, "mac")
+	insertReq(t, h.st, store.Request{ID: "w1", Kind: "webhook", State: "pending", Title: "部署 TOKEN=<redacted> 到生产",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "webhook"}})
+	insertReq(t, h.st, store.Request{ID: "q1", MachineID: id, Kind: "question", State: "recorded", Title: "要用 password=<redacted> 登录吗？"})
+	insertReq(t, h.st, store.Request{ID: "w2", Kind: "webhook", State: "pending", Title: "部署 v1.2（redacted 这个词本身不算）",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "webhook"}})
+	for rid, want := range map[string]bool{"w1": true, "q1": true, "w2": false} {
+		var detail struct {
+			Request map[string]any `json:"request"`
+		}
+		decodeBody(t, doReq(t, "GET", h.http.URL+"/api/requests/"+rid, nil, "", ck), &detail)
+		if detail.Request["has_redacted"] != want {
+			t.Errorf("%s 的 has_redacted 应为 %v: %+v", rid, want, detail.Request)
+		}
+	}
+	var requests []map[string]any
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/requests?limit=500", nil, "", ck), &requests)
+	for _, r := range requests {
+		if want := r["id"] != "w2"; r["has_redacted"] != want {
+			t.Errorf("/api/requests 里 %s 的 has_redacted 应为 %v", r["id"], want)
+		}
 	}
 }
 
@@ -857,9 +896,13 @@ func TestRequestViewHasRedacted(t *testing.T) {
 	insertReq(t, h.st, store.Request{ID: "h5", MachineID: id, State: "pending",
 		Payload: policy.Payload{Type: policy.PayloadFileWrite, Path: "/p/notes.txt", DiffPreview: "redacted 这个词本身不算"}})
 	want := map[string]bool{"h1": true, "h2": false, "h3": true, "h4": true, "h5": false}
-	for _, path := range []string{"/api/inbox", "/api/requests?limit=500"} {
-		var list []map[string]any
-		decodeBody(t, doReq(t, "GET", h.http.URL+path, nil, "", ck), &list)
+	var inbox struct {
+		Pending []map[string]any `json:"pending"`
+	}
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/inbox", nil, "", ck), &inbox)
+	var requests []map[string]any
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/requests?limit=500", nil, "", ck), &requests)
+	for path, list := range map[string][]map[string]any{"/api/inbox": inbox.Pending, "/api/requests": requests} {
 		if len(list) != len(want) {
 			t.Fatalf("%s: %d 条", path, len(list))
 		}
@@ -972,7 +1015,7 @@ func TestClientWSRechecksSession(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("会话有效时应照常收到广播")
 	}
-	if err := h.srv.SetPassword("another22"); err != nil {
+	if _, err := h.srv.SetPassword("another22"); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1047,6 +1090,7 @@ func TestAPIRoutesRequireLogin(t *testing.T) {
 		{"GET", "/api/requests", "", ""},
 		{"GET", "/api/requests/r1", "", ""},
 		{"POST", "/api/requests/r1/decide", "application/json", `{"action":"deny"}`},
+		{"POST", "/api/requests/r1/propose", "application/json", `{"action":"deny"}`},
 		{"GET", "/api/rules", "", ""},
 		{"PATCH", "/api/rules/builtin-readonly", "application/json", `{"enabled":false}`},
 		{"DELETE", "/api/rules/builtin-readonly", "", ""},
@@ -1160,6 +1204,10 @@ func TestRememberRefusedNearFrameLimit(t *testing.T) {
 	} {
 		p := policy.Payload{Type: policy.PayloadShell, Command: tc.cmd, Cwd: "/p"}
 		insertReq(t, h.st, store.Request{ID: tc.id, MachineID: m.ID, State: "pending", Payload: p, ProjectRoot: "/p"})
+		// 预览也如实说放不下，免得用户看过草案、点保存才被拒
+		if _, err := h.srv.propose(tc.id, tc.action, ""); !errors.Is(err, errLearn) || !strings.Contains(err.Error(), "上限") {
+			t.Fatalf("%s: propose 放不下应 errLearn（说明接近上限）, 得到 %v", tc.action, err)
+		}
 		if _, err := h.srv.Decide(DecideInput{RequestID: tc.id, Action: tc.action, Remember: true}); !errors.Is(err, errLearn) || !strings.Contains(err.Error(), "上限") {
 			t.Fatalf("%s: 放不下应 errLearn（说明接近上限）, 得到 %v", tc.action, err)
 		}
@@ -1308,7 +1356,7 @@ func TestRunWaitsForWebSocketHandlers(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 		exited.Add(1)
 	}
-	if err := srv.SetPassword("hunter22"); err != nil {
+	if _, err := srv.SetPassword("hunter22"); err != nil {
 		t.Fatal(err)
 	}
 	secret := store.RandomToken()
@@ -1591,7 +1639,7 @@ func TestServeEndedStillShutsDown(t *testing.T) {
 			}
 			exited.Add(1)
 		}
-		if err := srv.SetPassword("hunter22"); err != nil {
+		if _, err := srv.SetPassword("hunter22"); err != nil {
 			t.Fatal(err)
 		}
 		secret := store.RandomToken()
@@ -1682,5 +1730,447 @@ func TestRunReportsListenFailure(t *testing.T) {
 	err = srv.Run(context.Background())
 	if !errors.Is(err, ErrListen) || errors.Is(err, ErrShutdownTimeout) || !strings.Contains(err.Error(), cfg.Listen) {
 		t.Fatalf("端口被占时应返回 ErrListen 并带上地址: %v", err)
+	}
+}
+
+// 收件箱是 {pending, questions}：questions 是最近 24 小时还在等回答的 question，同一会话之后有了新事件（这里是 done）就不再列出。
+func TestInboxQuestions(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{MachineID: id, Proto: wire.Proto, HomeDir: "/home/u"})
+	defer c.close()
+	c.recv(5 * time.Second)
+	c.send(pendingFrame("r1", "s3", "t1", "git push origin main"))
+	sess := func(cli string) proto.Session { return proto.Session{Tool: "claude", CLISessionID: cli, Cwd: "/p"} }
+	c.send(auditFrame(t,
+		agent.AuditEntry{TS: time.Now().Add(-25 * time.Hour), Kind: "question", Session: sess("s4"), State: "recorded", Message: "太旧，不列"},
+		agent.AuditEntry{TS: time.Now(), Kind: "question", Session: sess("s1"), State: "recorded", Message: "要不要删掉旧分支？"},
+		agent.AuditEntry{TS: time.Now(), Kind: "question", Session: sess("s2"), State: "recorded", Message: "用哪个数据库？"},
+	))
+	var inbox struct {
+		Pending   []map[string]any `json:"pending"`
+		Questions []map[string]any `json:"questions"`
+	}
+	waitFor(t, "两条问题与一条审批进收件箱", func() bool {
+		decodeBody(t, doReq(t, "GET", h.http.URL+"/api/inbox", nil, "", ck), &inbox)
+		return len(inbox.Questions) == 2 && len(inbox.Pending) == 1
+	})
+	q := inbox.Questions[0]
+	if q["kind"] != "question" || q["state"] != "recorded" || q["title"] == "" || q["machine_name"] != "mac" || inbox.Pending[0]["id"] != "r1" {
+		t.Fatalf("inbox = %+v", inbox)
+	}
+	c.send(auditFrame(t, agent.AuditEntry{TS: time.Now().Add(time.Second), Kind: "done", Session: sess("s1"), State: "recorded", Message: "DONE"}))
+	waitFor(t, "s1 的问题被 done 收掉", func() bool {
+		decodeBody(t, doReq(t, "GET", h.http.URL+"/api/inbox", nil, "", ck), &inbox)
+		return len(inbox.Questions) == 1 && inbox.Questions[0]["cli_session_id"] == "s2"
+	})
+	// 空收件箱两个字段都是数组，不是 null
+	h2 := newTestHub(t)
+	resp := doReq(t, "GET", h2.http.URL+"/api/inbox", nil, "", loggedIn(t, h2))
+	raw, _ := io.ReadAll(resp.Body)
+	if got := strings.TrimSpace(string(raw)); got != `{"pending":[],"questions":[]}` {
+		t.Fatalf("空收件箱 = %s", got)
+	}
+}
+
+// apiPost 以登录 cookie 向 hub 的 path 发 JSON 的 POST。
+func apiPost(t *testing.T, h *testHub, ck *http.Cookie, path string, body any) *http.Response {
+	t.Helper()
+	return postJSON(t, h.http.URL+path, body, ck)
+}
+
+// proposeDraft 是 propose 的成功返回。
+type proposeDraft struct {
+	RuleID  string `json:"rule_id"`
+	Scope   string `json:"scope"`
+	YAML    string `json:"yaml"`
+	Summary struct {
+		Action  string `json:"action"`
+		Payload string `json:"payload"`
+		Anchor  string `json:"anchor"`
+	} `json:"summary"`
+}
+
+// propose 只算草案（项目或全局），decide 按 scope 入库。
+func TestProposeAndDecideWithScope(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{MachineID: id, Proto: wire.Proto, HomeDir: "/home/u"})
+	defer c.close()
+	c.recv(5 * time.Second)
+	fr := pendingFrame("r1", "s1", "t1", "curl https://api.example.com/v1/x")
+	fr.Risk = "network"
+	c.send(fr)
+	waitFor(t, "r1 登记", func() bool { _, err := h.st.GetRequest("r1"); return err == nil })
+	var draft proposeDraft
+	resp := apiPost(t, h, ck, "/api/requests/r1/propose", map[string]string{"action": "allow"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("propose: %d", resp.StatusCode)
+	}
+	decodeBody(t, resp, &draft)
+	plain := strings.ReplaceAll(draft.YAML, `\.`, ".") // 整条命令锚定的正则里点号被转义
+	if draft.Scope != "project" || !strings.Contains(plain, "api.example.com") || !strings.Contains(draft.YAML, "project: /p") ||
+		draft.Summary.Action != "allow" || draft.Summary.Payload != "shell" || draft.Summary.Anchor == "" || draft.RuleID == "" {
+		t.Fatalf("草案: %+v", draft)
+	}
+	var rule policy.Rule
+	if err := yaml.Unmarshal([]byte(draft.YAML), &rule); err != nil || rule.ID != draft.RuleID || rule.Source != policy.SourceLearned {
+		t.Fatalf("草案 YAML 应是一条规则: %+v %v", rule, err)
+	}
+	resp = apiPost(t, h, ck, "/api/requests/r1/propose", map[string]string{"action": "allow", "scope": "global"})
+	draft = proposeDraft{}
+	decodeBody(t, resp, &draft)
+	if resp.StatusCode != http.StatusOK || draft.Scope != "global" || strings.Contains(draft.YAML, "project:") || !strings.Contains(draft.YAML, "scope: global") {
+		t.Fatalf("全局草案: %d %+v", resp.StatusCode, draft)
+	}
+	// 预览不入库
+	var rules []map[string]any
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/rules", nil, "", ck), &rules)
+	if len(rules) != 2 {
+		t.Fatalf("预览不应入库，规则数 %d", len(rules))
+	}
+	if resp := apiPost(t, h, ck, "/api/requests/r1/propose", map[string]string{"action": "maybe"}); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("坏 action: %d", resp.StatusCode)
+	}
+	if resp := apiPost(t, h, ck, "/api/requests/r1/propose", map[string]string{"action": "allow", "scope": "machine"}); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("坏 scope: %d", resp.StatusCode)
+	}
+	if resp := doReq(t, "POST", h.http.URL+"/api/requests/r1/propose", []byte(`{"action":`), "application/json", ck); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("坏 JSON: %d", resp.StatusCode)
+	}
+	if resp := apiPost(t, h, ck, "/api/requests/nope/propose", map[string]string{"action": "allow"}); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("没有的请求: %d", resp.StatusCode)
+	}
+	// 记成全局
+	resp = apiPost(t, h, ck, "/api/requests/r1/decide", map[string]any{"action": "allow", "remember": true, "scope": "global"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("decide: %d", resp.StatusCode)
+	}
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/rules", nil, "", ck), &rules)
+	if len(rules) != 3 {
+		t.Fatalf("记住后规则数 %d", len(rules))
+	}
+	var learned map[string]any
+	for _, r := range rules {
+		if r["source"] == "learned" {
+			learned = r
+		}
+	}
+	if learned == nil || learned["id"] != draft.RuleID || strings.Contains(learned["yaml"].(string), "project:") {
+		t.Fatalf("学到的规则应为全局、id 同草案: %+v", learned)
+	}
+	// 全局规则在别的项目里也放行同一条命令
+	d := evalWith(t, h.st, fr.Payload, policy.Context{ProjectRoot: "/elsewhere", HomeDir: "/home/u", MachineID: id})
+	if d.Action != policy.ActionAllow || d.RuleID != draft.RuleID {
+		t.Fatalf("全局规则应在别的项目命中: %+v", d)
+	}
+	// 已处理的请求不能再预览
+	var e map[string]string
+	resp = apiPost(t, h, ck, "/api/requests/r1/propose", map[string]string{"action": "allow"})
+	decodeBody(t, resp, &e)
+	if resp.StatusCode != http.StatusConflict || e["error"] != "请求已经处理过" {
+		t.Fatalf("已处理: %d %v", resp.StatusCode, e)
+	}
+}
+
+// propose 与 decide 的前置条件一致：记不住 422（文案以“不能记住：”开头）；已处理、已过期、机器已吊销 409（文案同 decide），
+// 而且 propose 不像 decide 那样顺手把过期、吊销的请求改掉状态。
+func TestProposeRefusals(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{MachineID: id, Proto: wire.Proto, HomeDir: "/home/u"})
+	defer c.close()
+	c.recv(5 * time.Second)
+	fr := pendingFrame("r1", "s1", "t1", "git push origin main")
+	fr.Risk = "outward"
+	c.send(fr)
+	noRoot := pendingFrame("r2", "s1", "t2", "curl https://api.example.com/v1")
+	noRoot.Risk, noRoot.ProjectRoot = "network", ""
+	c.send(noRoot)
+	waitFor(t, "登记", func() bool { _, err := h.st.GetRequest("r2"); return err == nil })
+	m2, err := h.st.CreateMachine("old", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := store.FormatTime(time.Now().Add(-time.Minute))
+	insertReq(t, h.st, store.Request{ID: "exp", MachineID: id, State: "pending", ProjectRoot: "/p", ExpiresAt: &past})
+	insertReq(t, h.st, store.Request{ID: "rev", MachineID: m2.ID, State: "pending", ProjectRoot: "/p"})
+	if err := h.st.RevokeMachine(m2.ID); err != nil {
+		t.Fatal(err)
+	}
+	insertReq(t, h.st, store.Request{ID: "done", MachineID: id, State: "denied", ProjectRoot: "/p"})
+	insertReq(t, h.st, store.Request{ID: "sec", MachineID: id, State: "pending", ProjectRoot: "/p",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "npm login --password <redacted>", Cwd: "/p"}})
+	insertReq(t, h.st, store.Request{ID: "wh", MachineID: webhookMachineID, Kind: "webhook", State: "pending",
+		Payload: policy.Payload{Type: policy.PayloadType("other")}})
+	for _, tc := range []struct {
+		name, id, action, scope string
+		code                    int
+		msg                     string // 422 时要以“不能记住：”开头并含它；409 时要等于它
+	}{
+		{"outward 不能记成放行", "r1", "allow", "", http.StatusUnprocessableEntity, "不能记住"},
+		{"没有项目根不能显式记成项目范围", "r2", "deny", "project", http.StatusUnprocessableEntity, "不能记住：没有项目根，只能记成全局"},
+		{"含凭据", "sec", "deny", "", http.StatusUnprocessableEntity, "凭据"},
+		{"webhook", "wh", "deny", "", http.StatusUnprocessableEntity, "webhook"},
+		{"已过期", "exp", "deny", "", http.StatusConflict, "请求已过期"},
+		{"机器已吊销", "rev", "deny", "", http.StatusConflict, "机器已吊销，请求已取消"},
+		{"已处理", "done", "deny", "", http.StatusConflict, "请求已经处理过"},
+	} {
+		body := map[string]string{"action": tc.action}
+		if tc.scope != "" {
+			body["scope"] = tc.scope
+		}
+		resp := apiPost(t, h, ck, "/api/requests/"+tc.id+"/propose", body)
+		var e map[string]string
+		decodeBody(t, resp, &e)
+		ok := resp.StatusCode == tc.code
+		if tc.code == http.StatusUnprocessableEntity {
+			ok = ok && strings.HasPrefix(e["error"], "不能记住：") && strings.Contains(e["error"], tc.msg)
+		} else {
+			ok = ok && e["error"] == tc.msg
+		}
+		if !ok {
+			t.Fatalf("%s: %d %v", tc.name, resp.StatusCode, e)
+		}
+	}
+	for _, id := range []string{"exp", "rev"} {
+		if r := getReq(t, h.st, id); r.State != "pending" {
+			t.Fatalf("propose 不应改 %s 的状态: %+v", id, r)
+		}
+	}
+	// 没有项目根：显式 global 与缺省都记成全局
+	for _, scope := range []string{"global", ""} {
+		body := map[string]string{"action": "deny"}
+		if scope != "" {
+			body["scope"] = scope
+		}
+		resp := apiPost(t, h, ck, "/api/requests/r2/propose", body)
+		var draft proposeDraft
+		decodeBody(t, resp, &draft)
+		if resp.StatusCode != http.StatusOK || draft.Scope != "global" || !strings.Contains(draft.YAML, "scope: global") ||
+			draft.Summary.Action != "deny" || draft.Summary.Anchor != "^"+regexp.QuoteMeta("curl https://api.example.com/v1")+"$" {
+			t.Fatalf("没有项目根、scope %q: %d %+v", scope, resp.StatusCode, draft)
+		}
+	}
+}
+
+// propose 什么都不写：不入规则、不加审计、不改请求、不下发、不广播，无论成功、记不住还是 409。
+func TestProposeWritesNothing(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	m, err := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newFakeConn(m.ID, 16)
+	h.srv.agents.register(c)
+	past := store.FormatTime(time.Now().Add(-time.Minute))
+	insertReq(t, h.st, store.Request{ID: "ok", MachineID: m.ID, State: "pending", ProjectRoot: "/p",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "npm run build", Cwd: "/p"}})
+	insertReq(t, h.st, store.Request{ID: "exp", MachineID: m.ID, State: "pending", ProjectRoot: "/p", ExpiresAt: &past})
+	insertReq(t, h.st, store.Request{ID: "out", MachineID: m.ID, State: "pending", ProjectRoot: "/p",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "git push origin main", Cwd: "/p"}})
+	snapshot := func() string {
+		t.Helper()
+		rows, _ := ruleRows(t, h.st)
+		version, err := h.st.RulesVersion()
+		if err != nil {
+			t.Fatal(err)
+		}
+		events, err := h.st.ListAudit(0, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reqs []store.Request
+		for _, id := range []string{"ok", "exp", "out"} {
+			reqs = append(reqs, getReq(t, h.st, id))
+		}
+		return string(mustJSON(t, map[string]any{"rules": rows, "version": version, "audit": events, "requests": reqs}))
+	}
+	before := snapshot()
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	for _, tc := range []struct {
+		id, action, scope string
+		code              int
+	}{
+		{"ok", "allow", "", http.StatusOK},
+		{"ok", "allow", "global", http.StatusOK},
+		{"ok", "deny", "project", http.StatusOK},
+		{"exp", "deny", "", http.StatusConflict},
+		{"out", "allow", "", http.StatusUnprocessableEntity},
+	} {
+		if resp := apiPost(t, h, ck, "/api/requests/"+tc.id+"/propose", map[string]string{"action": tc.action, "scope": tc.scope}); resp.StatusCode != tc.code {
+			t.Fatalf("%s %s %q: 应 %d, 得到 %d", tc.id, tc.action, tc.scope, tc.code, resp.StatusCode)
+		}
+	}
+	if after := snapshot(); after != before {
+		t.Fatalf("propose 不应写库:\n前 %s\n后 %s", before, after)
+	}
+	if len(sub) != 0 || len(c.out) != 0 {
+		t.Fatalf("propose 不应广播或下发: 网页 %d 帧，守护进程 %d 帧", len(sub), len(c.out))
+	}
+}
+
+// decide 的 scope：缺省时有项目根记成项目、没有记成全局（与旧行为一致）；显式 project 而没有项目根 422；
+// 坏 scope 一律 400；不记住时 scope 不起作用。
+func TestDecideScope(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	m, err := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deploy := func(root string) policy.Payload {
+		return policy.Payload{Type: policy.PayloadShell, Command: "make deploy", Cwd: root}
+	}
+	for _, r := range []struct{ id, root string }{{"rooted", "/p"}, {"bare", ""}, {"bare2", ""}, {"rooted2", "/p"}, {"rooted3", "/p"}} {
+		insertReq(t, h.st, store.Request{ID: r.id, MachineID: m.ID, State: "pending", ProjectRoot: r.root, Payload: deploy(r.root)})
+	}
+	decide := func(id string, body map[string]any) (int, map[string]any) {
+		t.Helper()
+		resp := apiPost(t, h, ck, "/api/requests/"+id+"/decide", body)
+		var out map[string]any
+		decodeBody(t, resp, &out)
+		return resp.StatusCode, out
+	}
+	lastRule := func() policy.Rule {
+		t.Helper()
+		_, rules := ruleRows(t, h.st)
+		return rules[len(rules)-1]
+	}
+	if code, out := decide("bare", map[string]any{"action": "deny", "remember": true, "scope": "project"}); code != http.StatusUnprocessableEntity ||
+		out["error"] != "不能记住：没有项目根，只能记成全局" {
+		t.Fatalf("没有项目根显式记成项目: %d %v", code, out)
+	}
+	for _, body := range []map[string]any{
+		{"action": "deny", "remember": true, "scope": "machine"},
+		{"action": "deny", "remember": false, "scope": "Global"},
+	} {
+		if code, out := decide("bare", body); code != http.StatusBadRequest || out["error"] != "scope 只能是 project 或 global" {
+			t.Fatalf("坏 scope %v: %d %v", body, code, out)
+		}
+	}
+	if r := getReq(t, h.st, "bare"); r.State != "pending" {
+		t.Fatalf("出错的决定不应改状态: %+v", r)
+	}
+	if rows, _ := ruleRows(t, h.st); len(rows) != 2 {
+		t.Fatalf("出错的决定不应生成规则: %+v", rows)
+	}
+	// 不记住时 scope 不起作用：没有项目根写 project 也照常决定
+	if code, out := decide("bare2", map[string]any{"action": "deny", "scope": "project"}); code != http.StatusOK || out["rule_id"] != "" {
+		t.Fatalf("不记住时 scope 不起作用: %d %v", code, out)
+	}
+	// 缺省：没有项目根记成全局（旧客户端不带 scope）
+	if code, out := decide("bare", map[string]any{"action": "deny", "remember": true}); code != http.StatusOK || !lastRule().Scope.IsGlobal() {
+		t.Fatalf("缺省、没有项目根应记成全局: %d %v %+v", code, out, lastRule())
+	}
+	// 缺省：有项目根记成项目
+	if code, _ := decide("rooted", map[string]any{"action": "deny", "remember": true}); code != http.StatusOK || lastRule().Scope.Project != "/p" {
+		t.Fatalf("缺省、有项目根应记成项目: %d %+v", code, lastRule())
+	}
+	if code, _ := decide("rooted2", map[string]any{"action": "deny", "remember": true, "scope": "global"}); code != http.StatusOK || !lastRule().Scope.IsGlobal() {
+		t.Fatalf("显式 global: %d %+v", code, lastRule())
+	}
+	if code, _ := decide("rooted3", map[string]any{"action": "deny", "remember": true, "scope": "project"}); code != http.StatusOK || lastRule().Scope.Project != "/p" {
+		t.Fatalf("显式 project: %d %+v", code, lastRule())
+	}
+	// 记成全局的拒绝在任何项目里都拒这条命令
+	d := evalWith(t, h.st, deploy("/q"), policy.Context{ProjectRoot: "/q", HomeDir: "/home/u", MachineID: m.ID})
+	if d.Action != policy.ActionDeny {
+		t.Fatalf("全局拒绝应在别的项目命中: %+v", d)
+	}
+}
+
+// ruleAnchor 取草案里起匹配作用的锚点。
+func TestRuleAnchor(t *testing.T) {
+	for _, tc := range []struct {
+		m    policy.Match
+		want string
+	}{
+		{policy.Match{CommandPrefix: "npm run build", CommandRegex: `^npm run build$`}, "npm run build"},
+		{policy.Match{CommandRegex: `^make deploy$`}, `^make deploy$`},
+		{policy.Match{PathGlob: "/p/src/**"}, "/p/src/**"},
+		{policy.Match{MCPServer: "github", MCPTool: "create_issue"}, "github/create_issue"},
+		{policy.Match{MCPServer: "github"}, "github"},
+		{policy.Match{Domain: "api.example.com"}, "api.example.com"},
+		{policy.Match{}, ""},
+	} {
+		if got := ruleAnchor(policy.Rule{Match: tc.m}); got != tc.want {
+			t.Fatalf("ruleAnchor(%+v) = %q, 应 %q", tc.m, got, tc.want)
+		}
+	}
+}
+
+func TestRootServesWebUIOrNotBuilt(t *testing.T) {
+	h := newTestHub(t)
+	resp := doReq(t, "GET", h.http.URL+"/r/abc", nil, "", nil)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("根路径: %d", resp.StatusCode)
+	}
+	if resp := doReq(t, "GET", h.http.URL+"/api/nope", nil, "", nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("未知接口应 404: %d", resp.StatusCode)
+	}
+}
+
+// 挂上网页之后：网页路径回页面（单页回退）；/api/、/ws/ 下没有的接口回 404 JSON；路径对、方法不对的接口仍回 405 并带 Allow；
+// 已有接口照常处理。
+func TestWebUIMountKeepsAPIRouting(t *testing.T) {
+	built := fstest.MapFS{
+		"index.html": {Data: []byte("<!doctype html><title>Railse</title>")},
+		"sw.js":      {Data: []byte("self.addEventListener('push',()=>{})")},
+	}
+	h := newTestHubWith(t, nil, func(s *Server) { s.web = webui.Handler(built) })
+
+	for _, path := range []string{"/", "/r/abc", "/rules"} {
+		resp := doReq(t, "GET", h.http.URL+path, nil, "", nil)
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "<title>Railse</title>") {
+			t.Fatalf("%s: %d %q", path, resp.StatusCode, body)
+		}
+		if resp.Header.Get("X-Frame-Options") != "DENY" || !strings.Contains(resp.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+			t.Fatalf("%s 安全头: %v", path, resp.Header)
+		}
+	}
+	if resp := doReq(t, "GET", h.http.URL+"/sw.js", nil, "", nil); resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/javascript") {
+		t.Fatalf("sw.js: %d %v", resp.StatusCode, resp.Header)
+	}
+
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/api/nope"}, {"POST", "/api/nope"}, {"GET", "/ws/nope"}, {"GET", "/api/requests/x/y/z"}, {"GET", "/api"},
+	} {
+		resp := doReq(t, tc.method, h.http.URL+tc.path, nil, "", nil)
+		var e struct{ Error string }
+		decodeBody(t, resp, &e)
+		if resp.StatusCode != http.StatusNotFound || e.Error != "没有这个接口" {
+			t.Fatalf("%s %s: %d %q", tc.method, tc.path, resp.StatusCode, e.Error)
+		}
+	}
+
+	for _, tc := range []struct{ method, path, allow string }{
+		{"GET", "/api/requests/x/decide", "POST"},
+		{"DELETE", "/api/status", "GET, HEAD"},
+		{"POST", "/ws/client", "GET, HEAD"},
+		{"GET", "/api/login", "POST"},
+		{"PUT", "/api/push/subscribe", "DELETE, POST"},
+	} {
+		resp := doReq(t, tc.method, h.http.URL+tc.path, nil, "", nil)
+		if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != tc.allow {
+			t.Fatalf("%s %s 应 405 且 Allow %q: %d %q", tc.method, tc.path, tc.allow, resp.StatusCode, resp.Header.Get("Allow"))
+		}
+	}
+
+	// 已有接口照常处理：没登录回 401；HEAD 走 GET 路由
+	for _, method := range []string{"GET", "HEAD"} {
+		if resp := doReq(t, method, h.http.URL+"/api/status", nil, "", nil); resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s /api/status 未登录应 401: %d", method, resp.StatusCode)
+		}
+	}
+	ck := loggedIn(t, h)
+	if resp := doReq(t, "GET", h.http.URL+"/api/status", nil, "", ck); resp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/status: %d", resp.StatusCode)
 	}
 }

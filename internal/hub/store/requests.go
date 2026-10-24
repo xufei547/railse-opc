@@ -201,6 +201,19 @@ func (s *Store) ListRequests(state string, limit int) ([]Request, error) {
 	return s.queryRequests("SELECT "+requestCols+" FROM requests WHERE state = ? ORDER BY created_at DESC LIMIT ?", state, limit)
 }
 
+// OpenQuestions 列还在等回答的 question，按创建时间倒序、至多 limit 条：state 为 recorded、不早于 since，
+// 且同一会话之后没有任何新行。hub 存的会话行只有 question、done（recorded，见 hub 的 recordEvent）与 permission
+// （待决与补的历史行）：之后来了 done、新的 permission 或新的 question，都说明 agent 已经不在等那个问题了。
+// 没有会话 id 的 question 关联不到后续事件，视为仍在等（直到滑出 since）。
+// 会话行属于一台机器，子查询加上 machine_id 走 (machine_id, created_at) 索引，不扫全表。
+func (s *Store) OpenQuestions(since time.Time, limit int) ([]Request, error) {
+	return s.queryRequests("SELECT "+requestCols+` FROM requests q
+		WHERE q.kind = 'question' AND q.state = 'recorded' AND q.created_at >= ?
+		  AND NOT EXISTS (SELECT 1 FROM requests r
+		    WHERE q.session_id IS NOT NULL AND r.machine_id = q.machine_id AND r.created_at > q.created_at AND r.session_id = q.session_id)
+		ORDER BY q.created_at DESC LIMIT ?`, fmtTime(since), limit)
+}
+
 // ListPendingForMachine 列出某台机器的待处理请求。
 func (s *Store) ListPendingForMachine(machineID string) ([]Request, error) {
 	return s.queryRequests("SELECT "+requestCols+" FROM requests WHERE machine_id = ? AND state = 'pending' ORDER BY created_at", machineID)

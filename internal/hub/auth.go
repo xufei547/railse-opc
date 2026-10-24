@@ -84,16 +84,22 @@ func VerifyPassword(encoded, pw string) bool {
 }
 
 // SetPassword 设置或更换网页登录密码（至少 8 个字符，按 rune 计）。settings 的 password_hash 只存 argon2id 编码串；
-// 写入密码与删光已有登录会话在同一事务里，换密码后旧 cookie 立即失效。
-func (s *Server) SetPassword(pw string) error {
+// 写入密码、删光已有登录会话与全部推送订阅在同一事务里（审计 push_subscriptions_cleared）：换密码后旧 cookie 立即失效，
+// 任何设备都不再收到推送，各设备重新登录后在网页里重新开启通知。返回删掉的会话与订阅数；日志只记条数。
+func (s *Server) SetPassword(pw string) (store.PasswordChange, error) {
 	if utf8.RuneCountInString(pw) < 8 {
-		return errors.New("密码至少 8 个字符")
+		return store.PasswordChange{}, errors.New("密码至少 8 个字符")
 	}
 	enc, err := HashPassword(pw)
 	if err != nil {
-		return err
+		return store.PasswordChange{}, err
 	}
-	return s.store.SetPasswordHash(enc)
+	ch, err := s.store.SetPasswordHash(enc)
+	if err != nil {
+		return store.PasswordChange{}, err
+	}
+	s.log.Printf("已换网页登录密码：删除了 %d 个登录会话、%d 条推送订阅", ch.Sessions, ch.PushSubscriptions)
+	return ch, nil
 }
 
 // verifyLogin 在信号量名额内校验登录密码。等 verifyWait 仍拿不到名额（或请求已取消）时 busy 为 true，不做校验。
