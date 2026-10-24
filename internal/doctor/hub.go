@@ -13,7 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/railse/railse-opc/internal/agent"
 	"github.com/railse/railse-opc/internal/hub/push"
@@ -80,25 +81,76 @@ func hubServerChecks(o Options) []Check {
 	return out
 }
 
-// openReadOnly 只读打开 hub.db，不建任何文件。hub 没在跑（没有 -wal）时加 immutable=1：SQLite 不加锁、不建 -wal 与 -shm
-// （单用 mode=ro 打开 WAL 库也会建出 -wal、-shm 并留下，sudo 跑 doctor 时属主还是 root，hub 之后就写不了库）。
-// hub 在跑时 -wal 与 -shm 本来就在，用 mode=ro 才读得到还在 WAL 里、没检查点的数据。
-// 路径按 URL 编码（同 store.Open），路径里的 %、#、? 不会被当成转义、片段或参数。
-func openReadOnly(path string) (*sql.DB, error) {
+// 只读打开 hub.db 的两种 URI 参数。hub 没在跑（没有 -wal）时用 immutable：SQLite 不加锁、不建 -wal 与 -shm
+// （单用 mode=ro 打开 WAL 库会建出 -wal、-shm 并留下，sudo 跑 doctor 时属主还是 root，hub 之后就写不了库）。
+// 有 -wal 时（hub 在跑，或异常退出没检查点）用 readonly_shm：只读地用现成的 -shm，读得到还在 WAL 里的数据；
+// -shm 不在（崩溃后被删）时它报 CANTOPEN 而不新建，这时回退 immutable 再读（读到的是最后一次检查点的数据）。
+// busy timeout 只对加锁的那种有用：hub 关库、崩溃恢复时会短暂独占，等一会儿而不是立刻报 SQLITE_BUSY。
+const (
+	dsnImmutable   = "mode=ro&immutable=1"
+	dsnReadonlySHM = "mode=ro&readonly_shm=1&_busy_timeout=2000"
+)
+
+// hubDB 是只读打开、读过 schema_version 的 hub.db。
+type hubDB struct {
+	db      *sql.DB
+	version int
+}
+
+// openHubDB 只读打开 hub.db 并读出 schema_version，不建任何文件。路径按 URL 编码（同 store.Open），
+// 路径里的 %、#、? 不会被当成转义、片段或参数。sql.Open 不碰文件，第一次查询才真正打开，所以回退要看查询的错误。
+func openHubDB(path string) (*hubDB, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
-	query := "mode=ro&immutable=1"
+	tries := []string{dsnImmutable}
 	if _, err := os.Lstat(abs + "-wal"); err == nil {
-		query = "mode=ro"
+		tries = []string{dsnReadonlySHM, dsnImmutable}
 	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: abs, RawQuery: query}).String())
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for _, query := range tries {
+		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: abs, RawQuery: query}).String())
+		if err != nil {
+			return nil, err
+		}
+		db.SetMaxOpenConns(1)
+		var v int
+		if err = db.QueryRow("SELECT v FROM schema_version").Scan(&v); err == nil {
+			return &hubDB{db: db, version: v}, nil
+		}
+		db.Close()
+		lastErr = err
+		if sqliteCode(err) != sqlite3.SQLITE_CANTOPEN {
+			break
+		}
 	}
-	db.SetMaxOpenConns(1)
-	return db, nil
+	return nil, lastErr
+}
+
+// sqliteCode 取 SQLite 的主结果码（扩展码的低 8 位）；不是 SQLite 的错误时为 0。
+func sqliteCode(err error) int {
+	var e *sqlite.Error
+	if errors.As(err, &e) {
+		return e.Code() & 0xff
+	}
+	return 0
+}
+
+// dbErrHint 按错误给修复提示。只有库真坏了（不是数据库、损坏）才叫人从备份恢复或移走它；
+// 被锁、打不开、没权限都是暂时的或环境问题，移走库会白白丢掉机器与规则。
+func dbErrHint(err error) string {
+	switch code := sqliteCode(err); {
+	case code == sqlite3.SQLITE_NOTADB || code == sqlite3.SQLITE_CORRUPT:
+		return "hub.db 损坏或不是 hub 的数据库：从备份恢复，或移走它让 railse hub run 新建（机器要重新接入）"
+	case code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED:
+		return "hub 正持着库的锁（关库或崩溃恢复中），稍后重跑 railse doctor"
+	case code == sqlite3.SQLITE_CANTOPEN || code == sqlite3.SQLITE_PERM || code == sqlite3.SQLITE_READONLY || code == sqlite3.SQLITE_AUTH:
+		return "暂时读不了：确认用跑 hub 的同一个用户运行 doctor，hub.db 与 -wal、-shm 的属主和权限对，稍后重跑 railse doctor"
+	case strings.Contains(err.Error(), "no such table"):
+		return "库里没有 hub 的表（不是 hub 建的库，或建库中途断了）：railse hub run 会补建；不是 hub 的数据目录就换对 --hub-dir"
+	}
+	return "暂时读不了，稍后重跑 railse doctor；一直这样就带上这条报错反馈"
 }
 
 // hubDBChecks 给出 hubsrv.db、hubsrv.password、hubsrv.vapid 三项。
@@ -115,18 +167,13 @@ func hubDBChecks(o Options) []Check {
 	if _, err := os.Stat(dbPath); err != nil {
 		return append([]Check{perm}, skipRest("没有数据库")...)
 	}
-	broken := "hub.db 损坏或不是 hub 的数据库：从备份恢复，或移走它让 railse hub run 新建（机器要重新接入）"
-	db, err := openReadOnly(dbPath)
+	h, err := openHubDB(dbPath)
 	if err != nil {
-		return append([]Check{withPerm(perm, Check{ID: id, Name: name, Status: Fail, Detail: "打开失败：" + err.Error(), Hint: broken})}, skipRest("数据库打不开")...)
+		return append([]Check{withPerm(perm, Check{ID: id, Name: name, Status: Fail, Detail: "读不到 schema_version：" + err.Error(), Hint: dbErrHint(err)})}, skipRest("数据库读不了")...)
 	}
-	defer db.Close()
-	var v int
-	if err := db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil {
-		return append([]Check{withPerm(perm, Check{ID: id, Name: name, Status: Fail, Detail: "读不到 schema_version：" + err.Error(), Hint: broken})}, skipRest("数据库读不了")...)
-	}
+	defer h.db.Close()
 	var schema Check
-	switch {
+	switch v := h.version; {
 	case v > store.SchemaVersion:
 		schema = Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf("库版本 %d 比程序（%d）新，hub 起不来", v, store.SchemaVersion), Hint: "升级 railse 到建这个库的版本或更新"}
 	case v < store.SchemaVersion:
@@ -138,7 +185,7 @@ func hubDBChecks(o Options) []Check {
 
 	setting := func(key string) (string, bool, error) {
 		var val string
-		err := db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&val)
+		err := h.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&val)
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", false, nil
 		}
@@ -146,7 +193,7 @@ func hubDBChecks(o Options) []Check {
 	}
 	switch _, ok, err := setting("password_hash"); {
 	case err != nil:
-		out = append(out, Check{ID: "hubsrv.password", Name: "网页密码", Status: Fail, Detail: "读 settings 出错：" + err.Error(), Hint: broken})
+		out = append(out, Check{ID: "hubsrv.password", Name: "网页密码", Status: Fail, Detail: "读 settings 出错：" + err.Error(), Hint: dbErrHint(err)})
 	case ok:
 		out = append(out, Check{ID: "hubsrv.password", Name: "网页密码", Status: OK, Detail: "已设置"})
 	default:
@@ -155,7 +202,7 @@ func hubDBChecks(o Options) []Check {
 	// 错误信息不带密钥内容
 	switch raw, ok, err := setting("vapid_private"); {
 	case err != nil:
-		out = append(out, Check{ID: "hubsrv.vapid", Name: "推送密钥", Status: Fail, Detail: "读 settings 出错：" + err.Error(), Hint: broken})
+		out = append(out, Check{ID: "hubsrv.vapid", Name: "推送密钥", Status: Fail, Detail: "读 settings 出错：" + err.Error(), Hint: dbErrHint(err)})
 	case !ok:
 		out = append(out, Check{ID: "hubsrv.vapid", Name: "推送密钥", Status: Warn, Detail: "VAPID 密钥还没生成", Hint: "首次 railse hub run 会生成；也可以 railse hub vapid"})
 	default:
@@ -212,7 +259,7 @@ func acmeCheck(o Options) Check {
 		}
 	}
 	if len(bad) > 0 {
-		return Check{ID: id, Name: name, Status: Fail, Detail: "里面有私钥文件不是 0600：" + strings.Join(bad, "、"), Hint: "chmod 600 " + strings.Join(badPaths, " ")}
+		return Check{ID: id, Name: name, Status: Fail, Detail: "里面有私钥文件不是 0600：" + strings.Join(bad, "、"), Hint: "chmod 600 " + quoteAll(badPaths)}
 	}
 	return Check{ID: id, Name: name, Status: OK, Detail: dir}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -68,6 +69,9 @@ func fakeOpts(t *testing.T) (Options, string) {
 		LookPath:    func(string) (string, error) { return "", errors.New("not found") },
 		RunCmd:      func(string, ...string) (string, error) { return "", errors.New("不该跑") },
 		AgentStatus: func(string) (proto.Status, error) { return proto.Status{Rules: 2, Hub: "none"}, nil },
+		// 固定成普通用户、家目录归自己：测试在 root 下跑也照常跑 --version 的分支
+		Geteuid:   func() int { return 1000 },
+		FileOwner: func(string) (int, bool) { return 1000, true },
 	}, home
 }
 
@@ -303,7 +307,7 @@ func TestHubReachableProblems(t *testing.T) {
 	}
 }
 
-// writeClaude 写一份由 hooksconf 生成的配置，返回内容。
+// planDoc 返回 hooksconf 为 cli 生成的整份钩子配置。
 func planDoc(t *testing.T, cli, bin string) []byte {
 	t.Helper()
 	doc, err := hooksconf.Merge(nil, bin, hooksconf.Plan(cli, bin))
@@ -668,7 +672,7 @@ func TestHubServerSchemaAndBrokenDB(t *testing.T) {
 	// 不是 SQLite
 	os.WriteFile(dbPath, []byte("garbage, not a database at all...................................................................................."), 0o600)
 	r := Run(o)
-	if c := find(t, r, "hubsrv.db"); c.Status != Fail || c.Hint == "" {
+	if c := find(t, r, "hubsrv.db"); c.Status != Fail || !strings.Contains(c.Hint, "损坏") || !strings.Contains(c.Hint, "移走") {
 		t.Fatalf("坏库: %+v", c)
 	}
 	for _, id := range []string{"hubsrv.password", "hubsrv.vapid"} {
@@ -701,6 +705,11 @@ func snapshot(t *testing.T, dir string) map[string]fileState {
 		t.Fatal(err)
 	}
 	out := map[string]fileState{}
+	dst, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out["."] = fileState{0, dst.Mode(), dst.ModTime()} // 目录自身：建了又删的文件也会改它的 mtime
 	for _, e := range ents {
 		st, err := os.Lstat(filepath.Join(dir, e.Name()))
 		if err != nil {
@@ -714,13 +723,15 @@ func snapshot(t *testing.T, dir string) map[string]fileState {
 func names(m map[string]fileState) string {
 	var s []string
 	for k := range m {
-		s = append(s, k)
+		if k != "." {
+			s = append(s, k)
+		}
 	}
 	sort.Strings(s)
 	return strings.Join(s, ",")
 }
 
-// hub 没在跑（WAL 已检查点、没有 -wal/-shm）：doctor 前后目录里的文件一个不多，大小、权限、mtime 都不变。
+// hub 没在跑（WAL 已检查点、没有 -wal/-shm）：doctor 前后目录里的文件一个不多，大小、权限、mtime（含目录自身的）都不变。
 func TestHubDBReadLeavesNoSideFiles(t *testing.T) {
 	o, home := fakeOpts(t)
 	hubDir := filepath.Join(home, ".railse-hub")
@@ -752,7 +763,7 @@ func TestHubDBReadLeavesNoSideFiles(t *testing.T) {
 	}
 }
 
-// hub 在跑（-wal 存在）：按普通只读打开，读得到还在 WAL 里、没检查点的数据，也不多建文件。
+// hub 在跑（-wal 存在）：只读打开（readonly_shm），读得到还在 WAL 里、没检查点的数据，也不多建文件。
 func TestHubDBReadWhileHubRunning(t *testing.T) {
 	o, home := fakeOpts(t)
 	hubDir := filepath.Join(home, ".railse-hub")
@@ -779,8 +790,10 @@ func TestHubDBReadWhileHubRunning(t *testing.T) {
 	if names(after) != names(before) {
 		t.Fatalf("doctor 多建了文件：前 %s，后 %s", names(before), names(after))
 	}
-	if after["hub.db"] != before["hub.db"] {
-		t.Fatalf("hub.db 变了：前 %+v，后 %+v", before["hub.db"], after["hub.db"])
+	for _, name := range []string{".", "hub.db"} {
+		if after[name] != before[name] {
+			t.Fatalf("%s 变了：前 %+v，后 %+v", name, before[name], after[name])
+		}
 	}
 	// hub 还能照常写
 	if err := st.SetSetting("x", "y"); err != nil {
@@ -870,5 +883,272 @@ func TestReportOutput(t *testing.T) {
 	r.Checks[1].Status = Warn
 	if r.Failed() {
 		t.Fatal("只有 warn 时 Failed 应为假")
+	}
+}
+
+// hub 异常退出后 -shm 被删、只剩 -wal：doctor 不建 -shm（readonly_shm 打不开时回退 immutable），照样读得出库。
+func TestHubDBOnlyWALNoShm(t *testing.T) {
+	o, home := fakeOpts(t)
+	hubDir := filepath.Join(home, ".railse-hub")
+	dbPath := newHubDB(t, hubDir, func(st *store.Store) { st.SetSetting("password_hash", "$argon2id$x") })
+	if err := os.WriteFile(dbPath+"-wal", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o.HubDir = hubDir
+	before := snapshot(t, hubDir)
+	if names(before) != "hub.db,hub.db-wal" {
+		t.Fatalf("前提: %s", names(before))
+	}
+	time.Sleep(20 * time.Millisecond)
+	r := Run(o)
+	for _, id := range []string{"hubsrv.db", "hubsrv.password"} {
+		if c := find(t, r, id); c.Status != OK {
+			t.Fatalf("%s: %+v", id, c)
+		}
+	}
+	after := snapshot(t, hubDir)
+	if names(after) != names(before) {
+		t.Fatalf("doctor 多建了文件：前 %s，后 %s", names(before), names(after))
+	}
+	for name, b := range before {
+		if a := after[name]; a != b {
+			t.Fatalf("%s 变了：前 %+v，后 %+v", name, b, a)
+		}
+	}
+}
+
+// 另一个连接以独占方式持着 hub.db（hub 关库、崩溃恢复时都会短暂这样）：报“正忙、稍后重跑”，不能叫人移走数据库。
+func TestHubDBLockedIsNotCorrupt(t *testing.T) {
+	o, home := fakeOpts(t)
+	hubDir := filepath.Join(home, ".railse-hub")
+	dbPath := newHubDB(t, hubDir, func(st *store.Store) { st.SetSetting("password_hash", "$argon2id$x") })
+	o.HubDir = hubDir
+	locker, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close()
+	locker.SetMaxOpenConns(1)
+	for _, q := range []string{"PRAGMA locking_mode=EXCLUSIVE", "INSERT INTO settings(key, value) VALUES('lock', 'x')"} {
+		if _, err := locker.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	r := Run(o)
+	c := find(t, r, "hubsrv.db")
+	if c.Status != Fail || strings.Contains(c.Hint, "移走") || strings.Contains(c.Hint, "损坏") || !strings.Contains(c.Hint, "稍后") {
+		t.Fatalf("被锁: %+v", c)
+	}
+	if c := find(t, r, "hubsrv.password"); c.Status != Skip {
+		t.Fatalf("被锁时密码应 skip: %+v", c)
+	}
+	locker.Close()
+	if c := find(t, Run(o), "hubsrv.db"); c.Status != OK {
+		t.Fatalf("锁放开后: %+v", c)
+	}
+}
+
+// 锁只持一小会儿（hub 关库时的检查点）：doctor 等一等就读到，不报错。
+func TestHubDBWaitsForBriefLock(t *testing.T) {
+	o, home := fakeOpts(t)
+	hubDir := filepath.Join(home, ".railse-hub")
+	dbPath := newHubDB(t, hubDir, func(st *store.Store) { st.SetSetting("password_hash", "$argon2id$x") })
+	o.HubDir = hubDir
+	locker, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	locker.SetMaxOpenConns(1)
+	for _, q := range []string{"PRAGMA locking_mode=EXCLUSIVE", "INSERT INTO settings(key, value) VALUES('lock', 'x')"} {
+		if _, err := locker.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		locker.Close()
+		close(released)
+	}()
+	r := Run(o)
+	<-released
+	for _, id := range []string{"hubsrv.db", "hubsrv.password"} {
+		if c := find(t, r, id); c.Status != OK {
+			t.Fatalf("%s: %+v", id, c)
+		}
+	}
+}
+
+func TestParseVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"2.1.280 (Claude Code)\n":       "2.1.280",
+		"codex-cli 0.150.0\n":           "0.150.0",
+		"0.65.0":                        "0.65.0",
+		"v1.2.3\n":                      "1.2.3",
+		"0.66.0-nightly.20261020.abc\n": "0.66.0",
+		"(node:123) Warning: requires node v18.19.0\n0.60.0\n": "0.60.0",
+		"0.60.0\n(node:123) Warning: requires node v18.19.0\n": "0.60.0",
+		"update available: 1.0.0 -> 1.2.0":                     "1.2.0",
+	} {
+		v, ok := parseVersion(in)
+		if got := fmt.Sprintf("%d.%d.%d", v[0], v[1], v[2]); !ok || got != want {
+			t.Fatalf("parseVersion(%q) = %s, %v；要 %s", in, got, ok, want)
+		}
+	}
+	if _, ok := parseVersion("no version"); ok {
+		t.Fatal("没有版本号应返回 false")
+	}
+}
+
+func TestCLIVersionAfterWarningsAndFailureOutput(t *testing.T) {
+	o, _ := fakeOpts(t)
+	o.LookPath = func(name string) (string, error) { return "/bin/" + name, nil }
+	long := strings.Repeat("长", 300)
+	o.RunCmd = func(name string, _ ...string) (string, error) {
+		switch filepath.Base(name) {
+		case "gemini":
+			return "(node:123) Warning: requires node v18.19.0\n0.60.0\n", nil
+		case "claude":
+			return "Error: config is broken\n    at stack line\n", errors.New("exit status 1")
+		}
+		return long + "\nsecond", errors.New("exit status 2")
+	}
+	r := Run(o)
+	if c := find(t, r, "cli.gemini"); c.Status != Fail || !strings.Contains(c.Detail, "0.60.0") {
+		t.Fatalf("node 警告里的版本不该算: %+v", c)
+	}
+	if c := find(t, r, "cli.claude"); c.Status != Warn || !strings.Contains(c.Detail, "Error: config is broken") || strings.Contains(c.Detail, "stack") || !strings.Contains(c.Detail, "exit status 1") {
+		t.Fatalf("失败输出首行: %+v", c)
+	}
+	c := find(t, r, "cli.codex")
+	if strings.Contains(c.Detail, "second") || !strings.Contains(c.Detail, strings.Repeat("长", 200)+"…") || strings.Contains(c.Detail, strings.Repeat("长", 201)) {
+		t.Fatalf("首行应截到 200 个字符: %+v", c)
+	}
+}
+
+// 修复提示里的路径按 shell 引起来，带空格也能直接复制运行。
+func TestHintsQuotePaths(t *testing.T) {
+	base, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(base) })
+	agentDir := filepath.Join(base, "a b", ".railse")
+	os.MkdirAll(agentDir, 0o700)
+	os.Chmod(agentDir, 0o755)
+	rules := filepath.Join(agentDir, "rules.yaml")
+	os.WriteFile(rules, nil, 0o644)
+	sock := filepath.Join(agentDir, "agent.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	os.Chmod(sock, 0o644)
+	hubDir := filepath.Join(base, "h b")
+	acme := filepath.Join(hubDir, "acme")
+	os.MkdirAll(acme, 0o700)
+	key := filepath.Join(acme, "acme_account+key")
+	os.WriteFile(key, nil, 0o644)
+	o := Options{
+		AgentDir: agentDir, HubDir: hubDir, Home: base, GOOS: "darwin",
+		LookPath:    func(string) (string, error) { return "", errors.New("no") },
+		RunCmd:      func(string, ...string) (string, error) { return "", errors.New("不该跑") },
+		AgentStatus: func(string) (proto.Status, error) { return proto.Status{Hub: "none"}, nil },
+	}
+	r := Run(o)
+	q := hooksconf.ShellQuote
+	for id, want := range map[string]string{
+		"agent.dir":    "chmod 700 " + q(agentDir),
+		"agent.files":  "chmod 600 " + q(rules),
+		"agent.socket": "chmod 600 " + q(sock),
+		"hubsrv.acme":  "chmod 600 " + q(key),
+	} {
+		if c := find(t, r, id); !strings.Contains(c.Hint, want) {
+			t.Fatalf("%s 的提示要含 %q: %+v", id, want, c)
+		}
+	}
+	os.Chmod(acme, 0o755)
+	if c := find(t, Run(o), "hubsrv.acme"); !strings.Contains(c.Hint, "chmod 700 "+q(acme)) {
+		t.Fatalf("acme 目录: %+v", c)
+	}
+}
+
+// 取不到家目录：用到家目录的检查 skip 并说明，不拼出相对路径去读当前目录下的文件。
+func TestNoHomeDir(t *testing.T) {
+	o, home := fakeOpts(t)
+	t.Setenv("HOME", "")
+	o.Home = ""
+	o.Project = filepath.Join(home, "proj")
+	r := Run(o)
+	for _, id := range []string{"agent.autostart", "hooks.codex", "hooks.codex_notify"} {
+		if c := find(t, r, id); c.Status != Skip || !strings.Contains(c.Detail, "家目录") {
+			t.Fatalf("%s: %+v", id, c)
+		}
+	}
+	for _, c := range r.Checks {
+		if strings.HasPrefix(c.Detail, "Library") || strings.HasPrefix(c.Detail, ".codex") || strings.Contains(c.Detail, "没有托管文件 Library") {
+			t.Fatalf("拼出了相对路径: %+v", c)
+		}
+	}
+}
+
+// sudo 下（euid 是 root，或家目录不归当前用户）不跑 CLI：它们的 --version 可能在用户目录写缓存，留下 root 属主的文件。
+func TestCLISkippedUnderSudo(t *testing.T) {
+	const reason, hint = "sudo 下不跑 CLI，免得在用户目录留下 root 属主的文件", "用平时的用户身份重跑 railse doctor"
+	o, home := fakeOpts(t)
+	o.LookPath = func(name string) (string, error) { return "/bin/" + name, nil }
+	ran := 0
+	o.RunCmd = func(string, ...string) (string, error) { ran++; return "2.1.280\n", nil }
+	var asked []string
+	for name, set := range map[string]func(){
+		"euid 是 root": func() { o.Geteuid = func() int { return 0 }; o.FileOwner = func(string) (int, bool) { return 0, true } },
+		"家目录归别的用户": func() {
+			o.Geteuid = func() int { return 1000 }
+			o.FileOwner = func(p string) (int, bool) { asked = append(asked, p); return 1001, true }
+		},
+	} {
+		set()
+		r := Run(o)
+		for _, id := range []string{"cli.claude", "cli.codex", "cli.gemini"} {
+			if c := find(t, r, id); c.Status != Skip || c.Detail != reason || c.Hint != hint {
+				t.Fatalf("%s：%s = %+v", name, id, c)
+			}
+		}
+		if ran != 0 {
+			t.Fatalf("%s：不该跑 --version（跑了 %d 次）", name, ran)
+		}
+	}
+	if len(asked) == 0 || asked[0] != home {
+		t.Fatalf("应查家目录 %s 的属主，实际 %q", home, asked)
+	}
+	// 普通情况：照常跑
+	o.Geteuid = func() int { return 1000 }
+	o.FileOwner = func(string) (int, bool) { return 1000, true }
+	if c := find(t, Run(o), "cli.claude"); c.Status != OK || ran != 3 {
+		t.Fatalf("普通用户: %+v ran=%d", c, ran)
+	}
+	// 查不到家目录属主时只看 euid
+	o.FileOwner = func(string) (int, bool) { return 0, false }
+	if c := find(t, Run(o), "cli.claude"); c.Status != OK {
+		t.Fatalf("属主查不到: %+v", c)
+	}
+}
+
+// 默认的 Geteuid 与 FileOwner 是真的：自己建的临时目录归自己。
+func TestDefaultOwnerLookup(t *testing.T) {
+	var o Options
+	o.defaults()
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	uid, ok := o.FileOwner(dir)
+	if !ok || uid != o.Geteuid() || o.Geteuid() != os.Geteuid() {
+		t.Fatalf("属主 %d %v，euid %d", uid, ok, o.Geteuid())
+	}
+	if _, ok := o.FileOwner(filepath.Join(dir, "nope")); ok {
+		t.Fatal("不存在的路径应查不到属主")
 	}
 }

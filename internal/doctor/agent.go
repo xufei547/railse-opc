@@ -7,7 +7,17 @@ import (
 	"strings"
 
 	"github.com/railse/railse-opc/internal/autostart"
+	"github.com/railse/railse-opc/internal/hooksconf"
 )
+
+// quoteAll 把路径逐个按 shell 引起来、以空格连接：提示里的命令遇到带空格的路径也能直接复制运行。
+func quoteAll(paths []string) string {
+	q := make([]string, len(paths))
+	for i, p := range paths {
+		q[i] = hooksconf.ShellQuote(p)
+	}
+	return strings.Join(q, " ")
+}
 
 // permCheck 看 path 存在、类型对（dir 为真时要是目录，否则要是普通文件）、权限恰为 want。跟随符号链接，看的是真正的文件。
 // missingHint 是不存在时的修复提示。
@@ -26,7 +36,7 @@ func permCheck(id, name, path string, want os.FileMode, dir bool, missingHint st
 		return Check{ID: id, Name: name, Status: Fail, Detail: path + " 不是普通文件", Hint: "移走它，" + missingHint}
 	}
 	if st.Mode().Perm() != want {
-		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf("%s 权限是 %04o，应为 %04o", path, st.Mode().Perm(), want), Hint: fmt.Sprintf("chmod %o %s", want, path)}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf("%s 权限是 %04o，应为 %04o", path, st.Mode().Perm(), want), Hint: fmt.Sprintf("chmod %o %s", want, hooksconf.ShellQuote(path))}
 	}
 	return Check{ID: id, Name: name, Status: OK, Detail: path}
 }
@@ -62,7 +72,7 @@ func agentFilesCheck(o Options, dirCheck Check) Check {
 		}
 	}
 	if len(bad) > 0 {
-		return Check{ID: id, Name: name, Status: Fail, Detail: "不是 0600：" + strings.Join(bad, "、"), Hint: "chmod 600 " + strings.Join(badPaths, " ")}
+		return Check{ID: id, Name: name, Status: Fail, Detail: "不是 0600：" + strings.Join(bad, "、"), Hint: "chmod 600 " + quoteAll(badPaths)}
 	}
 	return Check{ID: id, Name: name, Status: OK, Detail: strings.Join(files, "、") + "（存在的）都是 0600"}
 }
@@ -77,7 +87,7 @@ func agentSocketCheck(o Options) Check {
 	case st.Mode()&os.ModeSocket == 0:
 		return Check{ID: id, Name: name, Status: Fail, Detail: sock + " 不是 socket", Hint: "移走这个文件后重启守护进程"}
 	case st.Mode().Perm() != 0o600:
-		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf("%s 权限是 %04o，应为 0600", sock, st.Mode().Perm()), Hint: "chmod 600 " + sock + "，或重启守护进程"}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf("%s 权限是 %04o，应为 0600", sock, st.Mode().Perm()), Hint: "chmod 600 " + hooksconf.ShellQuote(sock) + "，或重启守护进程"}
 	}
 	return Check{ID: id, Name: name, Status: OK, Detail: sock}
 }
@@ -120,18 +130,31 @@ func agentRunningChecks(o Options) []Check {
 
 // autostartCheck 只看托管文件在不在，不跑 launchctl/systemctl。路径与 railse setup autostart 共用 internal/autostart。
 // hub 在 Linux 上也可能装成系统单元（sudo railse setup autostart --hub --system），那个存在也算。
+// 取不到家目录时只看系统单元，没有就 skip：不拼相对路径。
 func autostartCheck(id, name string, o Options, kind string) Check {
 	var paths []string
 	switch o.GOOS {
 	case "darwin":
-		paths = []string{autostart.PlistPath(o.Home, kind)}
+		if o.Home != "" {
+			paths = []string{autostart.PlistPath(o.Home, kind)}
+		}
 	case "linux":
 		if kind == "hub" {
 			paths = append(paths, autostart.UnitPath(o.Home, kind, true))
 		}
-		paths = append(paths, autostart.UnitPath(o.Home, kind, false))
+		if o.Home != "" {
+			paths = append(paths, autostart.UnitPath(o.Home, kind, false))
+		}
 	default:
 		return Check{ID: id, Name: name, Status: Skip, Detail: "不支持 " + o.GOOS + " 的开机自启"}
+	}
+	if o.Home == "" {
+		for _, p := range paths {
+			if _, err := os.Stat(p); err == nil {
+				return Check{ID: id, Name: name, Status: OK, Detail: p}
+			}
+		}
+		return Check{ID: id, Name: name, Status: Skip, Detail: noHome}
 	}
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {

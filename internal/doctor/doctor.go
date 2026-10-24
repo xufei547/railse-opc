@@ -1,6 +1,8 @@
 // Package doctor 只读地检查一台机器上 Railse 的安装：守护进程、hub 连接、三个 CLI 的钩子与版本、权限；
-// 在 hub 机器上还检查数据库、密码与推送密钥。不改任何东西：不写配置、不建文件（数据库按只读打开，hub 没在跑时
-// 连 -wal、-shm 也不建），除了带超时的 `<cli> --version` 不起任何进程，网络只访问 hub 的 /api/version。
+// 在 hub 机器上还检查数据库、密码与推送密钥。doctor 自己不改配置、不建文件、不改权限（数据库按只读打开，
+// 连 -wal、-shm 也不建），网络只访问 hub 的 /api/version。唯一会起的进程是带超时的 `<cli> --version`，
+// 可能的副作用只有这些 CLI 自己在 --version 时写下的东西（如缓存、更新检查记录）；所以 sudo 下
+// （euid 是 root，或家目录不归当前用户）不跑它们，免得在用户目录留下 root 属主的文件。
 package doctor
 
 import (
@@ -66,7 +68,15 @@ type Options struct {
 	HTTP        *http.Client                                      // 只用来 GET hub 的 /api/version
 	AgentStatus func(socket string) (proto.Status, error)
 	Now         time.Time
+
+	// Geteuid 与 FileOwner 用来认出 sudo 下运行（euid 是 root，或 Home 的属主不是当前 euid），那时不跑 CLI 的 --version。
+	// FileOwner 查不到（路径不存在、不支持的系统）时 ok 为 false。
+	Geteuid   func() int
+	FileOwner func(path string) (uid int, ok bool)
 }
+
+// noHome 是取不到家目录时，用到家目录的检查（开机自启、Codex 的钩子与 notify）的 skip 说明。
+const noHome = "取不到家目录（$HOME 没设），跳过"
 
 // cliTimeout 是 `<cli> --version` 的时限：首次运行的自更新、登录提示之类卡住时不让 doctor 跟着挂住。是变量只为测试能调短。
 var cliTimeout = 10 * time.Second
@@ -93,7 +103,7 @@ func (o *Options) defaults() {
 		o.GOOS = runtime.GOOS
 	}
 	if o.Home == "" {
-		o.Home, _ = os.UserHomeDir()
+		o.Home, _ = os.UserHomeDir() // 取不到时留空，用到它的检查 skip（noHome），不拼相对路径
 	}
 	if o.LookPath == nil {
 		o.LookPath = exec.LookPath
@@ -122,6 +132,12 @@ func (o *Options) defaults() {
 	}
 	if o.Now.IsZero() {
 		o.Now = time.Now()
+	}
+	if o.Geteuid == nil {
+		o.Geteuid = os.Geteuid
+	}
+	if o.FileOwner == nil {
+		o.FileOwner = fileOwner
 	}
 }
 

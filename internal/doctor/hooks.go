@@ -27,10 +27,17 @@ func hookChecks(o Options) []Check {
 			{ID: "hooks.gemini", Name: "Gemini 钩子", Status: Skip, Detail: why},
 		}
 	}
+	codex := []Check{
+		{ID: "hooks.codex", Name: "Codex 钩子", Status: Skip, Detail: noHome},
+		{ID: "hooks.codex_notify", Name: "Codex notify", Status: Skip, Detail: noHome},
+	}
+	if o.Home != "" { // Codex 的钩子与 notify 都在用户级的 ~/.codex 下
+		codex = []Check{hookFileCheck("hooks.codex", "Codex 钩子", "codex", hooksconf.CodexPath(o.Home), o), codexNotifyCheck(o)}
+	}
 	return []Check{
 		claudeHookCheck(o),
-		hookFileCheck("hooks.codex", "Codex 钩子", "codex", hooksconf.CodexPath(o.Home), o),
-		codexNotifyCheck(o),
+		codex[0],
+		codex[1],
 		hookFileCheck("hooks.gemini", "Gemini 钩子", "gemini", hooksconf.GeminiPath(o.Project), o),
 	}
 }
