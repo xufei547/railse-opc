@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/autostart"
 	"github.com/railse/railse-opc/internal/hookclient"
 	"github.com/railse/railse-opc/internal/hooksconf"
 )
@@ -228,34 +228,49 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// setupDaemonWait 是 setup all 托管之后等守护进程应答的上限：launchd、systemd 拉起它要一点时间，等到了体检才看得到它在跑。
+// setupDaemonWait 是 setup all 托管之后探守护进程应答的时长：launchd、systemd 拉起它要一点时间，等到了体检才看得到它在跑。
+// 截止时间只在两次探测之间检查，单次探测最长约 5 秒（hookclient 管理命令的时限），所以最坏约等 setupDaemonWait 加 5 秒。
 // 是变量只为测试能调短。
 var setupDaemonWait = 5 * time.Second
 
-// daemonAnswers 报告 sock 上有没有守护进程应答 status。
+// daemonAnswers 报告 sock 上有没有守护进程应答 status。只用在托管之后的等待里；判断 socket 被没被占用 socketOccupied。
 func daemonAnswers(sock string) bool {
 	_, err := hookclient.Client{SocketPath: sock, ConnectTimeout: time.Second}.Control("status")
 	return err == nil
 }
 
-// agentJobPath 是本系统上守护进程托管文件的路径（与 setup autostart、doctor 共用 internal/autostart 的约定）；
-// 不支持开机自启的系统、取不到家目录时为空。
-func agentJobPath(home string) string {
-	if home == "" {
-		return ""
+// socketOccupied 用与守护进程 Listen 相同的判定看 socket 被没被占：连得上就是有进程在监听，不管它答不答、说哪个协议版本
+// （这时再起一个守护进程，它 Listen 会失败）。无人监听的陈旧 socket 文件不算，守护进程 Listen 时会替换它。
+func socketOccupied(sock string) bool {
+	c, err := net.DialTimeout("unix", sock, 500*time.Millisecond)
+	if err != nil {
+		return false
 	}
-	switch runtime.GOOS {
-	case "darwin":
-		return autostart.PlistPath(home, "agent")
-	case "linux":
-		return autostart.UnitPath(home, "agent", false)
+	c.Close()
+	return true
+}
+
+// agentJobRunning 问服务管理器守护进程的托管作业在不在跑（与 railse setup autostart --status 同一个查询：launchctl print 的
+// state、systemctl --user is-active），不看托管文件在不在：托管失败时文件可能已经写下了，作业却没起来。只读。
+func agentJobRunning() bool {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return false
 	}
-	return ""
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	return autostartStatus(runtime.GOOS, autostartSpec{Kind: "agent", Home: home, UID: os.Getuid()}, false, io.Discard) == 0
 }
 
 // runSetupAll 是 railse setup all：依次接入 hub、装三个 CLI 的钩子、托管开机自启、体检。
 // 任一步失败立即退出 1 并说明停在哪一步、哪些已做完；体检只展示（刚托管的守护进程可能还没起来），不影响退出码。
 func runSetupAll(args []string, stdout, stderr io.Writer) int {
+	return runSetupAllAs(os.Geteuid(), args, stdout, stderr)
+}
+
+// runSetupAllAs 是 runSetupAll 的可测版本：有效 uid 由调用方给。
+func runSetupAllAs(euid int, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("setup all", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
@@ -280,6 +295,13 @@ func runSetupAll(args []string, stdout, stderr io.Writer) int {
 	}
 	if fs.NArg() != 0 {
 		return usageErr("多余的参数 %q", fs.Args())
+	}
+	// 在动手之前拒绝 root：否则一次性接入码先被用掉，machine.json 与项目里、家目录下的钩子配置都成了 root 的文件，
+	// 到第 3 步才被 setup autostart 拒绝（加 --no-autostart 时更是以 root 一路跑完）
+	if euid == 0 {
+		fmt.Fprintln(stderr, "setup all 要用平时的用户身份运行，不要 sudo：以 root 跑会用掉一次性接入码，machine.json 与钩子配置也会成为 root 的文件；"+
+			"hub 机器用 sudo railse setup autostart --hub --system")
+		return 1
 	}
 	var hubBase string
 	if *hubURL != "" {
@@ -385,27 +407,37 @@ func runSetupAll(args []string, stdout, stderr io.Writer) int {
 		done = append(done, steps[1])
 	}
 
-	// 给人照抄的命令：用户给了 --dir、--bin 的，原样带上
-	dirBin := ""
+	// 给人照抄的命令：用户给了 --dir、--bin 的，原样带上（agent run 只认 --dir）
+	dirArg, dirBin := "", ""
 	if *dir != "" {
-		dirBin += " --dir " + hooksconf.ShellQuote(cfg.Dir)
+		dirArg = " --dir " + hooksconf.ShellQuote(cfg.Dir)
 	}
+	dirBin = dirArg
 	if *bin != "" {
 		dirBin += " --bin " + hooksconf.ShellQuote(b)
 	}
 	step(3)
 	slow := false // 托管了、守护进程却还没应答
-	switch job := agentJobPath(homeDir()); {
+	// socket 被占时问服务管理器作业在不在跑：在跑就是托管的那个占着，重装会换掉它；不在跑就是手动起的（或别的进程）占着，
+	// 再托管一个，新实例 Listen 失败、被 launchd/systemd 反复拉起
+	occupied := socketOccupied(cfg.SocketPath)
+	switch {
 	case *noAutostart:
-		fmt.Fprintln(stdout, "已跳过（--no-autostart）；守护进程要自己 railse agent run")
-	case daemonAnswers(cfg.SocketPath) && !jobExists(job):
-		// 手动起的守护进程占着 socket：再托管一个，新实例起不来、被 launchd/systemd 反复拉起；在跑的这个也只在启动时读 machine.json
-		fmt.Fprintf(stdout, "守护进程已在运行，但没有托管文件 %s（应是手动 railse agent run 起的），跳过托管：再托管一个会抢不到 socket、被反复拉起；"+
-			"在跑的这个也只在启动时读 machine.json。\n先停掉它（在它的终端里 Ctrl-C），再运行：railse setup autostart%s\n", job, dirBin)
+		fmt.Fprintf(stdout, "已跳过（--no-autostart）；守护进程要自己 railse agent run%s\n", dirArg)
+		if enroll && occupied { // 守护进程只在启动时读 machine.json
+			if agentJobRunning() {
+				fmt.Fprintf(stdout, "守护进程正在跑，读不到刚写的 machine.json：已托管的守护进程用 railse setup autostart%s 重装或重启后生效\n", dirBin)
+			} else {
+				fmt.Fprintf(stdout, "守护进程正在跑，读不到刚写的 machine.json：手动起的停掉后重新 railse agent run%s 才接上 hub\n", dirArg)
+			}
+		}
+	case occupied && !agentJobRunning():
+		fmt.Fprintf(stdout, "守护进程已在运行，但不是托管的那个（launchd/systemd 里的托管作业没在跑；应是手动 railse agent run 起的），跳过托管："+
+			"再托管一个会抢不到 socket、被反复拉起；在跑的这个也只在启动时读 machine.json。\n先停掉它（在它的终端里 Ctrl-C），再运行：railse setup autostart%s\n", dirBin)
 		notes = append(notes, "没有托管开机自启（守护进程在手动运行），见第 3 步")
 	default:
 		if code := runAutostart([]string{"--dir", cfg.Dir, "--bin", b}, stdout, stderr); code != 0 {
-			return fail(3, "可以先手动 railse agent run 跑起守护进程。")
+			return fail(3, "可以先手动 railse agent run"+dirArg+" 跑起守护进程。")
 		}
 		done = append(done, steps[2])
 		if waitDaemon(cfg.SocketPath, setupDaemonWait) {
@@ -432,22 +464,7 @@ func runSetupAll(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// homeDir 是家目录；取不到时为空（托管那一步会自己报错）。
-func homeDir() string {
-	h, _ := os.UserHomeDir()
-	return h
-}
-
-// jobExists 报告托管文件在不在（路径为空即不支持开机自启，算不在）。
-func jobExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	_, err := os.Lstat(path)
-	return err == nil
-}
-
-// waitDaemon 每 200 毫秒问一次守护进程，至多等 wait；wait 为零时只问一次。
+// waitDaemon 每 200 毫秒问一次守护进程，直到它应答或过了 wait（见 setupDaemonWait 说的最坏时长）；wait 为零时只问一次。
 func waitDaemon(sock string, wait time.Duration) bool {
 	deadline := time.Now().Add(wait)
 	for {

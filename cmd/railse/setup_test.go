@@ -4,16 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/autostart"
 	"github.com/railse/railse-opc/internal/hooksconf"
 )
 
@@ -726,12 +727,45 @@ func (f setupAllFixture) args(extra ...string) []string {
 	return append([]string{"setup", "all", "--project", f.proj, "--dir", f.dir, "--bin", f.bin}, extra...)
 }
 
-// agentJobPath 是本系统上守护进程的托管文件。
+// agentJobPath 是本系统上守护进程的托管文件（与 setup autostart 同一套路径函数）。
 func (f setupAllFixture) agentJobPath() string {
 	if runtime.GOOS == "darwin" {
-		return autostart.PlistPath(f.home, "agent")
+		return launchdPlistPath(f.home, "agent")
 	}
-	return autostart.UnitPath(f.home, "agent", false)
+	return systemdUnitPath(f.home, "agent", false)
+}
+
+// isJobStatusQuery 认出问服务管理器“作业在不在跑”的命令：launchctl print、systemctl is-active。
+func isJobStatusQuery(call []string) bool {
+	return len(call) > 1 && (call[0] == "launchctl" && call[1] == "print" || call[0] == "systemctl" && slices.Contains(call, "is-active"))
+}
+
+// jobState 给 cmdRec.respond：问作业状态时按 running 回答，其余命令一律成功。
+func jobState(running bool) func([]string) (string, error) {
+	return func(call []string) (string, error) {
+		switch {
+		case !isJobStatusQuery(call):
+			return "", nil
+		case running && call[0] == "launchctl":
+			return "\tstate = running\n", nil
+		case running:
+			return "active\n", nil
+		case call[0] == "launchctl":
+			return "Could not find service \"dev.railse.agent\" in domain for user gui: 501\n", exitErr(113)
+		}
+		return "inactive\n", exitErr(3)
+	}
+}
+
+// installCalls 去掉作业状态查询，只留装托管的命令（bootout、bootstrap、daemon-reload、restart 等）。
+func installCalls(calls [][]string) [][]string {
+	var out [][]string
+	for _, c := range calls {
+		if !isJobStatusQuery(c) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func newEnrollToken(t *testing.T, h *testHub) string {
@@ -923,7 +957,7 @@ func TestSetupAllAutostartFailureStopsAtStep3(t *testing.T) {
 	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h)), &out, &errOut); code != 1 {
 		t.Fatalf("托管失败应退出 1: %d %q", code, errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "第 3 步（开机自启）") || !strings.Contains(errOut.String(), "已完成：接入 hub、安装钩子") || !strings.Contains(errOut.String(), "railse agent run") {
+	if !strings.Contains(errOut.String(), "第 3 步（开机自启）") || !strings.Contains(errOut.String(), "已完成：接入 hub、安装钩子") || !strings.Contains(errOut.String(), "railse agent run --dir "+f.dir) {
 		t.Fatalf("应说明停在第 3 步: %q", errOut.String())
 	}
 	local, _ := hooksconf.ClaudePaths(f.proj)
@@ -959,6 +993,9 @@ func TestSetupAllNoHooksAndNoAutostart(t *testing.T) {
 	}
 	if len(f.rec.calls) != calls || !strings.Contains(out.String(), "项通过") || !strings.Contains(out.String(), "下一步") {
 		t.Fatalf("两个都跳过时只体检: %v %q", f.rec.calls[calls:], out.String())
+	}
+	if !strings.Contains(out.String(), "守护进程要自己 railse agent run --dir "+f.dir) {
+		t.Fatalf("--no-autostart 的提示应带上 --dir: %q", out.String())
 	}
 	// 没托管时体检的失败不是“还没起来”
 	if !strings.Contains(out.String(), "按上面的“修复：”处理") || strings.Contains(out.String(), "过几秒") {
@@ -1008,19 +1045,20 @@ func TestSetupAllSkipsEnrollWhenMachineExists(t *testing.T) {
 	}
 }
 
-// 手动起的守护进程在跑、又没有托管时不托管（第二个实例抢不到 socket，会被 launchd/systemd 反复拉起），照常体检；
-// 已经托管过的照常重装（bootout+bootstrap、restart 会换掉在跑的那个）。
+// 手动起的守护进程占着 socket、服务管理器里的作业又没在跑时不托管（第二个实例抢不到 socket，会被 launchd/systemd 反复拉起），
+// 照常体检；作业在跑（托管的那个占着 socket）时照常重装（bootout+bootstrap、restart 会换掉在跑的那个）。
 func TestSetupAllSkipsAutostartWhenUnmanagedDaemonRuns(t *testing.T) {
 	needUserAutostart(t)
 	h := startTestHub(t)
 	f := setupAllEnv(t)
+	f.rec.respond = jobState(false)
 	serveAgent(t, agent.ConfigIn(f.dir))
 	var out, errOut bytes.Buffer
 	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h)), &out, &errOut); code != 0 {
 		t.Fatalf("setup all: %d %q %q", code, out.String(), errOut.String())
 	}
-	if len(f.rec.calls) != 0 {
-		t.Fatalf("手动起的守护进程在跑时不该托管: %v", f.rec.calls)
+	if c := installCalls(f.rec.calls); len(c) != 0 || len(f.rec.calls) == 0 {
+		t.Fatalf("socket 被占时应只问作业状态、不托管: %v", f.rec.calls)
 	}
 	s := out.String()
 	for _, want := range []string{"已在运行", "Ctrl-C", "railse setup autostart --dir " + f.dir + " --bin " + f.bin, "[ok]    守护进程在跑", "没有托管开机自启", "下一步"} {
@@ -1031,16 +1069,174 @@ func TestSetupAllSkipsAutostartWhenUnmanagedDaemonRuns(t *testing.T) {
 	if _, err := os.Stat(f.agentJobPath()); !os.IsNotExist(err) {
 		t.Fatal("不该写托管文件")
 	}
-	// 已有托管文件：照常重装，并等到守护进程应答
+	// 作业文件在、作业却没在跑（例如上次托管失败留下的）：仍是手动那个占着 socket，照样不托管
 	os.MkdirAll(filepath.Dir(f.agentJobPath()), 0o755)
 	os.WriteFile(f.agentJobPath(), []byte("old"), 0o644)
+	f.rec.calls = nil
+	out.Reset()
+	if code := run(f.args(), &out, &errOut); code != 0 || len(installCalls(f.rec.calls)) != 0 || !strings.Contains(out.String(), "Ctrl-C") {
+		t.Fatalf("作业文件在但没在跑时不该托管: %d %v %q", code, f.rec.calls, out.String())
+	}
+	// 服务管理器说作业在跑：占着 socket 的是托管的那个，照常重装，并等到守护进程应答
+	f.rec.respond = jobState(true)
+	f.rec.calls = nil
 	setupDaemonWait = 2 * time.Second
 	out.Reset()
 	if code := run(f.args(), &out, &errOut); code != 0 {
 		t.Fatalf("已托管时重跑: %d %q %q", code, out.String(), errOut.String())
 	}
-	if len(f.rec.calls) == 0 || !strings.Contains(out.String(), "已托管") || !strings.Contains(out.String(), "守护进程已应答") {
-		t.Fatalf("已托管时应重装: %v %q", f.rec.calls, out.String())
+	if len(installCalls(f.rec.calls)) == 0 || !strings.Contains(out.String(), "已托管") || !strings.Contains(out.String(), "守护进程已应答") {
+		t.Fatalf("作业在跑时应重装: %v %q", f.rec.calls, out.String())
+	}
+}
+
+// 审查探针：第 3 步失败（托管文件已写下）→ 照提示手动 railse agent run → 重跑 setup all，不能再 bootstrap 第二个守护进程。
+func TestSetupAllRerunAfterAutostartFailureKeepsManualDaemon(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	f.rec.respond = func([]string) (string, error) { return "boom", exitErr(1) }
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h)), &out, &errOut); code != 1 {
+		t.Fatalf("托管应失败: %d %q", code, errOut.String())
+	}
+	if _, err := os.Stat(f.agentJobPath()); err != nil {
+		t.Fatalf("本例要的是托管失败后留下的托管文件: %v", err)
+	}
+	serveAgent(t, agent.ConfigIn(f.dir))
+	f.rec.respond = jobState(false)
+	f.rec.calls = nil
+	out.Reset()
+	if code := run(f.args(), &out, &errOut); code != 0 {
+		t.Fatalf("重跑: %d %q %q", code, out.String(), errOut.String())
+	}
+	if c := installCalls(f.rec.calls); len(c) != 0 {
+		t.Fatalf("手动守护进程在跑时不该再托管: %v", c)
+	}
+	if strings.Contains(out.String(), "守护进程已应答") || !strings.Contains(out.String(), "Ctrl-C") {
+		t.Fatalf("应跳过托管: %q", out.String())
+	}
+}
+
+// socket 上有监听、但不是能正常应答的守护进程（别的协议版本、卡住不答）：照样算被占，不托管。
+func TestSetupAllSocketHeldByForeignListenerSkipsAutostart(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	f.rec.respond = jobState(false)
+	if err := os.MkdirAll(f.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", filepath.Join(f.dir, "agent.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Write([]byte(`{"v":999,"ok":false,"error":"unsupported version"}` + "\n"))
+			c.Close()
+		}
+	}()
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h)), &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d %q %q", code, out.String(), errOut.String())
+	}
+	if c := installCalls(f.rec.calls); len(c) != 0 || !strings.Contains(out.String(), "Ctrl-C") {
+		t.Fatalf("socket 被别的监听占着时不该托管: %v %q", f.rec.calls, out.String())
+	}
+}
+
+// 上次崩溃留下的无人监听的 socket 文件不算被占：照常托管，也不必问作业状态（守护进程自己 Listen 时会替换它）。
+func TestSetupAllStaleSocketStillInstalls(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	if err := os.MkdirAll(f.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(f.dir, "agent.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ln.Close()
+	if st, err := os.Lstat(sock); err != nil || st.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("应留下陈旧的 socket 文件: %v", err)
+	}
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h)), &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d %q %q", code, out.String(), errOut.String())
+	}
+	if len(installCalls(f.rec.calls)) == 0 || len(installCalls(f.rec.calls)) != len(f.rec.calls) || !strings.Contains(out.String(), "已托管") {
+		t.Fatalf("陈旧 socket 时应直接托管: %v %q", f.rec.calls, out.String())
+	}
+}
+
+// --no-autostart 时刚（重新）接入，而守护进程正在跑：说清楚要怎样它才读到新的 machine.json。
+func TestSetupAllNoAutostartReenrollWhileDaemonRuns(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	serveAgent(t, agent.ConfigIn(f.dir))
+	f.rec.respond = jobState(true)
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d %q", code, errOut.String())
+	}
+	if c := installCalls(f.rec.calls); len(c) != 0 {
+		t.Fatalf("--no-autostart 不该托管: %v", c)
+	}
+	if !strings.Contains(out.String(), "已托管的守护进程用 railse setup autostart --dir "+f.dir+" --bin "+f.bin+" 重装或重启后生效") {
+		t.Fatalf("托管的守护进程在跑时应提示重装: %q", out.String())
+	}
+	f.rec.respond = jobState(false)
+	out.Reset()
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart", "--force"), &out, &errOut); code != 0 {
+		t.Fatalf("--force: %d %q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "停掉后重新 railse agent run --dir "+f.dir) {
+		t.Fatalf("手动的守护进程在跑时应提示重启它: %q", out.String())
+	}
+	// 没有新接入时不提示
+	out.Reset()
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 0 || strings.Contains(out.String(), "重装或重启后生效") || strings.Contains(out.String(), "停掉后重新") {
+		t.Fatalf("没有新接入时不该提示: %d %q", code, out.String())
+	}
+}
+
+// root 跑 setup all：一步都不做（不用掉一次性接入码、不写 root 属主的配置），退出 1。
+func TestSetupAllRefusesRoot(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	tok := newEnrollToken(t, h)
+	for _, extra := range [][]string{nil, {"--no-autostart"}, {"--no-autostart", "--no-hooks"}} {
+		var out, errOut bytes.Buffer
+		args := append(f.args("--hub", h.http.URL, "--token", tok), extra...)[2:] // 去掉 setup all
+		if code := runSetupAllAs(0, args, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "不要 sudo") || !strings.Contains(errOut.String(), "sudo railse setup autostart --hub --system") {
+			t.Fatalf("root %v: %d %q", extra, code, errOut.String())
+		}
+		if out.Len() != 0 {
+			t.Fatalf("root 时不该开始任何一步: %q", out.String())
+		}
+	}
+	for _, p := range []string{f.dir, filepath.Join(f.home, ".railse"), filepath.Join(f.proj, ".claude"), filepath.Join(f.proj, ".gemini"), filepath.Join(f.home, ".codex")} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("root 时不该建 %s", p)
+		}
+	}
+	if len(f.rec.calls) != 0 {
+		t.Fatalf("root 时不该跑命令: %v", f.rec.calls)
+	}
+	// 接入码没被用掉
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", tok, "--no-autostart"), &out, &errOut); code != 0 || !strings.Contains(out.String(), "已接入 hub") {
+		t.Fatalf("root 被拒后接入码应仍可用: %d %q %q", code, out.String(), errOut.String())
 	}
 }
 
