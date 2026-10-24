@@ -2112,7 +2112,7 @@ git commit -m "feat(doctor): 只读检查守护进程、hub 连接、三个 CLI 
 
 **Interfaces:**
 - `railse doctor [--project 目录] [--dir 目录] [--hub-dir 目录] [--bin 路径] [--json]`
-  - `--project` 默认当前目录；`--dir` 默认 `$RAILSE_HOME` 或 `~/.railse`；`--hub-dir` 默认 `$RAILSE_HUB_HOME` 或 `~/.railse-hub`，目录不存在时自动跳过 hub 侧；`--bin` 默认当前程序路径
+  - `--project` 默认当前目录；`--dir` 默认 `$RAILSE_HOME` 或 `~/.railse`；`--hub-dir` 默认 `$RAILSE_HUB_HOME` 或 `~/.railse-hub`，Linux 上两者都没有时再看 `/var/lib/railse-hub`（`--system` 装的 hub），都不存在时自动跳过 hub 侧并写明看过哪些目录；`--bin` 默认当前程序路径；euid 为 0 或 `$HOME` 属主不是当前用户时不跑 CLI 的 `--version`（`cli.*` 报 skip 并写原因，免得在用户目录留下 root 属主的文件），用法文本写明会跑三个 CLI 的 `--version`（2026-10-25 执行期决定 8、9）
   - 文本输出用 `Report.Write`，`--json` 输出 `Report.JSON`；有 `fail` 退出 1，否则 0
 - 包内 `func runDoctor(args []string, stdout, stderr io.Writer) int`
 
