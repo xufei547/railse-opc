@@ -2,7 +2,8 @@
 # 网页端到端：构建网页与二进制，Playwright 起真实的 hub 与守护进程（临时目录、随机端口）跑 web/e2e 里的用例。
 # 不碰真实的 ~/.railse、~/.railse-hub 与任何 CLI 的配置：各进程的数据目录与 HOME 都在临时目录里，
 # 钩子用 railse hook claude --socket 直接调用，不装进 ~/.claude。额外参数原样传给 playwright test（如 --headed、-g 关键字）。
-# 退出时（成功、失败或被中断）停掉这次起的所有 railse 进程并删掉临时目录；失败时先打印 hub 与守护进程日志的末尾。
+# 退出时（成功、失败或被中断）停掉这次起的所有 railse 进程并删掉临时目录；失败时先打印 hub 与守护进程日志的末尾，
+# 并把临时目录下的全部 *.log、*.stderr 按原相对路径复制到 web/test-results/logs/（CI 失败时连同 Playwright 的结果一起上传）。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -23,6 +24,22 @@ stop_children() {
   pkill -KILL -f -- "$BIN" 2>/dev/null || true
 }
 
+# 失败时留下这次运行的日志：$WORK 下的 *.log、*.stderr 按相对路径复制到 web/test-results/logs/（先清掉上一次留下的）。
+# 在 Playwright 跑完之后才复制：它开跑时会清空 web/test-results。复制失败不影响退出码与清理。
+save_logs() {
+  local dest="$ROOT/web/test-results/logs" f rel n=0
+  rm -rf "$dest" 2>/dev/null || true
+  while IFS= read -r -d '' f; do
+    rel="${f#"$WORK"/}"
+    mkdir -p "$dest/$(dirname "$rel")" && cp "$f" "$dest/$rel" && n=$((n + 1))
+  done < <(find "$WORK" -type f \( -name '*.log' -o -name '*.stderr' \) -print0 2>/dev/null)
+  if [ "$n" -gt 0 ]; then
+    echo "--- 这次运行的 $n 个日志已复制到 web/test-results/logs/ ---" >&2
+  else
+    echo "--- 这次运行没有留下日志（失败在起 hub 之前） ---" >&2
+  fi
+}
+
 cleanup() {
   local code=$?
   trap - EXIT INT TERM
@@ -34,6 +51,7 @@ cleanup() {
         tail -n 30 "$f" >&2
       fi
     done
+    save_logs
   fi
   rm -rf "$WORK"
   exit "$code"

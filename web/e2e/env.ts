@@ -68,10 +68,16 @@ export async function stopAll(pids: number[], ms = 5000): Promise<void> {
   }
 }
 
-/** 同步跑一次 railse 子命令，失败时带上 stderr 抛出。 */
+const runTimeoutMs = 30_000
+
+/** 同步跑一次 railse 子命令（至多 30 秒，超时杀掉），失败时带上 stderr 抛出。 */
 export function runBin(env: Pick<E2EEnv, 'bin' | 'home' | 'agentDir' | 'hubDir'>, args: string[], input?: string): string {
-  const r = spawnSync(env.bin, args, { input, encoding: 'utf8', env: childEnv(env), timeout: 30_000 })
+  const r = spawnSync(env.bin, args, { input, encoding: 'utf8', env: childEnv(env), timeout: runTimeoutMs })
+  const what = `railse ${args.slice(0, 2).join(' ')}`
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') {
+    throw new Error(`${what} ${runTimeoutMs / 1000} 秒内没有结束，已杀掉: ${r.stderr ?? ''}`)
+  }
   if (r.error) throw r.error
-  if (r.status !== 0) throw new Error(`railse ${args[0]} ${args[1] ?? ''} 失败（退出码 ${r.status}）: ${r.stderr}`)
+  if (r.status !== 0) throw new Error(`${what} 失败（${r.signal ? `被信号 ${r.signal} 终止` : `退出码 ${r.status}`}）: ${r.stderr}`)
   return r.stdout
 }

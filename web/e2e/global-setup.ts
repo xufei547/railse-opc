@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -51,7 +51,10 @@ function startDaemon(name: string, bin: string, args: string[], env: NodeJS.Proc
   return d
 }
 
-/** 每 100ms 查一次 cond，ms 内等不到就失败；等的过程中 daemon 退出了立即失败（不白等到超时）。 */
+/**
+ * 每 100ms 查一次 cond，ms 内等不到就失败；等的过程中 daemon 退出了立即失败（不白等到超时）。
+ * cond 里的网络请求要自带超时（见 hubReady），否则一次挂住的请求会拖过这里的时限。
+ */
 async function waitFor(what: string, ms: number, cond: () => boolean | Promise<boolean>, daemon?: Daemon) {
   const until = Date.now() + ms
   while (Date.now() < until) {
@@ -63,14 +66,42 @@ async function waitFor(what: string, ms: number, cond: () => boolean | Promise<b
     }
     await new Promise((r) => setTimeout(r, 100))
   }
-  throw new Error(`${ms}ms 内没有等到${what}`)
+  if (daemon?.failed) throw new Error(`等${what}时${daemon.failed}`)
+  throw new Error(`${ms / 1000} 秒内没有等到${what}`)
 }
+
+/** hub 就绪：不用登录的 GET /api/version 回 200 且是 hub 的应答（带数字的 agent_proto），不是碰巧占着这个端口的别的服务。 */
+async function hubReady(baseURL: string): Promise<boolean> {
+  const r = await fetch(baseURL + '/api/version', { signal: AbortSignal.timeout(2_000) })
+  if (!r.ok) return false
+  const v = (await r.json()) as { agent_proto?: unknown }
+  return typeof v.agent_proto === 'number'
+}
+
+const tailLines = 30
 
 function tail(path: string): string {
   try {
-    return readFileSync(path, 'utf8').split('\n').slice(-20).join('\n')
+    return readFileSync(path, 'utf8').split('\n').slice(-tailLines).join('\n')
   } catch {
     return '（没有日志）'
+  }
+}
+
+function fileSize(path: string): number {
+  try {
+    return statSync(path).size
+  } catch {
+    return 0
+  }
+}
+
+/** path 从第 offset 字节起的内容（stderr 文件是追加写的：只看这一次起的进程写的部分）。 */
+function readFrom(path: string, offset: number): string {
+  try {
+    return readFileSync(path).subarray(offset).toString('utf8')
+  } catch {
+    return ''
   }
 }
 
@@ -91,22 +122,29 @@ export default async function globalSetup() {
   const env0 = childEnv(paths)
   try {
     runBin(paths, ['hub', 'password', '--dir', hubDir], password + '\n')
-    // 空闲端口是先探后用：探完到 hub 监听之间可能被别的进程占走，hub 监听失败就换一个端口重试
+    // 空闲端口是先探后用：探完到 hub 监听之间可能被别的进程占走。只有这一种情况（hub 退出且这次的 stderr 里有
+    // address already in use）才换端口重试，至多 3 次；别的原因提前退出（数据目录不可写、库坏了等）或 10 秒内没就绪都立即失败并附日志。
+    const hubStderr = join(base, 'hub.stderr')
     let baseURL = ''
     for (let attempt = 1; ; attempt++) {
       const port = await freePort()
       baseURL = `http://127.0.0.1:${port}`
+      const errFrom = fileSize(hubStderr)
       const hub = startDaemon('hub', paths.bin, ['hub', 'run', '--dir', hubDir, '--listen', `127.0.0.1:${port}`], env0, base)
       if (hub.pid) pids.push(hub.pid)
       try {
-        await waitFor(`hub 起来（${baseURL}）`, 10_000, async () => (await fetch(baseURL + '/api/status')).status === 401, hub)
+        await waitFor(`hub 就绪（${baseURL}/api/version）`, 10_000, () => hubReady(baseURL), hub)
         break
       } catch (e) {
-        if (!hub.failed || attempt >= 3) throw e
+        const portTaken = hub.failed !== null && /address already in use/.test(readFrom(hubStderr, errFrom))
+        if (!portTaken) throw e
+        if (attempt >= 3) throw new Error(`hub 的端口连续 ${attempt} 次被别的进程抢先占用：${e instanceof Error ? e.message : String(e)}`)
+        // 这个 hub 已经退出：不留在 pids 里，免得 pid 被复用后误停别的进程
+        if (hub.pid) pids.pop()
       }
     }
     // 二进制必须带着网页构建：没构建时 / 回 503“网页未构建”
-    const root = await fetch(baseURL + '/')
+    const root = await fetch(baseURL + '/', { signal: AbortSignal.timeout(5_000) })
     if (root.status !== 200 || !(root.headers.get('content-type') ?? '').startsWith('text/html')) {
       throw new Error(`hub 的 / 回 ${root.status}：二进制里没有网页构建（先 npm run build 再 go build）`)
     }
