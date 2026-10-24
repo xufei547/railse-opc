@@ -45,7 +45,7 @@
 ## 开发
 
 - `cd web && npm ci && npm run dev`：Vite 开发服务器（默认 `http://localhost:5173`），把 `/api`、`/ws` 代理到 `RAILSE_HUB`（默认 `http://127.0.0.1:8787`，例如 `RAILSE_HUB=http://127.0.0.1:9000 npm run dev`）。hub 的写接口与 `/ws/client` 校验 Origin 与 Host 同源，代理把 `Origin` 改写成 hub 的源才能通过——**这只用于本机开发**，部署时网页始终由 hub 同源提供，不能从别的源调 hub。开发服务器不带 hub 的 CSP，与 CSP 有关的改动要用 `make build` 后的 hub 或 `make e2e` 验证。
-- `npm run check`：`tsc --noEmit` 与 Vitest（纯逻辑模块：接口层、实时通道、状态、格式化、决定面板、推送状态、Service Worker 等）。`make test` 同时跑 Go 侧的 gofmt（只查入库的 Go 文件）、vet 与 `go test -race`。依赖只用 `package.json` 里列出的包，`package-lock.json` 入库，安装一律 `npm ci`。
+- `npm run check`：`tsc --noEmit` 与 Vitest（纯逻辑模块：接口层、实时通道、状态、格式化、决定面板、推送状态、Service Worker 等）。`make test` 同时跑 Go 侧的 gofmt（查入库的与新建还没 git add 的 Go 文件，不查 .gitignore 里的）、vet 与 `go test -race`。依赖只用 `package.json` 里列出的包，`package-lock.json` 入库，安装一律 `npm ci`。
 - `make e2e`（即 `scripts/e2e-web.sh`）：`npm ci`、构建网页、把二进制编到临时目录，Playwright（Chromium，手机尺寸）起真实的 hub（临时目录、随机端口）与接入它的守护进程，用录制的 Claude `PermissionRequest` 样本直接运行 `railse hook claude --socket <临时 socket>` 模拟审批：登录 → 收件箱为空 → `curl https://api.example.com/v1/x` 出现 → 详情 → 批准并记住（看草案）→ 钩子输出 `"behavior":"allow"` → 规则页多一条学来的规则；再来 `git push origin main` → 带备注拒绝 → 钩子输出 `"behavior":"deny"`（不含备注）→ 历史里“已拒绝、手机上决定”。每个用例结束时断言页面上没有 CSP 违规与未捕获的异常（另有一条用例故意违规，确认检测本身有效）。所有进程的数据目录与 `HOME` 都在临时目录里，不碰 `~/.railse`、`~/.railse-hub` 与任何 CLI 的配置；退出时（成功、失败或 Ctrl-C）停掉这次起的全部 railse 进程、删掉临时目录，失败时打印 hub 与守护进程日志的末尾，截图与 trace 在 `web/test-results/`。额外参数传给 `playwright test`，如 `scripts/e2e-web.sh --headed`。
 
 ## 已知限制

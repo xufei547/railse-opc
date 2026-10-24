@@ -34,6 +34,9 @@ const (
 	vCloseDQ = 0x12 // 双引号（含 $"…"）的右引号
 	vPH      = 0x13 // 本层规则插入的占位符的第一个字节
 	vLit     = 0x14 // 引号里不参与匹配结构的字节：引号里的引号、<。整段引号值照样能配上，裸值不在这里开始或延续
+	// vCont 是引号外反斜杠续行里的换行（前面的 \ 与 \r 是 vMask）。对裸值它与 vMask 一样（值穿过它延续），
+	// 只是让 sshpass -p、curl -u 这类规则认得出“同一条命令跨行”：只有续行能跨，真正的换行不能
+	vCont = 0x15
 )
 
 // viewPlaceholder 是占位符在视图里的样子，与 placeholder 等长。
@@ -67,6 +70,7 @@ var viewRules = func() []rule {
 		jqEnd: `(\\")`, user: `([^'":\s\\` + x + `]*:)`,
 		// 同一条命令：引号按视图成对；嵌套结构（vNest）算在同一条命令里
 		sameCmd:  `(?:[^|;&\n'"\x11\x12]|'[^'\x11\x12]*\x11|"[^"\x11\x12]*\x12|&[^&\n'"\x11\x12]|\\\r?\n)*?`,
+		cont:     `\x00\x00?\x15`, // 续行：\ 与 \r 是 vMask，换行是 vCont
 		urlUser:  `[^/\s:@'"\\` + x + `]*`,
 		urlPass:  "[^\\s/?#'\"\\\\;|&<>()`$" + x + "]+",
 		excluded: x,
@@ -226,7 +230,7 @@ func (b *builder) nest(s string) {
 	b.nests = append(b.nests, s)
 }
 
-func isViewByte(c byte) bool { return c >= vNest && c <= vLit }
+func isViewByte(c byte) bool { return c >= vNest && c <= vCont }
 
 // viewByte 是引号外普通字符在视图里的样子。
 func viewByte(c byte) byte {
@@ -758,13 +762,13 @@ func (c *ctx) escape() {
 	switch {
 	case nx == '\n':
 		c.b.char(t, i, vMask)
-		c.b.char(t, i+1, vMask)
+		c.b.char(t, i+1, vCont)
 		sc.i += 2
 		return
 	case nx == '\r' && i+2 < c.hi && t.at(i+2) == '\n':
-		for k := 0; k < 3; k++ {
-			c.b.char(t, i+k, vMask)
-		}
+		c.b.char(t, i, vMask)
+		c.b.char(t, i+1, vMask)
+		c.b.char(t, i+2, vCont)
 		sc.i += 3
 		return
 	case c.cmd() && t.has(i+1, placeholder):

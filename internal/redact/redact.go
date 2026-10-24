@@ -62,6 +62,7 @@ type quoting struct {
 	jqEnd    string // JSON 原文里转义过的 \" 值的右引号
 	user     string // curl -u 不带引号的用户名
 	sameCmd  string
+	cont     string // 反斜杠续行：同一条命令跨到下一行（真正的换行是命令分隔符，不算）
 	urlUser  string // URL userinfo 的用户名
 	urlPass  string // URL userinfo 的密码
 	excluded string // 视图专用字节，所有值字符类都排除（文本语境为空）
@@ -78,7 +79,7 @@ func textQuoting(open bool) quoting {
 		quoted: quoted, jsonStr: `"(?:[^"\\]|\\.)*"`, keyEnd: `"`,
 		sqUser: `('[^'":\s\\]*:)`, sqPass: `[^']*`, sqEnd: `(')`,
 		dqUser: `("[^'":\s\\]*:)`, dqPass: `(?:[^"\\]|\\.)*`, dqEnd: `(")`,
-		jqEnd: `(\\")`, user: `([^'":\s\\]*:)`, sameCmd: sameCmd,
+		jqEnd: `(\\")`, user: `([^'":\s\\]*:)`, sameCmd: sameCmd, cont: `\\\r?\n`,
 		urlUser: `[^/\s:@'"\\]*`, urlPass: `[^\s/?#'"\\]+`, ph: placeholder,
 	}
 	if open {
@@ -103,9 +104,14 @@ func compile(bare string, open bool) []rule {
 // 占位符后面还连着值字符时照原来的字符类整段抹，免得 password=<redacted>RealSecret 漏出后半截。
 func build(bare string, q quoting) []rule {
 	stop := `[` + bare[2:len(bare)-2] + `]` // 值字符类以外的字符
+	// 选项与选项、选项与值之间只认同一行里的空白（空格、制表符）和反斜杠续行，不认换行：换行是命令分隔符，
+	// sshpass -p 后面直接换行时 -p 没有参数，下一行是另一条命令，不能把它的命令名当密码抹掉。
+	// sep 是词与词之间：至少一个空格或制表符（续行本身只是把两行接起来，x\⏎-p 是一个词 x-p）；gap 是选项与紧跟的值之间，可以没有
+	sep := `(?:` + q.cont + `)*[ \t](?:[ \t]|` + q.cont + `)*`
+	gap := `(?:[ \t]|` + q.cont + `)*`
 	// sshpass 在 -p 之前的选项（getopt 的 + 模式只认命令之前的选项）：带参数的 -f 文件、-d 描述符、-P 提示词（参数紧贴或
 	// 隔空白，可以是引号段），不带参数的 -h -e -V -v（可组合）。参数不脱敏，只是跳过
-	sshpassOpts := `(?:\s+-[ehVv]*[fdP]\s*(?:` + q.quoted + `|` + bare + `)+|\s+-[ehVv]+)*`
+	sshpassOpts := `(?:` + sep + `-[ehVv]*[fdP]` + gap + `(?:` + q.quoted + `|` + bare + `)+|` + sep + `-[ehVv]+)*`
 	phOnly := q.ph + `(?P<phend>` + stop + `|$)`
 	value := `(?:` + q.quoted + `|(?:` + phOnly + `|(?:` + q.ph + `)?` + bare + `))`
 	if q.word {
@@ -135,7 +141,7 @@ func build(bare string, q quoting) []rule {
 		// curl 的 -u/--user、-U/--proxy-user 的 user:pass（-u、-U 可以在组合短选项末尾，如 -sSu）：用户名与引号留着，
 		// 只抹密码；不带冒号的（curl 会提示输入密码）不动。整段带引号的（'user:pass'、"user:pass"）引号要成对（open 时允许
 		// 缺右引号），双引号里认转义的 \"；用户名不带引号时密码与别的值一样，可以是引号段（user:'pass'），整个词抹成占位符
-		{re: regexp.MustCompile(`(\bcurl\b` + q.sameCmd + `\s(?:-[A-Za-z]*[uU]\s*|--user\s+|--proxy-user\s+))` +
+		{re: regexp.MustCompile(`(\bcurl\b` + q.sameCmd + sep + `(?:-[A-Za-z]*[uU]` + gap + `|--user` + sep + `|--proxy-user` + sep + `))` +
 			`(?:` + q.sqUser + q.sqPass + q.sqEnd + `|` + q.dqUser + q.dqPass + q.dqEnd +
 			`|(\\"[^'":\s\\` + x + `]*:)(?:[^"\\` + x + `]|\\[^"` + x + `])*` + q.jqEnd + `|` + q.user + value + `)`),
 			repl: "${1}${2}${4}${6}${8}" + placeholder + "${phend}${3}${5}${7}", need: "-"},
@@ -143,7 +149,7 @@ func build(bare string, q quoting) []rule {
 		{re: regexp.MustCompile(`(\b(?:mysql|mariadb)[a-z-]*` + q.sameCmd + `\s-p)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
 		// sshpass 的 -p 密码（-p pw、-p 'pw'、-p'pw'、-ppw，-p 可以在 -v 这类选项之后或组合在末尾，如 -vp）。只认 sshpass
 		// 自己的选项里的 -p：后面 ssh、scp、rsync 自己的 -p（端口、保留权限）不动
-		{re: regexp.MustCompile(`(\bsshpass` + sshpassOpts + `\s+-[ehVv]*p\s*)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
+		{re: regexp.MustCompile(`(\bsshpass` + sshpassOpts + sep + `-[ehVv]*p` + gap + `)` + value), repl: "${1}" + placeholder + "${phend}", need: "-"},
 		// 裸 token：GitHub、OpenAI、Slack、AWS
 		{re: regexp.MustCompile(`\b(ghp_|gho_|ghs_|github_pat_|sk-|xox[abp]-|AKIA)[A-Za-z0-9_\-]{16,}\b`), repl: placeholder, need: "_-A"},
 	}
