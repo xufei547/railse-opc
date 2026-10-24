@@ -614,13 +614,13 @@ func TestClientVAPIDTokenWallClockJumps(t *testing.T) {
 		t.Fatal("离 exp 还剩 1 小时 1 秒，应复用")
 	}
 	clk.JumpWall(time.Second)
-	d := sendAt(t, c, clk, tr, ep) // now = t0 + 37h，exp = t0 + 49h
+	d := sendAt(t, c, clk, tr, ep) // now = t0 + 24h，exp = t0 + 36h
 	if d == b {
 		t.Fatal("离 exp 只剩 1 小时，应重签")
 	}
 	// NTP 往回调 13 小时：exp 离此刻 25 小时，超过 24 小时，Apple 会判 BadJwtToken，必须重签。
 	clk.JumpWall(-13 * time.Hour)
-	e := sendAt(t, c, clk, tr, ep) // sendAt 会抓“超过 24 小时”；now = t0 + 24h，exp = t0 + 36h
+	e := sendAt(t, c, clk, tr, ep) // sendAt 会抓“超过 24 小时”；now = t0 + 11h，exp = t0 + 23h
 	if e == d {
 		t.Fatal("墙钟回拨 13 小时后应重签")
 	}

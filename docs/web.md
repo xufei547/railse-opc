@@ -10,6 +10,7 @@
 - `make build`：先 `make web` 再 `go build -o railse ./cmd/railse`。直接 `go build` 也能编，但没有网页：hub 的网页路径回 503“网页未构建：在仓库里运行 make web 后重新构建 railse”，接口照常可用。
 - hub 不需要为网页做任何配置。HTML 带 CSP（脚本、样式、图片、连接只许同源，不许内联脚本、内联样式与 eval）与 `X-Frame-Options: DENY`；`assets/` 下带哈希的文件长期缓存，其余（`index.html`、`sw.js`、清单、图标）`no-cache`，升级 hub 后下次打开即是新版。
 - **要推送，必须** `railse hub run --public-url https://<hub 域名>`：只收 https 源（不带路径），localhost 也要 https；不设时推送停用，设置页会说明原因。**域名从第一天起固定**：推送订阅与主屏幕应用都绑在源上，换域名等于每台手机删掉图标、重新添加、重新开启通知。公网部署见 hub.md 的“部署与反向代理”（反向代理须保留原 Host，否则同源校验让写操作全部 403）。
+- **公网部署还要加 `--secure-cookies`**：hub 在 TLS 反向代理后面时自己看不到 TLS，不加的话登录 cookie 不带 Secure；在反向代理后面再加 `--trusted-proxy <代理地址>`，否则按 IP 的登录限速对所有人算成一个来源。完整命令例如 `railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com --secure-cookies --trusted-proxy 127.0.0.1`。
 
 ## 第一次使用（iPhone，iOS 16.4 起）
 
@@ -30,7 +31,7 @@
 - **历史**：按状态筛选（全部、已批准、已拒绝、自动放行、自动拒绝、交回终端、已过期、已取消、问题与完成），每条带依据：“手机上决定”“手机上决定（并记住为 <规则 id>）”“规则 <id>”“终端里处理了”“等待过期”等。先列最近 100 条，可加载到 500 条。
 - **规则**：每条的来源（内置、手写、学来的）、命中次数、来自哪条请求、规则原文；可启停、删除（内置的只能停用）、导入（整套替换，至多 1 MiB，先确认）、导出（`railse-rules.yaml`）。红标“可放行高风险操作”（`elevated`）是能自动放行对外或不可逆操作的规则，只能来自导入的手写规则，启用前要再确认一次。网页不编辑规则：改规则就导出、改 YAML、再导入。
 - **机器**：在线状态、版本、最近在线与接入时间；吊销（先确认）后它的密钥立即失效、在等的请求被取消，重新接入要 `railse hub token` 加 `railse agent enroll --force`。
-- **设置**：暂停自动审批（hub 的总开关：所有请求交回终端，手写的拒绝规则照常生效；立即下发到所有机器；机器上 `railse agent pause` 设的本机暂停不受这里影响，这里恢复也解除不了它，本机暂停也不会同步到 hub）、通知（开启、关闭、发测试通知）、hub 状态（规则版本、在线机器、待审批、已运行），退出登录。
+- **设置**：暂停自动审批（hub 的总开关：所有请求交回终端，手写的拒绝规则照常生效；立即下发到所有机器；机器上 `railse agent pause` 设的本机暂停不受这里影响，这里恢复也解除不了它，本机暂停也不会同步到 hub）、通知（开启、关闭、发测试通知）、hub 状态（规则版本、在线机器、待审批、已运行），退出登录。退出登录先关闭这台设备的通知（hub 删掉它的订阅、浏览器退掉订阅；最多等 3 秒，关不掉也照常退出），再删登录会话：推送订阅与登录是分开的，只退出登录的话锁屏上照样会收到审批摘要。再登录后要重新开启通知。
 
 ## 通知
 
@@ -38,12 +39,13 @@
 - **点开直达**：Service Worker 对每条推送都弹通知（iOS 对不弹通知的推送会吊销订阅），点通知时让已打开的窗口跳到 `/r/<id>`，跳不了就开新窗口；只认本站路径。
 - **前台也会响**：页面开着时实时通道已经把新请求推到收件箱，iOS 仍会弹横幅，这是 iOS 的规定，压不掉。
 - **通知失效**：推送服务对订阅回 404 或 410 时 hub 立即删掉它；其余失败要连续至少 5 次、且这一轮第一次失败已过去 24 小时才删（短暂故障不删好订阅）。删掉之后网页顶部出现“通知已失效”横幅，到设置里“重新开启通知”即可。订阅被浏览器更换时 Service Worker 自动重新登记（登录过期时登记不上，下次打开网页会看到横幅）。
-- **换钥**：`railse hub vapid --rotate` 删除全部订阅，每台手机都要在设置里重新开启通知。
+- **换钥、换密码**：`railse hub vapid --rotate` 与 `railse hub password` 都删除全部订阅，每台手机都要（重新登录后）在设置里重新开启通知。
+- **设备丢了**：在服务器上先 `railse hub password` 换密码（同时删掉全部登录会话与推送订阅，丢掉的设备立即登不进、收不到推送），再 `railse hub vapid --rotate` 换推送密钥；之后每台还在用的手机用新密码登录、重新开启通知。详见 hub.md“安全要点”的“退出登录与设备丢失”。
 
 ## 开发
 
 - `cd web && npm ci && npm run dev`：Vite 开发服务器（默认 `http://localhost:5173`），把 `/api`、`/ws` 代理到 `RAILSE_HUB`（默认 `http://127.0.0.1:8787`，例如 `RAILSE_HUB=http://127.0.0.1:9000 npm run dev`）。hub 的写接口与 `/ws/client` 校验 Origin 与 Host 同源，代理把 `Origin` 改写成 hub 的源才能通过——**这只用于本机开发**，部署时网页始终由 hub 同源提供，不能从别的源调 hub。开发服务器不带 hub 的 CSP，与 CSP 有关的改动要用 `make build` 后的 hub 或 `make e2e` 验证。
-- `npm run check`：`tsc --noEmit` 与 Vitest（纯逻辑模块：接口层、实时通道、状态、格式化、决定面板、推送状态、Service Worker 等）。`make test` 同时跑 Go 侧的 gofmt、vet 与 `go test -race`。依赖只用 `package.json` 里列出的包，`package-lock.json` 入库，安装一律 `npm ci`。
+- `npm run check`：`tsc --noEmit` 与 Vitest（纯逻辑模块：接口层、实时通道、状态、格式化、决定面板、推送状态、Service Worker 等）。`make test` 同时跑 Go 侧的 gofmt（只查入库的 Go 文件）、vet 与 `go test -race`。依赖只用 `package.json` 里列出的包，`package-lock.json` 入库，安装一律 `npm ci`。
 - `make e2e`（即 `scripts/e2e-web.sh`）：`npm ci`、构建网页、把二进制编到临时目录，Playwright（Chromium，手机尺寸）起真实的 hub（临时目录、随机端口）与接入它的守护进程，用录制的 Claude `PermissionRequest` 样本直接运行 `railse hook claude --socket <临时 socket>` 模拟审批：登录 → 收件箱为空 → `curl https://api.example.com/v1/x` 出现 → 详情 → 批准并记住（看草案）→ 钩子输出 `"behavior":"allow"` → 规则页多一条学来的规则；再来 `git push origin main` → 带备注拒绝 → 钩子输出 `"behavior":"deny"`（不含备注）→ 历史里“已拒绝、手机上决定”。每个用例结束时断言页面上没有 CSP 违规与未捕获的异常（另有一条用例故意违规，确认检测本身有效）。所有进程的数据目录与 `HOME` 都在临时目录里，不碰 `~/.railse`、`~/.railse-hub` 与任何 CLI 的配置；退出时（成功、失败或 Ctrl-C）停掉这次起的全部 railse 进程、删掉临时目录，失败时打印 hub 与守护进程日志的末尾，截图与 trace 在 `web/test-results/`。额外参数传给 `playwright test`，如 `scripts/e2e-web.sh --headed`。
 
 ## 已知限制
