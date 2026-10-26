@@ -1192,6 +1192,61 @@ func TestSetupHooksProjectLeavesUserLevelAlone(t *testing.T) {
 	}
 }
 
+// 从 0.1.0 升级：当前目录的项目里用 --project 装过，再按用户级装。stderr 逐个文件提醒项目级还有 Railse 的条目：Gemini 会触发两次、
+// Claude 条目不同时也会两次，建议删掉；Claude 两边条目完全相同时说只跑一次、可删可不删。项目级文件不改；只看这次装的 CLI；
+// 在家目录里跑时 .claude/settings.json、.gemini/settings.json 就是用户级那份，不算；没有项目级条目时不提醒。
+func TestSetupHooksUserLevelRemindsProjectLevel(t *testing.T) {
+	home, cwd := userLevelEnv(t)
+	local, shared := hooksconf.ClaudePaths(cwd)
+	gemini := hooksconf.GeminiPath(cwd)
+	hooks := func(args ...string) (string, string) {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		if code := run(append([]string{"setup", "hooks"}, args...), &out, &errOut); code != 0 {
+			t.Fatalf("setup hooks %v: %d %s", args, code, errOut.String())
+		}
+		return out.String(), errOut.String()
+	}
+	if _, errOut := hooks("--bin", "/opt/railse"); errOut != "" {
+		t.Fatalf("项目里没装过时不该提醒: %s", errOut)
+	}
+	hooks("--project", cwd, "--bin", "/opt/railse") // 0.1.0 的装法
+	before := map[string][]byte{local: readFile(t, local), gemini: readFile(t, gemini)}
+	_, errOut := hooks("--bin", "/opt/railse")
+	lines := strings.Split(strings.TrimSuffix(errOut, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("应各提醒一行（Claude、Gemini）:\n%s", errOut)
+	}
+	if l := lines[0]; !strings.Contains(l, local) || !strings.Contains(l, "完全相同") || !strings.Contains(l, "只跑一次") || !strings.Contains(l, "可删可不删") {
+		t.Fatalf("Claude 两边条目相同时说只跑一次、可删可不删: %s", l)
+	}
+	if l := lines[1]; !strings.Contains(l, gemini) || !strings.Contains(l, "触发两次") || !strings.Contains(l, "删掉其中 Railse 的条目") {
+		t.Fatalf("Gemini 应提醒会触发两次、建议删掉: %s", l)
+	}
+	for p, b := range before {
+		if !bytes.Equal(readFile(t, p), b) {
+			t.Fatalf("提醒不该改项目级文件 %s", p)
+		}
+	}
+	// Claude 两边条目不同（项目级是旧路径的 railse、旧位置 settings.json 也有）：会触发两次，建议删掉；只装 Claude 时不提 Gemini
+	hooks("--project", cwd, "--claude", "--bin", "/old/railse")
+	writeTestFile(t, shared, string(readFile(t, local)))
+	_, errOut = hooks("--claude", "--bin", "/opt/railse")
+	if strings.Contains(errOut, gemini) || strings.Count(errOut, "\n") != 2 {
+		t.Fatalf("只装 Claude 时只提醒 Claude 的两个项目级文件:\n%s", errOut)
+	}
+	for _, p := range []string{local, shared} {
+		if !strings.Contains(errOut, p+" 里也有 Railse 的钩子，与用户级的条目不同，Claude Code 会触发两次：建议删掉其中 Railse 的条目") {
+			t.Fatalf("%s 的条目不同时应提醒会触发两次:\n%s", p, errOut)
+		}
+	}
+	// 在家目录里跑：.claude/settings.json、.gemini/settings.json 就是用户级那份，不提醒
+	t.Chdir(home)
+	if _, errOut = hooks("--bin", "/opt/railse"); errOut != "" {
+		t.Fatalf("在家目录里跑不该把用户级文件当项目级提醒: %s", errOut)
+	}
+}
+
 // 取不到家目录又没给 --project：装不了用户级，退出 1 并提示用 --project 装项目级；给了 --project 照常装。
 func TestSetupHooksNoHomeNeedsProject(t *testing.T) {
 	_, cwd := userLevelEnv(t)
@@ -1427,6 +1482,63 @@ func TestSetupAllHooksUserLevelUnlessProject(t *testing.T) {
 		!strings.Contains(s, "[warn]  Gemini 钩子："+gemini+"；项目级 "+hooksconf.GeminiPath(f.proj)+" 也装了，钩子会触发两次") ||
 		!strings.Contains(s, "再跑 railse doctor --project "+f.proj+" --dir ") {
 		t.Fatalf("体检应带 --project，并报出两处都装了:\n%s", s)
+	}
+}
+
+// 在不是 git 仓库的目录（如 ~/Downloads）里跑 setup all、不给 --project：体检的项目根只告知（skip），不建议 git init，
+// 复查命令也不带 --project；给了 --project 才按那个项目查。
+func TestSetupAllDoctorOnlyInformsAboutCwd(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	dl := filepath.Join(f.home, "Downloads")
+	if err := os.MkdirAll(dl, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dl)
+	root, _ := filepath.EvalSymlinks(dl)
+	var out, errOut bytes.Buffer
+	args := []string{"setup", "all", "--dir", f.dir, "--bin", f.bin, "--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"}
+	if code := run(args, &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "[skip]  项目根：目录 "+root+" 不是 git 仓库，在这里起 agent 会按当前目录当项目根\n") || strings.Contains(s, "git init") {
+		t.Fatalf("不给 --project 时体检对当前目录只告知、不建议 git init:\n%s", s)
+	}
+	if strings.Contains(s, "doctor --project") {
+		t.Fatalf("复查命令不该带 --project:\n%s", s)
+	}
+}
+
+// setup all 不给 --bin：setup hooks 也不带 --bin（它默认就是当前程序），末尾的 Codex 提醒与体检的提示是同一条命令；
+// 给了 --bin 才原样带上。
+func TestSetupAllPassesBinToHooksOnlyWhenGiven(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, _ = filepath.Abs(exe)
+	var out, errOut bytes.Buffer
+	args := []string{"setup", "all", "--dir", f.dir, "--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"}
+	if code := run(args, &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	fix := "railse setup codex-notify --dir " + hooksconf.ShellQuote(f.dir)
+	s := out.String()
+	if !strings.Contains(s, "notify（完成与提问事件）请运行 "+fix+"（") || !strings.Contains(s, "修复：运行 "+fix+"（") || strings.Contains(s, fix+" --bin") {
+		t.Fatalf("不给 --bin 时 Codex 提醒与体检应给同一条命令（%s）:\n%s", fix, s)
+	}
+	if got := hookCommand(t, hooksconf.ClaudeUserPath(f.home), "Stop"); !strings.HasPrefix(got, hooksconf.ShellQuote(exe)+" hook claude") {
+		t.Fatalf("不给 --bin 时钩子指向当前程序 %s: %q", exe, got)
+	}
+	out.Reset()
+	if code := run([]string{"setup", "all", "--dir", f.dir, "--bin", f.bin, "--no-autostart"}, &out, &errOut); code != 0 {
+		t.Fatalf("setup all --bin: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "请运行 "+fix+" --bin "+hooksconf.ShellQuote(f.bin)+"（") {
+		t.Fatalf("给了 --bin 时 Codex 提醒带上它:\n%s", out.String())
 	}
 }
 

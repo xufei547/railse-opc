@@ -154,14 +154,19 @@ func TestShellJoin(t *testing.T) {
 	}
 }
 
-// 串接脚本的内容固定：标记行记前一跳（单行 JSON，不转义 HTML 字符），前一跳与 railse 各一行，参数经 ShellQuote，最后 exit 0。
+// 串接脚本的内容固定：标记行记前一跳（单行 JSON，不转义 HTML 字符），接着是重入保护，前一跳与 railse 各一行，
+// 参数经 ShellQuote，最后 exit 0。
 func TestNotifyScript(t *testing.T) {
 	head := "#!/bin/sh\n" +
 		"# 由 railse setup codex-notify 生成，重跑会重新生成，不要手动改。\n" +
 		"# Codex 把通知 JSON 作为最后一个参数传给 notify 命令；这里原样（\"$@\"）交给下面每个命令，一个失败不影响另一个。\n"
+	guard := "# 重入保护：前一跳经别名又调到本脚本时，再次进来的这一层直接退出。\n" +
+		`[ -n "${RAILSE_CODEX_NOTIFY:-}" ] && exit 0` + "\n" +
+		"RAILSE_CODEX_NOTIFY=1\n" +
+		"export RAILSE_CODEX_NOTIFY\n"
 	got := string(NotifyScript([]string{"/usr/local/bin/notify-wrap", "--quiet", "a&b <c>"}, "/Users/me/.local/bin/railse", ""))
 	want := head +
-		`# railse-prev-notify: ["/usr/local/bin/notify-wrap","--quiet","a&b <c>"]` + "\n" +
+		`# railse-prev-notify: ["/usr/local/bin/notify-wrap","--quiet","a&b <c>"]` + "\n" + guard +
 		`/usr/local/bin/notify-wrap --quiet 'a&b <c>' "$@"` + "\n" +
 		`/Users/me/.local/bin/railse hook codex-notify "$@"` + "\n" +
 		"exit 0\n"
@@ -169,7 +174,7 @@ func TestNotifyScript(t *testing.T) {
 		t.Fatalf("脚本:\n%s\n---\n%s", got, want)
 	}
 	got = string(NotifyScript(nil, "/my bin/railse", "/data dir/agent.sock"))
-	want = head + "# railse-prev-notify: []\n" + `'/my bin/railse' hook codex-notify --socket '/data dir/agent.sock' "$@"` + "\nexit 0\n"
+	want = head + "# railse-prev-notify: []\n" + guard + `'/my bin/railse' hook codex-notify --socket '/data dir/agent.sock' "$@"` + "\nexit 0\n"
 	if got != want {
 		t.Fatalf("没有前一跳、带 --socket:\n%s\n---\n%s", got, want)
 	}

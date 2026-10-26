@@ -23,6 +23,9 @@ const NotifyScriptName = "codex-notify.sh"
 // notifyMarker 是串接脚本里记前一跳的标记行的前缀，后面是单行的 JSON 数组。
 const notifyMarker = "# railse-prev-notify: "
 
+// NotifyGuardEnv 是串接脚本的重入保护变量：脚本开头设上并导出，前一跳与 railse 都继承它；脚本发现它已设就直接退出。
+const NotifyGuardEnv = "RAILSE_CODEX_NOTIFY"
+
 // CodexNotify 是从 config.toml 里认出的 notify。
 type CodexNotify struct {
 	Found  bool     // 顶层（第一个表头之前）有 notify
@@ -154,7 +157,8 @@ func tomlQuote(s string) string {
 // NotifyScript 生成串接脚本：Codex 把通知 JSON 作为最后一个参数交给 notify，脚本把收到的参数（"$@"）依次交给前一跳 prev
 // （原来的 notify 数组；为空时没有这一行）与“<bin> hook codex-notify”（socket 见 HookCommand）。参数都经 ShellQuote；
 // 不用 set -e，一个失败不影响另一个，最后总是 exit 0。标记行记下 prev（单行 JSON，不转义 HTML 字符），重跑时据此找回前一跳。
-// 同样的输入生成同样的字节。
+// 标记行之后是重入保护（NotifyGuardEnv）：前一跳经别名（大小写不同的路径、硬链接、firmlink、相对路径等，setup 认不出）
+// 又调到这个脚本时，再次进来的那一层直接退出，不会一层层嵌套下去，railse 也只被调一次。同样的输入生成同样的字节。
 func NotifyScript(prev []string, bin, socket string) []byte {
 	if prev == nil {
 		prev = []string{} // 标记行写 []，不写 null
@@ -168,6 +172,10 @@ func NotifyScript(prev []string, bin, socket string) []byte {
 	b.WriteString("# 由 railse setup codex-notify 生成，重跑会重新生成，不要手动改。\n")
 	b.WriteString("# Codex 把通知 JSON 作为最后一个参数传给 notify 命令；这里原样（\"$@\"）交给下面每个命令，一个失败不影响另一个。\n")
 	b.WriteString(notifyMarker + strings.TrimSuffix(j.String(), "\n") + "\n")
+	b.WriteString("# 重入保护：前一跳经别名又调到本脚本时，再次进来的这一层直接退出。\n")
+	b.WriteString(`[ -n "${` + NotifyGuardEnv + `:-}" ] && exit 0` + "\n")
+	b.WriteString(NotifyGuardEnv + "=1\n")
+	b.WriteString("export " + NotifyGuardEnv + "\n")
 	if len(prev) > 0 {
 		b.WriteString(ShellJoin(prev) + " \"$@\"\n")
 	}

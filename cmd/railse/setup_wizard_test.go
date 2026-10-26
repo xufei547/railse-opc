@@ -286,7 +286,7 @@ func TestSetupWizardChecksInputsBeforeAsking(t *testing.T) {
 	}
 }
 
-// 只看字符设备不够：/dev/null 也是字符设备（cron、CI、docker run 不带 -i、< /dev/null 时的 stdin），不能当终端去提问；
+// 只看字符设备不够：/dev/null 也是字符设备（< /dev/null 时的 stdin），不能当终端去提问；
 // 管道、普通文件更不算。stdinIsTerminal 本身（TestMain 换掉之前的那个）也按这个判 os.Stdin。
 func TestIsTerminalRejectsNullPipeAndFile(t *testing.T) {
 	null, err := os.Open(os.DevNull)

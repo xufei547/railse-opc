@@ -22,7 +22,7 @@ railse agent status              # 另开终端查看：paused、规则条数、
 railse setup hooks [--project <目录>] [--claude] [--codex] [--gemini] [--dir 目录] [--bin 路径] [--dry-run]
 ```
 
-不带 CLI 开关时三个都装，默认都是用户级（对所有项目生效）：Claude 写 `~/.claude/settings.json`，Gemini 写 `~/.gemini/settings.json`，Codex 写 `~/.codex/hooks.json`（`--codex-file` 可改）。`~/.claude/settings.json`、`~/.gemini/settings.json` 里多是你自己的设置：第一次改它们之前各备份一次到同目录的 `<文件>.railse-bak-<时间>`（0600，是链接时备份链接指向的内容；原来不存在、是空的、内容没变或已有备份时不备份），打印“已备份 … 到 …”。给了 `--project <目录>` 时 Claude 改写项目级的 `<目录>/.claude/settings.local.json`，Gemini 改写 `<目录>/.gemini/settings.json`（不备份；项目里的文件就是用户级那份时，如 `--project ~` 的 Gemini，照样按用户级备份），Codex 照旧是用户级。用户级与项目级都装了：Gemini 的钩子会触发两次；Claude Code 对写在多个配置文件里的相同处理器只跑一次，两处的命令、超时等完全相同时不重复，不同（如程序路径、`--socket` 不同）时也会触发两次。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dir` 是守护进程的数据目录（默认 `$RAILSE_HOME` 或 `~/.railse`），不是 `~/.railse` 时钩子命令变成 `<railse> hook <cli> --socket <目录>/agent.sock`；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
+不带 CLI 开关时三个都装，默认都是用户级（对所有项目生效）：Claude 写 `~/.claude/settings.json`，Gemini 写 `~/.gemini/settings.json`，Codex 写 `~/.codex/hooks.json`（`--codex-file` 可改）。`~/.claude/settings.json`、`~/.gemini/settings.json` 里多是你自己的设置：第一次改它们之前各备份一次到同目录的 `<文件>.railse-bak-<时间>`（0600，是链接时备份链接指向的内容；原来不存在、是空的、内容没变或已有备份时不备份），打印“已备份 … 到 …”。给了 `--project <目录>` 时 Claude 改写项目级的 `<目录>/.claude/settings.local.json`，Gemini 改写 `<目录>/.gemini/settings.json`（不备份；项目里的文件就是用户级那份时，如 `--project ~` 的 Gemini，照样按用户级备份），Codex 照旧是用户级。用户级与项目级都装了：Gemini 的钩子会触发两次；Claude Code 对写在多个配置文件里的相同处理器只跑一次，两处的命令、超时等完全相同时不重复，不同（如程序路径、`--socket` 不同）时也会触发两次；装用户级时当前目录的项目级文件里有 Railse 的条目，会在 stderr 逐个提醒（见 [setup.md](setup.md)）。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dir` 是守护进程的数据目录（默认 `$RAILSE_HOME` 或 `~/.railse`），不是 `~/.railse` 时钩子命令变成 `<railse> hook <cli> --socket <目录>/agent.sock`；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
 
 Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（不是 hooks.json），Codex 只认一条，所以另用 `railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]`（`setup hooks` 装 Codex 时会提示）：它在数据目录生成 `codex-notify.sh`，依次调用原来的 `notify`（有的话，原样保留）与 `railse hook codex-notify`（数据目录不是 `~/.railse` 时带 `--socket`），再把 `notify` 换成 `["<数据目录>/codex-notify.sh"]`，改之前备份到 `config.toml.railse-bak-<时间>`。重跑不会重复串接，详见 [setup.md](setup.md) 的 Codex 一条。
 
@@ -69,7 +69,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 
 ## 项目根
 
-内置规则放行的“项目内改动”（`write_in_project`）以项目根为界，项目根之外的写入（`write_outside`）要审批。守护进程从请求的工作目录向上找 `.git`（目录，或 worktree 的 `.git` 文件），找到的那一层就是项目根。不在 git 仓库里时按工作目录本身当项目根（不取它的上级），并在 `agent.log` 里提示“目录 X 不是 git 仓库，按当前目录当项目根；建议 git init”，每个目录只提示一次。家目录、它的上级与根目录永远不当项目根：工作目录就是它们时没有项目根，所有写入都算项目外；用 git 管 dotfiles、家目录里有 `.git` 的，家目录下的子目录按它自己当项目根。规则的 `scope: {project: …}` 与 hub 上“记住”的项目范围也按这个项目根，项目根是家目录、它的上级或根目录时一律按没有项目根处理。`railse doctor --project <目录>` 的 `project.root` 一项显示这个目录会被当成哪个项目根。
+内置规则放行的“项目内改动”（`write_in_project`）以项目根为界，项目根之外的写入（`write_outside`）要审批。守护进程从请求的工作目录向上找 `.git`（目录，或 worktree 的 `.git` 文件），找到的那一层就是项目根。不在 git 仓库里时按工作目录本身当项目根（不取它的上级），并在 `agent.log` 里提示“目录 "X" 不是 git 仓库，按当前目录当项目根；建议 git init”（路径带引号、转义），每个目录只提示一次。家目录、它的上级与根目录永远不当项目根：工作目录就是它们时没有项目根，所有写入都算项目外；用 git 管 dotfiles、家目录里有 `.git` 的，家目录下的子目录按它自己当项目根。规则的 `scope: {project: …}` 与 hub 上“记住”的项目范围也按这个项目根，项目根是家目录、它的上级或根目录时一律按没有项目根处理。`railse doctor --project <目录>` 的 `project.root` 一项显示这个目录会被当成哪个项目根（不给 `--project` 时看当前目录，它不是 git 仓库时只告知、不建议 `git init`）。
 
 ## 暂停与恢复
 

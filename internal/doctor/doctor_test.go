@@ -413,11 +413,23 @@ func TestHookChecks(t *testing.T) {
 		t.Fatalf("程序路径不同: %+v", c)
 	}
 	o.Bin = bin
-	// codex notify：没有 config.toml 时提示运行 railse setup codex-notify
-	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Hint, "railse setup codex-notify") {
-		t.Fatalf("没有 notify: %+v", c)
-	}
+	// codex notify：没有 config.toml 时说它不存在（不是权限问题），提示运行 railse setup codex-notify
 	cfg := filepath.Join(home, ".codex", "config.toml")
+	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Hint, "railse setup codex-notify") ||
+		!strings.Contains(c.Detail, cfg+" 不存在") || strings.Contains(c.Detail, "读不到") {
+		t.Fatalf("没有 config.toml: %+v", c)
+	}
+	// 读不了（权限）才说读不到
+	if os.Geteuid() != 0 {
+		writeFile(t, cfg, []byte("model = \"x\"\n"))
+		os.Chmod(cfg, 0)
+		c := find(t, Run(o), "hooks.codex_notify")
+		os.Chmod(cfg, 0o600)
+		os.Remove(cfg)
+		if c.Status != Warn || !strings.Contains(c.Detail, cfg+" 读不到") || strings.Contains(c.Detail, "不存在") {
+			t.Fatalf("config.toml 读不了: %+v", c)
+		}
+	}
 	writeFile(t, cfg, []byte("model = \"x\"\nnotify = [\"/usr/local/bin/railse\", \"hook\", \"codex-notify\"]\n"))
 	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != OK {
 		t.Fatalf("notify: %+v", c)
@@ -517,6 +529,7 @@ func TestCodexNotifyScript(t *testing.T) {
 	}
 }
 
+// 钩子连的 socket（命令里的 --socket，没有就是默认 socket）与 --dir 的守护进程对不上：warn 并给出带 --dir 的重装命令。
 func TestHookSocketMismatch(t *testing.T) {
 	o, home := fakeOpts(t)
 	proj := filepath.Join(home, "proj")
@@ -1630,8 +1643,8 @@ func TestHubDBUncheckpointedWALWithoutShm(t *testing.T) {
 }
 
 // project.root：项目目录会被守护进程当成哪个项目根，排在钩子检查之后。git 仓库 ok（细节是仓库根）；不是 git 仓库时
-// 按目录本身当项目根，warn 并建议 git init；家目录、它的上级、根目录与不存在的目录不当项目根，skip 并说明写入都算项目外；
-// 没给 Project 时 skip。
+// 按目录本身当项目根：显式给的（--project）warn 并建议 git init，隐式默认的当前目录只告知（skip，不建议 git init）；
+// 家目录、它的上级、根目录与不存在的目录不当项目根，skip 并说明写入都算项目外（显式与否一样）；没给 Project 时 skip。
 func TestProjectRootCheck(t *testing.T) {
 	o, home := fakeOpts(t)
 	t.Setenv("HOME", home) // 守护进程按 $HOME 认家目录
@@ -1646,32 +1659,42 @@ func TestProjectRootCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	o.Project = filepath.Join(repo, "src")
-	r := Run(o)
-	if c := find(t, r, "project.root"); c.Status != OK || c.Name != "项目根" || c.Detail != resolved(repo) {
-		t.Fatalf("git 仓库: %+v", c)
-	}
-	for i, c := range r.Checks {
-		if c.ID == "hooks.gemini" && (i+1 == len(r.Checks) || r.Checks[i+1].ID != "project.root") {
-			t.Fatalf("project.root 应紧跟在钩子检查之后: %+v", r.Checks)
+	for _, explicit := range []bool{true, false} {
+		o.ProjectExplicit = explicit
+		o.Project = filepath.Join(repo, "src")
+		r := Run(o)
+		if c := find(t, r, "project.root"); c.Status != OK || c.Name != "项目根" || c.Detail != resolved(repo) {
+			t.Fatalf("显式 %v，git 仓库: %+v", explicit, c)
+		}
+		for i, c := range r.Checks {
+			if c.ID == "hooks.gemini" && (i+1 == len(r.Checks) || r.Checks[i+1].ID != "project.root") {
+				t.Fatalf("project.root 应紧跟在钩子检查之后: %+v", r.Checks)
+			}
+		}
+		for _, tc := range []struct{ dir, why string }{
+			{home, "是家目录"}, {filepath.Dir(home), "它的上级"}, {"/", "根目录"}, {filepath.Join(home, "gone"), "不是存在的目录"},
+		} {
+			o.Project = tc.dir
+			if c := find(t, Run(o), "project.root"); c.Status != Skip || !strings.HasPrefix(c.Detail, tc.dir+" ") || !strings.Contains(c.Detail, tc.why) ||
+				!strings.Contains(c.Detail, "不当项目根") || !strings.Contains(c.Detail, "所有写入都算项目外") {
+				t.Fatalf("显式 %v，%s: %+v", explicit, tc.dir, c)
+			}
 		}
 	}
 
-	o.Project = plain
+	// 显式给的非 git 目录：warn，建议 git init
+	o.Project, o.ProjectExplicit = plain, true
 	if c := find(t, Run(o), "project.root"); c.Status != Warn || c.Detail != "目录 "+resolved(plain)+" 不是 git 仓库，按当前目录当项目根" ||
 		c.Hint != "建议在 "+resolved(plain)+" 里 git init（项目根决定哪些写入算项目内）" {
-		t.Fatalf("非 git 目录: %+v", c)
+		t.Fatalf("显式的非 git 目录: %+v", c)
 	}
-
-	for _, tc := range []struct{ dir, why string }{
-		{home, "是家目录"}, {filepath.Dir(home), "它的上级"}, {"/", "根目录"}, {filepath.Join(home, "gone"), "不是存在的目录"},
-	} {
-		o.Project = tc.dir
-		if c := find(t, Run(o), "project.root"); c.Status != Skip || !strings.HasPrefix(c.Detail, tc.dir+" ") || !strings.Contains(c.Detail, tc.why) ||
-			!strings.Contains(c.Detail, "不当项目根") || !strings.Contains(c.Detail, "所有写入都算项目外") {
-			t.Fatalf("%s: %+v", tc.dir, c)
-		}
+	// 隐式默认的当前目录（没给 --project，如在 ~/Downloads 里跑 railse setup）不是 git 仓库：只告知，不建议 git init
+	o.ProjectExplicit = false
+	if c := find(t, Run(o), "project.root"); c.Status != Skip || c.Detail != "目录 "+resolved(plain)+" 不是 git 仓库，在这里起 agent 会按当前目录当项目根" ||
+		c.Hint != "" {
+		t.Fatalf("隐式的非 git 目录应只告知: %+v", c)
 	}
+	o.ProjectExplicit = true
 
 	o.Project = ""
 	if c := find(t, Run(o), "project.root"); c.Status != Skip {

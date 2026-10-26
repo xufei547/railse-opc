@@ -158,7 +158,8 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 //     读得到、却没有标记行的，是用户自己的脚本，按下一条处理。
 //   - 别的：整个数组原样作为前一跳。
 //
-// 兜底：前一跳里任何一个元素就是这次的脚本（如 ["/bin/sh", 脚本]）时丢掉前一跳并警告，脚本绝不调自己。
+// 兜底：前一跳里任何一个元素就是这次的脚本（如 ["/bin/sh", 脚本]）时丢掉前一跳并警告。这里认不出的别名（大小写不同的路径、
+// 硬链接、firmlink、相对路径）由脚本里的重入保护兜住（见 hooksconf.NotifyScript）：再次进来的那一层直接退出，不会一直调自己。
 func codexPrevNotify(n hooksconf.CodexNotify, script, show string, stderr io.Writer) []string {
 	if !n.Found || len(n.Argv) == 0 {
 		return nil
@@ -189,7 +190,7 @@ func codexPrevNotify(n hooksconf.CodexNotify, script, show string, stderr io.Wri
 	}
 	for _, a := range prev {
 		if sameScript(a, script) {
-			fmt.Fprintf(stderr, "警告：原来的 notify（%s）会调到这次的脚本 %s 自己，没有串成前一跳（否则脚本会一直调自己）；要找回原来的 notify 请看 %s*\n",
+			fmt.Fprintf(stderr, "警告：原来的 notify（%s）会调到这次的脚本 %s 自己，没有串成前一跳（串上也只是又进到脚本自己、什么都不做）；要找回原来的 notify 请看 %s*\n",
 				hooksconf.ShellJoin(prev), script, show+backupSuffix)
 			return nil
 		}

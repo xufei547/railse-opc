@@ -49,6 +49,7 @@ var sensitivePatterns = []string{
 	"**/.codex/auth.json",
 	"**/.gemini/settings.json",
 	"**/.gemini/oauth_creds.json",
+	"**/*.railse-bak-*", // railse setup 改用户级配置前留的原样备份（settings.json、config.toml 的副本，可能带密钥）
 	"**/.railse/**",
 	"~/.ssh/**",
 	"~/.aws/**",
@@ -281,7 +282,7 @@ func literalPathRisk(p string, cwd string, ctx Context) Risk {
 
 // resolvedPathRisk 给一个已确认可解析的路径定级：无害的伪设备 read，敏感路径 destructive，
 // 项目内 write_in_project，其余 write_outside。项目根未知时 fail closed：没有路径在项目内
-// （不以 cwd 代替，否则 cd 或在家目录下执行就能把任意路径变成项目内）。
+// （本包不以 cwd 代替；项目根由守护进程定，见 agent.ResolveProjectRoot 与 Context.Root）。
 func resolvedPathRisk(p, cwd string, ctx Context) Risk {
 	abs := resolvePath(p, cwd, ctx.HomeDir)
 	switch {

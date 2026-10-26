@@ -206,20 +206,27 @@ func nonGitLines(logs string) []string {
 }
 
 // 不是 git 仓库的目录在日志里提示一次：同一目录再来请求不重复，换一个目录再记一行；git 仓库与家目录里不记。
+// 路径按 %q 记：目录名里带换行也伪造不出另一行日志。
 func TestNonGitRootLoggedOncePerDir(t *testing.T) {
 	logs := &logBuf{}
 	env := startServerLog(t, LocalDecider{}, setHome(t), logs)
 	a := filepath.Join(filepath.Dir(env.repo), "a")
 	b := filepath.Join(filepath.Dir(env.repo), "b")
+	evil := filepath.Join(filepath.Dir(env.repo), "x\n2026/10/27 12:00:00 伪造的一行")
 	os.MkdirAll(filepath.Join(env.repo, "src"), 0o755)
 	os.MkdirAll(a, 0o755)
 	os.MkdirAll(b, 0o755)
-	for _, cwd := range []string{a, a, env.repo, filepath.Join(env.repo, "src"), env.cfg.HomeDir, b, a, b} {
+	os.MkdirAll(evil, 0o755)
+	for _, cwd := range []string{a, a, env.repo, filepath.Join(env.repo, "src"), env.cfg.HomeDir, b, a, b, evil} {
 		roundTrip(t, env.cfg.SocketPath, permission(cwd, "touch x"))
 	}
 	want := []string{
-		"test 目录 " + CleanCwd(a) + " 不是 git 仓库，按当前目录当项目根；建议 git init",
-		"test 目录 " + CleanCwd(b) + " 不是 git 仓库，按当前目录当项目根；建议 git init",
+		fmt.Sprintf("test 目录 %q 不是 git 仓库，按当前目录当项目根；建议 git init", CleanCwd(a)),
+		fmt.Sprintf("test 目录 %q 不是 git 仓库，按当前目录当项目根；建议 git init", CleanCwd(b)),
+		fmt.Sprintf("test 目录 %q 不是 git 仓库，按当前目录当项目根；建议 git init", CleanCwd(evil)),
+	}
+	if strings.Contains(logs.String(), "\n2026/10/27 12:00:00 伪造的一行") {
+		t.Fatalf("目录名里的换行不该进日志:\n%s", logs.String())
 	}
 	if got := nonGitLines(logs.String()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("提示行 = %q，想要 %q\n日志:\n%s", got, want, logs.String())

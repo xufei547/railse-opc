@@ -66,6 +66,9 @@ type Options struct {
 
 	// HubDirRequired 表示 HubDir 是显式给的（--hub-dir）：它不存在或读不到时 hubsrv.dir 报 fail，而不是把 hub 侧整段跳过。
 	HubDirRequired bool
+	// ProjectExplicit 表示 Project 是显式给的（--project）。不是时 Project 是 doctor 默认看的当前目录（如在 ~/Downloads 里
+	// 跑 railse setup），它不是 git 仓库时 project.root 只告知（skip），不建议 git init。项目级钩子的检查不看它。
+	ProjectExplicit bool
 	// HubSkip 非空且 HubDir 为空时，hub 侧整段 skip，细节用它（如系统 hub 目录属于别的用户、查过哪些位置）。
 	HubSkip string
 

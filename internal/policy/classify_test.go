@@ -24,6 +24,12 @@ func TestClassify(t *testing.T) {
 		{"file_write 伪设备不低于项目内写", Payload{Type: PayloadFileWrite, Path: "/dev/null", Cwd: "/home/u/proj"}, RiskWriteInProject},
 		{"file_write 含变量", Payload{Type: PayloadFileWrite, Path: "$FOO/x", Cwd: "/home/u/proj"}, RiskUnknown},
 		{"file_write 相对路径无 Cwd 用 ProjectRoot", Payload{Type: PayloadFileWrite, Path: "docs/x.md"}, RiskWriteInProject},
+		// railse setup 在用户级配置旁边留的备份是原样副本（可能带 API key、MCP token），读写都按敏感文件
+		{"cat Claude 配置的备份", Payload{Type: PayloadShell, Command: "cat /home/u/.claude/settings.json.railse-bak-20261027-050729", Cwd: "/home/u/proj"}, RiskDestructive},
+		{"cat Codex 配置同一秒的第二个备份", Payload{Type: PayloadShell, Command: "cat ~/.codex/config.toml.railse-bak-20261027-050729-2", Cwd: "/home/u/proj"}, RiskDestructive},
+		{"cat Gemini 配置的备份", Payload{Type: PayloadShell, Command: "cat /home/u/.gemini/settings.json.railse-bak-20261027-050729", Cwd: "/home/u/proj"}, RiskDestructive},
+		{"file_write 写备份", Payload{Type: PayloadFileWrite, Path: "/home/u/.claude/settings.json.railse-bak-20261027-050729", Cwd: "/home/u/proj"}, RiskDestructive},
+		{"file_write 项目内写备份名的文件", Payload{Type: PayloadFileWrite, Path: "conf.toml.railse-bak-20261027-050729", Cwd: "/home/u/proj"}, RiskDestructive},
 		{"mcp", Payload{Type: PayloadMCP, Server: "github", Tool: "create_issue"}, RiskNetwork},
 		{"network", Payload{Type: PayloadNetwork, URL: "https://example.com"}, RiskNetwork},
 		{"未知类型", Payload{Type: "bogus"}, RiskUnknown},

@@ -17,8 +17,8 @@ var (
 	stdinIsTerminal           = func() bool { return isTerminal(os.Stdin) }
 )
 
-// isTerminal 报告 f 像不像终端：是字符设备，且不是 /dev/null。/dev/null 也是字符设备，cron、CI、docker run 不带 -i、
-// < /dev/null 时的 stdin 就是它，那里没人能回答。不引 golang.org/x/term，判不出别的非终端字符设备（如 /dev/zero）。
+// isTerminal 报告 f 像不像终端：是字符设备，且不是 /dev/null。/dev/null 也是字符设备，< /dev/null 时的 stdin 就是它，
+// 那里没人能回答。不引 golang.org/x/term，判不出别的非终端字符设备（如 /dev/zero）。
 func isTerminal(f *os.File) bool {
 	st, err := f.Stat()
 	if err != nil || st.Mode()&os.ModeCharDevice == 0 {

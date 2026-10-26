@@ -323,7 +323,7 @@ func (s *Server) noteNonGitRoot(root string) {
 	}
 	s.nonGitMu.Unlock()
 	if first {
-		s.log.Printf("目录 %s 不是 git 仓库，按当前目录当项目根；建议 git init", root)
+		s.log.Printf("目录 %q 不是 git 仓库，按当前目录当项目根；建议 git init", root) // 路径来自钩子，按 %q 记，换行伪造不出另一行
 	}
 }
 

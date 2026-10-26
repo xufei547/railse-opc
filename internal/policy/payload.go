@@ -39,7 +39,8 @@ type Payload struct {
 
 // Context 是评估一条请求时的环境，由调用方提供，本包不读环境。
 type Context struct {
-	// ProjectRoot 是项目根目录的绝对路径。适配器传 git 仓库根，不在仓库里时传会话的工作目录。
+	// ProjectRoot 是项目根目录的绝对路径，由守护进程按请求的 cwd 定（见 agent.ResolveProjectRoot）：git 仓库根，
+	// 不在 git 仓库里时是 cwd 自身，cwd 是家目录、家目录的祖先或根目录时为空。
 	// 为空时引擎 fail closed，认为没有任何改动在项目内，写入一律按 write_outside 询问；
 	// 是家目录、家目录的祖先或根目录时同样按空处理，见 Root。
 	ProjectRoot string

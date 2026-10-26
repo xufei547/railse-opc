@@ -336,6 +336,37 @@ func TestDoctorProjectBinAndCLIHook(t *testing.T) {
 	}
 }
 
+// 不给 --project：project.root 看当前目录，不是 git 仓库时只告知（skip，不建议 git init）；显式给了 --project（哪怕是 .）
+// 才按要检查的项目报 warn、建议 git init。
+func TestDoctorImplicitProjectOnlyInforms(t *testing.T) {
+	fakeDoctorCLIs(t)
+	base, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(base)
+	t.Setenv("HOME", base)
+	t.Setenv("RAILSE_HOME", "")
+	t.Setenv("RAILSE_HUB_HOME", filepath.Join(base, "nohub"))
+	plain := filepath.Join(base, "Downloads")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(plain)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _ := filepath.EvalSymlinks(cwd)
+	_, checks := doctorJSON(t)
+	if c := mustCheck(t, checks, "project.root"); c.Status != "skip" || c.Detail != "目录 "+root+" 不是 git 仓库，在这里起 agent 会按当前目录当项目根" || c.Hint != "" {
+		t.Fatalf("不给 --project 时应只告知: %+v", c)
+	}
+	for _, p := range []string{".", plain} {
+		_, checks = doctorJSON(t, "--project", p)
+		if c := mustCheck(t, checks, "project.root"); c.Status != "warn" || !strings.Contains(c.Hint, "git init") {
+			t.Fatalf("显式 --project %s 应 warn: %+v", p, c)
+		}
+	}
+}
+
 // Linux 上没设 $RAILSE_HUB_HOME、~/.railse-hub 也不在时，回退到系统单元的 hub 数据目录（以 root 跑 railse setup autostart
 // --hub --system 装的 hub），输出里写明用的是哪个目录；~/.railse-hub 在时优先它；设了 $RAILSE_HUB_HOME 就只看它；别的系统不回退。
 func TestDoctorLinuxSystemHubDir(t *testing.T) {

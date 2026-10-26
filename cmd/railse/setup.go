@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -376,6 +377,15 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "已写入 %s\n", w.show)
 		}
 	}
+	if userLevel && len(userSettings) == 2 {
+		if cwd, err := os.Getwd(); err == nil {
+			userData := map[string][]byte{} // 用户级文件这次写（--dry-run 时会写）的内容，按显示路径
+			for _, w := range writes {
+				userData[w.show] = w.data
+			}
+			remindProjectLevel(cwd, *bin, *doClaude, *doGemini, userData, userSettings, stderr)
+		}
+	}
 	if socket != "" && len(writes) > 0 {
 		if base == "" {
 			base = "~/.railse（取不到家目录）"
@@ -397,6 +407,46 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "提醒 Gemini：钩子只能拒绝不能放行，需要 Gemini CLI 0.65.0 以上，不要开 yolo 模式。")
 	}
 	return 0
+}
+
+// remindProjectLevel 在装用户级时提醒当前目录 dir 里项目级的 Railse 钩子（如从 0.1.0 升级、当初用 --project 装过的项目）：
+// 用户级已对所有项目生效，项目级的还留着时 Gemini 会触发两次，Claude 的条目与用户级的不同时也会两次（与 doctor 同一口径：
+// hooksconf.Inspect 认条目、hooksconf.SameOurs 比两边；Claude 两边完全相同时只跑一次）。只看这次装的 CLI，每个文件一行写到
+// stderr；与用户级是同一个文件的（在家目录里跑、链到用户级的）、已提醒过的同一个文件不算；读不了、不是合法 JSON 的不提。
+// userData 是用户级文件这次写的内容（按显示路径）。只读，不改项目里的文件。
+func remindProjectLevel(dir, bin string, doClaude, doGemini bool, userData map[string][]byte, userSettings []string, stderr io.Writer) {
+	type project struct{ cli, path, user string }
+	var files []project
+	if doClaude {
+		local, shared := hooksconf.ClaudePaths(dir)
+		files = append(files, project{"claude", local, userSettings[0]}, project{"claude", shared, userSettings[0]})
+	}
+	if doGemini {
+		files = append(files, project{"gemini", hooksconf.GeminiPath(dir), userSettings[1]})
+	}
+	seen := append([]string(nil), userSettings...)
+	for _, f := range files {
+		if slices.ContainsFunc(seen, func(p string) bool { return samePath(f.path, p) }) {
+			continue
+		}
+		seen = append(seen, f.path)
+		b, err := os.ReadFile(f.path)
+		if err != nil {
+			continue
+		}
+		if ins, err := hooksconf.Inspect(b, bin); err != nil || len(ins.Events) == 0 {
+			continue
+		}
+		const why = "（用户级已对所有项目生效；在项目里跑 railse doctor 也会指出）"
+		switch {
+		case f.cli == "claude" && hooksconf.SameOurs(userData[f.user], b, bin):
+			fmt.Fprintf(stderr, "提醒：%s 里也有 Railse 的钩子，与用户级的条目完全相同，Claude Code 只跑一次：其中 Railse 的条目可删可不删%s\n", f.path, why)
+		case f.cli == "claude":
+			fmt.Fprintf(stderr, "提醒：%s 里也有 Railse 的钩子，与用户级的条目不同，Claude Code 会触发两次：建议删掉其中 Railse 的条目%s\n", f.path, why)
+		default:
+			fmt.Fprintf(stderr, "提醒：%s 里也有 Railse 的钩子，Gemini 会触发两次：建议删掉其中 Railse 的条目%s\n", f.path, why)
+		}
+	}
 }
 
 // hookSocket 定钩子命令里的 --socket。dir 是守护进程的数据目录（--dir；空则同 agent 子命令，取 $RAILSE_HOME 或 ~/.railse）。
@@ -654,8 +704,12 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	if *noHooks {
 		fmt.Fprintln(stdout, "已跳过（--no-hooks）")
 	} else {
-		// --dir 也交给钩子：目录不是 ~/.railse 时钩子命令带 --socket，才连得上下面托管的、带 RAILSE_HOME=<目录> 的守护进程
-		hookArgs := []string{"hooks", "--bin", b, "--dir", cfg.Dir}
+		// --dir 也交给钩子：目录不是 ~/.railse 时钩子命令带 --socket，才连得上下面托管的、带 RAILSE_HOME=<目录> 的守护进程。
+		// --bin 只在用户给了时才传（setup hooks 默认就是当前程序），它末尾的 Codex 提醒才与体检的提示是同一条命令
+		hookArgs := []string{"hooks", "--dir", cfg.Dir}
+		if *bin != "" {
+			hookArgs = append(hookArgs, "--bin", b)
+		}
 		if proj != "" {
 			hookArgs = append(hookArgs, "--project", proj)
 		}
@@ -698,7 +752,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	}
 
 	step(4)
-	// 给了 --project 才交给 doctor（不给时 doctor 用它自己的默认），复查命令同理
+	// 给了 --project 才交给 doctor（不给时 doctor 看当前目录，它不是 git 仓库时项目根只告知），复查命令同理
 	doctorArgs, recheck := []string{"--dir", cfg.Dir, "--bin", b}, "railse doctor"+projArg+dirBin
 	if proj != "" {
 		doctorArgs = append([]string{"--project", proj}, doctorArgs...)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -255,7 +256,8 @@ func TestSetupCodexNotifyDeletedOldScript(t *testing.T) {
 	}
 }
 
-// 前一跳里有这次脚本的别名（经符号链接的目录，脚本还没写出来，samePath 认不出）：不串，警告，脚本绝不调自己。
+// 前一跳里有这次脚本的别名（经符号链接的目录，脚本还没写出来，samePath 认不出）：不串，警告（认不出的别名由重入保护兜住，
+// 见 TestSetupCodexNotifyScriptReentryGuard）。
 // 第一个元素就是别名时按我们的脚本处理（读不到标记行）；别名在后面的元素里（如 ["/bin/sh", 脚本]）时兜底丢掉前一跳。
 func TestSetupCodexNotifyNeverChainsItself(t *testing.T) {
 	needUnixShell(t)
@@ -481,6 +483,73 @@ func TestSetupCodexNotifyScriptRuns(t *testing.T) {
 	}
 	if got, want := lines(railseOut), []string{"hook", "codex-notify", "--socket", filepath.Join(data, "agent.sock"), payload}; !slices.Equal(got, want) {
 		t.Fatalf("railse 收到 %q，想要 %q", got, want)
+	}
+}
+
+// 前一跳经别名又调到脚本自己（这里是一个转回脚本的小脚本；大小写不同的路径、硬链接、firmlink、相对路径同理，
+// sameScript 认不出）：重入保护让再次进来的脚本直接退出，前一跳只跑一次、railse 只被调一次，脚本退出 0、不挂。
+// 转回脚本的小脚本最多转 5 次：没有重入保护时测试很快失败（railse 被调 6 次），而不是一层层嵌套下去耗尽进程数。
+func TestSetupCodexNotifyScriptReentryGuard(t *testing.T) {
+	needUnixShell(t)
+	home, cfg, _ := codexEnv(t)
+	data := filepath.Join(home, "data")
+	script := filepath.Join(data, "codex-notify.sh")
+	hops, railseOut := filepath.Join(home, "hops"), filepath.Join(home, "railse.out")
+	bin := filepath.Join(home, "bin", "railse")
+	writeExec(t, bin, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+hooksconf.ShellQuote(railseOut)+"\n")
+	alias := filepath.Join(home, "bin", "alias.sh")
+	writeExec(t, alias, "#!/bin/sh\n"+
+		"n=$(cat "+hooksconf.ShellQuote(hops)+" 2>/dev/null || echo 0)\n"+
+		"n=$((n + 1))\n"+
+		"echo \"$n\" > "+hooksconf.ShellQuote(hops)+"\n"+
+		"[ \"$n\" -le 5 ] || exit 0\n"+
+		"exec /bin/sh "+hooksconf.ShellQuote(script)+" \"$@\"\n")
+	writeTestFile(t, cfg, fmt.Sprintf("notify = [\"/bin/sh\", %q]\n", alias))
+	if _, errOut, code := codexNotify(t, "--bin", bin, "--dir", data); code != 0 || errOut != "" {
+		t.Fatalf("code=%d stderr=%s", code, errOut)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	payload := `{"type":"agent-turn-complete"}`
+	cmd := exec.CommandContext(ctx, script, payload)
+	for _, kv := range os.Environ() { // 跑测试的环境里万一带着保护变量，脚本会直接退出，测不到重入
+		if !strings.HasPrefix(kv, hooksconf.NotifyGuardEnv+"=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("脚本应退出 0: %v %s", err, out)
+	}
+	if got := strings.TrimSpace(string(readFile(t, hops))); got != "1" {
+		t.Fatalf("前一跳应只跑一次，跑了 %s 次", got)
+	}
+	calls := strings.Split(strings.TrimSuffix(string(readFile(t, railseOut)), "\n"), "\n")
+	if len(calls) != 1 || !strings.HasSuffix(calls[0], payload) {
+		t.Fatalf("railse 应只被调一次、收到通知 JSON，得到 %d 次: %q", len(calls), calls)
+	}
+}
+
+// 重入保护之前生成的脚本（字节不同）：重跑 setup codex-notify 会重新生成它，不报“已是最新”；config.toml 不变。
+func TestSetupCodexNotifyUpdatesPreGuardScript(t *testing.T) {
+	_, cfg, script := codexEnv(t)
+	old := "#!/bin/sh\n" +
+		"# 由 railse setup codex-notify 生成，重跑会重新生成，不要手动改。\n" +
+		"# Codex 把通知 JSON 作为最后一个参数传给 notify 命令；这里原样（\"$@\"）交给下面每个命令，一个失败不影响另一个。\n" +
+		"# railse-prev-notify: [\"/bin/other\"]\n" +
+		"/bin/other \"$@\"\n" +
+		"/opt/railse hook codex-notify \"$@\"\n" +
+		"exit 0\n"
+	writeExec(t, script, old)
+	writeTestFile(t, cfg, notifyLine(script)+"\n")
+	out, errOut, code := codexNotify(t, "--bin", "/opt/railse")
+	if code != 0 || errOut != "" {
+		t.Fatalf("code=%d stderr=%s", code, errOut)
+	}
+	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript([]string{"/bin/other"}, "/opt/railse", "")) || bytes.Equal(got, []byte(old)) {
+		t.Fatalf("旧脚本应重新生成、前一跳保留:\n%s", got)
+	}
+	if !strings.Contains(out, "已写入 "+script) || strings.Contains(out, script+" 已是最新") || !strings.Contains(out, cfg+" 已是最新") {
+		t.Fatalf("应重写脚本、config.toml 已是最新:\n%s", out)
 	}
 }
 

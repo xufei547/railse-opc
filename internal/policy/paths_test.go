@@ -71,12 +71,15 @@ func TestIsSensitive(t *testing.T) {
 		"/System/Volumes/Data/Users/u/.config/git/config",
 		"/home/u/proj/terraform.tfstate", "/home/u/proj/infra/terraform.tfstate.backup",
 		"/home/u/proj/infra/x.tfstate.1700000000.backup", "/home/u/proj/TERRAFORM.TFSTATE",
+		// railse setup 留下的用户级配置备份（同一秒的第二个加 -2）
+		"/home/u/.claude/settings.json.railse-bak-20261027-050729", "/home/u/.gemini/settings.json.railse-bak-20261027-050729",
+		"/home/u/.codex/config.toml.railse-bak-20261027-050729-2", "/home/u/dotfiles/config.toml.RAILSE-BAK-20261027-050729",
 	}
 	no := []string{
 		"/home/u/proj/src/a.go", "/home/u/proj/README.md", "/home/u/proj/.envrc.example",
 		"/home/u/proj/src/env.go", "/home/u/.sshx/config",
 		"/home/u/.config/gitx/config", "/home/u/.config/github-copilot/x.json", "/home/u/proj/tfstate.go",
-		"/home/u/proj/docs/tfstate.md",
+		"/home/u/proj/docs/tfstate.md", "/home/u/proj/docs/railse-bak.md",
 	}
 	for _, p := range yes {
 		if !isSensitive(p, "/home/u") {

@@ -1,12 +1,15 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
@@ -364,8 +367,16 @@ func codexNotifyCheck(o Options) Check {
 	fix := "railse setup codex-notify" + dirFlag(o)
 	hint := "运行 " + fix + "（会保留已有的 notify）"
 	b, err := os.ReadFile(path)
-	if err != nil {
-		return notifyWarn(path+" 读不到，Codex 的完成与提问事件不会进收件箱", hint)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR): // 新用户第一次体检多半是这样：说不存在，不说成权限问题
+		return notifyWarn(path+" 不存在，Codex 的完成与提问事件不会进收件箱", hint)
+	case err != nil:
+		why := err
+		var pe *fs.PathError
+		if errors.As(err, &pe) { // 细节里不重复路径
+			why = pe.Err
+		}
+		return notifyWarn(path+" 读不到（"+why.Error()+"），Codex 的完成与提问事件不会进收件箱", "确认用跑 Codex 的同一个用户运行 doctor")
 	}
 	n, err := hooksconf.ParseCodexNotify(b)
 	switch {
