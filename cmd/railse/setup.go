@@ -21,9 +21,12 @@ import (
 const setupAllUsage = `  railse setup all --hub URL --token 接入码 [--name 名字] [--project 目录] [--dir 目录] [--bin 路径] [--no-autostart] [--no-hooks] [--force]
     一键：接入 hub → 装三个 CLI 的钩子 → 开机自启 → 体检（railse doctor）。钩子默认装用户级（对所有项目生效），
     给了 --project 才把 Claude、Gemini 的装成那个项目的项目级（同 setup hooks）。
-    已接入过（有 machine.json）时跳过接入，这时可以不给 --hub 与 --token；--force 重新接入。体检的失败只展示，不算 setup all 失败。`
+    已接入过（有 machine.json）时跳过接入，这时可以不给 --hub 与 --token；--force 重新接入。体检的失败只展示，不算 setup all 失败。
+    要接入却缺 --hub 或 --token 时，在终端里逐个问缺的（--name 没给时也问名字）；不在终端里是用法错误。`
 
 const setupUsage = `用法:
+  railse setup
+    不带子命令、在终端里运行：逐个问 hub 地址、接入码、本机名字，再照 setup all 做完（已接入过的不问，直接跑）。
 ` + setupAllUsage + `
   railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--dir 目录] [--bin 路径] [--dry-run]
     默认三个都装，都是用户级（对所有项目生效）：Claude 写 ~/.claude/settings.json，Gemini 写 ~/.gemini/settings.json
@@ -190,6 +193,9 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 }
 
 func runSetup(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 && stdinIsTerminal() {
+		return runSetupAll(nil, stdout, stderr) // 不带子命令、在终端里：同 setup all 不带标志，缺的接入信息逐个问
+	}
 	if len(args) > 0 && args[0] == "all" {
 		return runSetupAll(args[1:], stdout, stderr)
 	}
@@ -440,7 +446,8 @@ func agentJobRunning() bool {
 	return autostartStatus(runtime.GOOS, autostartSpec{Kind: "agent", Home: home, UID: os.Getuid()}, false, io.Discard) == 0
 }
 
-// runSetupAll 是 railse setup all：依次接入 hub、装三个 CLI 的钩子、托管开机自启、体检。
+// runSetupAll 是 railse setup all：依次接入 hub、装三个 CLI 的钩子、托管开机自启、体检。要接入却缺 --hub 或 --token 时，
+// stdin 是终端就先逐个问（askSetupAll），再走同样的四步。
 // 任一步失败立即退出 1 并说明停在哪一步、哪些已做完；体检只展示（刚托管的守护进程可能还没起来），不影响退出码。
 func runSetupAll(args []string, stdout, stderr io.Writer) int {
 	return runSetupAllAs(runtime.GOOS, os.Geteuid(), args, stdout, stderr)
@@ -512,10 +519,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		return 1
 	}
 	enroll := *force || lerr != nil
-	if enroll && (*hubURL == "" || *token == "") {
-		return usageErr("需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）")
-	}
-	// 一看就不对的输入在动手之前挡住，免得做了一半才发现
+	// 一看就不对的输入在动手之前（也在下面提问之前）挡住，免得做了一半、答完才发现
 	b := *bin
 	if b == "" {
 		if b, err = os.Executable(); err != nil {
@@ -543,6 +547,21 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 			fmt.Fprintf(stderr, "项目目录 %s 不存在或不是目录：--project 给要装项目级钩子的项目，不给则钩子装用户级\n", proj)
 			return 1
 		}
+	}
+	// 要接入却缺 --hub 或 --token：stdin 是终端就逐个问缺的（--name 没给时也问名字），答完照下面同样的四步做；不是终端是用法错误
+	if enroll && (*hubURL == "" || *token == "") {
+		if !stdinIsTerminal() {
+			return usageErr("需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）")
+		}
+		if err := askSetupAll(setupStdin, stdout, hubURL, token, name, cfg.MachineID); err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(stderr, "已取消，什么都没做")
+			} else {
+				fmt.Fprintf(stderr, "读输入失败，什么都没做：%v\n", err)
+			}
+			return 1
+		}
+		_, hubBase, _ = parseHubURL(*hubURL) // 向导已按 --hub 的口径校验过
 	}
 
 	steps := []string{"接入 hub", "安装钩子", "开机自启", "体检"}
@@ -654,7 +673,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	for _, n := range notes {
 		fmt.Fprintf(stdout, "\n注意：%s。", n)
 	}
-	fmt.Fprintf(stdout, "\n下一步：手机上打开 %s 登录，加到主屏幕后在设置里开启通知（见 docs/web.md）。\n", phoneURL)
+	printPhoneStep(stdout, phoneURL)
 	return 0
 }
 

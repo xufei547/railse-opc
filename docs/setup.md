@@ -76,11 +76,14 @@ railse hub token --dir /var/lib/railse-hub
 
 ## 工作机
 
-跑一次（钩子默认装用户级，在哪个目录里跑都行）：
+在终端里跑一次（钩子默认装用户级，在哪个目录里跑都行）：
 
 ```sh
-railse setup all --hub https://hub.example.com --token <接入码>
+railse setup                                                     # 问答式：逐个问 hub 地址、接入码、本机名字
+railse setup all --hub https://hub.example.com --token <接入码>   # 或者一次给全
 ```
+
+**问答式向导。** 不带子命令的 `railse setup`，或 `railse setup all` 要接入却没给 `--hub`、`--token` 时，stdin 是终端就逐个问缺的：hub 地址（与 `--hub` 同样校验；非本机的 `http://` 也不收，确在可信内网的用 `--hub` 给出）、接入码（在 hub 机器上运行 `railse hub token` 生成；输入会回显）、本机名字（直接回车用主机名；给了 `--name` 不问）。答得不合格就说明原因再问；Ctrl-D 取消，什么都不做（退出 1）。答完照 `setup all` 做下面四步。已接入过（有 `machine.json`、没加 `--force`）时不问，直接跑（跳过接入）。stdin 不是终端（脚本、管道）时不问：`railse setup` 打印用法，`setup all` 缺 `--hub`、`--token` 是用法错误，都退出 2。拒绝 root、检查 `--bin` 与 `--project` 都在提问之前，不会答完才被拒。
 
 依次做四步，任一步失败就停下，说明停在哪一步、哪些已做完，修好后重跑（已接入的会跳过接入）：
 
@@ -88,6 +91,8 @@ railse setup all --hub https://hub.example.com --token <接入码>
 2. **装钩子**（同 `railse setup hooks --bin <程序> --dir <目录>`，给了 `--project` 时带上它）：三个 CLI 都装，默认用户级、对所有项目生效（见下面的“各 CLI 的钩子”）。
 3. **开机自启**（同 `railse setup autostart`）：托管守护进程并等它应答。已经有手动 `railse agent run` 起的守护进程占着 socket 时跳过托管并提示：先在它的终端里 Ctrl-C 停掉，再 `railse setup autostart`。
 4. **体检**（同 `railse doctor`，给了 `--project` 时带上它）：有失败项时照常展示，但不让 `setup all` 失败（刚托管的守护进程可能还没起来），按提示处理后再跑 `railse doctor` 复查。
+
+做完后把手机要打开的 hub 地址（守护进程实际接的那个）用框线围起来打印，并提示：手机 Safari 打开后分享→添加到主屏幕，再从图标打开；登录后在设置里开启通知（见 [web.md](web.md)）。
 
 其余标志：`--name 名字`（在 hub 里的名字，默认主机名）、`--project 目录`（给了才把 Claude、Gemini 的钩子装成那个项目的项目级，默认装用户级；目录要已存在）、`--dir 目录`（守护进程数据目录，默认 `$RAILSE_HOME` 或 `~/.railse`）、`--bin 路径`、`--no-hooks`、`--no-autostart`。`setup all` 要用平时的用户身份跑，以 root 运行直接拒绝（否则会用掉接入码，`machine.json` 与钩子配置也成了 root 的文件）。
 

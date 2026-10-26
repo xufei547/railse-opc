@@ -178,8 +178,8 @@ func agentEnroll(cfg agent.Config, hubURL, token, name string, force bool, stdou
 	if err := checkDisplayName(name); err != nil {
 		return fmt.Errorf("名字 %w（用 --name 另取一个）", err)
 	}
-	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
-		fmt.Fprintln(stderr, "警告: hub 地址是 http://，明文传输密钥，只适合本机或可信内网；公网请用 https://")
+	if plaintextHub(u) {
+		fmt.Fprintln(stderr, "警告: "+plaintextHubNote)
 	}
 	if _, err := os.Lstat(cfg.MachinePath); err == nil && !force {
 		return fmt.Errorf("%s 已存在，本机已接入过；要换 hub 或重新接入请加 --force", cfg.MachinePath)
@@ -244,6 +244,14 @@ func parseHubURL(raw string) (*url.URL, string, error) {
 		return nil, "", errors.New("--hub 不能带 ? 查询或 # 片段")
 	}
 	return u, u.Scheme + "://" + u.Host + strings.TrimRight(u.EscapedPath(), "/"), nil
+}
+
+// plaintextHubNote 说明非本机的 http:// hub 地址为什么不妥（见 plaintextHub）。
+const plaintextHubNote = "hub 地址是 http://，明文传输密钥，只适合本机或可信内网；公网请用 https://"
+
+// plaintextHub 报告 hub 地址是不是非本机的 http://：接入码与机器密钥会明文经过网络。enroll 时只警告，setup 的向导不收。
+func plaintextHub(u *url.URL) bool {
+	return u.Scheme == "http" && !isLoopbackHost(u.Hostname())
 }
 
 // isLoopbackHost 报告主机是否只在本机：localhost、*.localhost（RFC 6761）、127.0.0.0/8、::1。

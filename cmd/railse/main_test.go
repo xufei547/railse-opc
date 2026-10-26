@@ -11,6 +11,7 @@ import (
 
 // TestMain 在任何测试之前把 HOME 换成新建的临时目录（结束时删掉），并清掉 RAILSE_HOME、RAILSE_HUB_HOME：
 // 哪个测试漏设了它们，也写不到真实家目录下的 ~/.claude、~/.gemini、~/.codex、~/.railse。
+// setup 的向导一律当 stdin 不是终端、内容为空（要测向导的用 fakeStdin 换掉）：哪个测试都不会读真实的 os.Stdin。
 func TestMain(m *testing.M) {
 	home, err := os.MkdirTemp("", "rs")
 	if err != nil {
@@ -20,6 +21,8 @@ func TestMain(m *testing.M) {
 	os.Setenv("HOME", home)
 	os.Unsetenv("RAILSE_HOME")
 	os.Unsetenv("RAILSE_HUB_HOME")
+	stdinIsTerminal = func() bool { return false }
+	setupStdin = strings.NewReader("")
 	code := m.Run()
 	os.RemoveAll(home)
 	os.Exit(code)
