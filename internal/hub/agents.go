@@ -291,7 +291,8 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // Accept 已回了 HTTP 错误
 	}
-	defer conn.CloseNow()
+	// 已关过时 CloseNow 报错，无害
+	defer func() { _ = conn.CloseNow() }()
 	conn.SetReadLimit(wire.MaxFrame) // 库默认只有 32768 字节
 	hello, ok := s.readHello(r.Context(), conn, machine)
 	if !ok {
@@ -394,7 +395,7 @@ func (s *Server) rejectProto(ctx context.Context, conn *websocket.Conn, m store.
 		}
 	}
 	if b, err := wire.Marshal(wire.Error{T: wire.TError, Message: fmt.Sprintf("协议版本 %d，hub 需要 %d", got, wire.Proto)}); err == nil {
-		writeAgentFrame(ctx, conn, b)
+		_ = writeAgentFrame(ctx, conn, b) // 尽力告知原因，随后照样关连接
 	}
 	conn.Close(websocket.StatusPolicyViolation, "协议版本不一致")
 }

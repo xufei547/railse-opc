@@ -43,7 +43,8 @@ func TestAgentServeAndControl(t *testing.T) {
 		}
 	}
 	var out, errOut bytes.Buffer
-	if code := run([]string{"agent", "status", "--dir", cfgDir}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "paused: false") || !strings.Contains(out.String(), "rules: 2") {
+	if code := run([]string{"agent", "status", "--dir", cfgDir}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "paused: false") || !strings.Contains(out.String(), "rules: 2") ||
+		!strings.Contains(out.String(), "\nhub: none\n") {
 		t.Fatalf("status: %d %q %q", code, out.String(), errOut.String())
 	}
 	out.Reset()
@@ -178,6 +179,24 @@ func TestPausedLineShowsSource(t *testing.T) {
 	}
 }
 
+func TestHubLineShowsState(t *testing.T) {
+	const u = "https://hub.example.com"
+	for _, c := range []struct {
+		st   proto.Status
+		want string
+	}{
+		{proto.Status{}, "hub: 未知（守护进程版本较旧？重启它）"}, // 旧版守护进程不报（与 doctor 一致，不说成未接入）
+		{proto.Status{Hub: "none"}, "hub: none"},
+		{proto.Status{Hub: "connecting", HubURL: u}, "hub: connecting " + u},
+		{proto.Status{Hub: "connected", HubURL: u}, "hub: connected " + u},
+		{proto.Status{Hub: "disabled", HubURL: u}, "hub: disabled " + u + "（本机密钥被拒，请 railse agent enroll --force 后重启守护进程）"},
+	} {
+		if got := hubLine(&c.st); got != c.want {
+			t.Fatalf("%+v: got %q want %q", c.st, got, c.want)
+		}
+	}
+}
+
 func TestAgentResumeWarnsWhenHubPaused(t *testing.T) {
 	dir, _ := os.MkdirTemp("", "rs")
 	defer os.RemoveAll(dir)
@@ -208,7 +227,7 @@ func TestAgentResumeWarnsWhenHubPaused(t *testing.T) {
 	}
 	out.Reset()
 	run([]string{"agent", "status", "--dir", cfgDir}, &out, &errOut)
-	if !strings.Contains(out.String(), "paused: true (hub)\n") {
+	if !strings.Contains(out.String(), "paused: true (hub)\n") || !strings.Contains(out.String(), "\nhub: connecting http://127.0.0.1:1\n") {
 		t.Fatalf("status: %q", out.String())
 	}
 	out.Reset()
@@ -327,7 +346,7 @@ func TestAgentEnrollValidation(t *testing.T) {
 		{[]string{"--hub", "https://", "--token", "x"}, "http:// 或 https://"},
 		{[]string{"--hub", "127.0.0.1:8787", "--token", "x"}, "http:// 或 https://"},
 		{[]string{"--hub", "http://127.0.0.1:1", "--token", "x", "--name", "a\x1b[31mb"}, "名字"},
-		{[]string{"--hub", "http://127.0.0.1:1", "--token", "x", "--name", "a‮b"}, "名字"},
+		{[]string{"--hub", "http://127.0.0.1:1", "--token", "x", "--name", "a\u202eb"}, "名字"},
 		{[]string{"--hub", "http://127.0.0.1:1", "--token", "x", "--name", strings.Repeat("a", 129)}, "128"},
 		{[]string{"--hub", "http://127.0.0.1:1", "--token", "x", "extra"}, "extra"},
 	} {
@@ -619,6 +638,9 @@ func TestAgentRunKeepsServingWhenHubRevokes(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := run([]string{"agent", "status", "--dir", cfgDir}, &out, &errOut); code != 0 {
 		t.Fatalf("守护进程应照常服务: %d %q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "\nhub: disabled "+h.http.URL+"（") {
+		t.Fatalf("status 应显示 hub 已停用: %q", out.String())
 	}
 	repo := filepath.Join(dir, "repo")
 	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)

@@ -243,10 +243,13 @@ func inPrefixes(a netip.Addr, ps []netip.Prefix) bool {
 	return false
 }
 
-// sessionCookie 是登录会话 cookie：HttpOnly、SameSite=Lax、Path=/，配置要求或请求经 TLS 时加 Secure。
+// sessionCookie 是登录会话 cookie：HttpOnly、SameSite=Lax、Path=/。配置要求（--secure-cookies）、配了对外源
+// （--public-url，hub 在终止 TLS 的反向代理后面时自己收到的是明文 HTTP）或请求经 TLS 时加 Secure。
+// 非空的 PublicURL 已经 validate（CheckPublicURL）确认是 https 源（scheme 大小写不论），这里只看是否配了，不比前缀。
 func (s *Server) sessionCookie(r *http.Request, value string, maxAge int) *http.Cookie {
+	secure := s.cfg.SecureCookies || s.cfg.PublicURL != "" || r.TLS != nil
 	return &http.Cookie{Name: cookieName, Value: value, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode,
-		Secure: s.cfg.SecureCookies || r.TLS != nil, MaxAge: maxAge}
+		Secure: secure, MaxAge: maxAge}
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {

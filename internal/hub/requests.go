@@ -102,7 +102,8 @@ func validRequestID(id string) bool {
 	}
 	for i := 0; i < len(id); i++ {
 		c := id[i]
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+		idChar := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
+		if !idChar {
 			return false
 		}
 	}

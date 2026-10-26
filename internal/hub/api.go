@@ -460,7 +460,7 @@ func (s *Server) handleRulesExport(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/yaml")
 	w.Header().Set("Content-Disposition", `attachment; filename="railse-rules.yaml"`)
-	w.Write(b)
+	_, _ = w.Write(b) // 写失败只会是客户端已断开，无从补救
 }
 
 func (s *Server) handleMachines(w http.ResponseWriter, r *http.Request) {
@@ -548,7 +548,7 @@ func (s *Server) handleClientWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // Accept 已回了 HTTP 错误
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }() // 已关过时 CloseNow 报错，无害
 	ctx, cancel := context.WithCancel(conn.CloseRead(r.Context()))
 	defer cancel()
 	keepDone := make(chan struct{})

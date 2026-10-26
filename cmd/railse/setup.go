@@ -1,232 +1,96 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
+
+	"github.com/railse/railse-opc/internal/agent"
+	"github.com/railse/railse-opc/internal/hookclient"
+	"github.com/railse/railse-opc/internal/hooksconf"
 )
 
+const setupAllUsage = `  railse setup all --hub URL --token 接入码 [--name 名字] [--project 目录] [--dir 目录] [--bin 路径] [--no-autostart] [--no-hooks] [--force]
+    一键：接入 hub → 装三个 CLI 的钩子 → 开机自启 → 体检（railse doctor）。
+    已接入过（有 machine.json）时跳过接入，这时可以不给 --hub 与 --token；--force 重新接入。体检的失败只展示，不算 setup all 失败。`
+
 const setupUsage = `用法:
-  railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--bin 路径] [--dry-run]
-    默认三个都装。Claude 与 Gemini 写项目级配置，Codex 写用户级 ~/.codex/hooks.json。`
+` + setupAllUsage + `
+  railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--dir 目录] [--bin 路径] [--dry-run]
+    默认三个都装。Claude 写项目级 .claude/settings.local.json（不入库；旧版写在 settings.json 的会迁走），
+    Gemini 写项目级 .gemini/settings.json，Codex 写用户级 ~/.codex/hooks.json。
+    --dir 是守护进程的数据目录（默认 $RAILSE_HOME 或 ~/.railse）：不是 ~/.railse 时钩子命令带 --socket 指向它。
+  railse setup autostart [--hub] [--uninstall] [--status] [--dir 目录] [--bin 路径] [--system] [--user 名字] [--dry-run] [-- hub run 的额外参数]
+    开机自启并在退出后自动拉起（macOS launchd、Linux systemd），默认托管守护进程，--hub 托管 hub；详见 railse setup autostart -h。`
 
-type hookEntry struct {
-	Name    string `json:"name,omitempty"`
-	Type    string `json:"type"`
-	Command string `json:"command"`
-	Timeout int    `json:"timeout,omitempty"`
+// pendingWrite 是算好、待写的一个配置文件。
+type pendingWrite struct {
+	show, path string // show 是给人看的路径，path 是解开符号链接后真正写的文件
+	data       []byte
+	mode       os.FileMode
+	migrated   bool // 只删不加：把 Railse 钩子从 Claude 的 settings.json 迁走
 }
 
-type hookGroup struct {
-	Matcher *string     `json:"matcher,omitempty"`
-	Hooks   []hookEntry `json:"hooks"`
+// resolveForWrite 解开符号链接：配置是符号链接（如 dotfiles）时写到链接指向的文件，不把链接换成普通文件。
+// 同时取现有文件的权限沿用，文件还不存在时用 0644。
+func resolveForWrite(path string) (target string, mode os.FileMode) {
+	target, mode = path, 0o644
+	if r, err := filepath.EvalSymlinks(path); err == nil {
+		target = r
+	}
+	if st, err := os.Stat(target); err == nil {
+		mode = st.Mode().Perm()
+	}
+	return target, mode
 }
 
-func strp(s string) *string { return &s }
-
-// shellQuote 让 bin 能安全地拼进钩子命令（三家 CLI 都交给 shell 执行）：
-// 普通路径原样返回，含空格等特殊字符时用单引号包起来。
-func shellQuote(s string) string {
-	plain := s != "" && strings.IndexFunc(s, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+:@%,=", r))
-	}) < 0
-	if plain {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// hookPlan 给出每个 CLI 要写入的事件与条目。
-func hookPlan(cli, bin string) map[string][]hookGroup {
-	cmd := shellQuote(bin) + " hook " + cli
-	one := func(name string, timeout int) []hookGroup {
-		return []hookGroup{{Hooks: []hookEntry{{Name: name, Type: "command", Command: cmd, Timeout: timeout}}}}
-	}
-	switch cli {
-	case "claude":
-		return map[string][]hookGroup{
-			"PermissionRequest": {{Matcher: strp(""), Hooks: []hookEntry{{Type: "command", Command: cmd, Timeout: 86400}}}},
-			"Notification":      one("", 0),
-			"Stop":              one("", 0),
-			"SessionEnd":        one("", 0),
-		}
-	case "codex":
-		return map[string][]hookGroup{
-			"PermissionRequest": {{Matcher: strp(""), Hooks: []hookEntry{{Type: "command", Command: cmd, Timeout: 86400}}}},
-			"Stop":              one("", 0),
-			"SessionEnd":        one("", 3),
-		}
-	case "gemini":
-		return map[string][]hookGroup{
-			"BeforeTool":   {{Matcher: strp(".*"), Hooks: []hookEntry{{Name: "railse-before-tool", Type: "command", Command: cmd, Timeout: 86400000}}}},
-			"Notification": one("railse-notification", 0),
-			"AfterAgent":   one("railse-after-agent", 0),
-			"SessionEnd":   one("railse-session-end", 0),
+// claudeMigration 算出把 Railse 钩子从 Claude 的共享配置 settings.json 迁走后的内容；没有要迁的返回 false，文件不动。
+// settings.json 已不是写入目标：读不了、不是合法配置时只在 stderr 警告并跳过，不挡安装。
+// settings.local.json 与它是同一个文件（链接）时不迁，否则会把刚装进去的钩子删掉。
+// 它（解开链接后）就是用户级的 ~/.claude/settings.json 时（在家目录里运行，或项目的 settings.json 链到它）也不迁：
+// 那里的钩子对所有项目生效，迁走会让别的项目失去钩子；有 Railse 条目时警告，请用户自己决定。
+func claudeMigration(shared, localReal, bin string, stderr io.Writer) (pendingWrite, bool) {
+	target, mode := resolveForWrite(shared)
+	if a, err := os.Stat(target); err == nil {
+		if b, err := os.Stat(localReal); err == nil && os.SameFile(a, b) {
+			return pendingWrite{}, false
 		}
 	}
-	return nil
-}
-
-// isOurs 判断单个钩子条目是不是 Railse 写的：name 以 railse- 开头，
-// 或命令是“<程序> hook …”且程序是本次的 bin，
-// 或命令恰好是“<程序> hook claude|codex|gemini”且程序文件名是 railse（换过安装路径时留下的旧条目）。
-func isOurs(entry any, bin string) bool {
-	m, ok := entry.(map[string]any)
-	if !ok {
-		return false
+	existing, err := os.ReadFile(target)
+	if os.IsNotExist(err) {
+		return pendingWrite{}, false
 	}
-	cmd, _ := m["command"].(string)
-	name, _ := m["name"].(string)
-	if strings.HasPrefix(name, "railse-") || strings.HasPrefix(cmd, shellQuote(bin)+" hook ") {
-		return true
+	if err != nil {
+		fmt.Fprintf(stderr, "警告：读不了 %s，没有检查里面有没有旧版写的 Railse 钩子：%v\n", shared, err)
+		return pendingWrite{}, false
 	}
-	if prog, ok := hookCommandProgram(cmd); ok && filepath.Base(prog) == "railse" {
-		return true
+	ins, err := hooksconf.Inspect(existing, bin)
+	if err == nil && len(ins.Events) == 0 {
+		return pendingWrite{}, false
 	}
-	return false
-}
-
-// withoutOurs 从一个条目组里删掉我们的条目。返回去掉后的组，以及这个组是否因此删空、应整组去掉。
-// 组里没有我们的条目时原样返回；别人追加在我们组里的条目连同组的其他字段（如 matcher）都保留。
-func withoutOurs(group any, bin string) (kept any, drop bool) {
-	gm, ok := group.(map[string]any)
-	if !ok {
-		return group, false
-	}
-	hooks, ok := gm["hooks"].([]any)
-	if !ok {
-		return group, false
-	}
-	rest := []any{}
-	for _, h := range hooks {
-		if !isOurs(h, bin) {
-			rest = append(rest, h)
+	if home, herr := os.UserHomeDir(); herr == nil {
+		if user := filepath.Join(home, ".claude", "settings.json"); samePath(target, user) {
+			fmt.Fprintf(stderr, "警告：没有迁走 %s 里的 Railse 钩子：它就是 %s，这是用户级配置，迁走会让所有项目失去钩子；如确要迁走请手动删"+
+				"（不删的话，在这个目录里它会和 settings.local.json 里的一起触发两次）\n", shared, user)
+			return pendingWrite{}, false
 		}
 	}
-	switch {
-	case len(rest) == len(hooks):
-		return group, false
-	case len(rest) == 0:
-		return nil, true
+	var data []byte
+	if err == nil {
+		data, err = hooksconf.Merge(existing, bin, nil)
 	}
-	gm["hooks"] = rest
-	return gm, false
-}
-
-// hookCommandProgram 认出 hookPlan 写过的命令形状“<一个词> hook claude|codex|gemini”，返回去掉引号的程序路径。
-// “一个词”是不含空白的裸词，或 shellQuote 产生的单引号词（内部单引号按 shellQuote 的写法转义）。其他形状一律不认。
-func hookCommandProgram(cmd string) (string, bool) {
-	var prog, rest string
-	if strings.HasPrefix(cmd, "'") {
-		var b strings.Builder
-		i := 1
-		for {
-			j := strings.IndexByte(cmd[i:], '\'')
-			if j < 0 {
-				return "", false
-			}
-			b.WriteString(cmd[i : i+j])
-			i += j + 1
-			if !strings.HasPrefix(cmd[i:], `\''`) {
-				break
-			}
-			b.WriteByte('\'')
-			i += 3
-		}
-		prog, rest = b.String(), cmd[i:]
-	} else {
-		i := strings.IndexAny(cmd, " \t\r\n")
-		if i <= 0 {
-			return "", false
-		}
-		prog, rest = cmd[:i], cmd[i:]
+	if err != nil {
+		fmt.Fprintf(stderr, "警告：%s：%v，跳过迁移；里面若有旧版写的 Railse 钩子请手动删掉，否则会和 settings.local.json 里的一起触发两次\n", shared, err)
+		return pendingWrite{}, false
 	}
-	switch rest {
-	case " hook claude", " hook codex", " hook gemini":
-		return prog, true
-	}
-	return "", false
-}
-
-// mergeHooks 把我们的条目并进现有配置：逐个条目删旧的 Railse 条目（组删空了才删组），保留别人的，追加新的。
-// 现有内容不是合法 JSON、顶层或 hooks 不是对象、本次要写的事件不是数组时都视为损坏，返回错误不覆盖；
-// hooks 里其他非数组的值（如 Gemini 的开关项）原样保留。
-func mergeHooks(existing []byte, bin string, entries map[string][]hookGroup) ([]byte, error) {
-	doc := map[string]any{}
-	if len(bytes.TrimSpace(existing)) > 0 {
-		dec := json.NewDecoder(bytes.NewReader(existing))
-		dec.UseNumber() // 别人的数字原样保留，不经 float64 丢精度
-		var v any
-		if err := dec.Decode(&v); err != nil {
-			return nil, fmt.Errorf("现有配置不是合法 JSON，不覆盖: %w", err)
-		}
-		if _, err := dec.Token(); err != io.EOF {
-			return nil, errors.New("现有配置不是合法 JSON（末尾有多余内容），不覆盖")
-		}
-		m, ok := v.(map[string]any)
-		if !ok {
-			return nil, errors.New("现有配置顶层不是对象，不覆盖")
-		}
-		doc = m
-	}
-	hooks := map[string]any{}
-	if raw, ok := doc["hooks"]; ok {
-		h, ok := raw.(map[string]any)
-		if !ok {
-			return nil, errors.New(`现有配置的 "hooks" 不是对象，不覆盖`)
-		}
-		hooks = h
-	}
-	for ev := range entries {
-		if raw, ok := hooks[ev]; ok {
-			if _, ok := raw.([]any); !ok {
-				return nil, fmt.Errorf(`现有配置的 "hooks.%s" 不是数组，不覆盖`, ev)
-			}
-		}
-	}
-	// 先从所有事件里逐个条目删掉我们旧的条目；组里只剩我们的条目时整组删掉
-	for ev, raw := range hooks {
-		groups, ok := raw.([]any)
-		if !ok {
-			continue // 不是事件数组（我们不写的键），原样保留
-		}
-		kept := []any{}
-		for _, g := range groups {
-			if g2, drop := withoutOurs(g, bin); !drop {
-				kept = append(kept, g2)
-			}
-		}
-		switch {
-		case len(kept) == 0 && len(groups) > 0:
-			delete(hooks, ev)
-		default:
-			hooks[ev] = kept
-		}
-	}
-	// 再追加本次的
-	for ev, groups := range entries {
-		list, _ := hooks[ev].([]any)
-		for _, g := range groups {
-			list = append(list, g)
-		}
-		hooks[ev] = list
-	}
-	doc["hooks"] = hooks
-	// map 按键排序输出，重复运行结果字节相同；不转义 &、<、>，别人的命令保持可读
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(doc); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return pendingWrite{show: shared, path: target, data: data, mode: mode, migrated: true}, true
 }
 
 // writeFileAtomic 先写同目录的临时文件再 rename，中途失败不会留下写了一半的配置。
@@ -260,6 +124,12 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 }
 
 func runSetup(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "all" {
+		return runSetupAll(args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "autostart" {
+		return runAutostart(args[1:], stdout, stderr)
+	}
 	if len(args) == 0 || args[0] != "hooks" {
 		fmt.Fprintln(stderr, setupUsage)
 		return 2
@@ -271,6 +141,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	doCodex := fs.Bool("codex", false, "只装 Codex")
 	doGemini := fs.Bool("gemini", false, "只装 Gemini")
 	codexFile := fs.String("codex-file", "", "Codex 钩子文件，默认 ~/.codex/hooks.json")
+	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse；不是 ~/.railse 时钩子命令带 --socket")
 	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
 	dryRun := fs.Bool("dry-run", false, "只打印不写")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -282,6 +153,11 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	}
 	if !*doClaude && !*doCodex && !*doGemini {
 		*doClaude, *doCodex, *doGemini = true, true, true
+	}
+	socket, base, err := hookSocket(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
 	if *bin == "" {
 		exe, err := os.Executable()
@@ -302,65 +178,371 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		*codexFile = filepath.Join(home, ".codex", "hooks.json")
+		*codexFile = hooksconf.CodexPath(home)
 	}
+	claudeLocal, claudeShared := hooksconf.ClaudePaths(absProject)
 	targets := []struct {
 		cli  string
 		on   bool
 		path string
 	}{
-		{"claude", *doClaude, filepath.Join(absProject, ".claude", "settings.json")},
+		{"claude", *doClaude, claudeLocal},
 		{"codex", *doCodex, *codexFile},
-		{"gemini", *doGemini, filepath.Join(absProject, ".gemini", "settings.json")},
+		{"gemini", *doGemini, hooksconf.GeminiPath(absProject)},
 	}
-	type pending struct {
-		show, path string // show 是给人看的路径，path 是解开符号链接后真正写的文件
-		data       []byte
-		mode       os.FileMode
-	}
-	// 先把所有目标都算好，任何一个出错就一个都不写
-	var writes []pending
+	// 先把所有目标（连同 settings.json 的迁移）都算好，任何一个出错就一个都不写
+	var writes []pendingWrite
 	for _, tg := range targets {
 		if !tg.on {
 			continue
 		}
-		path := tg.path
-		if real, err := filepath.EvalSymlinks(path); err == nil {
-			path = real // 配置是符号链接（如 dotfiles）时写到链接指向的文件，不把链接换成普通文件
-		}
+		path, mode := resolveForWrite(tg.path)
 		existing, err := os.ReadFile(path)
 		if err != nil && !os.IsNotExist(err) {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		merged, err := mergeHooks(existing, *bin, hookPlan(tg.cli, *bin))
+		merged, err := hooksconf.Merge(existing, *bin, hooksconf.Plan(tg.cli, *bin, socket))
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", tg.path, err)
 			return 1
 		}
-		mode := os.FileMode(0o644)
-		if st, err := os.Stat(path); err == nil {
-			mode = st.Mode().Perm()
+		writes = append(writes, pendingWrite{show: tg.path, path: path, data: merged, mode: mode})
+		if tg.cli == "claude" {
+			// 紧跟在 settings.local.json 之后：先装好新的再删旧的，中途失败也不会两处都没有
+			if w, ok := claudeMigration(claudeShared, path, *bin, stderr); ok {
+				writes = append(writes, w)
+			}
 		}
-		writes = append(writes, pending{tg.path, path, merged, mode})
 	}
 	for _, w := range writes {
 		if *dryRun {
-			fmt.Fprintf(stdout, "== %s ==\n%s", w.show, w.data)
+			if w.migrated {
+				fmt.Fprintf(stdout, "== %s（迁走 Railse 钩子后）==\n%s", w.show, w.data)
+			} else {
+				fmt.Fprintf(stdout, "== %s ==\n%s", w.show, w.data)
+			}
 			continue
 		}
 		if err := writeFileAtomic(w.path, w.data, w.mode); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "已写入 %s\n", w.show)
+		if w.migrated {
+			fmt.Fprintf(stdout, "已从 %s 迁走 Railse 钩子（现在写在 settings.local.json，不入库）\n", w.show)
+		} else {
+			fmt.Fprintf(stdout, "已写入 %s\n", w.show)
+		}
+	}
+	if socket != "" && len(writes) > 0 {
+		if base == "" {
+			base = "~/.railse（取不到家目录）"
+		}
+		fmt.Fprintf(stdout, "钩子命令带 --socket %s：守护进程数据目录 %s 不是 %s，CLI 起钩子时的环境里不一定有指向它的 RAILSE_HOME\n", hooksconf.ShellQuote(socket), filepath.Dir(socket), base)
 	}
 	if *doCodex {
-		// notify 是 argv 数组，bin 必须单独作为第一个元素；%q 的转义对普通路径与 TOML 基本字符串一致
-		fmt.Fprintf(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify 需手动写在用户级 ~/.codex/config.toml：notify = [%q, \"hook\", \"codex-notify\"]。\n", *bin)
+		// notify 是 argv 数组，bin 必须单独作为第一个元素（Codex 把 JSON 追加在最后）；%q 的转义对普通路径与 TOML 基本字符串一致
+		notify := fmt.Sprintf("%q, \"hook\", \"codex-notify\"", *bin)
+		if socket != "" {
+			notify += fmt.Sprintf(", \"--socket\", %q", socket)
+		}
+		fmt.Fprintf(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify 需手动写在用户级 ~/.codex/config.toml：notify = [%s]。\n", notify)
 	}
 	if *doGemini {
 		fmt.Fprintln(stdout, "提醒 Gemini：钩子只能拒绝不能放行，需要 Gemini CLI 0.65.0 以上，不要开 yolo 模式。")
 	}
 	return 0
+}
+
+// hookSocket 定钩子命令里的 --socket。dir 是守护进程的数据目录（--dir；空则同 agent 子命令，取 $RAILSE_HOME 或 ~/.railse）。
+// 不带 --socket 的钩子连哪里，看的是 CLI 起钩子时的环境，那里不一定有 RAILSE_HOME（托管的守护进程带的、只在跑 setup 的
+// 那条命令上设的都进不去），所以基准取与环境无关的 ~/.railse：dir 不是它时返回 dir 里 socket 的绝对路径，是它时返回空，
+// 命令保持原样（已有用户的配置不变）。base 是 ~/.railse 的绝对路径（给提示用；取不到家目录时为空，这时总带 --socket）。
+// 既没有 $RAILSE_HOME 又取不到家目录、也没给 --dir 时没有目录可指，不带 --socket。
+func hookSocket(dir string) (socket, base string, err error) {
+	cfg, err := agentConfigFor(dir)
+	if err != nil {
+		return "", "", nil
+	}
+	abs, err := filepath.Abs(cfg.Dir)
+	if err != nil {
+		return "", "", err
+	}
+	if home, herr := os.UserHomeDir(); herr == nil {
+		if base, err = filepath.Abs(filepath.Join(home, ".railse")); err != nil {
+			return "", "", err
+		}
+		if samePath(abs, base) {
+			return "", base, nil
+		}
+	}
+	return agent.ConfigIn(abs).SocketPath, base, nil
+}
+
+// samePath 报告两个绝对路径是不是同一个文件或目录：字面相同（清理后），或都存在且是同一个文件（中间有符号链接）。
+func samePath(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	sa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	sb, err := os.Stat(b)
+	return err == nil && os.SameFile(sa, sb)
+}
+
+// setupDaemonWait 是 setup all 托管之后探守护进程应答的时长：launchd、systemd 拉起它要一点时间，等到了体检才看得到它在跑。
+// 截止时间只在两次探测之间检查，单次探测最长约 5 秒（hookclient 管理命令的时限），所以最坏约等 setupDaemonWait 加 5 秒。
+// 是变量只为测试能调短。
+var setupDaemonWait = 5 * time.Second
+
+// daemonAnswers 报告 sock 上有没有守护进程应答 status。只用在托管之后的等待里；判断 socket 被没被占用 socketOccupied。
+func daemonAnswers(sock string) bool {
+	_, err := hookclient.Client{SocketPath: sock, ConnectTimeout: time.Second}.Control("status")
+	return err == nil
+}
+
+// socketOccupied 用与守护进程 Listen 相同的判定看 socket 被没被占：连得上就是有进程在监听，不管它答不答、说哪个协议版本
+// （这时再起一个守护进程，它 Listen 会失败）。无人监听的陈旧 socket 文件不算，守护进程 Listen 时会替换它。
+func socketOccupied(sock string) bool {
+	c, err := net.DialTimeout("unix", sock, 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
+}
+
+// agentJobRunning 问服务管理器守护进程的托管作业在不在跑（与 railse setup autostart --status 同一个查询：launchctl print 的
+// state、systemctl --user is-active），不看托管文件在不在：托管失败时文件可能已经写下了，作业却没起来。只读。
+func agentJobRunning() bool {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	return autostartStatus(runtime.GOOS, autostartSpec{Kind: "agent", Home: home, UID: os.Getuid()}, false, io.Discard) == 0
+}
+
+// runSetupAll 是 railse setup all：依次接入 hub、装三个 CLI 的钩子、托管开机自启、体检。
+// 任一步失败立即退出 1 并说明停在哪一步、哪些已做完；体检只展示（刚托管的守护进程可能还没起来），不影响退出码。
+func runSetupAll(args []string, stdout, stderr io.Writer) int {
+	return runSetupAllAs(runtime.GOOS, os.Geteuid(), args, stdout, stderr)
+}
+
+// runSetupAllAs 是 runSetupAll 的可测版本：系统（只用于拒绝 root 时的提示）与有效 uid 由调用方给。
+func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("setup all", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintf(stderr, "用法:\n%s\n", setupAllUsage)
+		fs.PrintDefaults()
+	}
+	hubURL := fs.String("hub", "", "hub 地址，如 https://hub.example.com")
+	token := fs.String("token", "", "railse hub token 生成的接入码")
+	name := fs.String("name", "", "本机在 hub 里的名字，默认主机名")
+	project := fs.String("project", ".", "项目目录")
+	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse")
+	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
+	noAutostart := fs.Bool("no-autostart", false, "不托管开机自启")
+	noHooks := fs.Bool("no-hooks", false, "不装钩子")
+	force := fs.Bool("force", false, "已接入过也重新接入，覆盖 machine.json")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	usageErr := func(format string, a ...any) int {
+		fmt.Fprintf(stderr, format+"\n用法:\n%s\n", append(a, setupAllUsage)...)
+		return 2
+	}
+	if fs.NArg() != 0 {
+		return usageErr("多余的参数 %q", fs.Args())
+	}
+	// 在动手之前拒绝 root：否则一次性接入码先被用掉，machine.json 与项目里、家目录下的钩子配置都成了 root 的文件，
+	// 到第 3 步才被 setup autostart 拒绝（加 --no-autostart 时更是以 root 一路跑完）
+	if euid == 0 {
+		// hub 的提示按系统分：只有 Linux 的系统单元要 sudo；macOS 上 hub 也用平时的用户托管（launchd 用户代理）
+		hubHint := "hub 机器（Linux）用 " + sudoSystemHubCmd + " 装成系统服务"
+		if goos == "darwin" {
+			hubHint = "macOS 上 hub 也不用 sudo：railse setup autostart --hub"
+		}
+		fmt.Fprintln(stderr, "setup all 要用平时的用户身份运行，不要 sudo：以 root 跑会用掉一次性接入码，machine.json 与钩子配置也会成为 root 的文件；"+hubHint)
+		return 1
+	}
+	var hubBase string
+	if *hubURL != "" {
+		_, base, err := parseHubURL(*hubURL)
+		if err != nil {
+			return usageErr("%v", err)
+		}
+		hubBase = base
+	}
+	if *dir != "" {
+		abs, err := filepath.Abs(*dir)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		*dir = abs
+	}
+	cfg, err := agentConfigFor(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	// 已有 machine.json（哪怕是坏的）就不接入，--hub 与 --token 只在要接入时才必须给
+	_, lerr := os.Lstat(cfg.MachinePath)
+	if lerr != nil && !errors.Is(lerr, os.ErrNotExist) {
+		fmt.Fprintln(stderr, lerr)
+		return 1
+	}
+	enroll := *force || lerr != nil
+	if enroll && (*hubURL == "" || *token == "") {
+		return usageErr("需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）")
+	}
+	// 一看就不对的输入在动手之前挡住，免得做了一半才发现
+	b := *bin
+	if b == "" {
+		if b, err = os.Executable(); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	}
+	if b, err = filepath.Abs(b); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if !*noHooks || !*noAutostart {
+		if err := checkExecutable(b); err != nil { // 钩子与托管文件都指向它
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	}
+	proj, err := filepath.Abs(*project)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if st, err := os.Stat(proj); err != nil || !st.IsDir() {
+		fmt.Fprintf(stderr, "项目目录 %s 不存在或不是目录：用 --project 指定要装钩子的项目\n", proj)
+		return 1
+	}
+
+	steps := []string{"接入 hub", "安装钩子", "开机自启", "体检"}
+	var done []string
+	step := func(n int) { fmt.Fprintf(stdout, "\n== %d. %s ==\n", n, steps[n-1]) }
+	fail := func(n int, extra string) int {
+		fmt.Fprintf(stderr, "railse setup all 停在第 %d 步（%s）", n, steps[n-1])
+		if len(done) > 0 {
+			fmt.Fprintf(stderr, "；已完成：%s", strings.Join(done, "、"))
+		}
+		if n < len(steps) {
+			fmt.Fprintf(stderr, "；没做：%s", strings.Join(steps[n:], "、"))
+		}
+		fmt.Fprintf(stderr, "。%s修好后重跑 railse setup all（已接入的会跳过接入）\n", extra)
+		return 1
+	}
+	var notes []string
+	phoneURL := hubBase // 下一步里让手机打开的地址：守护进程实际接的 hub
+
+	step(1)
+	if !enroll {
+		m, err := agent.LoadMachine(cfg.MachinePath)
+		if err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return fail(1, "machine.json 坏了：加 --force（连同 --hub、--token）重新接入。")
+		}
+		fmt.Fprintf(stdout, "已接入过（%s），跳过；要换 hub 或重新接入加 --force\n", cfg.MachinePath)
+		phoneURL = m.HubURL
+		if hubBase != "" && hubBase != m.HubURL {
+			fmt.Fprintf(stdout, "注意：本机接的是 %s，不是 --hub 给的 %s；要改接那个 hub，加 --force 重新接入\n", m.HubURL, hubBase)
+		}
+	} else if err := agentEnroll(cfg, *hubURL, *token, *name, *force, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "接入失败：%v\n", err)
+		return fail(1, "")
+	}
+	done = append(done, steps[0])
+
+	step(2)
+	if *noHooks {
+		fmt.Fprintln(stdout, "已跳过（--no-hooks）")
+	} else {
+		// --dir 也交给钩子：目录不是 ~/.railse 时钩子命令带 --socket，才连得上下面托管的、带 RAILSE_HOME=<目录> 的守护进程
+		if code := runSetup([]string{"hooks", "--project", proj, "--bin", b, "--dir", cfg.Dir}, stdout, stderr); code != 0 {
+			return fail(2, "钩子文件的问题见上面（已写入的会列出来）。")
+		}
+		done = append(done, steps[1])
+	}
+
+	// 给人照抄的命令：用户给了 --dir、--bin 的，原样带上（agent run 只认 --dir）
+	dirArg, dirBin := "", ""
+	if *dir != "" {
+		dirArg = " --dir " + hooksconf.ShellQuote(cfg.Dir)
+	}
+	dirBin = dirArg
+	if *bin != "" {
+		dirBin += " --bin " + hooksconf.ShellQuote(b)
+	}
+	step(3)
+	slow := false // 托管了、守护进程却还没应答
+	// socket 被占时问服务管理器作业在不在跑：在跑就是托管的那个占着，重装会换掉它；不在跑就是手动起的（或别的进程）占着，
+	// 再托管一个，新实例 Listen 失败、被 launchd/systemd 反复拉起
+	occupied := socketOccupied(cfg.SocketPath)
+	switch {
+	case *noAutostart:
+		fmt.Fprintf(stdout, "已跳过（--no-autostart）；守护进程要自己 railse agent run%s\n", dirArg)
+		if enroll && occupied { // 守护进程只在启动时读 machine.json
+			if agentJobRunning() {
+				fmt.Fprintf(stdout, "守护进程正在跑，读不到刚写的 machine.json：已托管的守护进程用 railse setup autostart%s 重装或重启后生效\n", dirBin)
+			} else {
+				fmt.Fprintf(stdout, "守护进程正在跑，读不到刚写的 machine.json：手动起的停掉后重新 railse agent run%s 才接上 hub\n", dirArg)
+			}
+		}
+	case occupied && !agentJobRunning():
+		fmt.Fprintf(stdout, "守护进程已在运行，但不是托管的那个（launchd/systemd 里的托管作业没在跑；应是手动 railse agent run 起的），跳过托管："+
+			"再托管一个会抢不到 socket、被反复拉起；在跑的这个也只在启动时读 machine.json。\n先停掉它（在它的终端里 Ctrl-C），再运行：railse setup autostart%s\n", dirBin)
+		notes = append(notes, "没有托管开机自启（守护进程在手动运行），见第 3 步")
+	default:
+		if code := runAutostart([]string{"--dir", cfg.Dir, "--bin", b}, stdout, stderr); code != 0 {
+			return fail(3, "可以先手动 railse agent run"+dirArg+" 跑起守护进程。")
+		}
+		done = append(done, steps[2])
+		if waitDaemon(cfg.SocketPath, setupDaemonWait) {
+			fmt.Fprintln(stdout, "守护进程已应答")
+		} else {
+			slow = true
+			fmt.Fprintf(stdout, "守护进程等了 %s 还没有应答，下面的体检可能显示它没在跑\n", setupDaemonWait)
+		}
+	}
+
+	step(4)
+	if code := runDoctor([]string{"--project", proj, "--dir", cfg.Dir, "--bin", b}, stdout, stderr); code != 0 {
+		recheck := "railse doctor --project " + hooksconf.ShellQuote(proj) + dirBin
+		if slow {
+			fmt.Fprintf(stdout, "体检有失败项；setup all 不因体检失败而失败：刚托管的守护进程可能还没起来，过几秒再跑 %s 复查。\n", recheck)
+		} else {
+			fmt.Fprintf(stdout, "体检有失败项；setup all 不因体检失败而失败：按上面的“修复：”处理后再跑 %s 复查。\n", recheck)
+		}
+	}
+	for _, n := range notes {
+		fmt.Fprintf(stdout, "\n注意：%s。", n)
+	}
+	fmt.Fprintf(stdout, "\n下一步：手机上打开 %s 登录，加到主屏幕后在设置里开启通知（见 docs/web.md）。\n", phoneURL)
+	return 0
+}
+
+// waitDaemon 每 200 毫秒问一次守护进程，直到它应答或过了 wait（见 setupDaemonWait 说的最坏时长）；wait 为零时只问一次。
+func waitDaemon(sock string, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		if daemonAnswers(sock) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }

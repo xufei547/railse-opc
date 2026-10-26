@@ -156,8 +156,13 @@ func TestHubPasswordTokenAndWebhookToken(t *testing.T) {
 		t.Fatalf("token: %d %s", code, errOut.String())
 	}
 	tok := fieldAfter(t, out.String(), "接入码: ")
-	if !strings.Contains(out.String(), "railse agent enroll --hub") || !strings.Contains(out.String(), "有效期: 1m0s") {
+	// 下一步首推 setup all（一次做完接入、钩子、开机自启、体检），单独接入的 agent enroll 也给出
+	if !strings.Contains(out.String(), "railse setup all --hub https://<hub 地址> --token "+tok+"\n") ||
+		!strings.Contains(out.String(), "railse agent enroll --hub https://<hub 地址> --token "+tok+"\n") || !strings.Contains(out.String(), "有效期: 1m0s") {
 		t.Fatalf("应提示有效期与下一步命令: %q", out.String())
+	}
+	if strings.Index(out.String(), "setup all") > strings.Index(out.String(), "agent enroll") {
+		t.Fatalf("setup all 应写在前面: %q", out.String())
 	}
 	st, err := store.Open(filepath.Join(dir, "hub.db"))
 	if err != nil {
@@ -402,6 +407,9 @@ func TestCommandsRejectForeignFlags(t *testing.T) {
 		{[]string{"hub", "token", "--secure-cookies"}, "--secure-cookies"},
 		{[]string{"hub", "run", "--ttl", "1m"}, "--ttl"},
 		{[]string{"hub", "password", "--foreground"}, "--foreground"},
+		{[]string{"hub", "token", "--acme-domain", "hub.example.com"}, "--acme-domain"},
+		{[]string{"hub", "password", "--acme-email", "me@example.com"}, "--acme-email"},
+		{[]string{"hub", "vapid", "--acme-http", "none"}, "--acme-http"},
 	} {
 		dir := filepath.Join(tempDir(t), "d")
 		var out, errOut bytes.Buffer
@@ -593,6 +601,27 @@ func TestHubRunServeShutdownTimeout(t *testing.T) {
 	}
 }
 
+// hub run 把构建时注入的 main.version 交给 hub：GET /api/version 回它。
+func TestHubRunInjectsVersion(t *testing.T) {
+	cancelledHubRun(t)
+	oldServe, oldVersion := serveHub, version
+	t.Cleanup(func() { serveHub, version = oldServe, oldVersion })
+	version = "1.2.3-test"
+	var got map[string]any
+	serveHub = func(_ context.Context, srv *hub.Server) error {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/api/version", nil))
+		return json.Unmarshal(rec.Body.Bytes(), &got)
+	}
+	var out, errOut bytes.Buffer
+	if code := runHub([]string{"run", "--dir", filepath.Join(tempDir(t), "hub")}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("hub run = %d: %s", code, errOut.String())
+	}
+	if got["version"] != "1.2.3-test" {
+		t.Fatalf("/api/version = %v", got)
+	}
+}
+
 func TestHubVapidPrintsAndRotates(t *testing.T) {
 	cancelledHubRun(t)
 	dir := filepath.Join(tempDir(t), "hub")
@@ -645,5 +674,112 @@ func TestHubVapidPrintsAndRotates(t *testing.T) {
 	logText, _ := os.ReadFile(filepath.Join(dir, "hub.log"))
 	if !strings.Contains(string(logText), "Web Push 已启用") || !strings.Contains(string(logText), "https://hub.example.com") {
 		t.Fatalf("日志应说明推送已启用: %s", logText)
+	}
+}
+
+// --acme-domain 等只属于 hub run；坏值在建数据目录之前就以退出 2 拒绝。给了域名而没给 --listen 时监听 :443，
+// 对外源默认 https://<域名>，cookie 一律 Secure，80 端口默认 :80。
+func TestHubRunACMEFlags(t *testing.T) {
+	dir := filepath.Join(tempDir(t), "hub")
+	var out, errOut bytes.Buffer
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--acme-domain", "https://x.example.com"}, "acme-domain"},
+		{[]string{"--acme-domain", "Hub.Example.com"}, "acme-domain"},
+		{[]string{"--acme-domain", "hub.example.com", "--acme-http", "80"}, "acme-http"},
+		{[]string{"--acme-domain", "hub.example.com", "--acme-email", "nope"}, "acme-email"},
+		{[]string{"--acme-domain", "hub.example.com", "--public-url", "https://other.example.com"}, "public-url"},
+		{[]string{"--acme-email", "me@example.com"}, "--acme-domain"},
+		{[]string{"--acme-http", "none"}, "--acme-domain"},
+	} {
+		errOut.Reset()
+		if code := runHub(append([]string{"run", "--dir", dir}, c.args...), nil, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), c.want) {
+			t.Fatalf("%v 应退出 2 并点名 %s: %d %q", c.args, c.want, code, errOut.String())
+		}
+		if _, err := os.Stat(dir); err == nil {
+			t.Fatalf("%v: 被拒时不应建目录", c.args)
+		}
+	}
+	a, code := hubConfigFromArgs([]string{"run", "--dir", dir, "--acme-domain", "hub.example.com", "--acme-email", "me@example.com"}, &errOut)
+	cfg := a.cfg
+	if code != 0 || a.sub != "run" || cfg.Listen != ":443" || cfg.ACMEDomain != "hub.example.com" || cfg.ACMEEmail != "me@example.com" || cfg.ACMEHTTPListen != ":80" ||
+		cfg.PublicURL != "https://hub.example.com" || !cfg.SecureCookies || cfg.ACMECacheDir != filepath.Join(dir, "acme") {
+		t.Fatalf("ACME 默认监听: %d %+v", code, cfg)
+	}
+	a, code = hubConfigFromArgs([]string{"run", "--dir", dir, "--acme-domain", "hub.example.com", "--listen", ":8443", "--acme-http", "none", "--public-url", "https://hub.example.com:8443"}, &errOut)
+	if code != 0 || a.cfg.Listen != ":8443" || a.cfg.ACMEHTTPListen != "none" || a.cfg.PublicURL != "https://hub.example.com:8443" {
+		t.Fatalf("显式监听: %d %+v", code, a.cfg)
+	}
+	// 不用 ACME 时照旧：默认监听本机 8787，不填对外源
+	a, code = hubConfigFromArgs([]string{"run", "--dir", dir}, &errOut)
+	if code != 0 || a.cfg.Listen != "127.0.0.1:8787" || a.cfg.ACMEDomain != "" || a.cfg.PublicURL != "" || a.cfg.SecureCookies {
+		t.Fatalf("不用 ACME: %d %+v", code, a.cfg)
+	}
+	a, code = hubConfigFromArgs([]string{"token", "--dir", dir, "--ttl", "5m"}, &errOut)
+	if code != 0 || a.sub != "token" || a.ttl != 5*time.Minute {
+		t.Fatalf("token: %d %+v", code, a)
+	}
+	if _, err := os.Stat(dir); err == nil {
+		t.Fatal("hubConfigFromArgs 不应建目录")
+	}
+	if !strings.Contains(hubUsage, "--acme-domain") || !strings.Contains(hubUsage, "CAP_NET_BIND_SERVICE") || strings.Contains(hubUsage, "需要 root") {
+		t.Fatalf("用法应说明 ACME 与 CAP_NET_BIND_SERVICE（不写需要 root）:\n%s", hubUsage)
+	}
+}
+
+// hub run --acme-domain 把 ACME 配置交给 hub，日志写域名、证书目录与默认的对外源（推送随之启用）。不真的监听、不联网：serveHub 换掉。
+func TestHubRunACMEConfigReachesHub(t *testing.T) {
+	cancelledHubRun(t)
+	oldServe := serveHub
+	t.Cleanup(func() { serveHub = oldServe })
+	var got *hub.Server
+	serveHub = func(_ context.Context, srv *hub.Server) error {
+		got = srv
+		return nil
+	}
+	dir := filepath.Join(tempDir(t), "hub")
+	var out, errOut bytes.Buffer
+	if code := runHub([]string{"run", "--dir", dir, "--acme-domain", "hub.example.com"}, nil, &out, &errOut); code != 0 || got == nil {
+		t.Fatalf("hub run = %d: %s", code, errOut.String())
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "hub.log"))
+	for _, want := range []string{"hub.example.com", filepath.Join(dir, "acme"), "Web Push 已启用，对外源 https://hub.example.com"} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("日志应含 %q:\n%s", want, b)
+		}
+	}
+}
+
+// hub 以 root 运行时醒目警告（不拒绝）：不是 --foreground 时也写到 stderr；不是 root 时不警告。
+func TestHubRunWarnsWhenRoot(t *testing.T) {
+	old := hubEuid
+	t.Cleanup(func() { hubEuid = old })
+	for _, c := range []struct {
+		euid       int
+		foreground bool
+		warn       bool
+	}{{0, false, true}, {0, true, true}, {501, false, false}} {
+		hubEuid = func() int { return c.euid }
+		dir := filepath.Join(tempDir(t), "hub")
+		cfg := hub.DefaultConfig(dir)
+		cfg.Listen = "127.0.0.1:0"
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var errOut lockedBuf
+		if err := runHubServe(ctx, cfg, c.foreground, &errOut); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := os.ReadFile(filepath.Join(dir, "hub.log"))
+		if got := strings.Contains(errOut.String(), "root"); got != c.warn {
+			t.Fatalf("euid %d foreground %v: stderr 警告 = %v: %q", c.euid, c.foreground, got, errOut.String())
+		}
+		if got := strings.Contains(string(b), "root"); got != c.warn {
+			t.Fatalf("euid %d: 日志警告 = %v:\n%s", c.euid, got, b)
+		}
+		if c.warn && (strings.Count(errOut.String(), "以 root 运行") != 1 || !strings.Contains(errOut.String(), "setup autostart --hub --system")) {
+			t.Fatalf("stderr 应恰好一条警告并给出建议: %q", errOut.String())
+		}
 	}
 }

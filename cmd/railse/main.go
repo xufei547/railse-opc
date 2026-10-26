@@ -21,7 +21,8 @@ const usage = `用法: railse <子命令> [参数]
   hook      各 CLI 钩子调用的翻译器（claude、codex、codex-notify、gemini）
   agent     守护进程（run、status、pause、resume、reload、enroll）
   hub       云端服务（run、password、token、webhook-token）
-  setup     安装钩子（hooks）`
+  setup     一键接入与安装（all）、钩子（hooks）、开机自启（autostart）
+  doctor    检查安装与运行状态（只读）`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -47,6 +48,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runHub(args[1:], stdinReader, stdout, stderr)
 	case "setup":
 		return runSetup(args[1:], stdout, stderr)
+	case "doctor":
+		return runDoctor(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "未知子命令 %q\n\n%s\n", args[0], usage)
 		return 2

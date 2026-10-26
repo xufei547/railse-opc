@@ -9,3 +9,4 @@ internal/hub/webui/dist/*
 .claude/worktrees/
 .superpowers/
 spike/
+/web/.e2e/

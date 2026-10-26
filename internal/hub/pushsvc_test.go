@@ -30,14 +30,18 @@ import (
 	"github.com/railse/railse-opc/internal/proto"
 )
 
-// fakePushEndpoint 冒充推送服务：记每次收到的请求头与路径，按 status 回应（reason 作响应体）；hang 为真时挂到请求被取消。
+// fakePushEndpoint 冒充推送服务：记每次收到的请求头与路径，按 status 回应（reason 作响应体）；hang 为真时挂到请求被取消；
+// delay 非零时每次先等这么久（纳秒）再回应。inflight 是正在处理的请求数，maxInflight 是它到过的最大值（看并行度）。
 type fakePushEndpoint struct {
-	srv    *httptest.Server
-	status atomic.Int32
-	reason atomic.Value // string
-	hang   atomic.Bool
-	mu     sync.Mutex
-	got    []http.Header
+	srv         *httptest.Server
+	status      atomic.Int32
+	reason      atomic.Value // string
+	hang        atomic.Bool
+	delay       atomic.Int64
+	inflight    atomic.Int32
+	maxInflight atomic.Int32
+	mu          sync.Mutex
+	got         []http.Header
 }
 
 func newFakePushEndpoint(t *testing.T) *fakePushEndpoint {
@@ -50,10 +54,19 @@ func newFakePushEndpoint(t *testing.T) *fakePushEndpoint {
 		f.mu.Lock()
 		f.got = append(f.got, r.Header.Clone())
 		f.mu.Unlock()
+		n := f.inflight.Add(1)
+		defer f.inflight.Add(-1)
+		for {
+			m := f.maxInflight.Load()
+			if n <= m || f.maxInflight.CompareAndSwap(m, n) {
+				break
+			}
+		}
 		if f.hang.Load() {
 			<-r.Context().Done()
 			return
 		}
+		time.Sleep(time.Duration(f.delay.Load()))
 		w.WriteHeader(int(f.status.Load()))
 		io.WriteString(w, f.reason.Load().(string))
 	}))
@@ -997,5 +1010,68 @@ func TestPushMessageZeroWidthPadding(t *testing.T) {
 	}
 	if got := clean("  a\u200b\u200bb  \n c ", 10); got != "ab c" {
 		t.Fatalf("clean = %q", got)
+	}
+}
+
+// 一条请求对多个订阅并行发送（pushWorkers 路）：假端点每次慢 300ms，看端点同时在处理的请求数——串行时恒为 1，
+// 并行时大于 1 且不超过 pushWorkers（不量墙钟，负载高的机器上也稳）。结果照常汇总进 push_sent。
+// 恰好 pushWorkers 路在途由 TestPushDeliverStopsOnCancel 用挂住的端点确定性地验证。
+func TestPushDeliversInParallel(t *testing.T) {
+	f := newFakePushEndpoint(t)
+	f.delay.Store(int64(300 * time.Millisecond))
+	h, ck := pushHub(t, f)
+	for i := 0; i < 8; i++ {
+		body, _ := subscribeJSON(t, fmt.Sprintf("%s/p/%d", f.srv.URL, i))
+		subscribe(t, h, ck, body)
+	}
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{MachineID: id, Proto: wire.Proto, HomeDir: "/home/u"})
+	defer c.close()
+	c.send(pendingFrame("r1", "s1", "t1", "git push origin main"))
+	waitFor(t, "审计 push_sent", func() bool { return hasAuditFor(h, "r1", "push_sent") })
+	if m := f.maxInflight.Load(); m < 2 || m > pushWorkers {
+		t.Fatalf("端点同时在处理的推送至多 %d 条，应在 2 到 %d 之间（串行时为 1）", m, pushWorkers)
+	}
+	if f.count() != 8 || !hasAudit(h, "push_sent", `{"failed":0,"gone":0,"sent":8}`) {
+		t.Fatalf("应发出 8 条: 端点收到 %d 次", f.count())
+	}
+}
+
+// 并行发送时 hub 关停（ctx 取消）：在途的中止、不计失败；还没轮到的不再发；全部算进 push_sent 的 failed。
+func TestPushDeliverStopsOnCancel(t *testing.T) {
+	f := newFakePushEndpoint(t)
+	h, ck := pushHub(t, f)
+	const n = 3 * pushWorkers
+	for i := 0; i < n; i++ {
+		body, _ := subscribeJSON(t, fmt.Sprintf("%s/p/%d", f.srv.URL, i))
+		subscribe(t, h, ck, body)
+	}
+	f.hang.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		h.srv.push.deliver(ctx, store.Request{ID: "w1", Kind: "webhook", Title: "部署", CreatedAt: store.Now()})
+	}()
+	waitFor(t, "每路各有一条在途", func() bool { return f.count() == pushWorkers })
+	time.Sleep(100 * time.Millisecond) // 并行上限是 pushWorkers：在途的挂着时不会再多发
+	if got := f.count(); got != pushWorkers {
+		t.Fatalf("同时在途的推送应是 %d 条，得到 %d", pushWorkers, got)
+	}
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("取消后 deliver 应返回")
+	}
+	if got := f.count(); got != pushWorkers {
+		t.Fatalf("取消后不应再发: 端点收到 %d 次", got)
+	}
+	if !hasAudit(h, "push_sent", fmt.Sprintf(`{"failed":%d,"gone":0,"sent":0}`, n)) {
+		t.Fatalf("取消后全部算 failed: %s", h.logs.String())
+	}
+	if n2, _ := h.st.CountPushSubscriptions(); n2 != n {
+		t.Fatalf("取消不应删订阅: %d", n2)
 	}
 }

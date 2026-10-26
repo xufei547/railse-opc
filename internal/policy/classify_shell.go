@@ -316,7 +316,8 @@ func isEnvAssignment(s string) bool {
 		return false
 	}
 	for i, c := range k {
-		if !(c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (i > 0 && c >= '0' && c <= '9')) {
+		nameChar := c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (i > 0 && c >= '0' && c <= '9')
+		if !nameChar {
 			return false
 		}
 	}
@@ -390,14 +391,9 @@ func onNetDevice(targets []string, flags []wordFlags, cwd string, ctx Context) b
 	return false
 }
 
-// touchesSensitive 判断参数里是否有敏感路径，读敏感文件和写一样按 destructive。含空白的参数是消息，不检查。
-// 供没有引号信息的调用方使用，所有标志按零值处理。
-func touchesSensitive(args []string, cwd string, ctx Context) bool {
-	args, flags := withoutMessages(args, nil)
-	return touchesSensitiveWords(args, flags, cwd, ctx)
-}
-
-// touchesSensitiveWords 同 touchesSensitive，flags 与 args 一一对应。--name=value 形式的选项按 value 判断；
+// touchesSensitiveWords 判断参数里是否有敏感路径，读敏感文件和写一样按 destructive；flags 与 args 一一对应。
+// 自己不过滤含空白的词：命令参数由调用方先用 withoutMessages 去掉含空白的（那是提交说明之类的消息，不检查）；
+// 输入重定向的来源（seg.inputs）不过滤：含空格的就是文件名，照样要查。--name=value 形式的选项按 value 判断；
 // 无法静态解析的参数不在这里判断，由 hasUnresolvable 兜底。
 func touchesSensitiveWords(args []string, flags []wordFlags, cwd string, ctx Context) bool {
 	for i, a := range args {

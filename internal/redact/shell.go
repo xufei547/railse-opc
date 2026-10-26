@@ -38,6 +38,16 @@ const (
 	// 只是让 sshpass -p、curl -u 这类规则认得出“同一条命令跨行”：只有续行能跨，真正的换行不能。
 	// 反斜杠加 CRLF 不是续行：bash 里 \ 转义的是 CR，随后的 LF 照样分隔命令
 	vCont = 0x15
+	// vCmd 是命令位置上的 sshpass 命令名（"sshpass"、SSHPASS、/usr/bin/sshpass、ss''hpass……）：扫描时认出命令名后，
+	// 词的最后一段路径在视图里换成它（词里的 vNest 保留；见 builder.mark）。只标像程序路径的词（不以 - 开头，不含 = : @），
+	// URL、KEY=值、选项词里最后一段是 sshpass 的不标，里面的凭据照样交给别的规则。sshpass -p 的完整规则（认引号、大小写、
+	// 跳过 sshpass 不认的选项）只从这里开始认；别的工具参数里的 sshpass 最多按 vArg 的窄规则认（env -u SSHPASS -u -p curl
+	// 的 -p 是 env -u 的参数，curl 才是程序，不能当密码抹掉）。值不能从这两种标记开始，但可以穿过（见 quoting.noStart）
+	vCmd = 0x16
+	// vArg 是不在命令位置、按窄规则认的 sshpass 词：小写、不带引号与转义、像程序路径（可带路径），前一个词不是选项（不以
+	// - 或占位符开头，单独的 -- 除外）。ssh jump sshpass -p pw、docker exec ctr sshpass -p pw 这类扫描器不认的前缀之后
+	// 照样抹密码，xargs -I sshpass -p curl、docker run -e sshpass -p 8080:80 里 sshpass 是选项的值，不认
+	vArg = 0x17
 )
 
 // viewPlaceholder 是占位符在视图里的样子，与 placeholder 等长。
@@ -60,6 +70,8 @@ const (
 
 // viewRules 是命令行视图上的规则：裸值在空白、引号、反斜杠、shell 元字符和视图专用字节处停。
 // $ 开始展开，字面密码不可能未加引号地含它；反引号不能写进原始字符串，单独拼进去。
+// 空白用 RE2 的 \s，含换页 \f 与回车 \r：bash 把它们（单独的 \r）当普通字符、算进词里，值在这里停只会多露出后半截，
+// 不会多藏命令，密码里也不会有这两个字节。被反斜杠转义的 \r 在视图里是 vMask，值照样穿过它延续。
 var viewRules = func() []rule {
 	s, x := viewStruct, viewExcluded
 	q := quoting{
@@ -75,10 +87,18 @@ var viewRules = func() []rule {
 		cont:     `\x00\x15`, // 续行：\ 是 vMask，换行是 vCont（\ 加 CRLF 不是续行）
 		urlUser:  `[^/\s:@'"\\` + x + `]*`,
 		urlPass:  "[^\\s/?#'\"\\\\;|&<>()`$" + x + "]+",
+		sshpass:  `\x16[\x16\x10]*`, // 命令位置上的 sshpass，见 vCmd
 		excluded: x,
 		ph:       `[<\x13\x14]redacted>`, // 原文里的、本层插入的、引号里已抹过的占位符
 		word:     true,
 	}
+	// 不在命令位置的 sshpass 按窄规则认（见 vArg）；标志与值之间不跨换行
+	q.sshpassArg, q.sameLine = `\x17+`, true
+	// 值不能从 sshpass 命令名的标记开始，但可以穿过它（见 quoting.noStart）
+	q.noStart = `\x16\x17`
+	// 空引号：视图里 $'' 是 ' 加 vMask 加右引号；非空引号段要有一个不是 vMask 的字符
+	q.emptyQ = `'\x00?\x11|"\x00?\x12`
+	q.quoted1 = `"\x00?[^"` + s + `\x00][^"` + s + `]*\x12|'\x00?[^'` + s + `\x00][^'` + s + `]*\x11`
 	rules := build("[^\\s'\"\\\\;|&<>()`$"+x+"]+", q)
 	for i := range rules {
 		if rules[i].vrepl == "" {
@@ -188,7 +208,7 @@ type builder struct {
 	nests      []string
 }
 
-// char 追加逻辑字符 i 的原文，视图里第一个字节是 rep，其余是 vMask。
+// char 追加逻辑字符 i 的原文，视图里第一个字节是 rep，其余是 vMask（rep 是空白时补的也是这个空白）。
 func (b *builder) char(t *text, i int, rep byte) {
 	if t.ch == nil {
 		b.orig = append(b.orig, t.raw[i])
@@ -198,8 +218,13 @@ func (b *builder) char(t *text, i int, rep byte) {
 	s := t.slice(i, i+1)
 	b.orig = append(b.orig, s...)
 	b.view = append(b.view, rep)
+	pad := byte(vMask)
+	if rep == ' ' || rep == '\t' || rep == '\n' {
+		// 空白的原文里并进了外层去掉的续行（\⏎ 加空格）：补位也记成这个空白，免得补位字节在空白后面被当成值
+		pad = rep
+	}
 	for k := 1; k < len(s); k++ {
-		b.view = append(b.view, vMask)
+		b.view = append(b.view, pad)
 	}
 }
 
@@ -232,7 +257,26 @@ func (b *builder) nest(s string) {
 	b.nests = append(b.nests, s)
 }
 
-func isViewByte(c byte) bool { return c >= vNest && c <= vCont }
+// mark 把视图里从 from 到末尾的这个词的最后一段路径（最后一个 / 之后）换成 v（vCmd 或 vArg），其中的 vNest 保留（个数与
+// 顺序不能变）。原文不动。前面的路径照样给别的规则看（/tmp/ghp_…/sshpass、ghp_…/sshpass 里的 token）。词以 / . ~ 或引号
+// 开头时第一个字节也换：值不能从 v 开始（quoting.noStart），Bearer、--password 这类标志的值就不会从 /usr/bin/sshpass
+// 开始；"/usr/bin/sshpass" 的左右引号也都换掉，不留单个引号。以别的字符开头的（bin/sshpass）值可以从词首开始，但会穿过
+// v 一直抹到词尾，不在命令名前断开。token 不会以这几个字符开头，所以不影响裸 token 规则
+func (b *builder) mark(from int, v byte) {
+	if k := bytes.LastIndexByte(b.view[from:], '/'); k >= 0 {
+		if c := b.view[from]; c == '/' || c == '.' || c == '~' || c == '"' || c == '\'' {
+			b.view[from] = v
+		}
+		from += k + 1
+	}
+	for i := from; i < len(b.view); i++ {
+		if b.view[i] != vNest {
+			b.view[i] = v
+		}
+	}
+}
+
+func isViewByte(c byte) bool { return c >= vNest && c <= vArg }
 
 // viewByte 是引号外普通字符在视图里的样子。
 func viewByte(c byte) byte {
@@ -340,6 +384,7 @@ type ctx struct {
 	cases  int  // 本层未结束的 case：其中的 ) 是分支模式的结尾，不结束 $(…)
 	start  bool // 下一个字符在词首（# 在这里开始注释）
 	inWord bool
+	wstart int // 当前词在视图里的起点（见 begin）
 	// 当前词去掉引号与转义后的文本：word 是开头至多 64 字节（判断 VAR=值、-c 类选项、保留字），base 是最后一个 /
 	// 之后至多 64 字节（判断命令名，路径多长都行）。超出时 long、baseLong 为 true
 	word, base     []byte
@@ -359,6 +404,10 @@ type ctx struct {
 	shellOpts int
 	pipe      []*heredoc // 当前管道里登记的 heredoc：后面的管道段是 shell 时，正文也是喂给它的
 	pending   []*heredoc // 等下一个换行读正文的 heredoc，按出现顺序
+	// prevOpt：当前简单命令里的上一个词是选项（以 - 开头，单独的 -- 除外；或以占位符开头），见 vArg
+	prevOpt bool
+	// odd：当前词里有 = : @（不像程序路径）；nested：当前词里有嵌套结构
+	odd, nested bool
 }
 
 // context 从 sc.i 起扫描一层文本，到 closer（不消费）或 hi 为止，返回这层脱敏后的原文。
@@ -472,8 +521,18 @@ func (c *ctx) run() {
 	}
 }
 
+// begin 在词还没开始时记下视图里的当前位置：接下来追加的是一个新词的第一个字节。每个往词里追加内容的入口
+// （wordChar、escape、三种引号、nestDone、引号外的占位符）先调它；续行不调，它不开始新词。
+// 不变式：新增往词里追加视图字节的入口时也要先调 begin，否则 wstart 停在上一个词，mark 会把别的字节换掉。
+func (c *ctx) begin() {
+	if !c.inWord {
+		c.wstart = len(c.b.view)
+	}
+}
+
 // wordChar 追加当前字符作为词的一部分。
 func (c *ctx) wordChar() {
+	c.begin()
 	sc, t := c.sc, c.sc.t
 	ch := t.at(sc.i)
 	c.b.char(t, sc.i, viewByte(ch))
@@ -483,6 +542,9 @@ func (c *ctx) wordChar() {
 
 func (c *ctx) addWord(ch byte) {
 	c.inWord, c.start = true, false
+	if ch == '=' || ch == ':' || ch == '@' {
+		c.odd = true
+	}
 	if len(c.word) < 64 {
 		c.word = append(c.word, ch)
 	} else {
@@ -530,13 +592,14 @@ func (c *ctx) op(n int) {
 
 // nestDone 追加一个嵌套结构的文本，它是当前词的一部分。
 func (c *ctx) nestDone(s string) {
+	c.begin()
 	c.b.nest(s)
 	c.addWordNest(s)
 }
 
 // addWordNest 把嵌套结构算进当前词：展开的结果不知道，不算进命令名（${x:-}sh 按 sh 认），只有 ${SHELL} 记成 $SHELL。
 func (c *ctx) addWordNest(s string) {
-	c.inWord, c.start, c.quoted = true, false, true
+	c.inWord, c.start, c.quoted, c.nested = true, false, true, true
 	if s == "${SHELL}" {
 		for i := 0; i < len("$SHELL"); i++ {
 			c.base = append(c.base, "$SHELL"[i])
@@ -575,7 +638,7 @@ func (c *ctx) operator(ch byte) {
 func (c *ctx) endCmd(pipeEnd bool) {
 	c.cflag, c.eval, c.ssh, c.feeds, c.here, c.shellOpts = false, false, false, false, false, 0
 	c.wrap, c.wrapArg, c.wrapPos = "", false, 0
-	c.cmdPos, c.start = true, true
+	c.cmdPos, c.start, c.prevOpt = true, true, false
 	if pipeEnd {
 		c.pipe = c.pipe[:0]
 	}
@@ -586,7 +649,8 @@ var reservedWords = map[string]bool{"!": true, "{": true, "if": true, "then": tr
 	"do": true, "while": true, "until": true, "time": true}
 
 // endWord 结束当前词，按词的内容更新命令状态。只有命令位置上的词才当命令名认：命令开头、VAR=值 之后、
-// 包装命令及其选项之后、find 的 -exec 之后。参数里出现的 bash、eval、ssh 不算（echo ssh '…'）。
+// 包装命令（含 sshpass）及其选项之后、find 的 -exec 之后。参数里出现的 bash、eval、ssh 不算（echo ssh '…'）。
+// 不在命令位置的 sshpass 词按窄规则标成 vArg。
 func (c *ctx) endWord() {
 	if !c.inWord {
 		return
@@ -599,29 +663,52 @@ func (c *ctx) endWord() {
 	if !long && !c.quoted {
 		kw = w
 	}
+	// prog：词像程序路径（不以 - 开头，不含 = : @），只有这样的词才按 sshpass 命令名标记；URL、KEY=值、选项词
+	// （-a/tmp/sshpass、--volume=/opt/sshpass）里最后一段是 sshpass 的不算，它们里面的凭据照样交给别的规则。
+	// optLike：以 - 或占位符开头。占位符多半是 --token、Bearer、Authorization: 这类规则把选项样的词抹掉留下的，
+	// 第二遍要与第一遍一样把它当选项，前后两遍的认法才一致（用于 prevOpt 与 prog；包装命令的选项判断不用它，见下）
+	optLike := len(w) > 0 && (w[0] == '-' || strings.HasPrefix(w, placeholder))
+	prog := !c.odd && !optLike
+	nested, quoted := c.nested, c.quoted
 	c.word, c.base, c.inWord, c.long, c.baseLong, c.here, c.quoted = c.word[:0], c.base[:0], false, false, false, false, false
+	c.odd, c.nested = false, false
 	if c.mode != mShell {
 		return
 	}
+	prevOpt := c.prevOpt
+	// 上一个词以占位符开头时也当选项（见 optLike：--token -abc 第一遍抹成 --token <redacted>，第二遍照样不认后面的 sshpass）
+	c.prevOpt = optLike && w != "--"
+	isCmd := false
 	switch {
 	case c.cmdPos:
 		if reservedWords[kw] || !long && isAssign(w) {
 			return
 		}
 		c.cmdPos = false
-		c.command(name, kw)
+		c.command(name, kw, prog)
+		isCmd = true
 	case c.wrap != "":
 		switch {
 		case c.wrapArg:
 			c.wrapArg = false
 		case len(w) > 1 && w[0] == '-':
-			c.wrapArg = len(w) == 2 && strings.IndexByte(wrapperArgs[c.wrap], w[1]) >= 0
+			// 只认真正以 - 开头的词。占位符不当选项（第 6 轮按计数取舍：当选项时 sudo --token x 'sshpass' -p pw 这类
+			// 不幂等更多；不当选项时 timeout --token -vp x 这类不幂等，记账）
+			if c.wrap == "sshpass" {
+				// sshpass 按 getopt 认组合的选项字母（-vp pw）：第一个带参数的字母在词尾时，下一个词是它的参数
+				// 紧贴的嵌套结构（-p"${PW}"、-p$(…)、-p${PW}）是已经带上的值，不算词尾
+				k := strings.IndexAny(w[1:], wrapperArgs[c.wrap])
+				c.wrapArg = w[1] != '-' && k == len(w)-2 && !nested
+			} else {
+				c.wrapArg = len(w) == 2 && strings.IndexByte(wrapperArgs[c.wrap], w[1]) >= 0
+			}
 		case c.wrap == "env" && isAssign(w):
 		case c.wrapPos > 0:
 			c.wrapPos--
 		default:
 			c.wrap = ""
-			c.command(name, kw)
+			c.command(name, kw, prog)
+			isCmd = true
 		}
 	case w == "-exec" || w == "-execdir" || w == "-ok" || w == "-okdir":
 		c.cmdPos = true
@@ -643,6 +730,10 @@ func (c *ctx) endWord() {
 		c.shellOpts = 1
 		c.feed()
 	}
+	// 不带引号与转义（quoted）而不是 kw != ""：长于 64 字节的词 kw 为空，裸 token 规则把它缩短后第二遍就够不着阈值了
+	if !isCmd && !prevOpt && prog && !quoted && name == "sshpass" {
+		c.b.mark(c.wstart, vArg)
+	}
 }
 
 // isShellName 判断去掉引号、取路径最后一段后的命令名是不是 sh/bash/zsh/dash/ksh 或 $SHELL。
@@ -658,11 +749,12 @@ func isShellName(name string) bool {
 // 结果是不当解释器、引号里的值整段抹，这是可接受的失败方向。
 var wrapperArgs = map[string]string{
 	"sudo": "ughpCDRTUrt", "env": "uCS", "xargs": "InPLdEsa", "nice": "n", "timeout": "sk", "exec": "a",
-	"command": "", "builtin": "", "nohup": "",
+	"command": "", "builtin": "", "nohup": "", "sshpass": "fdpP",
 }
 
-// command 按命令位置上的词更新状态：name 是去掉引号、取路径最后一段的命令名，kw 是不带引号与转义的原词（认保留字用）。
-func (c *ctx) command(name, kw string) {
+// command 按命令位置上的词更新状态：name 是去掉引号、取路径最后一段的命令名，kw 是不带引号与转义的原词（认保留字用），
+// prog 表示词像程序路径（见 endWord）。
+func (c *ctx) command(name, kw string, prog bool) {
 	switch kw {
 	case "case":
 		c.cases++
@@ -672,6 +764,17 @@ func (c *ctx) command(name, kw string) {
 			c.cases--
 		}
 		return
+	}
+	if strings.EqualFold(name, "sshpass") {
+		// sshpass -p 的完整规则只从命令位置上的 sshpass 开始认（见 vCmd）。大小写不论：macOS 默认的文件系统不分大小写。
+		// sshpass 也是包装命令：-f -d -p -P 的参数之后的词是它执行的命令（sshpass -p pw ssh h '…' 的引号参数交给远端 shell）
+		if !prog {
+			// 不像程序路径（Authorization:/usr/bin/sshpass、/opt/TOKEN=x/sshpass）：别的规则会抹掉其中一段，第二遍就认不出
+			// sshpass，前后两遍对后面的词的认法不同。不当 sshpass，也不当包装命令
+			return
+		}
+		c.b.mark(c.wstart, vCmd)
+		name = "sshpass"
 	}
 	if isShellName(name) {
 		c.shellOpts = 1
@@ -710,7 +813,8 @@ func isCFlag(w string) bool {
 		return false
 	}
 	for i := 1; i < len(w); i++ {
-		if !(w[i] >= 'a' && w[i] <= 'z' || w[i] >= 'A' && w[i] <= 'Z') {
+		letter := w[i] >= 'a' && w[i] <= 'z' || w[i] >= 'A' && w[i] <= 'Z'
+		if !letter {
 			return false
 		}
 	}
@@ -727,7 +831,8 @@ func isAssign(w string) bool {
 	}
 	for i := 0; i < len(name); i++ {
 		ch := name[i]
-		if !(ch == '_' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || i > 0 && ch >= '0' && ch <= '9') {
+		nameChar := ch == '_' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || i > 0 && ch >= '0' && ch <= '9'
+		if !nameChar {
 			return false
 		}
 	}
@@ -762,13 +867,21 @@ func (c *ctx) escape() {
 		return
 	}
 	nx := t.at(i + 1)
-	switch {
-	case nx == '\n':
-		c.b.char(t, i, vMask)
-		c.b.char(t, i+1, vCont)
+	if nx == '\n' {
+		if c.inWord {
+			c.b.char(t, i, vMask)
+			c.b.char(t, i+1, vCont)
+		} else {
+			// 词与词之间的续行（-p \⏎pw）与空白等价，bash 把它整个去掉：视图里记成两个空格，值不从它开始。
+			// 否则 -p \⏎# 会把续行本身当值抹成占位符，再脱敏一次时 # 接在占位符后面不再是注释，结果不幂等
+			c.b.char(t, i, ' ')
+			c.b.char(t, i+1, ' ')
+		}
 		sc.i += 2
 		return
-	case c.cmd() && t.has(i+1, placeholder):
+	}
+	c.begin()
+	if c.cmd() && t.has(i+1, placeholder) {
 		// 上一次脱敏留下的 \<redacted>：占位符当词的一部分，免得第二次把 > 后面读成注释
 		c.b.char(t, i, vMask)
 		sc.i++
@@ -831,6 +944,7 @@ func (c *ctx) redirect() {
 		c.op(2)
 		return
 	case ch == '<' && t.has(i, placeholder):
+		c.begin()
 		c.placeholderWord()
 		return
 	}
@@ -1202,6 +1316,7 @@ func (sc *scanner) backtickText(hi int) string {
 
 // singleQuoted 处理单引号：里面是字面文本，整段按 literalRules 抹；交给解释器执行的递归按命令行语境处理。
 func (c *ctx) singleQuoted() {
+	c.begin()
 	sc, t := c.sc, c.sc.t
 	i := sc.i
 	k := i + 1
@@ -1212,7 +1327,8 @@ func (c *ctx) singleQuoted() {
 	if k < c.hi {
 		end = k + 1
 	}
-	if c.recArgs() {
+	// 空引号交给解释器也什么都不执行，照字面处理（-p'' 在视图里是空引号，不是嵌套结构）
+	if c.recArgs() && k > i+1 {
 		sc.i = i + 1
 		sc.depth++
 		inner := sc.context(k, mShell, 0)
@@ -1234,6 +1350,7 @@ func (c *ctx) singleQuoted() {
 
 // ansiQuoted 处理 $'…'：认 \ 转义，里面是字面文本（交给解释器执行的递归按命令行语境处理）。视图里 $ 当左引号，' 是 vMask。
 func (c *ctx) ansiQuoted() {
+	c.begin()
 	sc, t := c.sc, c.sc.t
 	i := sc.i
 	k := i + 2
@@ -1248,7 +1365,7 @@ func (c *ctx) ansiQuoted() {
 	if k < c.hi {
 		end = k + 1
 	}
-	if c.recArgs() {
+	if c.recArgs() && k > i+2 {
 		sc.i = i + 2
 		sc.depth++
 		inner := sc.context(k, mShell, 0)
@@ -1272,6 +1389,7 @@ func (c *ctx) ansiQuoted() {
 // doubleQuoted 处理双引号（dollar 为 true 时是 $"…"）：命令替换这类嵌套结构递归处理，其余是字面文本，
 // 一段一段按 literalRules 抹。交给解释器执行的，先空跑一遍找到右引号，再把去掉转义后的内容按命令行语境递归处理。
 func (c *ctx) doubleQuoted(dollar bool) {
+	c.begin()
 	sc, t := c.sc, c.sc.t
 	i := sc.i
 	open := 1

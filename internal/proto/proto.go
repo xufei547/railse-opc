@@ -82,6 +82,8 @@ type Status struct {
 	MachineID   string `json:"machine_id"`
 	RulesPath   string `json:"rules_path"`
 	Uptime      string `json:"uptime"`
+	Hub         string `json:"hub"`               // none（未接入）、connecting、connected、disabled（被 hub 以 401 停用）
+	HubURL      string `json:"hub_url,omitempty"` // machine.json 里的 hub 地址；未接入时为空
 }
 
 // ControlReply 是管理命令的答复。

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -2173,4 +2174,142 @@ func TestWebUIMountKeepsAPIRouting(t *testing.T) {
 	if resp := doReq(t, "GET", h.http.URL+"/api/status", nil, "", ck); resp.StatusCode != http.StatusOK {
 		t.Fatalf("/api/status: %d", resp.StatusCode)
 	}
+}
+
+// GET /api/version 无需登录：{"version","agent_proto"}，没注入版本时是 dev。配了 https 的 --public-url 时，
+// 登录与登出的 cookie 都带 Secure（即使 hub 自己收到的是明文 HTTP：TLS 在反向代理那里终止）。
+func TestVersionEndpointAndSecureCookieFromPublicURL(t *testing.T) {
+	var v map[string]any
+	decodeBody(t, doReq(t, "GET", newTestHub(t).http.URL+"/api/version", nil, "", nil), &v)
+	if v["version"] != "dev" || v["agent_proto"] != float64(wire.Proto) {
+		t.Fatalf("没注入版本时 version = %v", v)
+	}
+
+	h := newTestHubWith(t, func(c *Config) { c.PublicURL = "https://hub.example.com"; c.Version = "1.2.3" }, nil)
+	resp := doReq(t, "GET", h.http.URL+"/api/version", nil, "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/version 未登录应 200: %d", resp.StatusCode)
+	}
+	v = nil
+	decodeBody(t, resp, &v)
+	if v["version"] != "1.2.3" || v["agent_proto"] != float64(wire.Proto) || len(v) != 2 {
+		t.Fatalf("version = %v", v)
+	}
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
+		t.Fatal(err)
+	}
+	ck := login(t, h, "hunter22")
+	if !ck.Secure {
+		t.Fatal("配了 https 的 --public-url 时 cookie 应带 Secure")
+	}
+	resp = postJSON(t, h.http.URL+"/api/logout", nil, ck)
+	if cs := resp.Cookies(); resp.StatusCode != http.StatusNoContent || len(cs) != 1 || !cs[0].Secure {
+		t.Fatalf("登出清 cookie 也应带 Secure: %d %+v", resp.StatusCode, cs)
+	}
+}
+
+// --public-url 的 scheme 大小写不敏感（CheckPublicURL 经 url.Parse 接受 HTTPS://）：大写的照样蕴含 Secure。
+func TestSecureCookieFromUppercasePublicURL(t *testing.T) {
+	if err := CheckPublicURL("HTTPS://Hub.Example.com"); err != nil {
+		t.Fatalf("大写 scheme 应是合法的 public-url: %v", err)
+	}
+	h := newTestHubWith(t, func(c *Config) { c.PublicURL = "HTTPS://Hub.Example.com" }, nil)
+	if _, err := h.srv.SetPassword("hunter22"); err != nil {
+		t.Fatal(err)
+	}
+	if ck := login(t, h, "hunter22"); !ck.Secure {
+		t.Fatal("大写 HTTPS 的 --public-url 也应让 cookie 带 Secure")
+	}
+}
+
+// 推送订阅至多 maxPushSubscriptions 条：再登记新端点回 409；已有端点重新登记是更新，不算新增。
+func TestPushSubscriptionCap(t *testing.T) {
+	f := newFakePushEndpoint(t)
+	h, ck := pushHub(t, f)
+	for i := 0; i < maxPushSubscriptions; i++ {
+		body, _ := subscribeJSON(t, fmt.Sprintf("%s/p/%d", f.srv.URL, i))
+		subscribe(t, h, ck, body)
+	}
+	body, _ := subscribeJSON(t, f.srv.URL+"/p/overflow")
+	var e struct{ Error string }
+	resp := doReq(t, "POST", h.http.URL+"/api/push/subscribe", body, "application/json", ck)
+	decodeBody(t, resp, &e)
+	if resp.StatusCode != http.StatusConflict || e.Error != "推送订阅已达上限 20 个，请先在别的设备上关闭通知" {
+		t.Fatalf("超过上限应 409: %d %q", resp.StatusCode, e.Error)
+	}
+	if n, _ := h.st.CountPushSubscriptions(); n != maxPushSubscriptions {
+		t.Fatalf("超过上限的不应入库: %d", n)
+	}
+	// 已有端点重新订阅不算新增（换了密钥照样更新）
+	again, _ := subscribeJSON(t, f.srv.URL+"/p/0")
+	subscribe(t, h, ck, again)
+	// 删掉一条腾出名额后，新端点又能登记
+	if resp := doReq(t, "DELETE", h.http.URL+"/api/push/subscribe", mustJSON(t, map[string]string{"endpoint": f.srv.URL + "/p/1"}), "application/json", ck); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("删订阅: %d", resp.StatusCode)
+	}
+	subscribe(t, h, ck, body)
+}
+
+// http.Server 有 ReadTimeout（直出 TLS 时没有反向代理替 hub 缓冲慢速请求）：请求体迟迟发不完的连接在期限到时被断开；
+// WebSocket 握手完成后 Hijack 清掉期限，守护进程的长连接不受影响。
+func TestServeReadTimeout(t *testing.T) {
+	old := readTimeout
+	readTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { readTimeout = old })
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	var logs syncBuf
+	srv, err := New(DefaultConfig(dir), st, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.serve(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	addr := ln.Addr().String()
+
+	// 慢速请求体：头发完、请求体只发一个字节。处理器不读请求体就回 401，net/http 回应前要读掉剩下的请求体，
+	// 没有 ReadTimeout 时会一直等下去
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "POST /api/pause HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{", addr)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadAll(conn); errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatal("请求体发不完的连接应在 ReadTimeout 到时被断开")
+	}
+
+	// WebSocket 长连接：过了几倍 ReadTimeout 仍能收发
+	secret := store.RandomToken()
+	m, err := st.CreateMachine("m", secret, "/h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &testHub{srv: srv, st: st, http: &httptest.Server{URL: "http://" + addr}, dir: dir, logs: &logs}
+	c := dialAgent(t, h, secret, wire.Hello{MachineID: m.ID, Proto: wire.Proto, HomeDir: "/h"})
+	defer c.close()
+	if kind, _ := c.recv(5 * time.Second); kind != wire.TWelcome {
+		t.Fatalf("应先收到 welcome, 得到 %s", kind)
+	}
+	time.Sleep(3 * readTimeout)
+	c.send(pendingFrame("r1", "s1", "t1", "git push origin main"))
+	waitFor(t, "ReadTimeout 之后 WebSocket 照常收帧", func() bool { _, err := st.GetRequest("r1"); return err == nil })
 }

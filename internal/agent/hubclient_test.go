@@ -434,8 +434,9 @@ func TestHubClientRefusesGeminiPending(t *testing.T) {
 	}
 }
 
-// 机器被吊销后重连被 401 拒绝：客户端标成永久不可用，Run 不再重连。
+// 机器被吊销后重连被 401 拒绝：连续 3 次后客户端标成永久不可用，Run 不再重连。
 func TestHubClientDisabledOnRevoke(t *testing.T) {
+	agent.SetHubBackoffForTest(t, 50*time.Millisecond) // 默认退避下要 1+2+4 秒才到第 3 次 401
 	h := startHub(t)
 	m := enroll(t, h)
 	env := newClient(t, h, m, nil)
@@ -452,7 +453,10 @@ func TestHubClientDisabledOnRevoke(t *testing.T) {
 	select {
 	case <-env.done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("被 401 拒绝后 Run 应返回，不再重连")
+		t.Fatal("连续 3 次被 401 拒绝后 Run 应返回，不再重连")
+	}
+	if c.State() != "disabled" {
+		t.Fatalf("停用后 State = %q", c.State())
 	}
 	if !c.Disabled() || c.Connected() {
 		t.Fatalf("被 401 拒绝后应停用: disabled=%v connected=%v", c.Disabled(), c.Connected())
@@ -470,7 +474,8 @@ func TestHubClientDisabledOnRevoke(t *testing.T) {
 	if err := c.SendPending(shellPending("r9", "claude")); !errors.Is(err, agent.ErrHubDisconnected) {
 		t.Fatalf("停用后发送应报未连接: %v", err)
 	}
-	if !strings.Contains(env.logs.String(), "401") {
+	// 只数停用时的醒目日志：前两次 401 的“第 N/3 次”日志也含 401
+	if !strings.Contains(env.logs.String(), "以 HTTP 401 拒绝了本机密钥") {
 		t.Fatalf("应醒目记下 401: %s", env.logs.String())
 	}
 }

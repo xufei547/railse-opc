@@ -277,7 +277,7 @@ func (s *Server) postCallback(ctx context.Context, cb webhookCallback, body []by
 		}
 		return err
 	}
-	io.Copy(io.Discard, io.LimitReader(resp.Body, callbackRespMax))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, callbackRespMax)) // 读掉回应只为复用连接，读不完无妨
 	resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)

@@ -228,7 +228,7 @@ func TestVAPIDFormatHidesPrivateKey(t *testing.T) {
 		"base64url=":  base64.URLEncoding.EncodeToString(raw),
 		"base64":      base64.RawStdEncoding.EncodeToString(raw),
 		"base64=":     base64.StdEncoding.EncodeToString(raw),
-		"十进制字节":       strings.Trim(fmt.Sprint(raw), "[]"),
+		"十进制字节":       strings.Trim(fmt.Sprintf("%d", raw), "[]"),
 		"Go 语法":       strings.Join(goHex, ", "),
 		"原始字节":        string(raw),
 		"%q":          strings.Trim(fmt.Sprintf("%q", raw), `"`),
@@ -291,7 +291,7 @@ func TestVAPIDSignaturePadsRAndS(t *testing.T) {
 	}
 	base := time.Unix(1_800_000_000, 0)
 	var sawR, sawS bool
-	for i := 0; i < 20000 && !(sawR && sawS); i++ {
+	for i := 0; i < 20000 && (!sawR || !sawS); i++ {
 		hdr, err := v.Authorization("https://push.example.net", "mailto:push@example.com", base.Add(time.Duration(i)*time.Second))
 		if err != nil {
 			t.Fatal(err)

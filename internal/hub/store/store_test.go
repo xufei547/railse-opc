@@ -63,7 +63,7 @@ func TestOpenMigratesAndSetsPerms(t *testing.T) {
 	}
 	assertPerms(t, path)
 	var v int
-	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != schemaVersion {
+	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != SchemaVersion {
 		t.Fatalf("schema_version = %d, %v", v, err)
 	}
 	var mode string
@@ -126,7 +126,7 @@ func TestOpenRejectsOtherSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("UPDATE schema_version SET v = ?", schemaVersion+1); err != nil {
+	if _, err := s.db.Exec("UPDATE schema_version SET v = ?", SchemaVersion+1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec("DROP TABLE push_subscriptions"); err != nil {
@@ -138,7 +138,7 @@ func TestOpenRejectsOtherSchemaVersion(t *testing.T) {
 		s2.Close()
 		t.Fatal("版本不一致应报错")
 	}
-	if want := fmt.Sprintf("数据库版本 %d 比程序（%d）新，请升级 railse", schemaVersion+1, schemaVersion); !strings.Contains(err.Error(), want) {
+	if want := fmt.Sprintf("数据库版本 %d 比程序（%d）新，请升级 railse", SchemaVersion+1, SchemaVersion); !strings.Contains(err.Error(), want) {
 		t.Fatalf("错误应说明库比程序新: %v", err)
 	}
 	if tableExists(t, path, "push_subscriptions") {
@@ -333,7 +333,7 @@ func TestTimeFormatSortsLexically(t *testing.T) {
 	early := time.Date(2026, 10, 22, 8, 0, 0, 123450000, time.UTC)
 	late := time.Date(2026, 10, 22, 8, 0, 0, 123456000, time.UTC)
 	a, b := fmtTime(early), fmtTime(late)
-	if !(a < b) {
+	if a >= b {
 		t.Fatalf("字典序与时间先后不一致: %q !< %q", a, b)
 	}
 	if len(a) != len(b) {

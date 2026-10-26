@@ -36,7 +36,7 @@ func splitSegments(cmd string) []string {
 	for _, s := range segs {
 		out = append(out, string(runes[s.start:s.end]))
 	}
-	if opaque && !(len(out) == 1 && out[0] == whole) {
+	if opaque && (len(out) != 1 || out[0] != whole) {
 		out = append([]string{whole}, out...)
 	}
 	return out

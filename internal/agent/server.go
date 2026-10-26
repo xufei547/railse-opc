@@ -49,6 +49,8 @@ type Server struct {
 	start   time.Time
 	wg      sync.WaitGroup          // 进行中的连接
 	sink    atomic.Pointer[sinkBox] // 审计转发目标，nil 表示只写本地；可在 Serve 运行中替换
+	// hubStatus 给 status 报 hub 连接状态与地址；nil 表示未接入 hub。Listen 之前装好，之后只读。
+	hubStatus func() (state, url string)
 
 	// 暂停分开存：本机 pause/resume 与 hub 下发的总开关，生效值取或交给 rules。
 	// pauseMu 同时串行化 state.json 的写入，两个字段总是一起写。
@@ -90,6 +92,10 @@ func isNil(v any) bool {
 
 // Pending 返回未完成请求表，hub 客户端重连时枚举用。只能在 Listen 之前调用（不加锁）。
 func (s *Server) Pending() *Pending { return s.pending }
+
+// SetHubStatus 装上 hub 连接状态的来源（守护进程里传 HubClient.State 与 hub 地址），status 每次现取；
+// 没装时 status 报 none。只能在 Listen 之前调用（不加锁）；fn 会在处理连接的 goroutine 里并发调用。
+func (s *Server) SetHubStatus(fn func() (state, url string)) { s.hubStatus = fn }
 
 // SetDecider 换决定来源（装 hub 客户端用）。只能在 Listen 之前调用（不加锁）。
 func (s *Server) SetDecider(d Decider) { s.decider = d }
@@ -200,26 +206,26 @@ func (s *Server) Close() error {
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // 只在连接已关时失败，随后的读会报错
 	// 关停时不必等满读超时：ctx 取消就让正在进行的读立即返回。
-	stopRead := context.AfterFunc(ctx, func() { conn.SetReadDeadline(time.Now()) })
+	stopRead := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
 	line, err := proto.ReadLine(bufio.NewReader(conn))
 	stopRead()
 	if err != nil {
 		s.log.Printf("读请求: %v", err)
 		return
 	}
-	conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{}) // 同上
 	kind, err := proto.PeekKind(line)
 	if err != nil {
-		proto.WriteLine(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误"})
+		s.reply(conn, kind, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误"})
 		return
 	}
 	switch kind {
 	case "permission":
 		var req proto.Request
 		if err := proto.Decode(line, &req); err != nil {
-			proto.WriteLine(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误: " + err.Error()})
+			s.reply(conn, kind, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误: " + err.Error()})
 			return
 		}
 		// 钩子不会再发数据；读到 EOF 或错误就表示它消失了。答复后连接关闭，这个 goroutine 随之退出。
@@ -227,30 +233,42 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		cctx, cancel := context.WithCancelCause(ctx)
 		go func() {
 			var b [1]byte
-			conn.Read(b[:])
+			_, _ = conn.Read(b[:]) // 读到什么都不要，只等它返回
 			cancel(errHookGone)
 		}()
 		resp := s.handlePermission(cctx, req)
 		cancel(nil)
 		if resp.Decision != "" { // 钩子已消失时 resp 为空，不写回
-			proto.WriteLine(conn, resp)
+			s.reply(conn, kind, resp)
 		}
 	case "question", "done", "session_end":
 		var ev proto.Event
 		if err := proto.Decode(line, &ev); err != nil {
-			proto.WriteLine(conn, proto.EventAck{V: proto.Version, OK: false, Error: err.Error()})
+			s.reply(conn, kind, proto.EventAck{V: proto.Version, OK: false, Error: err.Error()})
 			return
 		}
-		proto.WriteLine(conn, s.handleEvent(ev))
+		s.reply(conn, kind, s.handleEvent(ev))
 	case "control":
 		var c proto.Control
 		if err := proto.Decode(line, &c); err != nil {
-			proto.WriteLine(conn, proto.ControlReply{V: proto.Version, OK: false, Error: err.Error()})
+			s.reply(conn, kind, proto.ControlReply{V: proto.Version, OK: false, Error: err.Error()})
 			return
 		}
-		proto.WriteLine(conn, s.handleControl(c))
+		s.reply(conn, kind, s.handleControl(c))
 	default:
-		proto.WriteLine(conn, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "未知消息种类 " + kind})
+		s.reply(conn, kind, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "未知消息种类 " + kind})
+	}
+}
+
+// reply 把一行答复写回钩子。写不出去（钩子已断开、答复超长）只记日志：钩子读不到答复就 passthrough，交回 CLI 自己审批。
+// 日志带消息种类（kind 来自钩子，截断后按 %q 记）与审批请求的 request_id（有时），便于对上审计。
+func (s *Server) reply(conn net.Conn, kind string, v any) {
+	if err := proto.WriteLine(conn, v); err != nil {
+		var id string
+		if r, ok := v.(proto.Response); ok {
+			id = r.RequestID
+		}
+		s.log.Printf("回写钩子（kind %q，request_id %q）: %v", clipText(kind, hubLogFieldMax), id, err)
 	}
 }
 
@@ -430,7 +448,12 @@ func (s *Server) status() *proto.Status {
 	s.pauseMu.Lock()
 	paused, local, hub := s.rules.Paused(), s.localPaused, s.hubPaused
 	s.pauseMu.Unlock()
-	return &proto.Status{Paused: paused, LocalPaused: local, HubPaused: hub, Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String()}
+	hubState, hubURL := "none", ""
+	if s.hubStatus != nil {
+		hubState, hubURL = s.hubStatus()
+	}
+	return &proto.Status{Paused: paused, LocalPaused: local, HubPaused: hub, Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String(),
+		Hub: hubState, HubURL: hubURL}
 }
 
 // SetHubPaused 设置 hub 下发的总开关（hub 客户端收到 welcome、paused 帧时调用）。只改 hub 这一侧，

@@ -1,0 +1,48 @@
+# goreleaser v2 配置。版本钉在 Makefile 的 GORELEASER_VERSION（本地 make release-check 与
+# .github/workflows/release.yml 用同一个值）。本地出快照包：
+#   GOTOOLCHAIN=local go run github.com/goreleaser/goreleaser/v2@<GORELEASER_VERSION> release --snapshot --clean --skip=publish
+version: 2
+project_name: railse
+before:
+  hooks:
+    # 先构建手机网页，go:embed 才能把它嵌进二进制
+    - make web
+builds:
+  - id: railse
+    main: ./cmd/railse
+    binary: railse
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: darwin
+        goarch: amd64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+archives:
+  - id: tar
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - docs/*.md
+checksum:
+  name_template: checksums.txt
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs"
+      - "^test"
+      - "^chore"
+      - "^ci"
+release:
+  github:
+    owner: railse
+    name: railse-opc
+  prerelease: auto

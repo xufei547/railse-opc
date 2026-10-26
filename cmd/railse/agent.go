@@ -26,7 +26,7 @@ import (
 )
 
 const agentUsage = `用法:
-  railse agent run [--dir 目录] [--foreground]   启动守护进程（前台运行；有 machine.json 时接 hub；开机自启在第 5 份计划）
+  railse agent run [--dir 目录] [--foreground]   启动守护进程（前台运行；有 machine.json 时接 hub；开机自启用 railse setup autostart）
   railse agent status|pause|resume|reload [--dir 目录]
   railse agent enroll --hub URL --token 接入码 [--name 名字] [--dir 目录] [--force]   接入 hub，写 machine.json`
 
@@ -72,16 +72,10 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "railse agent %s 不认 %s\n%s\n", args[0], bad, agentUsage)
 		return 2
 	}
-	var cfg agent.Config
-	if *dir != "" {
-		cfg = agent.ConfigIn(*dir)
-	} else {
-		c, err := agent.DefaultConfig()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		cfg = c
+	cfg, err := agentConfigFor(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
 	switch args[0] {
 	case "run":
@@ -104,7 +98,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		}
 		if args[0] == "status" && reply.Status != nil {
 			st := reply.Status
-			fmt.Fprintf(stdout, "%s\nrules: %d\npending: %d\nmachine: %s\nrules_path: %s\nuptime: %s\n", pausedLine(st), st.Rules, st.Pending, st.MachineID, st.RulesPath, st.Uptime)
+			fmt.Fprintf(stdout, "%s\nrules: %d\npending: %d\nmachine: %s\n%s\nrules_path: %s\nuptime: %s\n", pausedLine(st), st.Rules, st.Pending, st.MachineID, hubLine(st), st.RulesPath, st.Uptime)
 			return 0
 		}
 		fmt.Fprintln(stdout, "ok")
@@ -121,6 +115,28 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	return 2 // 到不了：子命令已在开头核对过
+}
+
+// agentConfigFor 取守护进程配置：给了 --dir 用它，否则 $RAILSE_HOME 或 ~/.railse。只算路径，不建目录。
+func agentConfigFor(dir string) (agent.Config, error) {
+	if dir != "" {
+		return agent.ConfigIn(dir), nil
+	}
+	return agent.DefaultConfig()
+}
+
+// hubLine 显示到 hub 的连接：none（未接入）、connecting/connected 加地址；disabled（连续被 hub 以 401 拒绝）时说明怎么恢复；
+// 旧版守护进程不报（为空）时显示未知并提示重启，与 doctor 一致，不说成未接入。
+func hubLine(st *proto.Status) string {
+	switch st.Hub {
+	case "":
+		return "hub: 未知（守护进程版本较旧？重启它）"
+	case "none":
+		return "hub: none"
+	case "disabled":
+		return fmt.Sprintf("hub: disabled %s（本机密钥被拒，请 railse agent enroll --force 后重启守护进程）", st.HubURL)
+	}
+	return fmt.Sprintf("hub: %s %s", st.Hub, st.HubURL)
 }
 
 // pausedLine 显示总开关的生效值；暂停时在括号里注明来源：本机（local）、hub，或两者都有。
@@ -337,6 +353,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 		decider := &agent.HubDecider{Client: client, Grace: cfg.HubGrace, Log: logger}
 		srv.SetDecider(decider)
 		srv.SetAuditSink(client)
+		srv.SetHubStatus(func() (string, string) { return client.State(), machine.HubURL })
 		// 送达回执在后台发：在审批服务停下（下面登记的 srv.Close，后登记先执行）之后、关审计与日志之前等它们发完
 		defer decider.Wait()
 	}
@@ -356,7 +373,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 		}
 	}
 	// hub 客户端在 LoadState 之后才开始收帧：welcome 设的 hub 暂停不能被磁盘上的旧值盖掉。它与 Serve 共用同一个关停 ctx
-	// （派生自 ctx），返回前等它退出：它会写审计、改 state.json。被 hub 以 401 停用时 Run 自己返回并记日志（要重新 enroll），
+	// （派生自 ctx），返回前等它退出：它会写审计、改 state.json。连续被 hub 以 401 拒绝而停用时 Run 自己返回并记日志（要重新 enroll），
 	// 这里不当致命错误、也不重启：HubDecider 见停用即交回终端，守护进程照常服务。
 	hubCtx, stopHub := context.WithCancel(ctx)
 	hubDone := make(chan struct{})
