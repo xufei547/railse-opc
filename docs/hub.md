@@ -194,6 +194,20 @@ server {
 
 配套：`railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com --trusted-proxy 127.0.0.1`（`--public-url` 是手机打开网页的源，不加推送就是停用的；nginx 经 IPv6 回环连 hub 时再加 `::1`）。用 Caddy 时 `reverse_proxy 127.0.0.1:8787` 即可（按 Caddy v2 文档：默认透传 Host、覆盖 X-Forwarded-For、自动代理 WebSocket）。
 
+## 部署到 Fly.io
+
+仓库 `deploy/fly/` 里有现成的 `Dockerfile`（从 GitHub Release 下载并校验二进制）、`entrypoint.sh` 与 `fly.toml`。Fly 的边缘代理终止 TLS 并转发 WebSocket，hub 在容器里监听明文 8787，用 `--trusted-proxy fdaa::/16` 认 Fly 代理送来的 `X-Forwarded-For`。数据目录挂在持久卷 `/data`。
+
+```bash
+fly apps create <应用名> --org <组织>
+fly volumes create railse_hub --region <区域> --size 1 -a <应用名>
+fly secrets set RAILSE_HUB_INIT_PASSWORD='<网页密码，至少 8 个字符>' -a <应用名>   # 首次启动时写入，之后用 railse hub password 改
+cd deploy/fly && fly deploy --app <应用名> --ha=false        # 单机加单卷，不要开高可用
+fly ssh console -a <应用名> -C "railse hub token"             # 接入码，给工作机 railse setup all 用
+```
+
+`fly.toml` 里的 `app` 与 `RAILSE_PUBLIC_URL` 改成自己的应用名（`https://<应用名>.fly.dev`，域名一旦定下不要再换，推送订阅绑在它上面）。`auto_stop_machines` 必须是 `off`：守护进程与手机的长连接和推送都要求机器常驻。升级就改 `RAILSE_VERSION` 再 `fly deploy`。
+
 ## 故障排查
 
 先跑 `railse doctor`：工作机上直接跑（检查守护进程、hub 连接、钩子与 CLI 版本），hub 机器上以跑 hub 的用户身份加 `--hub-dir <数据目录>`。每个 warn、fail 下面都有一行“修复：”，各检查项的含义见 [setup.md](setup.md) 的“railse doctor”。doctor 说不清的再对照下表。
