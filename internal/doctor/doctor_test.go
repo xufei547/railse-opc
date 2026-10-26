@@ -1677,4 +1677,11 @@ func TestProjectRootCheck(t *testing.T) {
 	if c := find(t, Run(o), "project.root"); c.Status != Skip {
 		t.Fatalf("没给 Project: %+v", c)
 	}
+
+	// 相对的 Project 按 doctor 的工作目录取绝对路径再定
+	t.Chdir(repo)
+	o.Project = "src"
+	if c := find(t, Run(o), "project.root"); c.Status != OK || c.Detail != resolved(repo) {
+		t.Fatalf("相对的 Project: %+v", c)
+	}
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // CleanCwd 解析符号链接并清理路径；解析失败就只清理。
@@ -17,9 +18,12 @@ func CleanCwd(cwd string) string {
 // ResolveProjectRoot 定项目根：从清理后的 cwd 向上找含 .git（目录或 worktree 的 .git 文件）的目录，
 // 找到且不 tooBroad 时返回它，git 为 true。找不到，或找到的仓库根太宽（用 git 管 dotfiles 的人家目录里有 .git）时
 // 退回 cwd 自身：它是存在的目录且不 tooBroad 时返回它，git 为 false；否则（家目录、它的祖先、根目录、不存在）返回空串，
-// 引擎会把空的项目根按项目外处理。
+// 引擎会把空的项目根按项目外处理。cwd 要是绝对路径：相对路径会按本进程的工作目录解析，一律返回空串。
 func ResolveProjectRoot(cwd string) (root string, git bool) {
 	dir := CleanCwd(cwd)
+	if !filepath.IsAbs(dir) {
+		return "", false
+	}
 	for d := dir; ; {
 		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
 			if !tooBroad(d) {
@@ -49,7 +53,7 @@ func FindProjectRoot(cwd string) string {
 // 在家目录里起 agent 时 cwd 就是家目录，把它当项目根会让“项目内可写”放行改写整个家目录，所以按项目外处理（fail closed）；
 // 祖先比家目录还宽，同理。
 // 按文件身份比较而不是比字符串：cwd 不存在时 dir 是未解析写法，macOS 的 firmlink
-// （如 /System/Volumes/Data/Users/x）也不被 EvalSymlinks 解析，字符串比较都会漏。
+// （如 /System/Volumes/Data/Users/x）也不被 EvalSymlinks 解析，字符串比较都会漏。家目录的写法见 homeSpellings。
 func tooBroad(dir string) bool {
 	if filepath.Dir(dir) == dir {
 		return true
@@ -62,8 +66,8 @@ func tooBroad(dir string) bool {
 		return true
 	}
 	if home := userHome(); home != "" {
-		// 家目录本身及其每一级祖先，原写法与解析链接后的写法都比，任一身份相同即太宽。
-		for _, h := range []string{filepath.Clean(home), CleanCwd(home)} {
+		// 家目录本身及其每一级祖先，每种写法都比，任一身份相同即太宽。
+		for _, h := range homeSpellings(home) {
 			for p := h; ; p = filepath.Dir(p) {
 				if ps, err := os.Stat(p); err == nil && os.SameFile(st, ps) {
 					return true
@@ -75,4 +79,23 @@ func tooBroad(dir string) bool {
 		}
 	}
 	return false
+}
+
+// darwinDataVolume 是 macOS 数据卷的挂载点：/Users/x 在它下面还有一个 firmlink 写法 /System/Volumes/Data/Users/x。
+const darwinDataVolume = "/System/Volumes/Data"
+
+// homeSpellings 返回家目录的各种写法：原写法、解析链接后的写法；macOS 上再加数据卷上的 firmlink 写法
+// （存在且与家目录是同一个文件时）。firmlink 写法的祖先 /System/Volumes/Data、/System/Volumes、/System
+// 和 /Users、/ 都不是同一个文件，只比前两种写法的祖先会漏掉它们。
+func homeSpellings(home string) []string {
+	out := []string{filepath.Clean(home), CleanCwd(home)}
+	if runtime.GOOS == "darwin" {
+		fl := darwinDataVolume + filepath.Clean(home)
+		if a, err := os.Stat(fl); err == nil {
+			if b, err := os.Stat(home); err == nil && os.SameFile(a, b) {
+				out = append(out, fl)
+			}
+		}
+	}
+	return out
 }

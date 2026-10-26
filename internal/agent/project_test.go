@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -105,5 +106,45 @@ func TestResolveProjectRootHomeAncestorHasGit(t *testing.T) {
 		{"cwd 是含 .git 的祖先", base, "", false},
 		{"cwd 不存在", filepath.Join(base, "gone", "x"), "", false},
 		{"家目录下的仓库", filepath.Join(repo, "src"), resolved(repo), true},
+	})
+}
+
+// 相对路径按本进程的工作目录解析，不能拿来定项目根：一律返回空。
+func TestResolveProjectRootRelative(t *testing.T) {
+	base := shortTempDir(t)
+	t.Setenv("HOME", filepath.Join(base, "home"))
+	repo := filepath.Join(base, "repo")
+	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
+	os.MkdirAll(filepath.Join(repo, "src"), 0o755)
+	os.MkdirAll(filepath.Join(base, "plain", "a"), 0o755)
+	t.Chdir(repo)
+	checkRoots(t, []rootCase{
+		{"仓库里的相对子目录", "src", "", false},
+		{"点", ".", "", false},
+	})
+	t.Chdir(filepath.Join(base, "plain"))
+	checkRoots(t, []rootCase{{"非 git 目录里的相对子目录", "a", "", false}})
+}
+
+// macOS 上家目录还能写成数据卷上的 firmlink（/System/Volumes/Data/Users/x），EvalSymlinks 不解析它；
+// 它的祖先 /System/Volumes/Data、/System/Volumes、/System 也是家目录的祖先，不当项目根。
+// 临时 HOME 造不出 firmlink，借现成的 /Users/Shared 当 HOME：只 stat，不写任何东西。
+func TestResolveProjectRootDarwinFirmlink(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("只有 macOS 有数据卷 firmlink")
+	}
+	const home = "/Users/Shared"
+	a, errA := os.Stat(home)
+	b, errB := os.Stat("/System/Volumes/Data" + home)
+	if errA != nil || errB != nil || !os.SameFile(a, b) {
+		t.Skip("这台机器没有 /Users/Shared 的 firmlink 写法")
+	}
+	t.Setenv("HOME", home)
+	checkRoots(t, []rootCase{
+		{"数据卷", "/System/Volumes/Data", "", false},
+		{"卷目录", "/System/Volumes", "", false},
+		{"/System", "/System", "", false},
+		{"firmlink 写法的家目录的上级", "/System/Volumes/Data/Users", "", false},
+		{"firmlink 写法的家目录", "/System/Volumes/Data" + home, "", false},
 	})
 }
