@@ -413,8 +413,8 @@ func TestHookChecks(t *testing.T) {
 		t.Fatalf("程序路径不同: %+v", c)
 	}
 	o.Bin = bin
-	// codex notify
-	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || c.Hint == "" {
+	// codex notify：没有 config.toml 时提示运行 railse setup codex-notify
+	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Hint, "railse setup codex-notify") {
 		t.Fatalf("没有 notify: %+v", c)
 	}
 	cfg := filepath.Join(home, ".codex", "config.toml")
@@ -429,8 +429,74 @@ func TestHookChecks(t *testing.T) {
 	}
 	// 写在某个表下面：Codex 读不到顶层的 notify
 	writeFile(t, cfg, []byte("model = \"x\"\n[mcp_servers.foo]\ncommand = \"foo\"\nnotify = [\"/usr/local/bin/railse\", \"hook\", \"codex-notify\"]\n"))
-	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, "[mcp_servers.foo]") {
+	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, "[mcp_servers.foo]") || !strings.Contains(c.Hint, "railse setup codex-notify") {
 		t.Fatalf("notify 在表下面: %+v", c)
+	}
+	// 顶层的 notify 是别人的命令：warn，提示运行 railse setup codex-notify（会保留它）
+	writeFile(t, cfg, []byte("notify = [\"/usr/local/bin/notify-wrap\"]\n"))
+	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, "/usr/local/bin/notify-wrap") || !strings.Contains(c.Hint, "railse setup codex-notify") {
+		t.Fatalf("别人的 notify: %+v", c)
+	}
+	// 看不懂的写法：warn，说明看不懂
+	writeFile(t, cfg, []byte("notify = \"\"\"x\"\"\"\n"))
+	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, "第 1 行") || c.Hint == "" {
+		t.Fatalf("看不懂的 notify: %+v", c)
+	}
+}
+
+// notify 是 railse setup codex-notify 写的串接脚本：脚本在、可执行、里面有 railse 那一行才 ok；脚本里 railse 那一行连的
+// socket 与 --dir 的守护进程对不上时 warn（与旧写法同一规则）；脚本不在、不可执行、没有 railse 那一行都 warn，提示重跑。
+func TestCodexNotifyScript(t *testing.T) {
+	o, home := fakeOpts(t)
+	bin := "/usr/local/bin/railse"
+	o.Bin = bin
+	cfg := hooksconf.CodexConfigPath(home)
+	script := filepath.Join(o.AgentDir, hooksconf.NotifyScriptName)
+	writeFile(t, cfg, []byte(fmt.Sprintf("model = \"x\"\nnotify = [%q]\n[tui]\nx = 1\n", script)))
+	check := func() Check { t.Helper(); return find(t, Run(o), "hooks.codex_notify") }
+	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, script) || !strings.Contains(c.Hint, "railse setup codex-notify") {
+		t.Fatalf("脚本不在: %+v", c)
+	}
+	writeFile(t, script, hooksconf.NotifyScript([]string{"/usr/local/bin/notify-wrap"}, bin, ""))
+	os.Chmod(script, 0o644)
+	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, "不可执行") || !strings.Contains(c.Hint, "railse setup codex-notify") {
+		t.Fatalf("脚本不可执行: %+v", c)
+	}
+	os.Chmod(script, 0o755)
+	if c := check(); c.Status != OK || !strings.Contains(c.Detail, script) {
+		t.Fatalf("脚本写法: %+v", c)
+	}
+	// 脚本里没有 railse 那一行
+	writeFile(t, script, []byte("#!/bin/sh\n/usr/local/bin/notify-wrap \"$@\"\n"))
+	os.Chmod(script, 0o755)
+	if c := check(); c.Status != Warn || !strings.Contains(c.Hint, "railse setup codex-notify") {
+		t.Fatalf("脚本里没有 railse: %+v", c)
+	}
+	// railse 那一行带 --socket 指向别处：warn，提示重跑或给 doctor 加 --dir
+	data := filepath.Join(home, "data dir")
+	dataSock := filepath.Join(data, "agent.sock")
+	writeFile(t, script, hooksconf.NotifyScript(nil, bin, dataSock))
+	os.Chmod(script, 0o755)
+	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, "连的是 "+dataSock) || !strings.Contains(c.Hint, "doctor 加 --dir "+hooksconf.ShellQuote(data)) {
+		t.Fatalf("socket 对不上: %+v", c)
+	}
+	// 守护进程确实在 data：脚本在 data 里、带 --socket 的 ok；不带 --socket 的旧脚本 warn，重跑命令带 --dir
+	o.AgentDir = data
+	script = filepath.Join(data, hooksconf.NotifyScriptName)
+	writeFile(t, cfg, []byte(fmt.Sprintf("notify = [%q]\n", script)))
+	writeFile(t, script, hooksconf.NotifyScript(nil, bin, dataSock))
+	os.Chmod(script, 0o755)
+	if c := check(); c.Status != OK {
+		t.Fatalf("--dir 的脚本: %+v", c)
+	}
+	writeFile(t, script, hooksconf.NotifyScript(nil, bin, ""))
+	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, "连的是 "+o.DefaultSocket) || !strings.Contains(c.Hint, "railse setup codex-notify --dir "+hooksconf.ShellQuote(data)) {
+		t.Fatalf("不带 --socket 的脚本: %+v", c)
+	}
+	// 旧写法仍 ok
+	writeFile(t, cfg, []byte(fmt.Sprintf("notify = [%q, \"hook\", \"codex-notify\", \"--socket\", %q]\n", bin, dataSock)))
+	if c := check(); c.Status != OK {
+		t.Fatalf("旧写法: %+v", c)
 	}
 }
 

@@ -4,29 +4,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
-
-// codexNotifyRe 认 notify = [..., "hook", "codex-notify"]，后面可以再跟 "--socket", "<路径>"（第 1 个子匹配是带引号的路径）；
-// 数组可以跨行（[^\]]* 不越出这个数组）。
-var codexNotifyRe = regexp.MustCompile(`(?m)^[ \t]*notify[ \t]*=[ \t]*\[[^\]]*["']hook["'][ \t\r\n]*,[ \t\r\n]*["']codex-notify["']` +
-	`(?:[ \t\r\n]*,[ \t\r\n]*["']--socket["'][ \t\r\n]*,[ \t\r\n]*("(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*'))?`)
-
-// tomlTableRe 认 TOML 的表头行（[x] 或 [[x]]）：顶层键必须写在第一个表头之前。
-var tomlTableRe = regexp.MustCompile(`(?m)^[ \t]*\[[^\r\n]*`)
 
 // hookChecks 看三个 CLI 的钩子。Claude、Gemini 的用户级（Home 下）或项目级（Project 下）任一装了就算装了（见 levelsCheck）；
 // Codex 的钩子与 notify 只有用户级，只看 Home。
 func hookChecks(o Options) []Check {
 	codex := []Check{
 		{ID: "hooks.codex", Name: "Codex 钩子", Status: Skip, Detail: noHome},
-		{ID: "hooks.codex_notify", Name: "Codex notify", Status: Skip, Detail: noHome},
+		{ID: codexNotifyID, Name: codexNotifyName, Status: Skip, Detail: noHome},
 	}
 	if o.Home != "" { // Codex 的钩子与 notify 都在用户级的 ~/.codex 下
 		codex = []Check{hookFileCheck("hooks.codex", "Codex 钩子", "codex", hooksconf.CodexPath(o.Home), setupHint(o, "codex", ""), o), codexNotifyCheck(o)}
@@ -365,55 +355,88 @@ func samePath(a, b string) bool {
 	return filepath.Clean(a) == filepath.Clean(b) || sameFile(a, b)
 }
 
-// codexNotifyCheck 看 ~/.codex/config.toml 顶层有没有 notify = [..., "hook", "codex-notify"]：没有时 Codex 的完成与提问事件进不了收件箱。
-// notify 是顶层键，写在某个 [表] 下面就成了那个表的键，Codex 读不到。
+// codexNotifyCheck 看 ~/.codex/config.toml 顶层的 notify：没有 railse 时 Codex 的完成与提问事件进不了收件箱。认两种写法：
+// railse setup codex-notify 写的串接脚本（单元素数组，文件名 codex-notify.sh，见 codexNotifyScriptCheck），与直接调 railse 的
+// 旧写法 [..., "hook", "codex-notify"]（后面可以再跟 "--socket", "<路径>"）。两种都按 railse 连的 socket 与 --dir 的守护进程比对。
+// notify 是顶层键，写在某个 [表] 下面就成了那个表的键，Codex 读不到。解析与 setup 共用 hooksconf.ParseCodexNotify。
 func codexNotifyCheck(o Options) Check {
-	const id, name = "hooks.codex_notify", "Codex notify"
-	path := filepath.Join(o.Home, ".codex", "config.toml")
-	hint := "把 railse setup hooks 打印的 notify = [...] 那一行加到 ~/.codex/config.toml 的开头（第一个 [表] 之前）"
+	path := hooksconf.CodexConfigPath(o.Home)
+	fix := "railse setup codex-notify" + dirFlag(o)
+	hint := "运行 " + fix + "（会保留已有的 notify）"
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return Check{ID: id, Name: name, Status: Warn, Detail: path + " 读不到，Codex 的完成与提问事件不会进收件箱", Hint: hint}
+		return notifyWarn(path+" 读不到，Codex 的完成与提问事件不会进收件箱", hint)
 	}
-	top := b
-	header := tomlTableRe.FindIndex(b)
-	if header != nil {
-		top = b[:header[0]]
+	n, err := hooksconf.ParseCodexNotify(b)
+	switch {
+	case err != nil:
+		return notifyWarn(path+" 看不懂："+err.Error(), "手动改好这一处，再运行 "+fix)
+	case !n.Found && len(n.Tables) > 0:
+		table := n.Tables[0]
+		return notifyWarn(fmt.Sprintf("%s 里的 notify 写在了 %s 下面，Codex 读不到", path, table), "运行 "+fix+"（在文件开头写顶层的 notify），再删掉 "+table+" 下面那个")
+	case !n.Found:
+		return notifyWarn(path+" 里没有 notify，Codex 的完成与提问事件不会进收件箱", hint)
+	case len(n.Argv) == 1 && filepath.Base(n.Argv[0]) == hooksconf.NotifyScriptName:
+		return codexNotifyScriptCheck(o, path, n.Argv[0], fix)
 	}
-	if m := codexNotifyRe.FindSubmatch(top); m != nil {
-		explicit, known := tomlString(string(m[1]))
-		if known {
-			if s, ok := socketMismatch(o, explicit); !ok {
-				var dirs []string
-				if explicit != "" {
-					dirs = []string{filepath.Dir(explicit)}
-				}
-				fix := "把 railse setup hooks --codex" + dirFlag(o) + " 打印的 notify = [...] 那一行换进 ~/.codex/config.toml"
-				return Check{ID: id, Name: name, Status: Warn, Detail: path + "：" + socketDetail("notify ", []string{s}, o), Hint: socketHint(fix, dirs, o)}
-			}
+	for i := 0; i+1 < len(n.Argv); i++ {
+		if n.Argv[i] != "hook" || n.Argv[i+1] != "codex-notify" {
+			continue
 		}
-		return Check{ID: id, Name: name, Status: OK, Detail: path}
-	}
-	if loc := codexNotifyRe.FindIndex(b); loc != nil {
-		// 找出 notify 落在哪个表下面
-		table := ""
-		for _, h := range tomlTableRe.FindAllIndex(b[:loc[0]], -1) {
-			table = strings.TrimSpace(string(b[h[0]:h[1]]))
+		explicit := ""
+		if i+3 < len(n.Argv) && n.Argv[i+2] == "--socket" {
+			explicit = n.Argv[i+3]
 		}
-		return Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf("%s 里的 notify 写在了 %s 下面，Codex 读不到", path, table), Hint: "把 notify 那一行挪到文件开头（第一个 [表] 之前）"}
+		if c, bad := notifySocketCheck(o, path, "notify ", explicit, fix+" 重写 notify"); bad {
+			return c
+		}
+		return Check{ID: codexNotifyID, Name: codexNotifyName, Status: OK, Detail: path}
 	}
-	return Check{ID: id, Name: name, Status: Warn, Detail: path + ` 里没有 notify = ["…/railse", "hook", "codex-notify"]，Codex 的完成与提问事件不会进收件箱`, Hint: hint}
+	return notifyWarn(path+" 的 notify 不调 railse（"+strings.Join(n.Argv, " ")+"），Codex 的完成与提问事件不会进收件箱", hint)
 }
 
-// tomlString 解出 TOML 的一个字符串：基本字符串（双引号，转义与 Go 的一致到普通路径够用）或字面字符串（单引号，不转义）。
-// 空串表示没有（返回 "", true）；解不出时 known 为 false，调用方不据此下结论。
-func tomlString(q string) (s string, known bool) {
+const codexNotifyID, codexNotifyName = "hooks.codex_notify", "Codex notify"
+
+// notifyWarn 是 hooks.codex_notify 的一条 warn。
+func notifyWarn(detail, hint string) Check {
+	return Check{ID: codexNotifyID, Name: codexNotifyName, Status: Warn, Detail: detail, Hint: hint}
+}
+
+// codexNotifyScriptCheck 看 config.toml（path）的 notify 指向的串接脚本 script：在、可执行、里面有 railse 的 hook codex-notify
+// 那一行才 ok；那一行连的 socket 对不上 --dir 的守护进程时 warn。fix 是重新生成脚本的命令。
+func codexNotifyScriptCheck(o Options, path, script, fix string) Check {
+	hint := "运行 " + fix + " 重新生成"
+	st, err := os.Stat(script)
 	switch {
-	case q == "":
-		return "", true
-	case strings.HasPrefix(q, "'"):
-		return strings.Trim(q, "'"), true
+	case err != nil:
+		return notifyWarn(path+" 的 notify 指向 "+script+"，它不存在或读不到", hint)
+	case !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0:
+		return notifyWarn(path+" 的 notify 指向 "+script+"，它不可执行", hint)
 	}
-	s, err := strconv.Unquote(q)
-	return s, err == nil
+	b, err := os.ReadFile(script)
+	if err != nil {
+		return notifyWarn(err.Error(), "确认用跑 Codex 的同一个用户运行 doctor")
+	}
+	c, ok := hooksconf.NotifyScriptHook(b)
+	if !ok {
+		return notifyWarn(script+" 里没有 railse 的 hook codex-notify 那一行，Codex 的完成与提问事件不会进收件箱", hint)
+	}
+	if c, bad := notifySocketCheck(o, script, "notify 脚本里的 railse ", c.Socket, fix+" 重新生成脚本"); bad {
+		return c
+	}
+	return Check{ID: codexNotifyID, Name: codexNotifyName, Status: OK, Detail: path + "（notify 经 " + script + "）"}
+}
+
+// notifySocketCheck 是 notify 里 railse 连的 socket（explicit 是 --socket 给的，空表示没带）对不上 --dir 的守护进程时的 warn；
+// 对得上或推不出基准时 bad 为假。where 是细节开头的文件，what 说是谁连的，fix 是重写的命令。
+func notifySocketCheck(o Options, where, what, explicit, fix string) (c Check, bad bool) {
+	s, ok := socketMismatch(o, explicit)
+	if ok {
+		return Check{}, false
+	}
+	var dirs []string
+	if explicit != "" {
+		dirs = []string{filepath.Dir(explicit)}
+	}
+	return notifyWarn(where+"："+socketDetail(what, []string{s}, o), socketHint("运行 "+fix, dirs, o)), true
 }

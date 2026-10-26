@@ -138,13 +138,16 @@ type Command struct {
 
 // ParseCommand 认出 Plan 写过的命令形状“<词> hook claude|codex|gemini”，后面可以再跟“ --socket <词>”（见 HookCommand）。
 // “词”是不含空白的裸词，或 ShellQuote 产生的单引号词（内部单引号按 ShellQuote 的写法转义）。其他形状一律不认。
-func ParseCommand(cmd string) (Command, bool) {
+func ParseCommand(cmd string) (Command, bool) { return parseHook(cmd, "claude", "codex", "gemini") }
+
+// parseHook 认“<词> hook <clis 之一>”，后面可以再跟“ --socket <词>”（见 ParseCommand）。
+func parseHook(cmd string, clis ...string) (Command, bool) {
 	prog, rest, ok := shellWord(cmd)
 	if !ok {
 		return Command{}, false
 	}
 	var c Command
-	for _, cli := range []string{"claude", "codex", "gemini"} {
+	for _, cli := range clis {
 		if r, found := strings.CutPrefix(rest, " hook "+cli); found && (r == "" || strings.HasPrefix(r, " --socket ")) {
 			c, rest = Command{Program: prog, CLI: cli}, r
 			break

@@ -35,7 +35,8 @@ const setupUsage = `用法:
     与 .gemini/settings.json，Codex 照旧是用户级。
     --dir 是守护进程的数据目录（默认 $RAILSE_HOME 或 ~/.railse）：不是 ~/.railse 时钩子命令带 --socket 指向它。
   railse setup autostart [--hub] [--uninstall] [--status] [--dir 目录] [--bin 路径] [--system] [--user 名字] [--dry-run] [-- hub run 的额外参数]
-    开机自启并在退出后自动拉起（macOS launchd、Linux systemd），默认托管守护进程，--hub 托管 hub；详见 railse setup autostart -h。`
+    开机自启并在退出后自动拉起（macOS launchd、Linux systemd），默认托管守护进程，--hub 托管 hub；详见 railse setup autostart -h。
+` + setupCodexNotifyUsage
 
 // pendingWrite 是算好、待写的一个配置文件。
 type pendingWrite struct {
@@ -202,6 +203,9 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "autostart" {
 		return runAutostart(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "codex-notify" {
+		return runSetupCodexNotify(args[1:], stdout, stderr)
+	}
 	if len(args) == 0 || args[0] != "hooks" {
 		fmt.Fprintln(stderr, setupUsage)
 		return 2
@@ -231,6 +235,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	binGiven := *bin != ""
 	if *bin == "" {
 		exe, err := os.Executable()
 		if err != nil {
@@ -360,12 +365,15 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "钩子命令带 --socket %s：守护进程数据目录 %s 不是 %s，CLI 起钩子时的环境里不一定有指向它的 RAILSE_HOME\n", hooksconf.ShellQuote(socket), filepath.Dir(socket), base)
 	}
 	if *doCodex {
-		// notify 是 argv 数组，bin 必须单独作为第一个元素（Codex 把 JSON 追加在最后）；%q 的转义对普通路径与 TOML 基本字符串一致
-		notify := fmt.Sprintf("%q, \"hook\", \"codex-notify\"", *bin)
+		// notify 另由 setup codex-notify 写（串接脚本，保留已有的 notify）；这里给的 --dir、--bin 原样带上，脚本与钩子连同一个守护进程
+		notify := "railse setup codex-notify"
 		if socket != "" {
-			notify += fmt.Sprintf(", \"--socket\", %q", socket)
+			notify += " --dir " + hooksconf.ShellQuote(filepath.Dir(socket))
 		}
-		fmt.Fprintf(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify 需手动写在用户级 ~/.codex/config.toml：notify = [%s]。\n", notify)
+		if binGiven {
+			notify += " --bin " + hooksconf.ShellQuote(*bin)
+		}
+		fmt.Fprintf(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify（完成与提问事件）请运行 %s（会保留已有的 notify）。\n", notify)
 	}
 	if *doGemini {
 		fmt.Fprintln(stdout, "提醒 Gemini：钩子只能拒绝不能放行，需要 Gemini CLI 0.65.0 以上，不要开 yolo 模式。")

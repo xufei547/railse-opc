@@ -55,8 +55,8 @@ func TestSetupHooksWritesAllThree(t *testing.T) {
 	if !strings.Contains(out.String(), "Codex") || !strings.Contains(out.String(), "Gemini") || !strings.Contains(out.String(), "yolo") {
 		t.Fatalf("应打印提醒: %s", out.String())
 	}
-	if !strings.Contains(out.String(), `notify = ["/opt/railse", "hook", "codex-notify"]`) {
-		t.Fatalf("Codex 提醒应给出 TOML 数组形式的 notify: %s", out.String())
+	if !strings.Contains(out.String(), "notify（完成与提问事件）请运行 railse setup codex-notify --bin /opt/railse") || !strings.Contains(out.String(), "保留已有的 notify") {
+		t.Fatalf("Codex 提醒应让用户运行 railse setup codex-notify: %s", out.String())
 	}
 }
 
@@ -383,8 +383,8 @@ func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 	if got := hookCommand(t, codexFile, "Stop"); got != "/opt/railse hook codex --socket "+q {
 		t.Fatalf("Codex 钩子命令应带 --socket: %q", got)
 	}
-	if want := fmt.Sprintf(`notify = ["/opt/railse", "hook", "codex-notify", "--socket", %q]`, sock); !strings.Contains(out, want) {
-		t.Fatalf("Codex notify 的建议也应带 --socket（%s）:\n%s", want, out)
+	if want := "railse setup codex-notify --dir " + hooksconf.ShellQuote(data) + " --bin /opt/railse"; !strings.Contains(out, want) {
+		t.Fatalf("Codex notify 的建议也应带 --dir（%s）:\n%s", want, out)
 	}
 	if !strings.Contains(out, "--socket") || !strings.Contains(out, data) {
 		t.Fatalf("应说明为什么带 --socket:\n%s", out)
@@ -403,8 +403,8 @@ func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 				t.Fatalf("%v: 默认目录时 %s 不应带 --socket:\n%s", extra, p, b)
 			}
 		}
-		if !strings.Contains(out, `notify = ["/opt/railse", "hook", "codex-notify"]`) {
-			t.Fatalf("%v: 默认目录时 notify 建议不带 --socket:\n%s", extra, out)
+		if !strings.Contains(out, "railse setup codex-notify --bin /opt/railse（") {
+			t.Fatalf("%v: 默认目录时 notify 建议不带 --dir:\n%s", extra, out)
 		}
 	}
 	// 设了 $RAILSE_HOME：基准仍是 ~/.railse（只在跑 setup 的命令上设的 RAILSE_HOME 不会进 CLI 的环境），
@@ -416,8 +416,8 @@ func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 			if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude --socket "+q {
 				t.Fatalf("RAILSE_HOME=%s %v: 应带 --socket %s: %q", env, extra, q, got)
 			}
-			if !strings.Contains(out, fmt.Sprintf(`"--socket", %q]`, sock)) {
-				t.Fatalf("RAILSE_HOME=%s %v: notify 建议也应带 --socket:\n%s", env, extra, out)
+			if !strings.Contains(out, "railse setup codex-notify --dir "+hooksconf.ShellQuote(data)) {
+				t.Fatalf("RAILSE_HOME=%s %v: notify 建议也应带 --dir:\n%s", env, extra, out)
 			}
 		}
 	}
