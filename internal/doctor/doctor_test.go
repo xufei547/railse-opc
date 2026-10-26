@@ -1628,3 +1628,53 @@ func TestHubDBUncheckpointedWALWithoutShm(t *testing.T) {
 		}
 	}
 }
+
+// project.root：项目目录会被守护进程当成哪个项目根，排在钩子检查之后。git 仓库 ok（细节是仓库根）；不是 git 仓库时
+// 按目录本身当项目根，warn 并建议 git init；家目录、它的上级、根目录与不存在的目录不当项目根，skip 并说明写入都算项目外；
+// 没给 Project 时 skip。
+func TestProjectRootCheck(t *testing.T) {
+	o, home := fakeOpts(t)
+	t.Setenv("HOME", home) // 守护进程按 $HOME 认家目录
+	resolved := func(p string) string { r, _ := filepath.EvalSymlinks(p); return r }
+	repo := filepath.Join(home, "repo")
+	writeFile(t, filepath.Join(repo, ".git", "HEAD"), []byte("ref: refs/heads/main\n"))
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(home, "plain")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	o.Project = filepath.Join(repo, "src")
+	r := Run(o)
+	if c := find(t, r, "project.root"); c.Status != OK || c.Name != "项目根" || c.Detail != resolved(repo) {
+		t.Fatalf("git 仓库: %+v", c)
+	}
+	for i, c := range r.Checks {
+		if c.ID == "hooks.gemini" && (i+1 == len(r.Checks) || r.Checks[i+1].ID != "project.root") {
+			t.Fatalf("project.root 应紧跟在钩子检查之后: %+v", r.Checks)
+		}
+	}
+
+	o.Project = plain
+	if c := find(t, Run(o), "project.root"); c.Status != Warn || c.Detail != "目录 "+resolved(plain)+" 不是 git 仓库，按当前目录当项目根" ||
+		c.Hint != "建议在 "+resolved(plain)+" 里 git init（项目根决定哪些写入算项目内）" {
+		t.Fatalf("非 git 目录: %+v", c)
+	}
+
+	for _, tc := range []struct{ dir, why string }{
+		{home, "是家目录"}, {filepath.Dir(home), "它的上级"}, {"/", "根目录"}, {filepath.Join(home, "gone"), "不是存在的目录"},
+	} {
+		o.Project = tc.dir
+		if c := find(t, Run(o), "project.root"); c.Status != Skip || !strings.HasPrefix(c.Detail, tc.dir+" ") || !strings.Contains(c.Detail, tc.why) ||
+			!strings.Contains(c.Detail, "不当项目根") || !strings.Contains(c.Detail, "所有写入都算项目外") {
+			t.Fatalf("%s: %+v", tc.dir, c)
+		}
+	}
+
+	o.Project = ""
+	if c := find(t, Run(o), "project.root"); c.Status != Skip {
+		t.Fatalf("没给 Project: %+v", c)
+	}
+}

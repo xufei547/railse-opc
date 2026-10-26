@@ -1,4 +1,4 @@
-// Package doctor 只读地检查一台机器上 Railse 的安装：守护进程、hub 连接、三个 CLI 的钩子与版本、权限；
+// Package doctor 只读地检查一台机器上 Railse 的安装：守护进程、hub 连接、三个 CLI 的钩子与版本、项目根、权限；
 // 在 hub 机器上还检查数据库、密码与推送密钥。doctor 自己不改配置、不建文件、不改权限（数据库按只读打开，
 // 连 -wal、-shm 也不建），网络只访问 hub 的 /api/version。唯一会起的进程是带超时的 `<cli> --version`，
 // 可能的副作用只有这些 CLI 自己在 --version 时写下的东西（如缓存、更新检查记录）；所以 sudo 下
@@ -57,7 +57,7 @@ func (r Report) Failed() bool {
 // Options 是检查的输入；函数型字段与 GOOS、Home、HTTP、Now 为空时由 Run 填真实实现。
 type Options struct {
 	AgentDir string // 守护进程数据目录
-	Project  string // 项目目录（钩子检查）；空则跳过
+	Project  string // 项目目录（项目级钩子、项目根检查）；空则跳过
 	HubDir   string // hub 数据目录；空则跳过 hub 侧
 	Bin      string // railse 可执行文件；用于比对钩子里的程序路径，空则只按文件名认
 	Version  string
@@ -155,13 +155,14 @@ func (o *Options) defaults() {
 	}
 }
 
-// Run 跑全部检查，顺序固定：守护进程、hub 可达、钩子、CLI 版本、hub 侧。
+// Run 跑全部检查，顺序固定：守护进程、hub 可达、钩子、项目根、CLI 版本、hub 侧。
 func Run(o Options) Report {
 	o.defaults()
 	r := Report{Version: o.Version}
 	r.Checks = append(r.Checks, agentChecks(o)...)
 	r.Checks = append(r.Checks, hubClientChecks(o)...)
 	r.Checks = append(r.Checks, hookChecks(o)...)
+	r.Checks = append(r.Checks, projectRootCheck(o))
 	r.Checks = append(r.Checks, cliChecks(o)...)
 	r.Checks = append(r.Checks, hubServerChecks(o)...)
 	return r

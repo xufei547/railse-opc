@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"sync"
 	"testing"
 )
@@ -914,6 +915,88 @@ func TestEverySegmentHasPrefix(t *testing.T) {
 	for _, c := range cases {
 		if got := everySegmentHasPrefix(c.cmd, c.prefix); got != c.want {
 			t.Errorf("everySegmentHasPrefix(%q, %q) = %v", c.cmd, c.prefix, got)
+		}
+	}
+}
+
+// builtinInProject 是内置的“项目内改动放行”。
+const builtinInProject = "  - id: builtin-write-in-project\n    source: builtin\n    scope: global\n    match: {risk: write_in_project}\n    action: allow\n"
+
+// scopedPush 是范围限定在 project 的用户放行规则。
+func scopedPush(project string) string {
+	return "version: 1\nrules:\n" + builtinInProject +
+		"  - id: push\n    source: user\n    scope: {project: \"" + project + "\"}\n    match: {payload: shell, command_prefix: \"git push origin\"}\n    action: allow\n"
+}
+
+// 项目根是家目录、家目录的祖先或根目录时按没有项目根处理：家目录下的写入是 write_outside（不被内置规则放行），
+// 范围是那个目录的规则不匹配，学不出命令与文件规则。只比较清理后的路径字符串。
+func TestBroadProjectRootTreatedAsNone(t *testing.T) {
+	for _, root := range []string{"/home/u", "/home/u/", "/home//u", "/home", "/"} {
+		ctx := Context{ProjectRoot: root, HomeDir: "/home/u", MachineID: "m1"}
+		write := Payload{Type: PayloadFileWrite, Path: "notes.md", Cwd: "/home/u"}
+		touch := Payload{Type: PayloadShell, Command: "touch notes.md", Cwd: "/home/u"}
+		for _, p := range []Payload{write, touch, {Type: PayloadFileWrite, Path: "/home/u/notes.md"}} {
+			if r := Classify(p, ctx); r != RiskWriteOutside {
+				t.Errorf("ProjectRoot %q: %+v 应为 write_outside, 得到 %s", root, p, r)
+			}
+		}
+		e := mustEngine(t, scopedPush(root))
+		if d := e.Evaluate(touch, ctx); d.Action != ActionAsk || d.Risk != RiskWriteOutside {
+			t.Errorf("ProjectRoot %q: 家目录下的写入不应被放行, 得到 %+v", root, d)
+		}
+		if d := e.Evaluate(Payload{Type: PayloadShell, Command: "git push origin main", Cwd: "/home/u"}, ctx); d.RuleID == "push" {
+			t.Errorf("ProjectRoot %q: 范围是 %q 的规则不应匹配, 得到 %+v", root, root, d)
+		}
+		for _, p := range []Payload{write, touch, {Type: PayloadShell, Command: "git status", Cwd: "/home/u"}} {
+			if _, err := ProposeRule(p, ctx, "id"); err == nil || !strings.Contains(err.Error(), "没有项目根") {
+				t.Errorf("ProjectRoot %q: %+v 应因没有项目根学不了, 得到 %v", root, p, err)
+			}
+		}
+	}
+}
+
+// 守卫只挡家目录、它的祖先与根目录：家目录下的项目照常；HomeDir 为空时只挡根目录。
+func TestNormalProjectRootUnaffectedByGuard(t *testing.T) {
+	for _, ctx := range []Context{
+		{ProjectRoot: "/home/u/proj", HomeDir: "/home/u"},
+		{ProjectRoot: "/home/u2", HomeDir: "/home/u"}, // 字符串前缀相同但不是祖先
+		{ProjectRoot: "/home/u", HomeDir: ""},
+	} {
+		root := ctx.ProjectRoot
+		touch := Payload{Type: PayloadShell, Command: "touch notes.md", Cwd: root}
+		if r := Classify(touch, ctx); r != RiskWriteInProject {
+			t.Errorf("%+v: 项目内写入应为 write_in_project, 得到 %s", ctx, r)
+		}
+		e := mustEngine(t, scopedPush(root))
+		if d := e.Evaluate(Payload{Type: PayloadShell, Command: "git push origin main", Cwd: root}, ctx); d.Action != ActionAllow || d.RuleID != "push" {
+			t.Errorf("%+v: 范围是项目根的规则应匹配, 得到 %+v", ctx, d)
+		}
+		if r, err := ProposeRule(touch, ctx, "id"); err != nil || r.Scope.Project != root {
+			t.Errorf("%+v: 应学成项目范围的规则, 得到 %+v, %v", ctx, r.Scope, err)
+		}
+	}
+	if r := Classify(Payload{Type: PayloadShell, Command: "touch a", Cwd: "/"}, Context{ProjectRoot: "/"}); r != RiskWriteOutside {
+		t.Errorf("HomeDir 为空时根目录仍不当项目根, 得到 %s", r)
+	}
+}
+
+// Root 只比较清理后的路径字符串：太宽时为空，否则原样返回 ProjectRoot。
+func TestContextRoot(t *testing.T) {
+	cases := []struct{ root, home, want string }{
+		{"", "/home/u", ""},
+		{"/home/u/proj", "/home/u", "/home/u/proj"},
+		{"/home/u/proj/", "/home/u", "/home/u/proj/"},
+		{"/home/u", "/home/u", ""},
+		{"/home/u/", "/home/u/", ""},
+		{"/home", "/home/u", ""},
+		{"/", "/home/u", ""},
+		{"/home/u2", "/home/u", "/home/u2"},
+		{"/home/u", "", "/home/u"},
+		{"/", "", ""},
+	}
+	for _, c := range cases {
+		if got := (Context{ProjectRoot: c.root, HomeDir: c.home}).Root(); got != c.want {
+			t.Errorf("Root(%q, 家目录 %q) = %q, 想要 %q", c.root, c.home, got, c.want)
 		}
 	}
 }

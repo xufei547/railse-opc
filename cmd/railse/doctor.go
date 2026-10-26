@@ -13,7 +13,7 @@ import (
 
 const doctorUsage = `用法:
   railse doctor [--project 目录] [--dir 目录] [--hub-dir 目录] [--bin 路径] [--json]
-    检查守护进程、hub 连接、三个 CLI 的钩子与版本、文件权限；这台机器有 hub 数据目录时还检查数据库、密码与推送密钥。
+    检查守护进程、hub 连接、三个 CLI 的钩子与版本、项目根、文件权限；这台机器有 hub 数据目录时还检查数据库、密码与推送密钥。
     只读：不改配置、不建文件；唯一会起的进程是 claude、codex、gemini 的 --version（带超时，sudo 下不跑）。
     hub 数据目录默认 $RAILSE_HUB_HOME，否则 ~/.railse-hub，Linux 上两者都没有时再看系统单元的 ` + systemHubDir + `
     （只在它归当前用户或以 root 运行时）；默认目录都不在就跳过 hub 侧，显式给的 --hub-dir 不在则报失败。
@@ -47,7 +47,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, doctorUsage)
 		fs.PrintDefaults()
 	}
-	project := fs.String("project", ".", "项目目录（检查项目级钩子）")
+	project := fs.String("project", ".", "项目目录（检查项目级钩子与项目根）")
 	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse")
 	hubDir := fs.String("hub-dir", "", "hub 数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub，Linux 上再看 "+systemHubDir+"（默认目录都不在则跳过 hub 侧）")
 	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")

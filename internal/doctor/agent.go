@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/autostart"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
@@ -50,6 +51,29 @@ func agentChecks(o Options) []Check {
 	out = append(out, agentRunningChecks(o)...)
 	out = append(out, autostartCheck("agent.autostart", "守护进程开机自启", o, "agent"))
 	return out
+}
+
+// projectRootCheck 看 Project 会被守护进程当成哪个项目根（同一个 agent.ResolveProjectRoot）：git 仓库 ok；
+// 不是 git 仓库、按目录本身当项目根时 warn，建议 git init；不当项目根（家目录、它的上级、根目录、不存在）时 skip。
+func projectRootCheck(o Options) Check {
+	const id, name = "project.root", "项目根"
+	if o.Project == "" {
+		return Check{ID: id, Name: name, Status: Skip, Detail: "没给项目目录"}
+	}
+	root, git := agent.ResolveProjectRoot(o.Project)
+	switch {
+	case git:
+		return Check{ID: id, Name: name, Status: OK, Detail: root}
+	case root != "":
+		return Check{ID: id, Name: name, Status: Warn, Detail: "目录 " + root + " 不是 git 仓库，按当前目录当项目根",
+			Hint: "建议在 " + root + " 里 git init（项目根决定哪些写入算项目内）"}
+	default:
+		why := "是家目录、它的上级或根目录"
+		if st, err := os.Stat(o.Project); err != nil || !st.IsDir() {
+			why = "不是存在的目录"
+		}
+		return Check{ID: id, Name: name, Status: Skip, Detail: o.Project + " " + why + "，不当项目根：在这里跑 agent 时所有写入都算项目外"}
+	}
 }
 
 // agentFilesCheck 看数据目录里存在的私密文件都是 0600（不存在的不算错：audit.jsonl 等要用到才建）。

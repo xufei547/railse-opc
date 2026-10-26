@@ -23,6 +23,9 @@ import (
 // maxSocketPath 是 socket 路径的字节上限。macOS 的 sun_path 只有 104 字节，留些余量。
 const maxSocketPath = 100
 
+// maxNonGitLogged 是记住“已提示过不是 git 仓库”的目录数上限：满了不再提示新目录，判定不受影响。
+const maxNonGitLogged = 1024
+
 // errHookGone 是钩子连接断开时取消请求 ctx 的原因，用来和守护进程关停区分开。
 var errHookGone = errors.New("钩子连接已断开")
 
@@ -57,6 +60,10 @@ type Server struct {
 	pauseMu     sync.Mutex
 	localPaused bool
 	hubPaused   bool
+
+	// nonGitLogged 是已在日志里提示过“不是 git 仓库”的目录，每个目录只提示一次，最多记 maxNonGitLogged 个；由 nonGitMu 保护。
+	nonGitMu     sync.Mutex
+	nonGitLogged map[string]struct{}
 
 	mu      sync.Mutex
 	closed  bool
@@ -293,10 +300,31 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	// 相对路径（含空 cwd 清理后的 "."）会按守护进程自己的工作目录解析，不能拿来找项目根。
 	var root string
 	if filepath.IsAbs(cwd) {
-		root = FindProjectRoot(cwd)
+		var git bool
+		if root, git = ResolveProjectRoot(cwd); !git && root != "" {
+			s.noteNonGitRoot(root)
+		}
 	}
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID}
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx
+}
+
+// noteNonGitRoot 在日志里提示 root 不是 git 仓库、按当前目录当项目根。同一目录只提示一次；
+// 记住的目录满了（maxNonGitLogged）就不再提示新目录，免得每条请求都记一行。
+func (s *Server) noteNonGitRoot(root string) {
+	s.nonGitMu.Lock()
+	_, seen := s.nonGitLogged[root]
+	first := !seen && len(s.nonGitLogged) < maxNonGitLogged
+	if first {
+		if s.nonGitLogged == nil {
+			s.nonGitLogged = map[string]struct{}{}
+		}
+		s.nonGitLogged[root] = struct{}{}
+	}
+	s.nonGitMu.Unlock()
+	if first {
+		s.log.Printf("目录 %s 不是 git 仓库，按当前目录当项目根；建议 git init", root)
+	}
 }
 
 // handlePermission 是审批主路径：引擎能定就定，定不了交给 Decider。

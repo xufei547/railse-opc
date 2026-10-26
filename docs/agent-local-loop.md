@@ -67,6 +67,10 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
       action: deny
 ```
 
+## 项目根
+
+内置规则放行的“项目内改动”（`write_in_project`）以项目根为界，项目根之外的写入（`write_outside`）要审批。守护进程从请求的工作目录向上找 `.git`（目录，或 worktree 的 `.git` 文件），找到的那一层就是项目根。不在 git 仓库里时按工作目录本身当项目根（不取它的上级），并在 `agent.log` 里提示“目录 X 不是 git 仓库，按当前目录当项目根；建议 git init”，每个目录只提示一次。家目录、它的上级与根目录永远不当项目根：工作目录就是它们时没有项目根，所有写入都算项目外；用 git 管 dotfiles、家目录里有 `.git` 的，家目录下的子目录按它自己当项目根。规则的 `scope: {project: …}` 与 hub 上“记住”的项目范围也按这个项目根，项目根是家目录、它的上级或根目录时一律按没有项目根处理。`railse doctor --project <目录>` 的 `project.root` 一项显示这个目录会被当成哪个项目根。
+
 ## 暂停与恢复
 
 `railse agent pause` 后，除命中用户 deny 规则的请求外一律交回终端；`railse agent resume` 恢复。暂停状态存在 `state.json`，重启守护进程后保持。

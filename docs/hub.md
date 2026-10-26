@@ -110,7 +110,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 
 范围 `scope`：`global` 去掉项目范围，规则对所有项目生效（放行规则仍限定原来的风险等级，换了项目定级不同就不命中）；`project` 限定请求的项目根，请求没有项目根时 422（文案以“不能记住：”开头，通常是“没有项目根，只能记成全局”；但先碰到别的记不住的原因时报的是那个原因，例如批准一条没有项目根的命令时说的是不能记成放行，客户端不要按文案判断）；缺省（不带或空串）沿用旧行为——有项目根记成项目，没有记成全局，所以不带 `scope` 的旧客户端（curl 等）行为不变。`project`、`global` 以外的取值一律 400。
 
-记不住时请求保持 pending，回 422，文案以“不能记住：”开头，例如：只读、项目内改动和联网操作之外的不能记成放行（`outward`、`destructive` 永远不行）；没有项目根的命令或文件写入不能记成放行（全局也不行：定级依赖项目根）；含凭据的命令（载荷里有 `<redacted>`）；命令、路径等超过 4 KiB；规则集已接近下发上限；拒绝匹配不上这条请求（例如 `a && b` 这样的复合命令，请手写规则）；webhook 请求；显式 `scope: project` 而没有项目根。
+记不住时请求保持 pending，回 422，文案以“不能记住：”开头，例如：只读、项目内改动和联网操作之外的不能记成放行（`outward`、`destructive` 永远不行）；没有项目根的命令或文件写入不能记成放行（全局也不行：定级依赖项目根；项目根是家目录、它的上级或根目录时也算没有）；含凭据的命令（载荷里有 `<redacted>`）；命令、路径等超过 4 KiB；规则集已接近下发上限；拒绝匹配不上这条请求（例如 `a && b` 这样的复合命令，请手写规则）；webhook 请求；显式 `scope: project` 而没有项目根。
 
 **`/ws/client` 帧**：每帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`。`request_new`、`request_updated` 的 `data` 是请求视图（与 `/api/inbox` 里每条同形状，守护进程、webhook、question/done 的请求都一样），`rules_updated` 是 `{"version"}`，`status` 是 `{"paused"}`。请求的状态变化、决定未送达（undeliverable），以及 `delivered_at` 从空变成有值（守护进程的送达回执、送达对账、webhook 回调成功）都推 `request_updated`。question 不再等（同一会话来了新事件）时不单独推 `request_updated`：之后的 question、done 与待审批本身以 `request_new` 推出，网页收到 `request_new` 时应重新拉 `/api/inbox`，`questions` 随之更新；由守护进程审计补进的历史行（本机自动放行、自动拒绝等）不推送，它们让 question 不再等的变化要到下一次全量拉取才看得到。推送只是“有变化”的提示：慢的订阅者（积压 64 帧）会被丢帧，网页每次连上或怀疑漏帧时必须全量重新拉取（`/api/inbox`、`/api/status`、`/api/rules` 等）。hub 每 30 秒复核一次登录并 ping，登录失效（登出、换密码、过期）时以 1008 关闭；网页不该发数据帧，发了就断开。
 

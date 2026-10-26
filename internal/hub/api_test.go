@@ -381,6 +381,46 @@ func TestRememberDenyShapes(t *testing.T) {
 	}
 }
 
+// 请求的项目根是机器的家目录（或它的上级、根目录）时按没有项目根处理，与引擎的守卫一致：“拒绝并记住”记成全局，
+// 按项目范围记住报“没有项目根”，file_write 的相对路径不接在家目录后面；不会记下范围是家目录、永远匹配不上的 deny。
+func TestRememberHomeProjectRootIsNone(t *testing.T) {
+	h := newTestHub(t)
+	m, err := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, root := range []string{"/home/u", "/home/u/", "/home", "/"} {
+		cmd := fmt.Sprintf("make deploy%d", i) // 每轮一条不同的命令：上一轮记下的全局 deny 不会抢先命中
+		p := policy.Payload{Type: policy.PayloadShell, Command: cmd, Cwd: "/home/u"}
+		mcp := policy.Payload{Type: policy.PayloadMCP, Server: "github", Tool: "create_issue"}
+		ids := []string{fmt.Sprintf("sh%d", i), fmt.Sprintf("mcp%d", i), fmt.Sprintf("fw%d", i)}
+		insertReq(t, h.st, store.Request{ID: ids[0], MachineID: m.ID, State: "pending", Payload: p, ProjectRoot: root})
+		insertReq(t, h.st, store.Request{ID: ids[1], MachineID: m.ID, State: "pending", Payload: mcp, ProjectRoot: root})
+		insertReq(t, h.st, store.Request{ID: ids[2], MachineID: m.ID, State: "pending", ProjectRoot: root,
+			Payload: policy.Payload{Type: policy.PayloadFileWrite, Path: "a.go"}})
+		for _, tc := range []struct{ id, action string }{{ids[0], "deny"}, {ids[0], "allow"}, {ids[1], "deny"}, {ids[1], "allow"}} {
+			if _, err := h.srv.propose(tc.id, tc.action, scopeProject); !errors.Is(err, errLearn) || !strings.Contains(err.Error(), "没有项目根") {
+				t.Fatalf("项目根 %q、%s %s 按项目范围记住应报没有项目根, 得到 %v", root, tc.id, tc.action, err)
+			}
+		}
+		if _, err := h.srv.Decide(DecideInput{RequestID: ids[2], Action: "deny", Remember: true}); !errors.Is(err, errLearn) {
+			t.Fatalf("项目根 %q: 没有 cwd 的相对路径不应接在家目录后面记住, 得到 %v", root, err)
+		}
+		got, err := h.srv.Decide(DecideInput{RequestID: ids[0], Action: "deny", Remember: true})
+		if err != nil || got.RuleID == "" {
+			t.Fatalf("项目根 %q: Decide = %+v, %v", root, got, err)
+		}
+		_, rules := ruleRows(t, h.st)
+		if r := rules[len(rules)-1]; !r.Scope.IsGlobal() || r.Match.CommandRegex != "^"+regexp.QuoteMeta(cmd)+"$" {
+			t.Fatalf("项目根 %q: 应记成全局的 deny: %+v", root, r)
+		}
+		d := evalWith(t, h.st, p, policy.Context{ProjectRoot: root, HomeDir: "/home/u", MachineID: m.ID})
+		if d.Action != policy.ActionDeny || d.RuleID != got.RuleID {
+			t.Fatalf("项目根 %q: 记住的规则应拒绝原请求: %+v", root, d)
+		}
+	}
+}
+
 // 学规则之后、改状态之前请求已被别处结束（取消、过期、重发顶掉）：删掉刚学的规则、记 rule_learn_rolled_back，
 // 不下发决定；下发的规则快照里没有那条规则。
 func TestRememberRolledBackWhenRequestSettledMeanwhile(t *testing.T) {
