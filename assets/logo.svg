@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Railse</title>
+  <rect width="1024" height="1024" rx="224" fill="#1f2a44"/>
+  <g fill="none" stroke="#ffffff" stroke-width="88" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M352 780 V244"/>
+    <path d="M520 780 V560 C520 440 600 372 700 340 L760 322"/>
+  </g>
+  <circle cx="776" cy="316" r="60" fill="#f59e0b"/>
+</svg>

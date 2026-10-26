@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" width="112" alt="Railse"></p>
+
 # Railse 一人公司（Railse OPC）
 
 Railse 一人公司（Railse OPC）用策略引擎自动审批 AI 编程 agent（Claude Code、Codex CLI、Gemini CLI）的工具调用，定不了的进手机收件箱，在手机上批准或拒绝（Gemini CLI 只能自动拒绝，定不了的交回终端，不进手机）。
