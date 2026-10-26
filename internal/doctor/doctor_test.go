@@ -77,7 +77,11 @@ func fakeOpts(t *testing.T) (Options, string) {
 }
 
 func TestAgentChecksHappyAndPermissions(t *testing.T) {
-	o, _ := fakeOpts(t)
+	o, home := fakeOpts(t)
+	// 钩子都装在用户级：没给 Project 时只看用户级，也全部正常
+	writeFile(t, hooksconf.ClaudeUserPath(home), planDoc(t, "claude", "/usr/local/bin/railse"))
+	writeFile(t, hooksconf.GeminiUserPath(home), planDoc(t, "gemini", "/usr/local/bin/railse"))
+	writeFile(t, hooksconf.CodexPath(home), planDoc(t, "codex", "/usr/local/bin/railse"))
 	r := Run(o)
 	for _, id := range []string{"agent.dir", "agent.files", "agent.socket", "agent.running"} {
 		if c := find(t, r, id); c.Status != OK {
@@ -90,8 +94,10 @@ func TestAgentChecksHappyAndPermissions(t *testing.T) {
 	if c := find(t, r, "agent.hub"); c.Status != Warn || !strings.Contains(c.Detail, "未接入") {
 		t.Fatalf("agent.hub = %+v", c)
 	}
-	if c := find(t, r, "hooks.claude"); c.Status != Skip {
-		t.Fatalf("没给 Project 应 skip: %+v", c)
+	for _, id := range []string{"hooks.claude", "hooks.codex", "hooks.gemini"} {
+		if c := find(t, r, id); c.Status != OK {
+			t.Fatalf("没给 Project 时按用户级检查 %s: %+v", id, c)
+		}
 	}
 	if r.Failed() {
 		t.Fatalf("全部正常时不应失败: %+v", r.Checks)
@@ -544,6 +550,152 @@ func TestClaudeHooksOldLocation(t *testing.T) {
 	}
 	if c := find(t, Run(o), "hooks.claude"); c.Status != OK {
 		t.Fatalf("同一文件: %+v", c)
+	}
+}
+
+// Claude、Gemini 的钩子：用户级（Home 下）或项目级（Project 下）任一装了就算装了。只有用户级：按用户级文件查，修复提示
+// 不带 --project；只有项目级：沿用项目级的检查，提示带 --project；两处都装：按用户级查，至少 warn，说会触发两次；
+// 都没装：fail，列出看过的位置；用户级是坏 JSON：fail。
+func TestHookChecksUserOrProject(t *testing.T) {
+	o, home := fakeOpts(t)
+	proj := filepath.Join(home, "proj")
+	bin := "/usr/local/bin/railse"
+	o.Bin = bin
+	user := map[string]string{"claude": hooksconf.ClaudeUserPath(home), "gemini": hooksconf.GeminiUserPath(home)}
+	local, shared := hooksconf.ClaudePaths(proj)
+	project := map[string]string{"claude": local, "gemini": hooksconf.GeminiPath(proj)}
+	ids := map[string]string{"claude": "hooks.claude", "gemini": "hooks.gemini"}
+	check := func(cli string) Check { t.Helper(); return find(t, Run(o), ids[cli]) }
+	userHint := func(cli string) string { return "railse setup hooks --" + cli }
+
+	// Project 为空、用户级没装：fail，细节是看过的用户级文件，提示装用户级；Codex 两项照样检查
+	for cli := range ids {
+		if c := check(cli); c.Status != Fail || !strings.Contains(c.Detail, user[cli]) || c.Hint != userHint(cli) {
+			t.Fatalf("%s 没装: %+v", cli, c)
+		}
+	}
+	if c := find(t, Run(o), "hooks.codex"); c.Status == Skip {
+		t.Fatalf("没给 Project 时 Codex 照样检查: %+v", c)
+	}
+	// 只有用户级装了：ok
+	for cli, p := range user {
+		writeFile(t, p, planDoc(t, cli, bin))
+	}
+	for cli := range ids {
+		if c := check(cli); c.Status != OK || c.Detail != user[cli] {
+			t.Fatalf("%s 只有用户级: %+v", cli, c)
+		}
+	}
+	// 用户级不全：fail，提示装用户级
+	writeFile(t, user["claude"], []byte(strings.Replace(string(planDoc(t, "claude", bin)), `"timeout": 86400`, `"timeout": 60`, 1)))
+	if c := check("claude"); c.Status != Fail || !strings.Contains(c.Detail, user["claude"]) || c.Hint != userHint("claude") {
+		t.Fatalf("用户级不全: %+v", c)
+	}
+	writeFile(t, user["claude"], planDoc(t, "claude", bin))
+	// 给了 Project、项目级没装：仍按用户级，ok
+	o.Project = proj
+	for cli := range ids {
+		if c := check(cli); c.Status != OK || c.Detail != user[cli] {
+			t.Fatalf("%s 给了 Project、只有用户级: %+v", cli, c)
+		}
+	}
+	// 两处都装了：warn，说项目级的文件也装了、会触发两次，提示删掉项目级的条目
+	for cli, p := range project {
+		writeFile(t, p, planDoc(t, cli, bin))
+	}
+	for cli := range ids {
+		c := check(cli)
+		if c.Status != Warn || !strings.Contains(c.Detail, user[cli]) || !strings.Contains(c.Detail, project[cli]) || !strings.Contains(c.Detail, "触发两次") ||
+			!strings.Contains(c.Hint, "删掉") || !strings.Contains(c.Hint, project[cli]) {
+			t.Fatalf("%s 两处都装: %+v", cli, c)
+		}
+	}
+	// Claude 项目级的旧位置也算
+	os.Remove(local)
+	writeFile(t, shared, planDoc(t, "claude", bin))
+	if c := check("claude"); c.Status != Warn || !strings.Contains(c.Detail, shared) || !strings.Contains(c.Detail, "触发两次") {
+		t.Fatalf("用户级与项目级旧位置都装: %+v", c)
+	}
+	os.Remove(shared)
+	writeFile(t, local, planDoc(t, "claude", bin))
+	// 只有项目级装了（用户级文件在，但没有 Railse 的条目）：沿用项目级的检查，ok；不全时 fail，提示带 --project
+	writeFile(t, user["claude"], []byte(`{"model":"opus"}`))
+	os.Remove(user["gemini"])
+	for cli := range ids {
+		if c := check(cli); c.Status != OK || c.Detail != project[cli] {
+			t.Fatalf("%s 只有项目级: %+v", cli, c)
+		}
+	}
+	writeFile(t, project["gemini"], []byte(strings.Replace(string(planDoc(t, "gemini", bin)), `"timeout": 86400000`, `"timeout": 5`, 1)))
+	if c := check("gemini"); c.Status != Fail || c.Hint != "railse setup hooks --project "+hooksconf.ShellQuote(proj)+" --gemini" {
+		t.Fatalf("只有项目级且不全: %+v", c)
+	}
+	// 都没装：fail，细节列出看过的用户级与项目级位置，提示装用户级
+	os.Remove(local)
+	os.Remove(project["gemini"])
+	for cli := range ids {
+		c := check(cli)
+		if c.Status != Fail || !strings.Contains(c.Detail, user[cli]) || !strings.Contains(c.Detail, project[cli]) || c.Hint != userHint(cli) {
+			t.Fatalf("%s 都没装: %+v", cli, c)
+		}
+	}
+	// 用户级是坏 JSON：fail，提示修好再装（项目级装着也一样）
+	writeFile(t, local, planDoc(t, "claude", bin))
+	writeFile(t, user["claude"], []byte("{bad"))
+	if c := check("claude"); c.Status != Fail || !strings.Contains(c.Detail, user["claude"]) || !strings.Contains(c.Detail, "JSON") ||
+		!strings.Contains(c.Hint, "修好 JSON") || !strings.Contains(c.Hint, userHint("claude")) {
+		t.Fatalf("用户级坏 JSON: %+v", c)
+	}
+}
+
+// 同一个文件不算两处：项目就是家目录时 Gemini 的项目级就是用户级；Claude 项目级的旧位置 <项目>/.claude/settings.json
+// 可能就是用户级文件（项目就是家目录，或链过去）。Home 为空时只看项目级，两者都空时 skip。
+func TestHookChecksSameFileAndMissingLevels(t *testing.T) {
+	o, home := fakeOpts(t)
+	bin := "/usr/local/bin/railse"
+	o.Bin, o.Project = bin, home
+	writeFile(t, hooksconf.ClaudeUserPath(home), planDoc(t, "claude", bin))
+	writeFile(t, hooksconf.GeminiUserPath(home), planDoc(t, "gemini", bin))
+	for _, id := range []string{"hooks.claude", "hooks.gemini"} {
+		if c := find(t, Run(o), id); c.Status != OK {
+			t.Fatalf("项目就是家目录时 %s 不算两处: %+v", id, c)
+		}
+	}
+	// 项目就是家目录、又装了 ~/.claude/settings.local.json（在 ~ 里是项目级的本机配置）：真是两处
+	local, _ := hooksconf.ClaudePaths(home)
+	writeFile(t, local, planDoc(t, "claude", bin))
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, local) || !strings.Contains(c.Detail, "触发两次") {
+		t.Fatalf("~/.claude/settings.local.json 也装了: %+v", c)
+	}
+	os.Remove(local)
+	// 项目的 .claude/settings.json 链到用户级文件：同一个文件
+	proj := filepath.Join(home, "proj")
+	_, shared := hooksconf.ClaudePaths(proj)
+	os.MkdirAll(filepath.Dir(shared), 0o755)
+	if err := os.Symlink(hooksconf.ClaudeUserPath(home), shared); err != nil {
+		t.Fatal(err)
+	}
+	o.Project = proj
+	if c := find(t, Run(o), "hooks.claude"); c.Status != OK || c.Detail != hooksconf.ClaudeUserPath(home) {
+		t.Fatalf("项目的 settings.json 链到用户级文件不算两处: %+v", c)
+	}
+	// Home 为空：只看项目级（沿用项目级的检查与提示）
+	t.Setenv("HOME", "")
+	o.Home = ""
+	if c := find(t, Run(o), "hooks.gemini"); c.Status != Fail || !strings.Contains(c.Detail, hooksconf.GeminiPath(proj)) || !strings.Contains(c.Hint, "--project") {
+		t.Fatalf("Home 为空时只看项目级: %+v", c)
+	}
+	writeFile(t, hooksconf.GeminiPath(proj), planDoc(t, "gemini", bin))
+	if c := find(t, Run(o), "hooks.gemini"); c.Status != OK {
+		t.Fatalf("Home 为空、项目级装了: %+v", c)
+	}
+	// 两者都空：skip
+	o.Project = ""
+	r := Run(o)
+	for _, id := range []string{"hooks.claude", "hooks.codex", "hooks.codex_notify", "hooks.gemini"} {
+		if c := find(t, r, id); c.Status != Skip {
+			t.Fatalf("Home 与 Project 都空时 %s 应 skip: %+v", id, c)
+		}
 	}
 }
 

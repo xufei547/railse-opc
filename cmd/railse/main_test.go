@@ -2,9 +2,35 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestMain 在任何测试之前把 HOME 换成新建的临时目录（结束时删掉），并清掉 RAILSE_HOME、RAILSE_HUB_HOME：
+// 哪个测试漏设了它们，也写不到真实家目录下的 ~/.claude、~/.gemini、~/.codex、~/.railse。
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "建临时 HOME:", err)
+		os.Exit(1)
+	}
+	os.Setenv("HOME", home)
+	os.Unsetenv("RAILSE_HOME")
+	os.Unsetenv("RAILSE_HUB_HOME")
+	code := m.Run()
+	os.RemoveAll(home)
+	os.Exit(code)
+}
+
+// TestMain 换上的 HOME 是临时目录：漏设 HOME 的测试也碰不到真实家目录。
+func TestHomeIsTemporary(t *testing.T) {
+	if home := os.Getenv("HOME"); home == "" || !strings.HasPrefix(home, filepath.Clean(os.TempDir())+string(filepath.Separator)) {
+		t.Fatalf("HOME = %q，应是 %s 下的临时目录", home, os.TempDir())
+	}
+}
 
 func TestRunVersion(t *testing.T) {
 	var out, errOut bytes.Buffer

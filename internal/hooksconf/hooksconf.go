@@ -375,3 +375,9 @@ func GeminiPath(project string) string { return filepath.Join(project, ".gemini"
 
 // CodexPath 是 Codex 的用户级钩子文件。
 func CodexPath(home string) string { return filepath.Join(home, ".codex", "hooks.json") }
+
+// ClaudeUserPath 是 Claude Code 的用户级配置（对所有项目生效）：railse setup hooks 不给 --project 时钩子写在这里。
+func ClaudeUserPath(home string) string { return filepath.Join(home, ".claude", "settings.json") }
+
+// GeminiUserPath 是 Gemini CLI 的用户级配置（对所有项目生效）：railse setup hooks 不给 --project 时钩子写在这里。
+func GeminiUserPath(home string) string { return filepath.Join(home, ".gemini", "settings.json") }

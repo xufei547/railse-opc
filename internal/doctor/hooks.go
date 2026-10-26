@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,38 +21,32 @@ var codexNotifyRe = regexp.MustCompile(`(?m)^[ \t]*notify[ \t]*=[ \t]*\[[^\]]*["
 // tomlTableRe 认 TOML 的表头行（[x] 或 [[x]]）：顶层键必须写在第一个表头之前。
 var tomlTableRe = regexp.MustCompile(`(?m)^[ \t]*\[[^\r\n]*`)
 
+// hookChecks 看三个 CLI 的钩子。Claude、Gemini 的用户级（Home 下）或项目级（Project 下）任一装了就算装了（见 levelsCheck）；
+// Codex 的钩子与 notify 只有用户级，只看 Home。
 func hookChecks(o Options) []Check {
-	if o.Project == "" {
-		const why = "没有指定项目目录（--project）"
-		return []Check{
-			{ID: "hooks.claude", Name: "Claude Code 钩子", Status: Skip, Detail: why},
-			{ID: "hooks.codex", Name: "Codex 钩子", Status: Skip, Detail: why},
-			{ID: "hooks.codex_notify", Name: "Codex notify", Status: Skip, Detail: why},
-			{ID: "hooks.gemini", Name: "Gemini 钩子", Status: Skip, Detail: why},
-		}
-	}
 	codex := []Check{
 		{ID: "hooks.codex", Name: "Codex 钩子", Status: Skip, Detail: noHome},
 		{ID: "hooks.codex_notify", Name: "Codex notify", Status: Skip, Detail: noHome},
 	}
 	if o.Home != "" { // Codex 的钩子与 notify 都在用户级的 ~/.codex 下
-		codex = []Check{hookFileCheck("hooks.codex", "Codex 钩子", "codex", hooksconf.CodexPath(o.Home), o), codexNotifyCheck(o)}
+		codex = []Check{hookFileCheck("hooks.codex", "Codex 钩子", "codex", hooksconf.CodexPath(o.Home), setupHint(o, "codex", ""), o), codexNotifyCheck(o)}
 	}
 	return []Check{
 		claudeHookCheck(o),
 		codex[0],
 		codex[1],
-		hookFileCheck("hooks.gemini", "Gemini 钩子", "gemini", hooksconf.GeminiPath(o.Project), o),
+		geminiHookCheck(o),
 	}
 }
 
-// setupHint 是重装某个 CLI 钩子的命令。Codex 的钩子是用户级的，不用 --project。守护进程不在 ~/.railse 时带上 --dir
-// （setup hooks 据此在钩子命令里写 --socket）。
-func setupHint(o Options, cli string) string {
-	if cli == "codex" {
-		return "railse setup hooks --codex" + dirFlag(o)
+// setupHint 是重装某个 CLI 钩子的命令：project 为空时装用户级（Codex 只有用户级），否则带 --project 装那个项目的项目级。
+// 守护进程不在 ~/.railse 时带上 --dir（setup hooks 据此在钩子命令里写 --socket）。
+func setupHint(o Options, cli, project string) string {
+	h := "railse setup hooks"
+	if project != "" {
+		h += " --project " + hooksconf.ShellQuote(project)
 	}
-	return "railse setup hooks --project " + hooksconf.ShellQuote(o.Project) + " --" + cli + dirFlag(o)
+	return h + " --" + cli + dirFlag(o)
 }
 
 // agentSocket 是 --dir 那个守护进程的 socket。
@@ -102,6 +97,19 @@ func hasOurs(path, bin string) bool {
 	return err == nil && len(ins.Events) > 0
 }
 
+// broken 报告 path 在、却读不了或不是合法的钩子配置（这时 hookFileCheck 报 fail）。
+func broken(path, bin string) bool {
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	_, err = hooksconf.Inspect(b, bin)
+	return err != nil
+}
+
 func sameFile(a, b string) bool {
 	sa, err := os.Stat(a)
 	if err != nil {
@@ -111,24 +119,112 @@ func sameFile(a, b string) bool {
 	return err == nil && os.SameFile(sa, sb)
 }
 
-// claudeHookCheck 看 Claude 的钩子：现在写在 .claude/settings.local.json，旧版写在 .claude/settings.json。
+// claudeHookCheck 看 Claude 的钩子：用户级 ~/.claude/settings.json，或项目级（见 claudeProjectCheck）。
+func claudeHookCheck(o Options) Check {
+	const id, name = "hooks.claude", "Claude Code 钩子"
+	var project []string
+	if o.Project != "" {
+		local, shared := hooksconf.ClaudePaths(o.Project)
+		project = []string{local, shared}
+	}
+	return levelsCheck(id, name, "claude", userPath(o, hooksconf.ClaudeUserPath), project, func() Check { return claudeProjectCheck(o) }, o)
+}
+
+// geminiHookCheck 看 Gemini 的钩子：用户级 ~/.gemini/settings.json，或项目级 <项目>/.gemini/settings.json。
+func geminiHookCheck(o Options) Check {
+	const id, name = "hooks.gemini", "Gemini 钩子"
+	var project []string
+	if o.Project != "" {
+		project = []string{hooksconf.GeminiPath(o.Project)}
+	}
+	projectCheck := func() Check {
+		return hookFileCheck(id, name, "gemini", hooksconf.GeminiPath(o.Project), setupHint(o, "gemini", o.Project), o)
+	}
+	return levelsCheck(id, name, "gemini", userPath(o, hooksconf.GeminiUserPath), project, projectCheck, o)
+}
+
+// userPath 是 Home 下的用户级配置；Home 为空时为空（不拼相对路径）。
+func userPath(o Options, path func(home string) string) string {
+	if o.Home == "" {
+		return ""
+	}
+	return path(o.Home)
+}
+
+// levelsCheck 合起 Claude、Gemini 的用户级与项目级：任一处装了就算装了。user 是用户级文件（Home 为空时为空，只看项目级），
+// project 是项目级要看的文件（Project 为空时为空，只看用户级），projectCheck 是只看项目级时的检查（沿用项目级的规则，
+// 修复提示带 --project）。同一个文件不算两处：项目就是家目录、项目的文件链到用户级的文件时，按文件身份去重。
+// 只有用户级装了：按用户级文件查（hookFileCheck）；两处都装：同样按用户级查，至少 warn（会触发两次），提示删掉项目级的条目；
+// 只有项目级装了：projectCheck；都没装：fail，列出看过的位置，提示装用户级。用户级（或都没装时项目级）的文件读不了、
+// 不是合法 JSON 时报 fail（hookFileCheck 的写法）。
+func levelsCheck(id, name, cli, user string, project []string, projectCheck func() Check, o Options) Check {
+	switch {
+	case user == "" && len(project) == 0:
+		return Check{ID: id, Name: name, Status: Skip, Detail: "取不到家目录（$HOME 没设），也没有指定项目目录（--project），跳过"}
+	case user == "":
+		return projectCheck()
+	}
+	hint := setupHint(o, cli, "")
+	looked := []string{user}
+	var projLooked, projHas []string
+	for _, p := range project {
+		if slices.ContainsFunc(looked, func(q string) bool { return samePath(p, q) }) {
+			continue
+		}
+		looked = append(looked, p)
+		projLooked = append(projLooked, p)
+		if hasOurs(p, o.Bin) {
+			projHas = append(projHas, p)
+		}
+	}
+	userHas := hasOurs(user, o.Bin)
+	switch {
+	case userHas && len(projHas) > 0:
+		c := hookFileCheck(id, name, cli, user, hint, o)
+		if c.Status == OK {
+			c.Status = Warn
+		}
+		files := strings.Join(projHas, "、")
+		c.Detail += "；项目级 " + files + " 也装了，钩子会触发两次"
+		del := "删掉 " + files + " 里 Railse 的钩子条目（用户级已对所有项目生效）"
+		if c.Hint == "" {
+			c.Hint = del
+		} else {
+			c.Hint += "；" + del
+		}
+		return c
+	case userHas || broken(user, o.Bin): // 用户级坏了：先修它，不给 --project 的 setup hooks 也要往里写
+		return hookFileCheck(id, name, cli, user, hint, o)
+	case len(projHas) > 0:
+		return projectCheck()
+	}
+	for _, p := range projLooked {
+		if broken(p, o.Bin) {
+			return hookFileCheck(id, name, cli, p, hint, o)
+		}
+	}
+	return Check{ID: id, Name: name, Status: Fail, Detail: "没装钩子（看过 " + strings.Join(looked, "、") + "）", Hint: hint}
+}
+
+// claudeProjectCheck 看 Claude 的项目级钩子：现在写在 .claude/settings.local.json，旧版写在 .claude/settings.json。
 // 只在旧位置：钩子照样生效，报 warn 提示迁走（旧位置的条目本身不全时照实 fail）；两处都有：会触发两次，warn；
 // 两处是同一个文件（链接）不算两处；两处都没有：fail；settings.local.json 是坏 JSON 时报它（setup 也要往里写）。
-func claudeHookCheck(o Options) Check {
+func claudeProjectCheck(o Options) Check {
 	const id, name = "hooks.claude", "Claude Code 钩子"
 	local, shared := hooksconf.ClaudePaths(o.Project)
 	localHas, sharedHas := hasOurs(local, o.Bin), hasOurs(shared, o.Bin) && !sameFile(local, shared)
-	migrate := "运行 " + setupHint(o, "claude") + " 迁到 settings.local.json"
+	hint := setupHint(o, "claude", o.Project)
+	migrate := "运行 " + hint + " 迁到 settings.local.json"
 	switch {
 	case sharedHas && !localHas:
 		if b, err := os.ReadFile(local); err == nil {
 			if _, err := hooksconf.Inspect(b, o.Bin); err != nil { // settings.local.json 坏了：先修它，setup 也要往里写
-				c := hookFileCheck(id, name, "claude", local, o)
+				c := hookFileCheck(id, name, "claude", local, hint, o)
 				c.Detail += "；钩子还在 .claude/settings.json（旧位置）"
 				return c
 			}
 		}
-		c := hookFileCheck(id, name, "claude", shared, o)
+		c := hookFileCheck(id, name, "claude", shared, hint, o)
 		if c.Status == Fail {
 			c.Detail = "钩子还在 .claude/settings.json（旧位置），且不全：" + c.Detail
 			return c
@@ -139,7 +235,7 @@ func claudeHookCheck(o Options) Check {
 		}
 		return Check{ID: id, Name: name, Status: Warn, Detail: detail, Hint: migrate}
 	case sharedHas && localHas:
-		c := hookFileCheck(id, name, "claude", local, o)
+		c := hookFileCheck(id, name, "claude", local, hint, o)
 		if c.Status == OK {
 			c.Status = Warn
 		}
@@ -151,12 +247,12 @@ func claudeHookCheck(o Options) Check {
 		}
 		return c
 	}
-	return hookFileCheck(id, name, "claude", local, o)
+	return hookFileCheck(id, name, "claude", local, hint, o)
 }
 
 // hookFileCheck 看一份钩子配置：Expected(cli) 的每个事件都有我们的条目且超时不低于下限；Bin 非空时程序路径要是它。
-func hookFileCheck(id, name, cli, path string, o Options) Check {
-	hint := setupHint(o, cli)
+// hint 是重装这份配置的命令（setupHint）。
+func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return Check{ID: id, Name: name, Status: Fail, Detail: path + " 不存在，没装钩子", Hint: hint}

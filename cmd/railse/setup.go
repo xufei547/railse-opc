@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,14 +19,17 @@ import (
 )
 
 const setupAllUsage = `  railse setup all --hub URL --token 接入码 [--name 名字] [--project 目录] [--dir 目录] [--bin 路径] [--no-autostart] [--no-hooks] [--force]
-    一键：接入 hub → 装三个 CLI 的钩子 → 开机自启 → 体检（railse doctor）。
+    一键：接入 hub → 装三个 CLI 的钩子 → 开机自启 → 体检（railse doctor）。钩子默认装用户级（对所有项目生效），
+    给了 --project 才把 Claude、Gemini 的装成那个项目的项目级（同 setup hooks）。
     已接入过（有 machine.json）时跳过接入，这时可以不给 --hub 与 --token；--force 重新接入。体检的失败只展示，不算 setup all 失败。`
 
 const setupUsage = `用法:
 ` + setupAllUsage + `
   railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--dir 目录] [--bin 路径] [--dry-run]
-    默认三个都装。Claude 写项目级 .claude/settings.local.json（不入库；旧版写在 settings.json 的会迁走），
-    Gemini 写项目级 .gemini/settings.json，Codex 写用户级 ~/.codex/hooks.json。
+    默认三个都装，都是用户级（对所有项目生效）：Claude 写 ~/.claude/settings.json，Gemini 写 ~/.gemini/settings.json
+    （第一次改这两个文件之前各备份一次，<文件>.railse-bak-<时间>），Codex 写 ~/.codex/hooks.json。
+    --project 目录：Claude、Gemini 改写那个项目的项目级 .claude/settings.local.json（不入库；旧版写在 settings.json 的会迁走）
+    与 .gemini/settings.json，Codex 照旧是用户级。
     --dir 是守护进程的数据目录（默认 $RAILSE_HOME 或 ~/.railse）：不是 ~/.railse 时钩子命令带 --socket 指向它。
   railse setup autostart [--hub] [--uninstall] [--status] [--dir 目录] [--bin 路径] [--system] [--user 名字] [--dry-run] [-- hub run 的额外参数]
     开机自启并在退出后自动拉起（macOS launchd、Linux systemd），默认托管守护进程，--hub 托管 hub；详见 railse setup autostart -h。`
@@ -35,7 +39,57 @@ type pendingWrite struct {
 	show, path string // show 是给人看的路径，path 是解开符号链接后真正写的文件
 	data       []byte
 	mode       os.FileMode
-	migrated   bool // 只删不加：把 Railse 钩子从 Claude 的 settings.json 迁走
+	migrated   bool   // 只删不加：把 Railse 钩子从 Claude 的 settings.json 迁走
+	user       bool   // 用户级配置（对所有项目生效）
+	backup     []byte // 非空时写之前先把它（解开链接后的现有内容）备份到 show 旁边，见 needBackup
+}
+
+// backupSuffix 是用户级配置备份文件名里的后缀：<文件>.railse-bak-<时间>。
+const backupSuffix = ".railse-bak-"
+
+// backupPath 是 show 在 now 时刻的备份文件：放在 show（给人看的路径）旁边，不放进链接指向的目录。时间用本地时间。
+func backupPath(show string, now time.Time) string {
+	return show + backupSuffix + now.Format("20060102-150405")
+}
+
+// needBackup 报告写用户级配置 show 之前要不要先备份：现有内容非空、这次要写的与它不同，且 show 旁边还没有任何
+// <文件名>.railse-bak-*（只在第一次改它之前备份一次）。
+func needBackup(show string, existing, data []byte) (bool, error) {
+	if len(existing) == 0 || bytes.Equal(existing, data) {
+		return false, nil
+	}
+	ents, err := os.ReadDir(filepath.Dir(show))
+	if err != nil {
+		return false, err
+	}
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), filepath.Base(show)+backupSuffix) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// writeBackup 把 data 写到 show 旁边新建的备份文件（0600，O_EXCL：不覆盖已有文件），返回备份文件的路径。
+// 中途失败时删掉写了一半的备份。
+func writeBackup(show string, data []byte) (string, error) {
+	bak := backupPath(show, time.Now())
+	f, err := os.OpenFile(bak, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(bak)
+		return "", err
+	}
+	return bak, nil
 }
 
 // resolveForWrite 解开符号链接：配置是符号链接（如 dotfiles）时写到链接指向的文件，不把链接换成普通文件。
@@ -76,7 +130,7 @@ func claudeMigration(shared, localReal, bin string, stderr io.Writer) (pendingWr
 		return pendingWrite{}, false
 	}
 	if home, herr := os.UserHomeDir(); herr == nil {
-		if user := filepath.Join(home, ".claude", "settings.json"); samePath(target, user) {
+		if user := hooksconf.ClaudeUserPath(home); samePath(target, user) {
 			fmt.Fprintf(stderr, "警告：没有迁走 %s 里的 Railse 钩子：它就是 %s，这是用户级配置，迁走会让所有项目失去钩子；如确要迁走请手动删"+
 				"（不删的话，在这个目录里它会和 settings.local.json 里的一起触发两次）\n", shared, user)
 			return pendingWrite{}, false
@@ -136,7 +190,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	}
 	fs := flag.NewFlagSet("setup hooks", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	project := fs.String("project", ".", "项目目录")
+	project := fs.String("project", "", "项目目录：给了才把 Claude、Gemini 的钩子写成这个项目的项目级，默认写用户级")
 	doClaude := fs.Bool("claude", false, "只装 Claude Code")
 	doCodex := fs.Bool("codex", false, "只装 Codex")
 	doGemini := fs.Bool("gemini", false, "只装 Gemini")
@@ -167,11 +221,28 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		}
 		*bin, _ = filepath.Abs(exe)
 	}
-	absProject, err := filepath.Abs(*project)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+	// 不给 --project：Claude、Gemini 写用户级（对所有项目生效），不做 settings.json 的迁移（它只针对项目级）
+	userLevel := *project == ""
+	var claudePath, claudeShared, geminiPath string
+	if userLevel {
+		if *doClaude || *doGemini {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintf(stderr, "取不到家目录（%v），装不了用户级的 Claude、Gemini 钩子：用 --project 目录 装成那个项目的项目级\n", err)
+				return 1
+			}
+			claudePath, geminiPath = hooksconf.ClaudeUserPath(home), hooksconf.GeminiUserPath(home)
+		}
+	} else {
+		absProject, err := filepath.Abs(*project)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		claudePath, claudeShared = hooksconf.ClaudePaths(absProject)
+		geminiPath = hooksconf.GeminiPath(absProject)
 	}
+	codexUser := *codexFile == "" // 默认的 ~/.codex/hooks.json 是用户级
 	if *codexFile == "" && *doCodex {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -180,15 +251,15 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		}
 		*codexFile = hooksconf.CodexPath(home)
 	}
-	claudeLocal, claudeShared := hooksconf.ClaudePaths(absProject)
 	targets := []struct {
 		cli  string
 		on   bool
 		path string
+		user bool
 	}{
-		{"claude", *doClaude, claudeLocal},
-		{"codex", *doCodex, *codexFile},
-		{"gemini", *doGemini, hooksconf.GeminiPath(absProject)},
+		{"claude", *doClaude, claudePath, userLevel},
+		{"codex", *doCodex, *codexFile, codexUser},
+		{"gemini", *doGemini, geminiPath, userLevel},
 	}
 	// 先把所有目标（连同 settings.json 的迁移）都算好，任何一个出错就一个都不写
 	var writes []pendingWrite
@@ -207,30 +278,56 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "%s: %v\n", tg.path, err)
 			return 1
 		}
-		writes = append(writes, pendingWrite{show: tg.path, path: path, data: merged, mode: mode})
-		if tg.cli == "claude" {
+		w := pendingWrite{show: tg.path, path: path, data: merged, mode: mode, user: tg.user}
+		// 用户级的 Claude、Gemini 配置里多是用户自己的设置：第一次改它之前备份一次（Codex 的 hooks.json 只放钩子，不备份）
+		if tg.user && tg.cli != "codex" {
+			bak, err := needBackup(tg.path, existing, merged)
+			if err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			if bak {
+				w.backup = existing
+			}
+		}
+		writes = append(writes, w)
+		if tg.cli == "claude" && !userLevel {
 			// 紧跟在 settings.local.json 之后：先装好新的再删旧的，中途失败也不会两处都没有
-			if w, ok := claudeMigration(claudeShared, path, *bin, stderr); ok {
-				writes = append(writes, w)
+			if mw, ok := claudeMigration(claudeShared, path, *bin, stderr); ok {
+				writes = append(writes, mw)
 			}
 		}
 	}
 	for _, w := range writes {
 		if *dryRun {
-			if w.migrated {
+			switch {
+			case w.migrated:
 				fmt.Fprintf(stdout, "== %s（迁走 Railse 钩子后）==\n%s", w.show, w.data)
-			} else {
+			case w.backup != nil:
+				fmt.Fprintf(stdout, "== %s（会先备份到 %s）==\n%s", w.show, backupPath(w.show, time.Now()), w.data)
+			default:
 				fmt.Fprintf(stdout, "== %s ==\n%s", w.show, w.data)
 			}
 			continue
+		}
+		if w.backup != nil {
+			bak, err := writeBackup(w.show, w.backup)
+			if err != nil {
+				fmt.Fprintf(stderr, "备份 %s 失败，没有改它：%v\n", w.show, err)
+				return 1
+			}
+			fmt.Fprintf(stdout, "已备份 %s 到 %s\n", w.show, bak)
 		}
 		if err := writeFileAtomic(w.path, w.data, w.mode); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		if w.migrated {
+		switch {
+		case w.migrated:
 			fmt.Fprintf(stdout, "已从 %s 迁走 Railse 钩子（现在写在 settings.local.json，不入库）\n", w.show)
-		} else {
+		case w.user:
+			fmt.Fprintf(stdout, "已写入 %s（用户级，对所有项目生效）\n", w.show)
+		default:
 			fmt.Fprintf(stdout, "已写入 %s\n", w.show)
 		}
 	}
@@ -344,7 +441,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	hubURL := fs.String("hub", "", "hub 地址，如 https://hub.example.com")
 	token := fs.String("token", "", "railse hub token 生成的接入码")
 	name := fs.String("name", "", "本机在 hub 里的名字，默认主机名")
-	project := fs.String("project", ".", "项目目录")
+	project := fs.String("project", "", "项目目录：给了才把 Claude、Gemini 的钩子装成这个项目的项目级，默认装用户级")
 	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse")
 	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
 	noAutostart := fs.Bool("no-autostart", false, "不托管开机自启")
@@ -420,14 +517,16 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 			return 1
 		}
 	}
-	proj, err := filepath.Abs(*project)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	if st, err := os.Stat(proj); err != nil || !st.IsDir() {
-		fmt.Fprintf(stderr, "项目目录 %s 不存在或不是目录：用 --project 指定要装钩子的项目\n", proj)
-		return 1
+	var proj string // 空：钩子装用户级
+	if *project != "" {
+		if proj, err = filepath.Abs(*project); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if st, err := os.Stat(proj); err != nil || !st.IsDir() {
+			fmt.Fprintf(stderr, "项目目录 %s 不存在或不是目录：--project 给要装项目级钩子的项目，不给则钩子装用户级\n", proj)
+			return 1
+		}
 	}
 
 	steps := []string{"接入 hub", "安装钩子", "开机自启", "体检"}
@@ -470,7 +569,11 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		fmt.Fprintln(stdout, "已跳过（--no-hooks）")
 	} else {
 		// --dir 也交给钩子：目录不是 ~/.railse 时钩子命令带 --socket，才连得上下面托管的、带 RAILSE_HOME=<目录> 的守护进程
-		if code := runSetup([]string{"hooks", "--project", proj, "--bin", b, "--dir", cfg.Dir}, stdout, stderr); code != 0 {
+		hookArgs := []string{"hooks", "--bin", b, "--dir", cfg.Dir}
+		if proj != "" {
+			hookArgs = append(hookArgs, "--project", proj)
+		}
+		if code := runSetup(hookArgs, stdout, stderr); code != 0 {
 			return fail(2, "钩子文件的问题见上面（已写入的会列出来）。")
 		}
 		done = append(done, steps[1])
@@ -518,8 +621,14 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	}
 
 	step(4)
-	if code := runDoctor([]string{"--project", proj, "--dir", cfg.Dir, "--bin", b}, stdout, stderr); code != 0 {
-		recheck := "railse doctor --project " + hooksconf.ShellQuote(proj) + dirBin
+	// 给了 --project 才交给 doctor（不给时 doctor 用它自己的默认），复查命令同理
+	doctorArgs, recheck := []string{"--dir", cfg.Dir, "--bin", b}, "railse doctor"
+	if proj != "" {
+		doctorArgs = append([]string{"--project", proj}, doctorArgs...)
+		recheck += " --project " + hooksconf.ShellQuote(proj)
+	}
+	recheck += dirBin
+	if code := runDoctor(doctorArgs, stdout, stderr); code != 0 {
 		if slow {
 			fmt.Fprintf(stdout, "体检有失败项；setup all 不因体检失败而失败：刚托管的守护进程可能还没起来，过几秒再跑 %s 复查。\n", recheck)
 		} else {

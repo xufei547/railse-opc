@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
   railse setup autostart --hub --uninstall           # 用户级托管的 hub
   sudo /usr/local/bin/railse setup autostart --hub --system --uninstall   # Linux 系统单元的 hub
   ```
-  没有卸载钩子的命令：删二进制之前，手动删掉各 CLI 配置里 Railse 的条目（命令是 `<railse 路径> hook claude|codex|gemini` 的那几条，数据目录不是 `~/.railse` 的后面还带 `--socket …`，在项目的 `.claude/settings.local.json`、`.gemini/settings.json` 与 `~/.codex/hooks.json` 里；`~/.codex/config.toml` 里的 `notify` 那一行也删掉），否则 CLI 每次调用钩子都会报错。最后删掉二进制：`rm "$(command -v railse)"`，以 root 装进去的用 `sudo rm /usr/local/bin/railse`；不要的数据目录（`~/.railse`、`~/.railse-hub`，系统单元的 `/var/lib/railse-hub` 要 sudo）自己删。
+  没有卸载钩子的命令：删二进制之前，手动删掉各 CLI 配置里 Railse 的条目（命令是 `<railse 路径> hook claude|codex|gemini` 的那几条，数据目录不是 `~/.railse` 的后面还带 `--socket …`，在用户级的 `~/.claude/settings.json`、`~/.gemini/settings.json`、`~/.codex/hooks.json` 里，用 `--project` 装过的还在那些项目的 `.claude/settings.local.json`、`.gemini/settings.json` 里；`~/.codex/config.toml` 里的 `notify` 那一行也删掉），否则 CLI 每次调用钩子都会报错。`setup hooks` 第一次改 `~/.claude/settings.json`、`~/.gemini/settings.json` 之前留下的备份 `~/.claude/settings.json.railse-bak-<时间>`、`~/.gemini/settings.json.railse-bak-<时间>` 是装钩子之前的原样：不要了就删掉（拿它覆盖回去也能回到装之前，但之后对那个文件的改动会一起丢掉）。最后删掉二进制：`rm "$(command -v railse)"`，以 root 装进去的用 `sudo rm /usr/local/bin/railse`；不要的数据目录（`~/.railse`、`~/.railse-hub`，系统单元的 `/var/lib/railse-hub` 要 sudo）自己删。
 
 ## hub 机器
 
@@ -76,7 +76,7 @@ railse hub token --dir /var/lib/railse-hub
 
 ## 工作机
 
-在一个项目目录里跑一次：
+跑一次（钩子默认装用户级，在哪个目录里跑都行）：
 
 ```sh
 railse setup all --hub https://hub.example.com --token <接入码>
@@ -85,19 +85,19 @@ railse setup all --hub https://hub.example.com --token <接入码>
 依次做四步，任一步失败就停下，说明停在哪一步、哪些已做完，修好后重跑（已接入的会跳过接入）：
 
 1. **接入 hub**（同 `railse agent enroll`）：用接入码换本机长期密钥，写 `~/.railse/machine.json`（0600）。已有 `machine.json` 时跳过，这时可以不给 `--hub`、`--token`；`--force` 重新接入。
-2. **装钩子**（同 `railse setup hooks --project <项目> --bin <程序> --dir <目录>`）：三个 CLI 都装。
+2. **装钩子**（同 `railse setup hooks --bin <程序> --dir <目录>`，给了 `--project` 时带上它）：三个 CLI 都装，默认用户级、对所有项目生效（见下面的“各 CLI 的钩子”）。
 3. **开机自启**（同 `railse setup autostart`）：托管守护进程并等它应答。已经有手动 `railse agent run` 起的守护进程占着 socket 时跳过托管并提示：先在它的终端里 Ctrl-C 停掉，再 `railse setup autostart`。
-4. **体检**（同 `railse doctor`）：有失败项时照常展示，但不让 `setup all` 失败（刚托管的守护进程可能还没起来），按提示处理后再跑 `railse doctor` 复查。
+4. **体检**（同 `railse doctor`，给了 `--project` 时带上它）：有失败项时照常展示，但不让 `setup all` 失败（刚托管的守护进程可能还没起来），按提示处理后再跑 `railse doctor` 复查。
 
-其余标志：`--name 名字`（在 hub 里的名字，默认主机名）、`--project 目录`（默认当前目录）、`--dir 目录`（守护进程数据目录，默认 `$RAILSE_HOME` 或 `~/.railse`）、`--bin 路径`、`--no-hooks`、`--no-autostart`。`setup all` 要用平时的用户身份跑，以 root 运行直接拒绝（否则会用掉接入码，`machine.json` 与钩子配置也成了 root 的文件）。
+其余标志：`--name 名字`（在 hub 里的名字，默认主机名）、`--project 目录`（给了才把 Claude、Gemini 的钩子装成那个项目的项目级，默认装用户级；目录要已存在）、`--dir 目录`（守护进程数据目录，默认 `$RAILSE_HOME` 或 `~/.railse`）、`--bin 路径`、`--no-hooks`、`--no-autostart`。`setup all` 要用平时的用户身份跑，以 root 运行直接拒绝（否则会用掉接入码，`machine.json` 与钩子配置也成了 root 的文件）。
 
 **数据目录不是 `~/.railse` 时。** 托管的守护进程带着 `RAILSE_HOME=<目录>` 跑，CLI 起钩子时的环境里却不一定有它（只在跑 setup 的那条命令上设的 `RAILSE_HOME` 也进不去），不带 `--socket` 的钩子就会去连 `~/.railse/agent.sock`，请求全都交回终端、进不了 hub。所以守护进程的数据目录（`--dir`，没给时取 `$RAILSE_HOME`）不是 `~/.railse` 时，`setup all` 与 `setup hooks` 在钩子命令里写上 `--socket <目录>/agent.sock`（`setup hooks` 打印的 Codex `notify` 那一行也带上）；是 `~/.railse` 时命令不变。以前换过数据目录、钩子却是按 `~/.railse` 装的，`railse doctor --dir <目录>` 的 `hooks.*` 会报 warn（doctor 把不带 `--socket` 的钩子一律当作连 `~/.railse/agent.sock`），照提示重跑 `railse setup hooks --dir <目录>`（Codex 的 `notify` 那一行一并换掉）。
 
-**各 CLI 的钩子。** Claude 与 Gemini 的钩子是项目级的：别的项目再跑 `railse setup hooks --project <目录>`。
+**各 CLI 的钩子。** 默认都装用户级，对所有项目生效，装一次就够：合并时只动 `hooks` 里 Railse 自己的条目，别的设置与别人的钩子原样保留。用户级的 `~/.claude/settings.json`、`~/.gemini/settings.json` 里多是你自己的设置，`setup hooks` 第一次改它们之前各备份一次到同目录的 `<文件>.railse-bak-<时间>`（0600；是符号链接时备份链接指向的内容，备份放在链接旁边；原来不存在、是空的、这次内容没变或已有任何备份时不备份），打印“已备份 … 到 …”；`--dry-run` 不备份，只说会备份到哪里；备份失败就不改那个文件、退出 1。只想让某个项目用 Railse 的，给 `--project <目录>` 把 Claude、Gemini 的钩子装成那个项目的项目级（下面写的项目级位置，不备份）；用户级与项目级都装了，钩子会触发两次（`railse doctor` 报 warn）。
 
-- **Claude Code**：写 `<项目>/.claude/settings.local.json`（钩子命令里是本机的 railse 路径，不该入库）；旧版写在 `.claude/settings.json` 的 Railse 条目会自动迁走，别的设置原样保留；在家目录里跑（项目就是 `~`，或项目的 `settings.json` 链到 `~/.claude/settings.json`）时不迁：那是用户级配置，迁走会让所有项目失去钩子，只警告，要迁请手动删。railse 新建的 `settings.local.json` 不一定被 git 忽略，`git status` 里看到它就加进 `.gitignore`（或全局的 `~/.config/git/ignore`）：`echo '.claude/settings.local.json' >> .gitignore`。
+- **Claude Code**：用户级写 `~/.claude/settings.json`。`--project` 时写 `<项目>/.claude/settings.local.json`（钩子命令里是本机的 railse 路径，不该入库）；旧版写在 `.claude/settings.json` 的 Railse 条目会自动迁走，别的设置原样保留；`--project` 是家目录（或项目的 `settings.json` 链到 `~/.claude/settings.json`）时不迁：那是用户级配置，迁走会让所有项目失去钩子，只警告，要迁请手动删。railse 新建的 `settings.local.json` 不一定被 git 忽略，`git status` 里看到它就加进 `.gitignore`（或全局的 `~/.config/git/ignore`）：`echo '.claude/settings.local.json' >> .gitignore`。
 - **Codex CLI**：写用户级 `~/.codex/hooks.json`；只在交互会话里审批（`codex exec` 不触发）；首次使用在 Codex 里用 `/hooks` 审核；`notify` 要手动加到 `~/.codex/config.toml` 开头（第一个 `[表]` 之前），`setup hooks` 会打印那一行。
-- **Gemini CLI**：写 `<项目>/.gemini/settings.json`；需要 0.65.0 以上，不要开 yolo 模式。Gemini 的钩子只能拒绝不能放行：规则拒绝的照常自动拒绝，其余（规则放行的与定不了的）都交回终端，由 Gemini 自己的确认框处理，永远不进 hub 与手机。
+- **Gemini CLI**：用户级写 `~/.gemini/settings.json`，`--project` 时写 `<项目>/.gemini/settings.json`；需要 0.65.0 以上，不要开 yolo 模式。Gemini 的钩子只能拒绝不能放行：规则拒绝的照常自动拒绝，其余（规则放行的与定不了的）都交回终端，由 Gemini 自己的确认框处理，永远不进 hub 与手机。
 
 **单独用子命令。**
 
@@ -107,7 +107,7 @@ railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-f
 railse setup autostart [--hub] [--uninstall] [--status] [--dir 目录] [--bin 路径] [--system] [--user 名字] [--dry-run] [-- hub run 的额外参数]
 ```
 
-`enroll` 之后要重启守护进程才接上 hub（它只在启动时读 `machine.json`）：托管的重跑 `railse setup autostart`，前台跑的停掉后重新 `railse agent run`。`setup hooks` 不带 CLI 开关时三个都装，`--dry-run` 只打印不写，重复执行只替换 Railse 自己的条目；`--dir` 是守护进程的数据目录（默认 `$RAILSE_HOME` 或 `~/.railse`），不是 `~/.railse` 时钩子命令带 `--socket`（见上面的“数据目录不是 `~/.railse` 时”）。`setup autostart` 的 `--dry-run` 只打印要写的文件与要跑的命令。
+`enroll` 之后要重启守护进程才接上 hub（它只在启动时读 `machine.json`）：托管的重跑 `railse setup autostart`，前台跑的停掉后重新 `railse agent run`。`setup hooks` 不带 CLI 开关时三个都装，Claude、Gemini 默认写用户级、给了 `--project` 才写项目级（见上面的“各 CLI 的钩子”），`--dry-run` 只打印不写，重复执行只替换 Railse 自己的条目；`--dir` 是守护进程的数据目录（默认 `$RAILSE_HOME` 或 `~/.railse`），不是 `~/.railse` 时钩子命令带 `--socket`（见上面的“数据目录不是 `~/.railse` 时”）。`setup autostart` 的 `--dry-run` 只打印要写的文件与要跑的命令。
 
 ## 开机自启
 
@@ -143,10 +143,10 @@ hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux
 | `agent.hub` | hub 连接 | 守护进程连 hub 的状态：`connected` 为 ok，`connecting`、`none`（未接入）为 warn，`disabled`（连续 3 次被 401 拒绝）为 fail | `connecting` 看 `agent.log`；`none` 而 `machine.json` 已在：接入后还没重启守护进程，按提示重启（不用再接入）；`disabled` 要 `railse agent enroll --force` 后重启守护进程；没有报状态的是升级前起的旧进程，重启它 |
 | `agent.autostart` | 守护进程开机自启 | 有没有守护进程的托管文件（只看文件，不问 launchd/systemd） | `railse setup autostart`（warn） |
 | `hub.reachable` | hub 可达 | `machine.json` 里 hub 的 `/api/version` 答得上、协议号与本机一致；没接入时 skip | 连不上：看 hub 在不在跑、地址、证书；不是 200：hub 太旧或地址被重定向；协议不一致：升级较旧的一方 |
-| `hooks.claude` | Claude Code 钩子 | `.claude/settings.local.json` 里 `PermissionRequest`、`Notification`、`Stop`、`SessionEnd` 四个事件都在，`PermissionRequest` 超时不低于 86400 秒；程序路径不是当前程序时 warn；钩子连的 socket（命令里的 `--socket`，没有就按 `~/.railse/agent.sock` 算）不是 `--dir` 那个守护进程的时 warn | 缺了或超时不够：`railse setup hooks --project <目录> --claude`（守护进程不在 `~/.railse` 时提示里带 `--dir`）；只在旧位置 `settings.json`，或两处都装了（会触发两次）：同一条命令迁走（warn）；socket 对不上：带 `--dir` 重装，或是 doctor 自己少给了 `--dir` |
+| `hooks.claude` | Claude Code 钩子 | 用户级 `~/.claude/settings.json` 或项目级（`--project`，默认当前目录）的 `.claude/settings.local.json`（含旧位置 `.claude/settings.json`）任一装了就算装了，按装了的那份查：`PermissionRequest`、`Notification`、`Stop`、`SessionEnd` 四个事件都在，`PermissionRequest` 超时不低于 86400 秒；程序路径不是当前程序时 warn；钩子连的 socket（命令里的 `--socket`，没有就按 `~/.railse/agent.sock` 算）不是 `--dir` 那个守护进程的时 warn；用户级与项目级都装了（会触发两次）按用户级查、至少 warn；同一个文件（项目就是家目录、链到用户级文件）不算两处；都没装时 fail，列出看过的位置 | 都没装、缺了或超时不够：`railse setup hooks --claude`（只装在项目级的，提示带 `--project <目录>`；守护进程不在 `~/.railse` 时带 `--dir`）；用户级与项目级都装了：删掉项目级文件里 Railse 的条目（用户级已对所有项目生效）；项目级只在旧位置 `settings.json`，或它与 `settings.local.json` 都装了（会触发两次）：`railse setup hooks --project <目录> --claude` 迁走（warn）；用户级文件不是合法 JSON：修好再装；socket 对不上：带 `--dir` 重装，或是 doctor 自己少给了 `--dir` |
 | `hooks.codex` | Codex 钩子 | `~/.codex/hooks.json` 里 `PermissionRequest`、`Stop`、`SessionEnd` 三个事件都在，`PermissionRequest` 超时不低于 86400 秒；socket 同上 | `railse setup hooks --codex` |
 | `hooks.codex_notify` | Codex notify | `~/.codex/config.toml` 顶层有 `notify = [..., "hook", "codex-notify"]`；带 `"--socket", "<路径>"` 时按它、不带时按 `~/.railse/agent.sock` 与 `--dir` 比对 | 把 `setup hooks` 打印的那一行加到文件开头（warn） |
-| `hooks.gemini` | Gemini 钩子 | `.gemini/settings.json` 里 `BeforeTool`、`Notification`、`AfterAgent`、`SessionEnd` 四个事件都在，`BeforeTool` 超时不低于 86400000 毫秒；socket 同上 | `railse setup hooks --project <目录> --gemini` |
+| `hooks.gemini` | Gemini 钩子 | 用户级 `~/.gemini/settings.json` 或项目级 `.gemini/settings.json` 任一装了就算装了（用户级、项目级与两处都装的规则同 `hooks.claude`）：`BeforeTool`、`Notification`、`AfterAgent`、`SessionEnd` 四个事件都在，`BeforeTool` 超时不低于 86400000 毫秒；socket 同上 | `railse setup hooks --gemini`（只装在项目级的带 `--project <目录>`）；两处都装了：删掉项目级文件里 Railse 的条目 |
 | `cli.claude` | Claude Code 版本 | 版本是否与录制钩子样本时（2.1.280）一致；不在 PATH 里 skip | 不同时 warn：试一次需要审批的操作，确认请求经过 Railse |
 | `cli.codex` | Codex CLI 版本 | 版本是否与录制钩子样本时（0.145.0）一致；不在 PATH 里 skip | 同上 |
 | `cli.gemini` | Gemini CLI 版本 | 版本不低于 0.65.0（更早的版本钩子在确认之后才触发）；不在 PATH 里 skip | 升级 Gemini CLI（fail） |

@@ -57,7 +57,8 @@ func TestMergeRemoveOnly(t *testing.T) {
 
 func TestPaths(t *testing.T) {
 	local, shared := ClaudePaths("/p")
-	if local != "/p/.claude/settings.local.json" || shared != "/p/.claude/settings.json" || GeminiPath("/p") != "/p/.gemini/settings.json" || CodexPath("/h") != "/h/.codex/hooks.json" {
+	if local != "/p/.claude/settings.local.json" || shared != "/p/.claude/settings.json" || GeminiPath("/p") != "/p/.gemini/settings.json" || CodexPath("/h") != "/h/.codex/hooks.json" ||
+		ClaudeUserPath("/h") != "/h/.claude/settings.json" || GeminiUserPath("/h") != "/h/.gemini/settings.json" {
 		t.Fatal("路径不对")
 	}
 }
