@@ -1024,6 +1024,72 @@ func TestSetupHooksBacksUpUserSettingsOnce(t *testing.T) {
 	}
 }
 
+// 用户级文件本来就是这次要写的内容（旁边也没有备份）：内容没变，不备份。
+func TestSetupHooksNoBackupWhenUnchanged(t *testing.T) {
+	home, _ := userLevelEnv(t)
+	claude := hooksconf.ClaudeUserPath(home)
+	want, err := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, claude, string(want))
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
+		t.Fatalf("setup hooks: %d %s", code, errOut.String())
+	}
+	if b := backups(t, claude); len(b) != 0 || strings.Contains(out.String(), "已备份") {
+		t.Fatalf("内容没变时不该备份: %v\n%s", b, out.String())
+	}
+	if !bytes.Equal(readFile(t, claude), want) {
+		t.Fatal("内容应保持不变")
+	}
+}
+
+// 项目级写入的文件（解开链接后）就是用户级配置时（--project 是家目录时的 Gemini、项目的 settings.local.json 链到
+// ~/.claude/settings.json）：同样第一次改它之前备份一次，备份放在用户级配置旁边，已有备份就不再备份。
+func TestSetupHooksBacksUpUserFileViaProject(t *testing.T) {
+	home, _ := userLevelEnv(t)
+	setup := func(args ...string) string {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		args = append([]string{"setup", "hooks"}, args...)
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatalf("%v: %d %s", args, code, errOut.String())
+		}
+		return out.String()
+	}
+	gemini := hooksconf.GeminiUserPath(home)
+	writeTestFile(t, gemini, `{"theme":"dark"}`)
+	out := setup("--project", home, "--gemini", "--bin", "/opt/railse")
+	baks := backups(t, gemini)
+	if len(baks) != 1 || string(readFile(t, baks[0])) != `{"theme":"dark"}` || !strings.Contains(out, "已备份 "+gemini+" 到 "+baks[0]) {
+		t.Fatalf("--project ~ 时改的就是用户级的 Gemini 配置，应备份一次: %v\n%s", baks, out)
+	}
+	if out = setup("--project", home, "--gemini", "--bin", "/opt/new/railse"); strings.Contains(out, "已备份") || len(backups(t, gemini)) != 1 {
+		t.Fatalf("已有备份时不该再备份: %v\n%s", backups(t, gemini), out)
+	}
+
+	if runtime.GOOS == "windows" {
+		t.Skip("符号链接用例只在 Unix 上跑")
+	}
+	claude := hooksconf.ClaudeUserPath(home)
+	writeTestFile(t, claude, `{"model":"opus"}`)
+	proj := filepath.Join(home, "p")
+	local, _ := hooksconf.ClaudePaths(proj)
+	os.MkdirAll(filepath.Dir(local), 0o755)
+	if err := os.Symlink(claude, local); err != nil {
+		t.Fatal(err)
+	}
+	out = setup("--project", proj, "--claude", "--bin", "/opt/railse")
+	baks = backups(t, claude)
+	if len(baks) != 1 || string(readFile(t, baks[0])) != `{"model":"opus"}` || !strings.Contains(out, "已备份 "+claude+" 到 "+baks[0]) {
+		t.Fatalf("项目的 settings.local.json 链到用户级配置时应备份用户级配置: %v\n%s", baks, out)
+	}
+	if b := backups(t, local); len(b) != 0 {
+		t.Fatalf("备份应放在用户级配置旁边，不放在项目里: %v", b)
+	}
+}
+
 // --dry-run 不备份不写，只说会先备份到哪里；用户级配置是符号链接（dotfiles）时备份内容取链接指向的文件，
 // 备份放在链接旁边（~/.claude/ 下），不放进 dotfiles 目录；备份不了就不写这个文件、退出 1。
 func TestSetupHooksUserBackupDryRunAndSymlink(t *testing.T) {
@@ -1356,7 +1422,10 @@ func TestSetupAllHooksUserLevelUnlessProject(t *testing.T) {
 	if !bytes.Equal(readFile(t, claude), before) {
 		t.Fatal("给了 --project 时不该动用户级的配置")
 	}
-	if s = out.String(); !strings.Contains(s, "触发两次") || !strings.Contains(s, "再跑 railse doctor --project "+f.proj+" --dir ") {
+	// 两处的命令一样：Claude Code 只跑一次，Gemini 仍报会触发两次
+	if s = out.String(); !strings.Contains(s, "[ok]    Claude Code 钩子："+claude+"；"+local+" 也装了相同的钩子") ||
+		!strings.Contains(s, "[warn]  Gemini 钩子："+gemini+"；项目级 "+hooksconf.GeminiPath(f.proj)+" 也装了，钩子会触发两次") ||
+		!strings.Contains(s, "再跑 railse doctor --project "+f.proj+" --dir ") {
 		t.Fatalf("体检应带 --project，并报出两处都装了:\n%s", s)
 	}
 }

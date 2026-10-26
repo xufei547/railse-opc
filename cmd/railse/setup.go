@@ -41,7 +41,8 @@ type pendingWrite struct {
 	mode       os.FileMode
 	migrated   bool   // 只删不加：把 Railse 钩子从 Claude 的 settings.json 迁走
 	user       bool   // 用户级配置（对所有项目生效）
-	backup     []byte // 非空时写之前先把它（解开链接后的现有内容）备份到 show 旁边，见 needBackup
+	backup     []byte // 非空时写之前先把它（解开链接后的现有内容）备份到 backupOf 旁边，见 needBackup
+	backupOf   string // 要备份的用户级配置的显示路径（~/.claude/settings.json 或 ~/.gemini/settings.json）
 }
 
 // backupSuffix 是用户级配置备份文件名里的后缀：<文件>.railse-bak-<时间>。
@@ -50,6 +51,17 @@ const backupSuffix = ".railse-bak-"
 // backupPath 是 show 在 now 时刻的备份文件：放在 show（给人看的路径）旁边，不放进链接指向的目录。时间用本地时间。
 func backupPath(show string, now time.Time) string {
 	return show + backupSuffix + now.Format("20060102-150405")
+}
+
+// userSettingsOf 在 users（用户级 Claude、Gemini 配置的显示路径）里找 path（解开链接后要写的文件）是哪一个：
+// 是同一个文件（字面相同或 os.SameFile）时返回它，都不是返回空。
+func userSettingsOf(path string, users []string) string {
+	for _, u := range users {
+		if samePath(path, u) {
+			return u
+		}
+	}
+	return ""
 }
 
 // needBackup 报告写用户级配置 show 之前要不要先备份：现有内容非空、这次要写的与它不同，且 show 旁边还没有任何
@@ -221,19 +233,17 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		}
 		*bin, _ = filepath.Abs(exe)
 	}
+	home, homeErr := os.UserHomeDir()
+	// 用户级的 Claude、Gemini 配置：改它们之前要备份（见 needBackup）；取不到家目录时没有
+	var userSettings []string
+	if homeErr == nil {
+		userSettings = []string{hooksconf.ClaudeUserPath(home), hooksconf.GeminiUserPath(home)}
+	}
 	// 不给 --project：Claude、Gemini 写用户级（对所有项目生效），不做 settings.json 的迁移（它只针对项目级）
 	userLevel := *project == ""
 	var claudePath, claudeShared, geminiPath string
-	if userLevel {
-		if *doClaude || *doGemini {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				fmt.Fprintf(stderr, "取不到家目录（%v），装不了用户级的 Claude、Gemini 钩子：用 --project 目录 装成那个项目的项目级\n", err)
-				return 1
-			}
-			claudePath, geminiPath = hooksconf.ClaudeUserPath(home), hooksconf.GeminiUserPath(home)
-		}
-	} else {
+	switch {
+	case !userLevel:
 		absProject, err := filepath.Abs(*project)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
@@ -241,12 +251,17 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		}
 		claudePath, claudeShared = hooksconf.ClaudePaths(absProject)
 		geminiPath = hooksconf.GeminiPath(absProject)
+	case *doClaude || *doGemini:
+		if homeErr != nil {
+			fmt.Fprintf(stderr, "取不到家目录（%v），装不了用户级的 Claude、Gemini 钩子：用 --project 目录 装成那个项目的项目级\n", homeErr)
+			return 1
+		}
+		claudePath, geminiPath = userSettings[0], userSettings[1]
 	}
 	codexUser := *codexFile == "" // 默认的 ~/.codex/hooks.json 是用户级
 	if *codexFile == "" && *doCodex {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Fprintln(stderr, err)
+		if homeErr != nil {
+			fmt.Fprintln(stderr, homeErr)
 			return 1
 		}
 		*codexFile = hooksconf.CodexPath(home)
@@ -279,15 +294,16 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		w := pendingWrite{show: tg.path, path: path, data: merged, mode: mode, user: tg.user}
-		// 用户级的 Claude、Gemini 配置里多是用户自己的设置：第一次改它之前备份一次（Codex 的 hooks.json 只放钩子，不备份）
-		if tg.user && tg.cli != "codex" {
-			bak, err := needBackup(tg.path, existing, merged)
+		// 用户级的 Claude、Gemini 配置里多是用户自己的设置：第一次改它之前备份一次，备份放在用户级配置旁边。按文件身份认：
+		// 给了 --project 而项目里的文件就是它（--project ~ 时的 Gemini、链到它的项目文件）也算。Codex 的 hooks.json 只放钩子，不备份
+		if u := userSettingsOf(path, userSettings); u != "" {
+			bak, err := needBackup(u, existing, merged)
 			if err != nil {
 				fmt.Fprintln(stderr, err)
 				return 1
 			}
 			if bak {
-				w.backup = existing
+				w.backup, w.backupOf = existing, u
 			}
 		}
 		writes = append(writes, w)
@@ -304,19 +320,19 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 			case w.migrated:
 				fmt.Fprintf(stdout, "== %s（迁走 Railse 钩子后）==\n%s", w.show, w.data)
 			case w.backup != nil:
-				fmt.Fprintf(stdout, "== %s（会先备份到 %s）==\n%s", w.show, backupPath(w.show, time.Now()), w.data)
+				fmt.Fprintf(stdout, "== %s（会先备份到 %s）==\n%s", w.show, backupPath(w.backupOf, time.Now()), w.data)
 			default:
 				fmt.Fprintf(stdout, "== %s ==\n%s", w.show, w.data)
 			}
 			continue
 		}
 		if w.backup != nil {
-			bak, err := writeBackup(w.show, w.backup)
+			bak, err := writeBackup(w.backupOf, w.backup)
 			if err != nil {
-				fmt.Fprintf(stderr, "备份 %s 失败，没有改它：%v\n", w.show, err)
+				fmt.Fprintf(stderr, "备份 %s 失败，没有改它：%v\n", w.backupOf, err)
 				return 1
 			}
-			fmt.Fprintf(stdout, "已备份 %s 到 %s\n", w.show, bak)
+			fmt.Fprintf(stdout, "已备份 %s 到 %s\n", w.backupOf, bak)
 		}
 		if err := writeFileAtomic(w.path, w.data, w.mode); err != nil {
 			fmt.Fprintln(stderr, err)

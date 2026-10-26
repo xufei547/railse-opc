@@ -110,6 +110,21 @@ func broken(path, bin string) bool {
 	return err != nil
 }
 
+// sameOurs 报告两份配置文件里 Railse 的条目是否完全相同（见 hooksconf.SameOurs）；读不了的不算相同。
+func sameOurs(a, b, bin string) bool {
+	ba, err := os.ReadFile(a)
+	if err != nil {
+		return false
+	}
+	bb, err := os.ReadFile(b)
+	return err == nil && hooksconf.SameOurs(ba, bb, bin)
+}
+
+// sameHandlers 是 Claude 两处都装了相同的钩子时细节里的说明：Claude Code 对相同的处理器只跑一次，不算重复触发。
+func sameHandlers(other, remove string) string {
+	return other + " 也装了相同的钩子（Claude Code 对相同的处理器只跑一次），可以删掉 " + remove
+}
+
 func sameFile(a, b string) bool {
 	sa, err := os.Stat(a)
 	if err != nil {
@@ -154,9 +169,11 @@ func userPath(o Options, path func(home string) string) string {
 // levelsCheck 合起 Claude、Gemini 的用户级与项目级：任一处装了就算装了。user 是用户级文件（Home 为空时为空，只看项目级），
 // project 是项目级要看的文件（Project 为空时为空，只看用户级），projectCheck 是只看项目级时的检查（沿用项目级的规则，
 // 修复提示带 --project）。同一个文件不算两处：项目就是家目录、项目的文件链到用户级的文件时，按文件身份去重。
-// 只有用户级装了：按用户级文件查（hookFileCheck）；两处都装：同样按用户级查，至少 warn（会触发两次），提示删掉项目级的条目；
-// 只有项目级装了：projectCheck；都没装：fail，列出看过的位置，提示装用户级。用户级（或都没装时项目级）的文件读不了、
-// 不是合法 JSON 时报 fail（hookFileCheck 的写法）。
+// 只有用户级装了：按用户级文件查（hookFileCheck）；两处都装：同样按用户级查，项目级里 Railse 的条目与用户级的不同时
+// 至少 warn（会触发两次），提示删掉项目级的条目；Claude 两处的条目完全相同时 Claude Code 只跑一次，不降级，只在细节里说
+// 可以删掉（Gemini 的文档没说去重，一律按会触发两次算）；
+// 只有项目级装了：projectCheck；都没装：fail，列出看过的位置，提示装用户级。用户级的文件读不了、不是合法 JSON 时报 fail
+// （hookFileCheck 的写法）；都没装而项目级的文件坏了时报那个文件，提示带 --project，细节里也说用户级没装。
 func levelsCheck(id, name, cli, user string, project []string, projectCheck func() Check, o Options) Check {
 	switch {
 	case user == "" && len(project) == 0:
@@ -181,16 +198,30 @@ func levelsCheck(id, name, cli, user string, project []string, projectCheck func
 	switch {
 	case userHas && len(projHas) > 0:
 		c := hookFileCheck(id, name, cli, user, hint, o)
-		if c.Status == OK {
-			c.Status = Warn
+		var same, twice []string
+		for _, p := range projHas {
+			if cli == "claude" && sameOurs(user, p, o.Bin) {
+				same = append(same, p)
+			} else {
+				twice = append(twice, p)
+			}
 		}
-		files := strings.Join(projHas, "、")
-		c.Detail += "；项目级 " + files + " 也装了，钩子会触发两次"
-		del := "删掉 " + files + " 里 Railse 的钩子条目（用户级已对所有项目生效）"
-		if c.Hint == "" {
-			c.Hint = del
-		} else {
-			c.Hint += "；" + del
+		if len(same) > 0 {
+			files := strings.Join(same, "、")
+			c.Detail += "；" + sameHandlers(files, files+" 里 Railse 的条目（用户级已对所有项目生效）")
+		}
+		if len(twice) > 0 {
+			if c.Status == OK {
+				c.Status = Warn
+			}
+			files := strings.Join(twice, "、")
+			c.Detail += "；项目级 " + files + " 也装了，钩子会触发两次"
+			del := "删掉 " + files + " 里 Railse 的钩子条目（用户级已对所有项目生效）"
+			if c.Hint == "" {
+				c.Hint = del
+			} else {
+				c.Hint += "；" + del
+			}
 		}
 		return c
 	case userHas || broken(user, o.Bin): // 用户级坏了：先修它，不给 --project 的 setup hooks 也要往里写
@@ -198,17 +229,21 @@ func levelsCheck(id, name, cli, user string, project []string, projectCheck func
 	case len(projHas) > 0:
 		return projectCheck()
 	}
+	// 都没装、项目级的文件坏了：报它，提示修好它（装用户级的命令不碰项目里的文件，所以给带 --project 的命令）
 	for _, p := range projLooked {
 		if broken(p, o.Bin) {
-			return hookFileCheck(id, name, cli, p, hint, o)
+			c := hookFileCheck(id, name, cli, p, setupHint(o, cli, o.Project), o)
+			c.Detail += "；用户级 " + user + " 也没装"
+			return c
 		}
 	}
 	return Check{ID: id, Name: name, Status: Fail, Detail: "没装钩子（看过 " + strings.Join(looked, "、") + "）", Hint: hint}
 }
 
 // claudeProjectCheck 看 Claude 的项目级钩子：现在写在 .claude/settings.local.json，旧版写在 .claude/settings.json。
-// 只在旧位置：钩子照样生效，报 warn 提示迁走（旧位置的条目本身不全时照实 fail）；两处都有：会触发两次，warn；
-// 两处是同一个文件（链接）不算两处；两处都没有：fail；settings.local.json 是坏 JSON 时报它（setup 也要往里写）。
+// 只在旧位置：钩子照样生效，报 warn 提示迁走（旧位置的条目本身不全时照实 fail）；两处都有：Railse 的条目不同时会触发两次，
+// warn，完全相同时 Claude Code 只跑一次，不降级，细节里说可以迁走；两处是同一个文件（链接）不算两处；两处都没有：fail；
+// settings.local.json 是坏 JSON 时报它（setup 也要往里写）。
 func claudeProjectCheck(o Options) Check {
 	const id, name = "hooks.claude", "Claude Code 钩子"
 	local, shared := hooksconf.ClaudePaths(o.Project)
@@ -236,13 +271,19 @@ func claudeProjectCheck(o Options) Check {
 		return Check{ID: id, Name: name, Status: Warn, Detail: detail, Hint: migrate}
 	case sharedHas && localHas:
 		c := hookFileCheck(id, name, "claude", local, hint, o)
-		if c.Status == OK {
-			c.Status = Warn
-		}
-		c.Detail += "；settings.json 与 settings.local.json 都装了，钩子会触发两次"
-		if c.Hint == "" {
-			c.Hint = migrate
+		if sameOurs(local, shared, o.Bin) {
+			c.Detail += "；" + sameHandlers(shared, shared+" 里 Railse 的条目（运行 "+hint+" 会迁走）")
 		} else {
+			if c.Status == OK {
+				c.Status = Warn
+			}
+			c.Detail += "；settings.json 与 settings.local.json 都装了，钩子会触发两次"
+		}
+		switch {
+		case c.Status == OK:
+		case c.Hint == "":
+			c.Hint = migrate
+		default:
 			c.Hint += "（同一条命令也会把 settings.json 里的迁走）"
 		}
 		return c

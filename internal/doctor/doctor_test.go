@@ -394,11 +394,17 @@ func TestHookChecks(t *testing.T) {
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Fail || !strings.Contains(c.Detail, "JSON") || c.Hint == "" {
 		t.Fatalf("坏 JSON: %+v", c)
 	}
-	// 两处都装了
+	// 两处都装了、Railse 的条目完全相同：Claude Code 对相同的处理器只跑一次，不因两处降级，细节说可以删掉旧位置的
 	writeFile(t, local, doc)
 	writeFile(t, shared, doc)
+	if c := find(t, Run(o), "hooks.claude"); c.Status != OK || strings.Contains(c.Detail, "两次") || !strings.Contains(c.Detail, shared+" 也装了相同的钩子") ||
+		!strings.Contains(c.Detail, "只跑一次") || !strings.Contains(c.Detail, "可以删掉 "+shared) {
+		t.Fatalf("两处都装、条目相同: %+v", c)
+	}
+	// 两处的条目不同（旧位置是别的程序路径）：会触发两次
+	writeFile(t, shared, planDoc(t, "claude", "/old/railse"))
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "两次") || !strings.Contains(c.Hint, "setup hooks") {
-		t.Fatalf("两处都装: %+v", c)
+		t.Fatalf("两处都装、条目不同: %+v", c)
 	}
 	os.Remove(shared)
 	// 指向别的程序
@@ -554,8 +560,9 @@ func TestClaudeHooksOldLocation(t *testing.T) {
 }
 
 // Claude、Gemini 的钩子：用户级（Home 下）或项目级（Project 下）任一装了就算装了。只有用户级：按用户级文件查，修复提示
-// 不带 --project；只有项目级：沿用项目级的检查，提示带 --project；两处都装：按用户级查，至少 warn，说会触发两次；
-// 都没装：fail，列出看过的位置；用户级是坏 JSON：fail。
+// 不带 --project；只有项目级：沿用项目级的检查，提示带 --project；两处都装：按用户级查，Gemini 至少 warn、说会触发两次，
+// Claude 两处 Railse 的条目完全相同时只跑一次、不降级，不同才 warn；都没装：fail，列出看过的位置（项目级文件坏了时
+// 报它，提示修好它的 JSON）；用户级是坏 JSON：fail。
 func TestHookChecksUserOrProject(t *testing.T) {
 	o, home := fakeOpts(t)
 	proj := filepath.Join(home, "proj")
@@ -599,22 +606,34 @@ func TestHookChecksUserOrProject(t *testing.T) {
 			t.Fatalf("%s 给了 Project、只有用户级: %+v", cli, c)
 		}
 	}
-	// 两处都装了：warn，说项目级的文件也装了、会触发两次，提示删掉项目级的条目
+	// 两处都装了、条目相同：Gemini 仍 warn（文档没说去重），说会触发两次，提示删掉项目级的条目；
+	// Claude 对相同的处理器只跑一次：不降级，细节说项目级也装了相同的钩子、可以删掉
 	for cli, p := range project {
 		writeFile(t, p, planDoc(t, cli, bin))
 	}
-	for cli := range ids {
-		c := check(cli)
-		if c.Status != Warn || !strings.Contains(c.Detail, user[cli]) || !strings.Contains(c.Detail, project[cli]) || !strings.Contains(c.Detail, "触发两次") ||
-			!strings.Contains(c.Hint, "删掉") || !strings.Contains(c.Hint, project[cli]) {
-			t.Fatalf("%s 两处都装: %+v", cli, c)
-		}
+	if c := check("gemini"); c.Status != Warn || !strings.Contains(c.Detail, user["gemini"]) || !strings.Contains(c.Detail, project["gemini"]) ||
+		!strings.Contains(c.Detail, "触发两次") || !strings.Contains(c.Hint, "删掉") || !strings.Contains(c.Hint, project["gemini"]) {
+		t.Fatalf("gemini 两处都装: %+v", c)
 	}
-	// Claude 项目级的旧位置也算
+	if c := check("claude"); c.Status != OK || !strings.HasPrefix(c.Detail, user["claude"]) || strings.Contains(c.Detail, "两次") ||
+		!strings.Contains(c.Detail, local+" 也装了相同的钩子") || !strings.Contains(c.Detail, "只跑一次") || !strings.Contains(c.Detail, "可以删掉 "+local) {
+		t.Fatalf("claude 两处都装、条目相同: %+v", c)
+	}
+	// Claude 两处的条目不同（项目级是别的程序路径）：会触发两次，warn，提示删掉项目级的条目
+	writeFile(t, local, planDoc(t, "claude", "/old/railse"))
+	if c := check("claude"); c.Status != Warn || !strings.Contains(c.Detail, local) || !strings.Contains(c.Detail, "触发两次") ||
+		!strings.Contains(c.Hint, "删掉") || !strings.Contains(c.Hint, local) {
+		t.Fatalf("claude 两处都装、条目不同: %+v", c)
+	}
+	// Claude 项目级的旧位置也算：相同只跑一次，不同触发两次
 	os.Remove(local)
 	writeFile(t, shared, planDoc(t, "claude", bin))
+	if c := check("claude"); c.Status != OK || !strings.Contains(c.Detail, shared+" 也装了相同的钩子") || strings.Contains(c.Detail, "两次") {
+		t.Fatalf("用户级与项目级旧位置都装、条目相同: %+v", c)
+	}
+	writeFile(t, shared, planDoc(t, "claude", bin, "/x/agent.sock"))
 	if c := check("claude"); c.Status != Warn || !strings.Contains(c.Detail, shared) || !strings.Contains(c.Detail, "触发两次") {
-		t.Fatalf("用户级与项目级旧位置都装: %+v", c)
+		t.Fatalf("用户级与项目级旧位置都装、条目不同: %+v", c)
 	}
 	os.Remove(shared)
 	writeFile(t, local, planDoc(t, "claude", bin))
@@ -639,6 +658,12 @@ func TestHookChecksUserOrProject(t *testing.T) {
 			t.Fatalf("%s 都没装: %+v", cli, c)
 		}
 	}
+	// 都没装、项目级文件是坏 JSON：报那个文件，提示修好它的 JSON（带 --project 的命令；装用户级不碰它），细节里也说看过的用户级
+	writeFile(t, local, []byte("{bad"))
+	if c := check("claude"); c.Status != Fail || !strings.Contains(c.Detail, local) || !strings.Contains(c.Detail, "JSON") || !strings.Contains(c.Detail, user["claude"]) ||
+		c.Hint != "修好 JSON 后再 railse setup hooks --project "+hooksconf.ShellQuote(proj)+" --claude" {
+		t.Fatalf("都没装、项目级坏 JSON: %+v", c)
+	}
 	// 用户级是坏 JSON：fail，提示修好再装（项目级装着也一样）
 	writeFile(t, local, planDoc(t, "claude", bin))
 	writeFile(t, user["claude"], []byte("{bad"))
@@ -661,9 +686,9 @@ func TestHookChecksSameFileAndMissingLevels(t *testing.T) {
 			t.Fatalf("项目就是家目录时 %s 不算两处: %+v", id, c)
 		}
 	}
-	// 项目就是家目录、又装了 ~/.claude/settings.local.json（在 ~ 里是项目级的本机配置）：真是两处
+	// 项目就是家目录、又装了 ~/.claude/settings.local.json（在 ~ 里是项目级的本机配置），条目不同：真是两处
 	local, _ := hooksconf.ClaudePaths(home)
-	writeFile(t, local, planDoc(t, "claude", bin))
+	writeFile(t, local, planDoc(t, "claude", "/old/railse"))
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, local) || !strings.Contains(c.Detail, "触发两次") {
 		t.Fatalf("~/.claude/settings.local.json 也装了: %+v", c)
 	}

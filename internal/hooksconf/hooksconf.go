@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -363,6 +365,57 @@ func Inspect(doc []byte, bin string) (Installed, error) {
 		}
 	}
 	return ins, nil
+}
+
+// SameOurs 报告两份钩子配置里我们的条目是否完全相同：每个事件里我们的条目作为集合相同。条目按整条比（type、command、
+// timeout、name 等全部字段，连同所在组的 matcher），用规范化后的 JSON（键排序、无空白）比，不挑字段；别人的条目、别的设置、
+// 键的顺序与排版不影响。Claude Code 对写在多个配置文件里的相同处理器只跑一次，doctor 据此判断两处都装时会不会触发两次。
+// 只读；任一份解析不了时返回 false。bin 同 IsOurs。
+func SameOurs(a, b []byte, bin string) bool {
+	sa, err := ourEntries(a, bin)
+	if err != nil {
+		return false
+	}
+	sb, err := ourEntries(b, bin)
+	if err != nil {
+		return false
+	}
+	return maps.EqualFunc(sa, sb, slices.Equal[[]string])
+}
+
+// ourEntries 是一份配置里我们的条目：事件名 → 条目（连同所在组的 matcher）规范化后的 JSON，排好序、去掉重复。
+func ourEntries(doc []byte, bin string) (map[string][]string, error) {
+	_, hooks, err := parse(doc)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]string{}
+	for ev, raw := range hooks {
+		groups, _ := raw.([]any)
+		for _, g := range groups {
+			gm, _ := g.(map[string]any)
+			list, _ := gm["hooks"].([]any)
+			for _, e := range list {
+				if !IsOurs(e, bin) {
+					continue
+				}
+				key := map[string]any{"entry": e}
+				if m, ok := gm["matcher"]; ok {
+					key["matcher"] = m
+				}
+				j, err := json.Marshal(key) // map 按键排序；数字是 json.Number，原样输出
+				if err != nil {
+					return nil, err
+				}
+				out[ev] = append(out[ev], string(j))
+			}
+		}
+	}
+	for ev, list := range out {
+		slices.Sort(list)
+		out[ev] = slices.Compact(list)
+	}
+	return out, nil
 }
 
 // ClaudePaths 返回项目级的本机配置与共享配置：钩子写进 settings.local.json（不入库），settings.json 里只做清理。
