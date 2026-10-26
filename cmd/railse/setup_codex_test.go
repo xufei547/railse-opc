@@ -38,6 +38,17 @@ func codexNotify(t *testing.T, args ...string) (stdout, stderr string, code int)
 // notifyLine 是 config.toml 里指向 script 的那一行（临时目录的路径用 %q 转义与 TOML 基本字符串一致）。
 func notifyLine(script string) string { return fmt.Sprintf("notify = [%q]", script) }
 
+// writeExec 建好上级目录再写一个 0755 的可执行文件。
+func writeExec(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func fileMode(t *testing.T, path string) os.FileMode {
 	t.Helper()
 	st, err := os.Stat(path)
@@ -47,8 +58,13 @@ func fileMode(t *testing.T, path string) os.FileMode {
 	return st.Mode().Perm()
 }
 
-// nextSecond 等到下一秒：备份名精确到秒，同一秒里第二次改 config.toml 会撞上已有的备份（O_EXCL）。
-func nextSecond() { time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second))) }
+// fixBackupTime 把备份文件名里的时间固定成 at（测试结束时还原）。
+func fixBackupTime(t *testing.T, at time.Time) {
+	t.Helper()
+	old := backupNow
+	backupNow = func() time.Time { return at }
+	t.Cleanup(func() { backupNow = old })
+}
 
 // 没有 config.toml：新建 0600、只有 notify 一行；脚本 0755、标记行是 []、没有前一跳那一行；数据目录按 0700 建；不备份。
 func TestSetupCodexNotifyNoConfig(t *testing.T) {
@@ -185,7 +201,6 @@ func TestSetupCodexNotifyNonDefaultDir(t *testing.T) {
 		t.Fatal("给了 --dir 时不该在 ~/.railse 里写脚本")
 	}
 
-	nextSecond()
 	if _, errOut, code := codexNotify(t, "--bin", "/opt/railse"); code != 0 {
 		t.Fatalf("换回默认目录: code=%d stderr=%s", code, errOut)
 	}
@@ -210,6 +225,125 @@ func TestSetupCodexNotifyUnreadableOwnScript(t *testing.T) {
 	}
 	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", "")) {
 		t.Fatalf("不该把自己当前一跳:\n%s", got)
+	}
+}
+
+// 上次的脚本（别的数据目录里，文件名是 codex-notify.sh）被删了：认作我们的脚本，读不到它记的前一跳 → 没有前一跳、警告，
+// 不把那个不存在的路径串成前一跳（原来的 notify 只剩在备份里，警告指向备份）。
+func TestSetupCodexNotifyDeletedOldScript(t *testing.T) {
+	home, cfg, defScript := codexEnv(t)
+	writeTestFile(t, cfg, "notify = [\"/usr/bin/true\", \"--x\"]\n")
+	old := filepath.Join(home, "A", "codex-notify.sh")
+	if _, errOut, code := codexNotify(t, "--dir", filepath.Dir(old), "--bin", "/opt/railse"); code != 0 {
+		t.Fatalf("--dir A: code=%d stderr=%s", code, errOut)
+	}
+	if err := os.Remove(old); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut, code := codexNotify(t, "--bin", "/opt/railse")
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errOut)
+	}
+	if got := readFile(t, defScript); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", "")) {
+		t.Fatalf("读不到的旧脚本不该成为前一跳（标记行应是 []、没有前一跳那一行）:\n%s", got)
+	}
+	if !strings.Contains(errOut, "警告") || !strings.Contains(errOut, old) || !strings.Contains(errOut, cfg+".railse-bak-") {
+		t.Fatalf("应警告前一跳没有保留、指向备份: %s", errOut)
+	}
+	if !strings.Contains(out, "只调 railse") {
+		t.Fatalf("串接说明应是只调 railse:\n%s", out)
+	}
+}
+
+// 前一跳里有这次脚本的别名（经符号链接的目录，脚本还没写出来，samePath 认不出）：不串，警告，脚本绝不调自己。
+// 第一个元素就是别名时按我们的脚本处理（读不到标记行）；别名在后面的元素里（如 ["/bin/sh", 脚本]）时兜底丢掉前一跳。
+func TestSetupCodexNotifyNeverChainsItself(t *testing.T) {
+	needUnixShell(t)
+	home, cfg, script := codexEnv(t)
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(home, "alias", "codex-notify.sh")
+	if err := os.Symlink(filepath.Dir(script), filepath.Dir(alias)); err != nil {
+		t.Fatal(err)
+	}
+	for _, notify := range []string{
+		fmt.Sprintf("notify = [%q]\n", alias),
+		fmt.Sprintf("notify = [\"/bin/sh\", %q]\n", alias),
+	} {
+		if err := os.Remove(script); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		writeTestFile(t, cfg, notify)
+		_, errOut, code := codexNotify(t, "--bin", "/opt/railse")
+		if code != 0 {
+			t.Fatalf("%s: code=%d stderr=%s", notify, code, errOut)
+		}
+		if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", "")) {
+			t.Fatalf("%s: 脚本不该调自己:\n%s", notify, got)
+		}
+		if !strings.Contains(errOut, "警告") || !strings.Contains(errOut, alias) {
+			t.Fatalf("%s: 应警告: %s", notify, errOut)
+		}
+	}
+}
+
+// 同一秒里两次真的改 config.toml：都成功，第二个备份名加 -2，两个备份各是那一次之前的内容。
+func TestSetupCodexNotifyBackupsSameSecond(t *testing.T) {
+	home, cfg, _ := codexEnv(t)
+	fixBackupTime(t, time.Date(2026, 10, 27, 12, 0, 0, 0, time.Local))
+	orig := "notify = [\"/bin/other\"]\n"
+	writeTestFile(t, cfg, orig)
+	if _, errOut, code := codexNotify(t, "--dir", filepath.Join(home, "A"), "--bin", "/opt/railse"); code != 0 {
+		t.Fatalf("--dir A: code=%d stderr=%s", code, errOut)
+	}
+	afterA := string(readFile(t, cfg))
+	out, errOut, code := codexNotify(t, "--dir", filepath.Join(home, "B"), "--bin", "/opt/railse")
+	if code != 0 {
+		t.Fatalf("同一秒里第二次改也应成功: code=%d stderr=%s", code, errOut)
+	}
+	base := cfg + ".railse-bak-20261027-120000"
+	if got := string(readFile(t, base)); got != orig {
+		t.Fatalf("第一个备份应是原文件: %q", got)
+	}
+	if got := string(readFile(t, base+"-2")); got != afterA || fileMode(t, base+"-2") != 0o600 {
+		t.Fatalf("第二个备份应是 %s-2（0600），内容是第一次改之后的: %q", base, got)
+	}
+	if b := backups(t, cfg); len(b) != 2 {
+		t.Fatalf("应有两个备份: %v", b)
+	}
+	if !strings.Contains(out, "已备份 "+cfg+" 到 "+base+"-2") {
+		t.Fatalf("应打印第二个备份的名字:\n%s", out)
+	}
+}
+
+// writeBackup 遇到同名文件依次试 -2、-3…（仍 O_EXCL，不覆盖），试满 100 个都被占才报错。
+func TestWriteBackupSameSecondLimit(t *testing.T) {
+	dir := t.TempDir()
+	show := filepath.Join(dir, "config.toml")
+	at := time.Date(2026, 10, 27, 12, 0, 0, 0, time.Local)
+	fixBackupTime(t, at)
+	base := backupPath(show, at)
+	taken := []string{base}
+	for i := 2; i <= 100; i++ {
+		taken = append(taken, fmt.Sprintf("%s-%d", base, i))
+	}
+	for _, p := range taken {
+		writeTestFile(t, p, "old")
+	}
+	if bak, err := writeBackup(show, []byte("new")); err == nil {
+		t.Fatalf("100 个名字都被占时应报错，得到 %s", bak)
+	}
+	for _, p := range taken {
+		if string(readFile(t, p)) != "old" {
+			t.Fatalf("不该覆盖已有的备份 %s", p)
+		}
+	}
+	if err := os.Remove(taken[56]); err != nil {
+		t.Fatal(err)
+	}
+	if bak, err := writeBackup(show, []byte("new")); err != nil || bak != taken[56] || string(readFile(t, bak)) != "new" {
+		t.Fatalf("应写到第一个空着的名字 %s: %s %v", taken[56], bak, err)
 	}
 }
 
@@ -291,8 +425,12 @@ func TestSetupCodexNotifyFollowsSymlink(t *testing.T) {
 	real := filepath.Join(home, "dotfiles", "codex.toml")
 	orig := "notify = [\"/bin/other\"]\n"
 	writeTestFile(t, real, orig)
-	os.Chmod(real, 0o640)
-	os.MkdirAll(filepath.Dir(cfg), 0o755)
+	if err := os.Chmod(real, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(real, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -320,12 +458,11 @@ func TestSetupCodexNotifyScriptRuns(t *testing.T) {
 	needUnixShell(t)
 	home, cfg, _ := codexEnv(t)
 	dir := filepath.Join(home, "my bin")
-	os.MkdirAll(dir, 0o755)
 	prevOut, railseOut := filepath.Join(home, "prev.out"), filepath.Join(home, "railse.out")
 	prev := filepath.Join(dir, "notify wrap")
 	bin := filepath.Join(dir, "railse")
-	os.WriteFile(prev, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+hooksconf.ShellQuote(prevOut)+"\nexit 1\n"), 0o755)
-	os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+hooksconf.ShellQuote(railseOut)+"\n"), 0o755)
+	writeExec(t, prev, "#!/bin/sh\nprintf '%s\\n' \"$@\" > "+hooksconf.ShellQuote(prevOut)+"\nexit 1\n")
+	writeExec(t, bin, "#!/bin/sh\nprintf '%s\\n' \"$@\" > "+hooksconf.ShellQuote(railseOut)+"\n")
 	writeTestFile(t, cfg, fmt.Sprintf("notify = [%q, '--a b']\n", prev))
 	data := filepath.Join(home, "data")
 	if _, errOut, code := codexNotify(t, "--bin", bin, "--dir", data); code != 0 {

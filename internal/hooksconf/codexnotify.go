@@ -94,24 +94,29 @@ func ParseCodexNotify(doc []byte) (CodexNotify, error) {
 }
 
 // SetCodexNotify 把 config.toml 顶层的 notify 换成 notify = [argv…]（TOML 基本字符串）：有顶层 notify 时只换从键到 ] 那一段，
-// 没有时（只写在表下面的不算）在文件最前面插一行；其余字节不变。doc 看不懂时（见 ParseCodexNotify）返回错误。
-func SetCodexNotify(doc []byte, argv []string) ([]byte, error) {
-	n, err := ParseCodexNotify(doc)
-	if err != nil {
-		return nil, err
-	}
+// 没有时（只写在表下面的不算）在文件最前面插一行；其余字节不变。n 必须是 ParseCodexNotify(doc) 的结果（这里不再解析一遍）。
+func SetCodexNotify(doc []byte, n CodexNotify, argv []string) []byte {
 	quoted := make([]string, len(argv))
 	for i, a := range argv {
 		quoted[i] = tomlQuote(a)
 	}
 	line := "notify = [" + strings.Join(quoted, ", ") + "]"
 	if !n.Found {
-		return append([]byte(line+"\n"), doc...), nil
+		return append([]byte(line+"\n"), doc...)
 	}
 	out := make([]byte, 0, len(doc)+len(line))
 	out = append(out, doc[:n.start]...)
 	out = append(out, line...)
-	return append(out, doc[n.end:]...), nil
+	return append(out, doc[n.end:]...)
+}
+
+// ShellJoin 把 argv 拼成一条 shell 命令：每个参数经 ShellQuote，用空格隔开。
+func ShellJoin(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, a := range argv {
+		quoted[i] = ShellQuote(a)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // tomlQuote 把 s 写成 TOML 基本字符串：转义 "、\ 与控制字符。
@@ -164,10 +169,7 @@ func NotifyScript(prev []string, bin, socket string) []byte {
 	b.WriteString("# Codex 把通知 JSON 作为最后一个参数传给 notify 命令；这里原样（\"$@\"）交给下面每个命令，一个失败不影响另一个。\n")
 	b.WriteString(notifyMarker + strings.TrimSuffix(j.String(), "\n") + "\n")
 	if len(prev) > 0 {
-		for _, a := range prev {
-			b.WriteString(ShellQuote(a) + " ")
-		}
-		b.WriteString("\"$@\"\n")
+		b.WriteString(ShellJoin(prev) + " \"$@\"\n")
 	}
 	b.WriteString(HookCommand(bin, "codex-notify", socket) + " \"$@\"\n")
 	b.WriteString("exit 0\n")

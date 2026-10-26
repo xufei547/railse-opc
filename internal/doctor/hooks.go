@@ -392,7 +392,7 @@ func codexNotifyCheck(o Options) Check {
 		}
 		return Check{ID: codexNotifyID, Name: codexNotifyName, Status: OK, Detail: path}
 	}
-	return notifyWarn(path+" 的 notify 不调 railse（"+strings.Join(n.Argv, " ")+"），Codex 的完成与提问事件不会进收件箱", hint)
+	return notifyWarn(path+" 的 notify 不调 railse（"+hooksconf.ShellJoin(n.Argv)+"），Codex 的完成与提问事件不会进收件箱", hint)
 }
 
 const codexNotifyID, codexNotifyName = "hooks.codex_notify", "Codex notify"
@@ -403,7 +403,8 @@ func notifyWarn(detail, hint string) Check {
 }
 
 // codexNotifyScriptCheck 看 config.toml（path）的 notify 指向的串接脚本 script：在、可执行、里面有 railse 的 hook codex-notify
-// 那一行才 ok；那一行连的 socket 对不上 --dir 的守护进程时 warn。fix 是重新生成脚本的命令。
+// 那一行才 ok；那一行连的 socket 对不上 --dir 的守护进程时 warn。fix 是重新生成脚本的命令。没有 railse 那一行的、不在数据目录里
+// 也没有标记行的，是用户自己的 codex-notify.sh：setup codex-notify 会把它保留为前一跳，提示照实说，不说“重新生成”。
 func codexNotifyScriptCheck(o Options, path, script, fix string) Check {
 	hint := "运行 " + fix + " 重新生成"
 	st, err := os.Stat(script)
@@ -419,6 +420,9 @@ func codexNotifyScriptCheck(o Options, path, script, fix string) Check {
 	}
 	c, ok := hooksconf.NotifyScriptHook(b)
 	if !ok {
+		if _, marked, _ := hooksconf.ParseNotifyScript(b); !marked && !samePath(script, filepath.Join(o.AgentDir, hooksconf.NotifyScriptName)) {
+			hint = "运行 " + fix + "：会把这个脚本保留为前一跳，再串上 railse"
+		}
 		return notifyWarn(script+" 里没有 railse 的 hook codex-notify 那一行，Codex 的完成与提问事件不会进收件箱", hint)
 	}
 	if c, bad := notifySocketCheck(o, script, "notify 脚本里的 railse ", c.Socket, fix+" 重新生成脚本"); bad {

@@ -108,45 +108,49 @@ func TestParseCodexNotifyRejects(t *testing.T) {
 }
 
 // SetCodexNotify 只换顶层 notify 从键到 ] 那一段，其余字节不变；没有顶层 notify 时在文件最前面插一行。路径按 TOML 基本字符串转义。
+// 它用 ParseCodexNotify 已解析的结果，不再解析一遍。
 func TestSetCodexNotify(t *testing.T) {
+	set := func(doc string, argv ...string) string {
+		t.Helper()
+		n, err := ParseCodexNotify([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(SetCodexNotify([]byte(doc), n, argv))
+	}
 	rest := "model = \"o3\" # 模型\n[tui]\nnotifications = true\n"
 	old := "notify = [ # 旧的\n  \"/usr/local/bin/notify-wrap\",\n  '--quiet',\n]"
 	doc := "# 我的配置\n" + old + " # 尾注释\n" + rest
-	got, err := SetCodexNotify([]byte(doc), []string{"/Users/me/.railse/codex-notify.sh"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "# 我的配置\n" + `notify = ["/Users/me/.railse/codex-notify.sh"]` + " # 尾注释\n" + rest; string(got) != want {
+	got := set(doc, "/Users/me/.railse/codex-notify.sh")
+	if want := "# 我的配置\n" + `notify = ["/Users/me/.railse/codex-notify.sh"]` + " # 尾注释\n" + rest; got != want {
 		t.Fatalf("只该换 notify 那一段:\n%s\n---\n%s", got, want)
 	}
 	// 再换一次：不变
-	again, err := SetCodexNotify(got, []string{"/Users/me/.railse/codex-notify.sh"})
-	if err != nil || string(again) != string(got) {
-		t.Fatalf("同样的 notify 再写一次应不变: %v\n%s", err, again)
+	if again := set(got, "/Users/me/.railse/codex-notify.sh"); again != got {
+		t.Fatalf("同样的 notify 再写一次应不变:\n%s", again)
 	}
 	// 没有顶层 notify（只在表下面的不算）：最前面插一行
 	under := "[mcp_servers.foo]\nnotify = [\"/x\"]\n"
-	got, err = SetCodexNotify([]byte(under), []string{"/s.sh"})
-	if err != nil || string(got) != "notify = [\"/s.sh\"]\n"+under {
-		t.Fatalf("应在最前面插一行: %v\n%s", err, got)
+	if got := set(under, "/s.sh"); got != "notify = [\"/s.sh\"]\n"+under {
+		t.Fatalf("应在最前面插一行:\n%s", got)
 	}
-	if got, _ := SetCodexNotify(nil, []string{"/s.sh"}); string(got) != "notify = [\"/s.sh\"]\n" {
+	if got := set("", "/s.sh"); got != "notify = [\"/s.sh\"]\n" {
 		t.Fatalf("空文件: %q", got)
 	}
 	// 引号、反斜杠、控制字符转义后读回来一样
 	odd := "/tmp/a \"b\"\\c\td\x01é/codex-notify.sh"
-	got, err = SetCodexNotify(nil, []string{odd})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := `notify = ["/tmp/a \"b\"\\c\td\u0001é/codex-notify.sh"]` + "\n"; string(got) != want {
+	got = set("", odd)
+	if want := `notify = ["/tmp/a \"b\"\\c\td\u0001é/codex-notify.sh"]` + "\n"; got != want {
 		t.Fatalf("转义: %q，想要 %q", got, want)
 	}
-	if n, err := ParseCodexNotify(got); err != nil || !slices.Equal(n.Argv, []string{odd}) {
+	if n, err := ParseCodexNotify([]byte(got)); err != nil || !slices.Equal(n.Argv, []string{odd}) {
 		t.Fatalf("读回来应是原路径: %v %q", err, n.Argv)
 	}
-	if _, err := SetCodexNotify([]byte(`notify = """x"""`), []string{"/s.sh"}); err == nil {
-		t.Fatal("看不懂的写法应报错")
+}
+
+func TestShellJoin(t *testing.T) {
+	if got := ShellJoin([]string{"/usr/local/bin/notify wrap", "--quiet", "it's", ""}); got != `'/usr/local/bin/notify wrap' --quiet 'it'\''s' ''` {
+		t.Fatalf("ShellJoin = %s", got)
 	}
 }
 

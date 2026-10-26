@@ -52,6 +52,9 @@ type pendingWrite struct {
 // backupSuffix 是用户级配置备份文件名里的后缀：<文件>.railse-bak-<时间>。
 const backupSuffix = ".railse-bak-"
 
+// backupNow 是备份文件名里的时间；是变量只为测试能固定它。
+var backupNow = time.Now
+
 // backupPath 是 show 在 now 时刻的备份文件：放在 show（给人看的路径）旁边，不放进链接指向的目录。时间用本地时间。
 func backupPath(show string, now time.Time) string {
 	return show + backupSuffix + now.Format("20060102-150405")
@@ -86,11 +89,26 @@ func needBackup(show string, existing, data []byte) (bool, error) {
 	return true, nil
 }
 
+// maxBackupTries 是同一秒里同名备份已存在时最多试几个名字（<名字>、<名字>-2 … <名字>-100）。
+const maxBackupTries = 100
+
 // writeBackup 把 data 写到 show 旁边新建的备份文件（0600，O_EXCL：不覆盖已有文件），返回备份文件的路径。
+// backupPath 已被占（同一秒里改了第二次）时依次试 -2、-3…，试满 maxBackupTries 个都被占才报错。
 // 中途失败时删掉写了一半的备份。
 func writeBackup(show string, data []byte) (string, error) {
-	bak := backupPath(show, time.Now())
-	f, err := os.OpenFile(bak, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	base := backupPath(show, backupNow())
+	var bak string
+	var f *os.File
+	var err error
+	for i := 1; i <= maxBackupTries; i++ {
+		bak = base
+		if i > 1 {
+			bak = fmt.Sprintf("%s-%d", base, i)
+		}
+		if f, err = os.OpenFile(bak, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); !errors.Is(err, os.ErrExist) {
+			break
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -331,7 +349,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 			case w.migrated:
 				fmt.Fprintf(stdout, "== %s（迁走 Railse 钩子后）==\n%s", w.show, w.data)
 			case w.backup != nil:
-				fmt.Fprintf(stdout, "== %s（会先备份到 %s）==\n%s", w.show, backupPath(w.backupOf, time.Now()), w.data)
+				fmt.Fprintf(stdout, "== %s（会先备份到 %s）==\n%s", w.show, backupPath(w.backupOf, backupNow()), w.data)
 			default:
 				fmt.Fprintf(stdout, "== %s ==\n%s", w.show, w.data)
 			}

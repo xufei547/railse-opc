@@ -8,8 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
@@ -82,10 +80,6 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 	}
 	script := filepath.Join(dataDir, hooksconf.NotifyScriptName)
 	n, err := hooksconf.ParseCodexNotify(existing)
-	var data []byte
-	if err == nil {
-		data, err = hooksconf.SetCodexNotify(existing, []string{script})
-	}
 	if err != nil {
 		fmt.Fprintf(stderr, "%s 看不懂（%v），什么都没改：请手动改好这一处（notify 要写成第一个 [表] 之前的字符串数组，"+
 			"如 notify = [\"/path/to/cmd\", \"--flag\"]）再重跑 railse setup codex-notify\n", show, err)
@@ -94,6 +88,7 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 	for _, t := range n.Tables {
 		fmt.Fprintf(stderr, "警告：%s 里 %s 下面的 notify 是那个表的键，Codex 读不到，已忽略（没有串进脚本）；请手动删掉它\n", show, t)
 	}
+	data := hooksconf.SetCodexNotify(existing, n, []string{script})
 	prev := codexPrevNotify(n, script, show, stderr)
 	body := hooksconf.NotifyScript(prev, b, socket)
 	scriptSame := false
@@ -113,7 +108,7 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 		case configSame:
 			configNote = "（已是最新）"
 		case backup:
-			configNote = "（会先备份到 " + backupPath(show, time.Now()) + "）"
+			configNote = "（会先备份到 " + backupPath(show, backupNow()) + "）"
 		}
 		fmt.Fprintf(stdout, "== %s%s ==\n%s== %s%s ==\n%s", script, scriptNote, body, show, configNote, data)
 		return 0
@@ -149,47 +144,72 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "已写入 %s：notify 指向 %s\n", show, script)
 	}
 	if len(prev) > 0 {
-		quoted := make([]string, len(prev))
-		for i, a := range prev {
-			quoted[i] = hooksconf.ShellQuote(a)
-		}
-		fmt.Fprintf(stdout, "Codex 的 notify 先调原来的 %s，再调 railse\n", strings.Join(quoted, " "))
+		fmt.Fprintf(stdout, "Codex 的 notify 先调原来的 %s，再调 railse\n", hooksconf.ShellJoin(prev))
 	} else {
-		fmt.Fprintln(stdout, "Codex 的 notify 只调 railse（没有要保留的 notify）")
+		fmt.Fprintln(stdout, "Codex 的 notify 只调 railse（没有前一跳）")
 	}
 	return 0
 }
 
-// codexPrevNotify 定串接脚本的前一跳：config.toml 顶层原有的 notify（n）。没有时、是直接调 railse 的旧写法
-// [".../railse", "hook", "codex-notify", ...] 时没有前一跳（替换掉，不串两个 railse）；已经是我们的脚本（与 script 是同一个文件，
-// 或文件名是 codex-notify.sh 且里面有标记行，如换 --dir 之前生成的）时取它标记行里记的前一跳，不把自己当前一跳，
-// 读不到时没有前一跳并警告；别的整个数组原样作为前一跳。
+// codexPrevNotify 定串接脚本的前一跳：config.toml 顶层原有的 notify（n）。
+//   - 没有，或是直接调 railse 的旧写法 [".../railse", "hook", "codex-notify", ...]：没有前一跳（替换掉，不串两个 railse）。
+//   - 第一个元素是我们的脚本（就是这次的 script，或文件名是 codex-notify.sh，如换 --dir 之前生成的）：取它标记行里记的前一跳，
+//     不把自己当前一跳；读不到（不在、没权限、没有标记行或标记行坏了）时没有前一跳，警告去备份里找。别处的 codex-notify.sh
+//     读得到、却没有标记行的，是用户自己的脚本，按下一条处理。
+//   - 别的：整个数组原样作为前一跳。
+//
+// 兜底：前一跳里任何一个元素就是这次的脚本（如 ["/bin/sh", 脚本]）时丢掉前一跳并警告，脚本绝不调自己。
 func codexPrevNotify(n hooksconf.CodexNotify, script, show string, stderr io.Writer) []string {
 	if !n.Found || len(n.Argv) == 0 {
 		return nil
 	}
-	first := n.Argv[0]
-	if same := samePath(first, script); same || filepath.Base(first) == hooksconf.NotifyScriptName {
-		var prev []string
-		marked := false
+	first, prev := n.Argv[0], n.Argv
+	switch {
+	case filepath.Base(first) == hooksconf.NotifyScriptName || sameScript(first, script):
 		b, err := os.ReadFile(first)
+		var p []string
+		marked := false
 		if err == nil {
-			prev, marked, err = hooksconf.ParseNotifyScript(b)
+			p, marked, err = hooksconf.ParseNotifyScript(b)
 		}
 		switch {
-		case marked && err == nil:
-			return prev
-		case same || marked:
+		case err == nil && marked:
+			prev = p
+		case err == nil && !sameScript(first, script):
+			// 别处的、读得到却没有标记行的 codex-notify.sh：用户自己的脚本，整个保留
+		default:
 			if err == nil {
-				err = errors.New("里面没有 railse 记的标记行")
+				err = errors.New("没有标记行")
 			}
-			fmt.Fprintf(stderr, "警告：读不到 %s 里记的前一跳（%v），这次没有前一跳；原来另有 notify 的，从 %s 的备份（%s*）里找回它写回 notify，"+
-				"再重跑 railse setup codex-notify\n", first, err, show, show+backupSuffix)
+			fmt.Fprintf(stderr, "警告：原来的 notify 记在 %s 的标记行里，读不到（%v），前一跳没有保留；要找回请看 %s*\n", first, err, show+backupSuffix)
+			return nil
+		}
+	case len(n.Argv) >= 3 && filepath.Base(first) == "railse" && n.Argv[1] == "hook" && n.Argv[2] == "codex-notify":
+		return nil
+	}
+	for _, a := range prev {
+		if sameScript(a, script) {
+			fmt.Fprintf(stderr, "警告：原来的 notify（%s）会调到这次的脚本 %s 自己，没有串成前一跳（否则脚本会一直调自己）；要找回原来的 notify 请看 %s*\n",
+				hooksconf.ShellJoin(prev), script, show+backupSuffix)
 			return nil
 		}
 	}
-	if len(n.Argv) >= 3 && filepath.Base(first) == "railse" && n.Argv[1] == "hook" && n.Argv[2] == "codex-notify" {
-		return nil
+	return prev
+}
+
+// sameScript 报告 p 是不是这次的脚本 script：samePath，或两者的规范形式（canonicalPath）相同。脚本还没写出来时 samePath
+// 认不出经符号链接目录的别名，要比父目录解开链接后的路径。只比绝对路径（相对路径要看 Codex 起 notify 时的当前目录）。
+func sameScript(p, script string) bool {
+	return filepath.IsAbs(p) && (samePath(p, script) || canonicalPath(p) == canonicalPath(script))
+}
+
+// canonicalPath 是 p 解开符号链接后的路径：p 存在时整个解开；不存在时解开父目录再接上文件名；父目录也不在时是清理后的 p。
+func canonicalPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
 	}
-	return n.Argv
+	if d, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(d, filepath.Base(p))
+	}
+	return filepath.Clean(p)
 }

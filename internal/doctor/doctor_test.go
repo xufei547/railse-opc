@@ -433,8 +433,9 @@ func TestHookChecks(t *testing.T) {
 		t.Fatalf("notify 在表下面: %+v", c)
 	}
 	// 顶层的 notify 是别人的命令：warn，提示运行 railse setup codex-notify（会保留它）
-	writeFile(t, cfg, []byte("notify = [\"/usr/local/bin/notify-wrap\"]\n"))
-	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, "/usr/local/bin/notify-wrap") || !strings.Contains(c.Hint, "railse setup codex-notify") {
+	// 参数逐个 ShellQuote，带空格的不会看不清边界
+	writeFile(t, cfg, []byte("notify = [\"/usr/local/bin/notify wrap\", \"--title=a b\"]\n"))
+	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, `（'/usr/local/bin/notify wrap' '--title=a b'）`) || !strings.Contains(c.Hint, "railse setup codex-notify") {
 		t.Fatalf("别人的 notify: %+v", c)
 	}
 	// 看不懂的写法：warn，说明看不懂
@@ -446,6 +447,7 @@ func TestHookChecks(t *testing.T) {
 
 // notify 是 railse setup codex-notify 写的串接脚本：脚本在、可执行、里面有 railse 那一行才 ok；脚本里 railse 那一行连的
 // socket 与 --dir 的守护进程对不上时 warn（与旧写法同一规则）；脚本不在、不可执行、没有 railse 那一行都 warn，提示重跑。
+// 用户自己的 codex-notify.sh（不在数据目录里、没有标记行）不说“重新生成”，说重跑会把它保留为前一跳。
 func TestCodexNotifyScript(t *testing.T) {
 	o, home := fakeOpts(t)
 	bin := "/usr/local/bin/railse"
@@ -454,29 +456,44 @@ func TestCodexNotifyScript(t *testing.T) {
 	script := filepath.Join(o.AgentDir, hooksconf.NotifyScriptName)
 	writeFile(t, cfg, []byte(fmt.Sprintf("model = \"x\"\nnotify = [%q]\n[tui]\nx = 1\n", script)))
 	check := func() Check { t.Helper(); return find(t, Run(o), "hooks.codex_notify") }
+	chmod := func(p string, mode os.FileMode) {
+		t.Helper()
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, script) || !strings.Contains(c.Hint, "railse setup codex-notify") {
 		t.Fatalf("脚本不在: %+v", c)
 	}
 	writeFile(t, script, hooksconf.NotifyScript([]string{"/usr/local/bin/notify-wrap"}, bin, ""))
-	os.Chmod(script, 0o644)
+	chmod(script, 0o644)
 	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, "不可执行") || !strings.Contains(c.Hint, "railse setup codex-notify") {
 		t.Fatalf("脚本不可执行: %+v", c)
 	}
-	os.Chmod(script, 0o755)
+	chmod(script, 0o755)
 	if c := check(); c.Status != OK || !strings.Contains(c.Detail, script) {
 		t.Fatalf("脚本写法: %+v", c)
 	}
-	// 脚本里没有 railse 那一行
+	// 数据目录里的脚本没有 railse 那一行（被改过）：重跑会重新生成它
 	writeFile(t, script, []byte("#!/bin/sh\n/usr/local/bin/notify-wrap \"$@\"\n"))
-	os.Chmod(script, 0o755)
-	if c := check(); c.Status != Warn || !strings.Contains(c.Hint, "railse setup codex-notify") {
+	chmod(script, 0o755)
+	if c := check(); c.Status != Warn || !strings.Contains(c.Hint, "railse setup codex-notify") || !strings.Contains(c.Hint, "重新生成") {
 		t.Fatalf("脚本里没有 railse: %+v", c)
 	}
+	// 用户自己的 codex-notify.sh（别处、没有标记行）：重跑会把它保留为前一跳，不说重新生成
+	own := filepath.Join(home, "bin", hooksconf.NotifyScriptName)
+	writeFile(t, own, []byte("#!/bin/sh\nterminal-notifier -message \"$1\"\n"))
+	chmod(own, 0o755)
+	writeFile(t, cfg, []byte(fmt.Sprintf("notify = [%q]\n", own)))
+	if c := check(); c.Status != Warn || !strings.Contains(c.Hint, "railse setup codex-notify") || !strings.Contains(c.Hint, "保留为前一跳") || strings.Contains(c.Hint, "重新生成") {
+		t.Fatalf("用户自己的 codex-notify.sh: %+v", c)
+	}
+	writeFile(t, cfg, []byte(fmt.Sprintf("notify = [%q]\n", script)))
 	// railse 那一行带 --socket 指向别处：warn，提示重跑或给 doctor 加 --dir
 	data := filepath.Join(home, "data dir")
 	dataSock := filepath.Join(data, "agent.sock")
 	writeFile(t, script, hooksconf.NotifyScript(nil, bin, dataSock))
-	os.Chmod(script, 0o755)
+	chmod(script, 0o755)
 	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, "连的是 "+dataSock) || !strings.Contains(c.Hint, "doctor 加 --dir "+hooksconf.ShellQuote(data)) {
 		t.Fatalf("socket 对不上: %+v", c)
 	}
@@ -485,7 +502,7 @@ func TestCodexNotifyScript(t *testing.T) {
 	script = filepath.Join(data, hooksconf.NotifyScriptName)
 	writeFile(t, cfg, []byte(fmt.Sprintf("notify = [%q]\n", script)))
 	writeFile(t, script, hooksconf.NotifyScript(nil, bin, dataSock))
-	os.Chmod(script, 0o755)
+	chmod(script, 0o755)
 	if c := check(); c.Status != OK {
 		t.Fatalf("--dir 的脚本: %+v", c)
 	}
@@ -500,7 +517,6 @@ func TestCodexNotifyScript(t *testing.T) {
 	}
 }
 
-// 钩子连的 socket（命令里的 --socket，没有就是默认 socket）与 --dir 的守护进程对不上：warn 并给出带 --dir 的重装命令。
 func TestHookSocketMismatch(t *testing.T) {
 	o, home := fakeOpts(t)
 	proj := filepath.Join(home, "proj")
