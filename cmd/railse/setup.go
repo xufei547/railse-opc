@@ -519,6 +519,11 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		return 1
 	}
 	enroll := *force || lerr != nil
+	// 要接入却缺 --hub 或 --token：不是终端就是用法错误（与原来一样排在下面的检查之前）；是终端的到下面再问
+	missing := enroll && (*hubURL == "" || *token == "")
+	if missing && !stdinIsTerminal() {
+		return usageErr("需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）")
+	}
 	// 一看就不对的输入在动手之前（也在下面提问之前）挡住，免得做了一半、答完才发现
 	b := *bin
 	if b == "" {
@@ -548,12 +553,16 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 			return 1
 		}
 	}
-	// 要接入却缺 --hub 或 --token：stdin 是终端就逐个问缺的（--name 没给时也问名字），答完照下面同样的四步做；不是终端是用法错误
-	if enroll && (*hubURL == "" || *token == "") {
-		if !stdinIsTerminal() {
-			return usageErr("需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）")
+	if enroll && *name != "" { // 只在要接入时用得上（已接入的跳过接入，不看 --name）
+		if err := checkNameFlag(*name); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
 		}
-		if err := askSetupAll(setupStdin, stdout, hubURL, token, name, cfg.MachineID); err != nil {
+	}
+	// 在终端里逐个问缺的（--name 没给时也问名字），答完照下面同样的四步做
+	if missing {
+		base, err := askSetupAll(setupStdin, stdout, hubURL, token, name, cfg.MachineID)
+		if err != nil {
 			if errors.Is(err, io.EOF) {
 				fmt.Fprintln(stderr, "已取消，什么都没做")
 			} else {
@@ -561,8 +570,24 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 			}
 			return 1
 		}
-		_, hubBase, _ = parseHubURL(*hubURL) // 向导已按 --hub 的口径校验过
+		if base != "" { // 问了 hub 地址：已按 --hub 的口径校验、规范化
+			hubBase = base
+		}
 	}
+	// 给人照抄的命令：用户给了 --project、--dir、--bin 的，原样带上（agent run 只认 --dir）
+	projArg, dirArg := "", ""
+	if proj != "" {
+		projArg = " --project " + hooksconf.ShellQuote(proj)
+	}
+	if *dir != "" {
+		dirArg = " --dir " + hooksconf.ShellQuote(cfg.Dir)
+	}
+	dirBin := dirArg
+	if *bin != "" {
+		dirBin += " --bin " + hooksconf.ShellQuote(b)
+	}
+	// 重新接入写成完整的 setup all 命令：从不带子命令的 railse setup 进来的，加 --force 是用法错误
+	reenroll := "railse setup all --force" + projArg + dirBin
 
 	steps := []string{"接入 hub", "安装钩子", "开机自启", "体检"}
 	var done []string
@@ -586,9 +611,9 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		m, err := agent.LoadMachine(cfg.MachinePath)
 		if err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
-			return fail(1, "machine.json 坏了：加 --force（连同 --hub、--token）重新接入。")
+			return fail(1, "machine.json 坏了：用 "+reenroll+" 重新接入（不在终端里时连同 --hub、--token）。")
 		}
-		fmt.Fprintf(stdout, "已接入过（%s），跳过；要换 hub 或重新接入加 --force\n", cfg.MachinePath)
+		fmt.Fprintf(stdout, "已接入过（%s），跳过；要换 hub 或重新接入：%s\n", cfg.MachinePath, reenroll)
 		phoneURL = m.HubURL
 		if hubBase != "" && hubBase != m.HubURL {
 			fmt.Fprintf(stdout, "注意：本机接的是 %s，不是 --hub 给的 %s；要改接那个 hub，加 --force 重新接入\n", m.HubURL, hubBase)
@@ -614,15 +639,6 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		done = append(done, steps[1])
 	}
 
-	// 给人照抄的命令：用户给了 --dir、--bin 的，原样带上（agent run 只认 --dir）
-	dirArg, dirBin := "", ""
-	if *dir != "" {
-		dirArg = " --dir " + hooksconf.ShellQuote(cfg.Dir)
-	}
-	dirBin = dirArg
-	if *bin != "" {
-		dirBin += " --bin " + hooksconf.ShellQuote(b)
-	}
 	step(3)
 	slow := false // 托管了、守护进程却还没应答
 	// socket 被占时问服务管理器作业在不在跑：在跑就是托管的那个占着，重装会换掉它；不在跑就是手动起的（或别的进程）占着，
@@ -657,12 +673,10 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 
 	step(4)
 	// 给了 --project 才交给 doctor（不给时 doctor 用它自己的默认），复查命令同理
-	doctorArgs, recheck := []string{"--dir", cfg.Dir, "--bin", b}, "railse doctor"
+	doctorArgs, recheck := []string{"--dir", cfg.Dir, "--bin", b}, "railse doctor"+projArg+dirBin
 	if proj != "" {
 		doctorArgs = append([]string{"--project", proj}, doctorArgs...)
-		recheck += " --project " + hooksconf.ShellQuote(proj)
 	}
-	recheck += dirBin
 	if code := runDoctor(doctorArgs, stdout, stderr); code != 0 {
 		if slow {
 			fmt.Fprintf(stdout, "体检有失败项；setup all 不因体检失败而失败：刚托管的守护进程可能还没起来，过几秒再跑 %s 复查。\n", recheck)

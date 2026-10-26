@@ -1619,8 +1619,9 @@ func TestSetupAllSkipsEnrollWhenMachineExists(t *testing.T) {
 	os.WriteFile(mpath, []byte("{"), 0o600)
 	os.RemoveAll(filepath.Join(f.proj, ".claude"))
 	errOut.Reset()
-	if code := run(f.args("--no-autostart"), &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "第 1 步") || !strings.Contains(errOut.String(), "--force") {
-		t.Fatalf("坏的 machine.json: %d %q", code, errOut.String())
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "第 1 步") ||
+		!strings.Contains(errOut.String(), "用 railse setup all --force --project "+f.proj+" --dir "+f.dir+" --bin "+f.bin+" 重新接入") {
+		t.Fatalf("坏的 machine.json 应给出照抄得了的重新接入命令: %d %q", code, errOut.String())
 	}
 	if _, err := os.Stat(filepath.Join(f.proj, ".claude")); !os.IsNotExist(err) {
 		t.Fatal("第 1 步失败后不该装钩子")

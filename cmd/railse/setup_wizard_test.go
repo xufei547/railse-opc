@@ -98,12 +98,13 @@ func TestSetupWizardAsksThenRunsSetupAll(t *testing.T) {
 	}
 }
 
-// 不合格的答案打印原因后重问：hub 地址同 --hub 的校验，非本机的 http:// 也不收；接入码去掉首尾空白后不能为空；名字同 --name 的校验。
+// 不合格的答案打印原因后重问：hub 地址同 --hub 的校验（原因里不提用户没输入过的 --hub），非本机的 http:// 也不收；
+// 接入码去掉首尾空白后不能为空；名字同 --name 的校验。答对的 hub 地址按 --hub 的口径规范化（去掉末尾 /），框里也是它。
 func TestSetupWizardReasksBadAnswers(t *testing.T) {
 	h := startTestHub(t)
 	f := setupAllEnv(t)
 	input := strings.Join([]string{
-		"ftp://x", "https://u:s3cretpw@hub.example.com", "http://hub.example.com", " " + h.http.URL + " ",
+		"ftp://x", "https://u:s3cretpw@hub.example.com", "http://hub.example.com", " " + h.http.URL + "/ ",
 		"   ", newEnrollToken(t, h),
 		strings.Repeat("a", 129), "mac",
 	}, "\n") + "\n"
@@ -118,10 +119,13 @@ func TestSetupWizardReasksBadAnswers(t *testing.T) {
 			t.Fatalf("%q 应问 %d 次，问了 %d 次:\n%s", prompt, n, got, s)
 		}
 	}
-	for _, want := range []string{"--hub 必须是 http:// 或 https://", "不能带用户名", "明文传输密钥", "接入码不能为空", "名字至多 128 字节"} {
+	for _, want := range []string{"hub 地址必须是 http:// 或 https://", "hub 地址不能带用户名", "明文传输密钥", "接入码不能为空", "名字至多 128 字节", "║  " + h.http.URL + "  ║"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("应说明为什么重问，缺 %q:\n%s", want, s)
 		}
+	}
+	if strings.Contains(s, "--hub 必须") || strings.Contains(s, "--hub 不能") {
+		t.Fatalf("向导的重问原因不该提 --hub:\n%s", s)
 	}
 	if strings.Contains(s+errOut.String(), "s3cretpw") {
 		t.Fatalf("不该回显地址里的密码:\n%s\n%s", s, errOut.String())
@@ -166,9 +170,17 @@ func TestSetupWizardNotTerminalKeepsUsageErrors(t *testing.T) {
 	if code := run([]string{"setup"}, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "railse setup all --hub URL") {
 		t.Fatalf("railse setup 不在终端里应打印用法、退出 2: %d %q", code, errOut.String())
 	}
-	errOut.Reset()
-	if code := run(f.args("--hub", "https://hub.example.com"), &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "需要 --hub 与 --token") {
-		t.Fatalf("setup all 缺 --token 不在终端里应退出 2: %d %q", code, errOut.String())
+	// 缺 --token 的用法错误与原来一样排在 --bin、--project 的检查之前：同时有坏的 --bin、--project 也照样退出 2
+	nope := filepath.Join(f.home, "nope")
+	for _, args := range [][]string{
+		f.args("--hub", "https://hub.example.com"),
+		append(f.args("--hub", "https://hub.example.com"), "--project", nope),
+		append(f.args("--hub", "https://hub.example.com"), "--bin", nope),
+	} {
+		errOut.Reset()
+		if code := run(args, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "需要 --hub 与 --token") {
+			t.Fatalf("%v: setup all 缺 --token 不在终端里应退出 2: %d %q", args, code, errOut.String())
+		}
 	}
 	if in.n != 0 || out.Len() != 0 {
 		t.Fatalf("不在终端里不该读 stdin（读了 %d 字节）、不该提问: %q", in.n, out.String())
@@ -227,6 +239,10 @@ func TestSetupWizardSkipsQuestionsWhenEnrolled(t *testing.T) {
 	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "已托管") || !strings.Contains(s, "║  "+h.http.URL+"  ║") {
 		t.Fatalf("应跳过接入、照常跑完，框里是 machine.json 的地址:\n%s", s)
 	}
+	// 从 railse setup 进来的人照抄得了：railse setup --force 是用法错误，要写成完整的 setup all 命令
+	if !strings.Contains(s, "要换 hub 或重新接入：railse setup all --force\n") {
+		t.Fatalf("重新接入的提示应是完整命令 railse setup all --force:\n%s", s)
+	}
 }
 
 // root：先拒绝，不提问，一个字节都不读。
@@ -247,21 +263,61 @@ func TestSetupWizardRootRefusedBeforeAsking(t *testing.T) {
 	}
 }
 
-// 一看就不对的输入（--bin 不能执行、项目目录不存在）在提问之前挡住，免得答完才被拒。
+// 一看就不对的输入（--bin 不能执行、项目目录不存在、--name 不合格）在提问之前挡住，免得答完才被拒。
 func TestSetupWizardChecksInputsBeforeAsking(t *testing.T) {
 	f := setupAllEnv(t)
 	in := fakeStdin(t, true, "https://hub.example.com\ntok\n\n")
-	for _, args := range [][]string{
-		append(f.args(), "--bin", filepath.Join(f.home, "nope")),
-		append(f.args(), "--project", filepath.Join(f.home, "nope")),
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{append(f.args(), "--bin", filepath.Join(f.home, "nope")), "不存在"},
+		{append(f.args(), "--project", filepath.Join(f.home, "nope")), "项目目录"},
+		{append(f.args(), "--name", "a\tb"), "名字 必须是合法 UTF-8，且不能含控制字符或不可见的格式字符（用 --name 另取一个）"},
+		{append(f.args(), "--name", strings.Repeat("a", 129)), "名字 至多 128 字节（用 --name 另取一个）"},
 	} {
 		var out, errOut bytes.Buffer
-		if code := run(args, &out, &errOut); code != 1 || out.Len() != 0 {
-			t.Fatalf("%v: %d %q %q", args, code, out.String(), errOut.String())
+		if code := run(tc.args, &out, &errOut); code != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), tc.want) {
+			t.Fatalf("%v: %d %q %q", tc.args, code, out.String(), errOut.String())
 		}
 	}
 	if in.n != 0 {
 		t.Fatalf("输入不对时不该提问，读了 %d 字节", in.n)
+	}
+}
+
+// 只看字符设备不够：/dev/null 也是字符设备（cron、CI、docker run 不带 -i、< /dev/null 时的 stdin），不能当终端去提问；
+// 管道、普通文件更不算。stdinIsTerminal 本身（TestMain 换掉之前的那个）也按这个判 os.Stdin。
+func TestIsTerminalRejectsNullPipeAndFile(t *testing.T) {
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	if st, err := null.Stat(); err != nil || st.Mode()&os.ModeCharDevice == 0 {
+		t.Fatalf("本例要的是字符设备 %s: %v", os.DevNull, err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	file, err := os.Create(filepath.Join(t.TempDir(), "in"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	for name, f := range map[string]*os.File{os.DevNull: null, "管道": r, "普通文件": file} {
+		if isTerminal(f) {
+			t.Fatalf("%s 不该算终端", name)
+		}
+	}
+	old := os.Stdin
+	os.Stdin = null
+	defer func() { os.Stdin = old }()
+	if realStdinIsTerminal() {
+		t.Fatal("stdin 是 /dev/null 时 stdinIsTerminal 不该算终端")
 	}
 }
 

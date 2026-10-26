@@ -248,7 +248,7 @@ main() {
   esac
 
   printf '\n下一步（详见 docs/setup.md）：\n'
-  printf '  工作机：railse setup all --hub https://<hub 域名> --token <接入码>\n'
+  printf '  工作机：railse setup all --hub https://<hub 域名> --token <接入码>，或直接运行 railse setup（终端里问答）\n'
   printf '  hub 机器（macOS，或用反向代理）：railse hub password、railse hub token，再 railse hub run（macOS 直出 TLS 加 --acme-domain <域名>）\n'
   # 提示里写装好的绝对路径：sudo 的 secure_path 常常找不到 railse（RHEL 系连 /usr/local/bin 都没有）
   absdir="$(CDPATH='' cd -- "$dir" && pwd)" || absdir="$dir"

@@ -83,7 +83,7 @@ railse setup                                                     # 问答式：�
 railse setup all --hub https://hub.example.com --token <接入码>   # 或者一次给全
 ```
 
-**问答式向导。** 不带子命令的 `railse setup`，或 `railse setup all` 要接入却没给 `--hub`、`--token` 时，stdin 是终端就逐个问缺的：hub 地址（与 `--hub` 同样校验；非本机的 `http://` 也不收，确在可信内网的用 `--hub` 给出）、接入码（在 hub 机器上运行 `railse hub token` 生成；输入会回显）、本机名字（直接回车用主机名；给了 `--name` 不问）。答得不合格就说明原因再问；Ctrl-D 取消，什么都不做（退出 1）。答完照 `setup all` 做下面四步。已接入过（有 `machine.json`、没加 `--force`）时不问，直接跑（跳过接入）。stdin 不是终端（脚本、管道）时不问：`railse setup` 打印用法，`setup all` 缺 `--hub`、`--token` 是用法错误，都退出 2。拒绝 root、检查 `--bin` 与 `--project` 都在提问之前，不会答完才被拒。
+**问答式向导。** 不带子命令的 `railse setup`，或 `railse setup all` 要接入却没给 `--hub`、`--token` 时，stdin 是终端就逐个问缺的：hub 地址（与 `--hub` 同样校验；非本机的 `http://` 也不收，确在可信内网的用 `--hub` 给出）、接入码（在 hub 机器上运行 `railse hub token` 生成；输入会回显）、本机名字（直接回车用主机名；给了 `--name` 不问）。答得不合格就说明原因再问；Ctrl-D 取消，什么都不做（退出 1）。答完照 `setup all` 做下面四步。已接入过（有 `machine.json`、没加 `--force`）时不问，直接跑（跳过接入）。stdin 不是终端（脚本、管道、`/dev/null`，如 cron、CI、`docker run` 不带 `-i`）时不问：`railse setup` 打印用法，`setup all` 缺 `--hub`、`--token` 是用法错误，都退出 2，与原来一样排在其余检查之前。拒绝 root、检查 `--bin`、`--project` 与 `--name` 都在提问之前，不会答完才被拒。
 
 依次做四步，任一步失败就停下，说明停在哪一步、哪些已做完，修好后重跑（已接入的会跳过接入）：
 

@@ -175,8 +175,8 @@ func agentEnroll(cfg agent.Config, hubURL, token, name string, force bool, stdou
 	if name == "" {
 		name = cfg.MachineID // 主机名
 	}
-	if err := checkDisplayName(name); err != nil {
-		return fmt.Errorf("名字 %w（用 --name 另取一个）", err)
+	if err := checkNameFlag(name); err != nil {
+		return err
 	}
 	if plaintextHub(u) {
 		fmt.Fprintln(stderr, "警告: "+plaintextHubNote)
@@ -230,18 +230,28 @@ func agentEnroll(cfg agent.Config, hubURL, token, name string, force bool, stdou
 	return nil
 }
 
-// parseHubURL 校验 --hub：只收 http、https，要有主机名，不带 user:pass（凭据只走接入码与机器密钥）、查询与片段。
-// 返回解析结果与去掉末尾 / 的基地址。错误信息不带原文（里面可能有密码）。
+// parseHubURL 校验 --hub（见 parseHubAddr），错误信息前面带“--hub ”。
 func parseHubURL(raw string) (*url.URL, string, error) {
+	u, base, err := parseHubAddr(raw)
+	if err != nil {
+		return nil, "", fmt.Errorf("--hub %w", err)
+	}
+	return u, base, nil
+}
+
+// parseHubAddr 校验 hub 地址：只收 http、https，要有主机名，不带 user:pass（凭据只走接入码与机器密钥）、查询与片段。
+// 返回解析结果与去掉末尾 / 的基地址。错误信息不带原文（里面可能有密码），也不带标志名：--hub 用 parseHubURL，
+// setup 的向导在前面加“hub 地址”。
+func parseHubAddr(raw string) (*url.URL, string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" || u.Hostname() == "" {
-		return nil, "", errors.New("--hub 必须是 http:// 或 https:// 开头、带主机名的地址")
+		return nil, "", errors.New("必须是 http:// 或 https:// 开头、带主机名的地址")
 	}
 	if u.User != nil {
-		return nil, "", errors.New("--hub 不能带用户名或密码")
+		return nil, "", errors.New("不能带用户名或密码")
 	}
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return nil, "", errors.New("--hub 不能带 ? 查询或 # 片段")
+		return nil, "", errors.New("不能带 ? 查询或 # 片段")
 	}
 	return u, u.Scheme + "://" + u.Host + strings.TrimRight(u.EscapedPath(), "/"), nil
 }
@@ -271,6 +281,14 @@ func checkDisplayName(s string) error {
 	}
 	if !hub.ValidName(s) {
 		return errors.New("必须是合法 UTF-8，且不能含控制字符或不可见的格式字符")
+	}
+	return nil
+}
+
+// checkNameFlag 按 checkDisplayName 检查本机名字（--name，没给时是主机名），错误说明带上怎么改。
+func checkNameFlag(name string) error {
+	if err := checkDisplayName(name); err != nil {
+		return fmt.Errorf("名字 %w（用 --name 另取一个）", err)
 	}
 	return nil
 }
