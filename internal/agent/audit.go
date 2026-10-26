@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // AuditEntry 是审计日志的一行。Payload 已脱敏。

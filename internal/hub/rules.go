@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/hub/wire"
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/redact"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/redact"
 )
 
 // errLearn 表示“记住”失败：这条请求生成不了规则（风险等级不许自动放行、载荷含凭据、形状表达不了等）。

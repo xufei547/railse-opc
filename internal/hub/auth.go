@@ -18,7 +18,7 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 const (

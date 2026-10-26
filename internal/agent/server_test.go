@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // blockingDecider 等到 release 被关闭才返回，用来模拟 hub 等待。

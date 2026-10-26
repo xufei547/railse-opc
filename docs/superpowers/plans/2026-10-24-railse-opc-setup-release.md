@@ -14,13 +14,13 @@
 
 ## Global Constraints
 
-- 模块路径 `github.com/railse/railse-opc`，`go 1.26.0`。Go 侧不新增第三方或直接依赖；`x/crypto/acme/autocert` 的传递依赖 `golang.org/x/net`、`golang.org/x/text`（Go 官方 x 模块，按 x/crypto v0.58.0 的 go.mod 版本）以 `// indirect` 进 go.mod（2026-10-25 执行期决定 10）；工具链（golangci-lint、goreleaser）只经 `go run <模块>@<版本>` 或 GitHub Action 使用，不进 go.mod。网页侧不改依赖。
+- 模块路径 `github.com/xufei547/railse-opc`，`go 1.26.0`。Go 侧不新增第三方或直接依赖；`x/crypto/acme/autocert` 的传递依赖 `golang.org/x/net`、`golang.org/x/text`（Go 官方 x 模块，按 x/crypto v0.58.0 的 go.mod 版本）以 `// indirect` 进 go.mod（2026-10-25 执行期决定 10）；工具链（golangci-lint、goreleaser）只经 `go run <模块>@<版本>` 或 GitHub Action 使用，不进 go.mod。网页侧不改依赖。
 - 平台：macOS arm64、Linux amd64、Linux arm64（设计 6.2）；`CGO_ENABLED=0`（modernc sqlite 纯 Go）。开机自启：macOS 用 launchd 用户代理，Linux 用 systemd（用户单元；hub 以 root 安装时用系统单元：只配 `--hub`，默认数据目录 `/var/lib/railse-hub`，单元加 `StateDirectory=railse-hub`、`StateDirectoryMode=0700`，显式 `--dir` 优先；hub 永远不以 root 运行，绑定 443/80 靠 `AmbientCapabilities=CAP_NET_BIND_SERVICE`，`hub run` 发现 euid 为 0 时警告但不拒绝）。Windows 不做。
 - 新增子命令沿用现有写法：`flag.FlagSet` 加 `foreignFlags` 拒绝不认的标志、`fs.NArg() != 0` 报多余参数、用法错退出 2、运行错退出 1、全部文案中文。写文件一律原子写（临时文件加 rename），私密文件 0600、目录 0700。
 - doctor 只读：不改任何配置、不启动守护进程或服务、不连 CLI 的账号（允许带 10 秒超时跑 `claude|codex|gemini --version`）；每项检查有 `ok`/`warn`/`fail`/`skip` 四种结果与一句修复提示；任一 `fail` 退出码 1。
 - ACME：只支持 Let's Encrypt 生产目录（autocert 默认），账户与证书私钥明文存在 hub 数据目录 `acme/`（0700，文件 0600，设计 5.3 的出站与签名密钥例外）；直出 TLS 时 `http.Server` 设 `ReadTimeout`。
 - 每个 Task 结束时 `make test` 全过（gofmt、vet、`go test ./... -race`、网页检查）；改了 CI 或发布配置的 Task 还要本地校验 YAML 能解析（`ruby -ryaml -e 'YAML.load_file(ARGV[0])' 文件`，macOS 自带 ruby）与 goreleaser 配置能通过 `check`。测试里的目录用 `os.MkdirTemp("", "rs")`。提交信息用中文。
-- 发布产物：`railse_<version>_<os>_<arch>.tar.gz`（内含 `railse`、`LICENSE`、`README.md`、`docs/*.md`，离线可读）与 `checksums.txt`；版本号来自 git tag `vX.Y.Z`，经 `-X main.version` 注入。GitHub 仓库 `railse/railse-opc`（与模块路径一致；安装脚本可用 `RAILSE_REPO` 改，goreleaser 的 owner/name 待用户确认 GitHub 账号后定）。
+- 发布产物：`railse_<version>_<os>_<arch>.tar.gz`（内含 `railse`、`LICENSE`、`README.md`、`docs/*.md`，离线可读）与 `checksums.txt`；版本号来自 git tag `vX.Y.Z`，经 `-X main.version` 注入。GitHub 仓库 `xufei547/railse-opc`（与模块路径一致；安装脚本可用 `RAILSE_REPO` 改，goreleaser 的 owner/name 待用户确认 GitHub 账号后定）。
 - 许可证 Apache 2.0（`LICENSE` 已在仓库首个提交里，Task 10 只核对首行，不再下载）。
 - golangci-lint：`errcheck` 只对 `_test.go` 排除，非测试代码逐条修，不放宽其他配置（2026-10-25 预检决定）。
 
@@ -1290,11 +1290,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hooksconf"
-	"github.com/railse/railse-opc/internal/hub/push"
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/hub/wire"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/hub/push"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func find(t *testing.T, r Report, id string) Check {
@@ -1547,8 +1547,8 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hookclient"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // Status 是一项检查的结果。
@@ -1769,9 +1769,9 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/railse/railse-opc/internal/hub/push"
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/hub/push"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
 )
 
 // hubClientChecks 在机器侧看 hub 是否可达、协议是否一致。
@@ -1896,7 +1896,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/railse/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
 
 var codexNotifyRe = regexp.MustCompile(`(?m)^\s*notify\s*=\s*\[.*"hook"\s*,\s*"codex-notify"`)
@@ -2191,8 +2191,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/doctor"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/doctor"
 )
 
 const doctorUsage = `用法:
@@ -2776,7 +2776,7 @@ formatters:
 `README.md`（中文，约 60 行）：
 1. 一句话：Railse 一人公司（Railse OPC）用策略引擎自动审批 AI 编程 agent（Claude Code、Codex CLI、Gemini CLI）的工具调用，定不了的进手机收件箱。状态：第一版自用中，未发布正式版。
 2. 怎么工作：三段（钩子 → 守护进程与策略引擎 → hub 与手机网页），一张 ASCII 流程。
-3. 安装：`curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sh`（Task 12 提供）；或 `go install github.com/railse/railse-opc/cmd/railse@latest`（没有网页，网页路径回 503）。
+3. 安装：`curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sh`（Task 12 提供）；或 `go install github.com/xufei547/railse-opc/cmd/railse@latest`（没有网页，网页路径回 503）。
 4. 三步上手：hub 机器 `railse hub password && railse hub token && railse hub run --acme-domain …`（或 `railse setup autostart --hub --system -- --acme-domain …`）；每台工作机 `railse setup all --hub https://… --token …`；手机打开网页。
 5. 文档索引：`docs/setup.md`、`docs/agent-local-loop.md`、`docs/hub.md`、`docs/web.md`、设计文档。
 6. 开发：`make test`、`make e2e`、`make lint`、`make build`。
@@ -2962,9 +2962,9 @@ git commit -m "ci: GitHub Actions（Go 竞态测试与 lint、网页检查、Pla
 - Modify: `.gitignore`（加 `/dist/` 已有；加 `/web/.e2e/`）
 
 **Interfaces:**
-- goreleaser v2：`before.hooks: [make web]`；一个 build（`./cmd/railse`，`CGO_ENABLED=0`，`darwin/arm64`、`linux/amd64`、`linux/arm64`，`-s -w -X main.version={{.Version}}`，`mod_timestamp`）；归档 `tar.gz`，名 `railse_{{ .Version }}_{{ .Os }}_{{ .Arch }}`，含 `LICENSE`、`README.md`、`docs/*.md`；`checksums.txt`；changelog 排除 `^docs`、`^test`、`^chore`、`^ci`；`release.github` 为 `railse/railse-opc`，`prerelease: auto`
+- goreleaser v2：`before.hooks: [make web]`；一个 build（`./cmd/railse`，`CGO_ENABLED=0`，`darwin/arm64`、`linux/amd64`、`linux/arm64`，`-s -w -X main.version={{.Version}}`，`mod_timestamp`）；归档 `tar.gz`，名 `railse_{{ .Version }}_{{ .Os }}_{{ .Arch }}`，含 `LICENSE`、`README.md`、`docs/*.md`；`checksums.txt`；changelog 排除 `^docs`、`^test`、`^chore`、`^ci`；`release.github` 为 `xufei547/railse-opc`，`prerelease: auto`
 - `release.yml`：`push` 到 `v*` tag 触发；`permissions: contents: write`；checkout `fetch-depth: 0`；setup Go 与 Node；`goreleaser/goreleaser-action@v6`（`version: '~> v2'`，`args: release --clean`，`GITHUB_TOKEN`）
-- `install.sh`（POSIX sh）：环境变量 `RAILSE_REPO`（默认 `railse/railse-opc`）、`RAILSE_VERSION`（默认最新）、`RAILSE_INSTALL_DIR`（默认 `/usr/local/bin`，不可写时 `~/.local/bin`）、`RAILSE_BASE_URL`（默认 `https://github.com/$RAILSE_REPO/releases/download/v$VERSION`，测试用）；流程：检测 `uname -s/-m` → `darwin/arm64`、`linux/amd64`、`linux/arm64`，其他报错；版本为最新时从 `https://github.com/$RAILSE_REPO/releases/latest/download/checksums.txt` 取文件名里的版本号；下载 `checksums.txt` 与对应 tar.gz 到临时目录；`sha256sum` 或 `shasum -a 256` 校验；解包；`install -m 755 railse $DIR/railse`（目录不可写且有 sudo 时提示并用 sudo）；打印 `railse version` 与下一步（`railse setup all …`、`railse doctor`）
+- `install.sh`（POSIX sh）：环境变量 `RAILSE_REPO`（默认 `xufei547/railse-opc`）、`RAILSE_VERSION`（默认最新）、`RAILSE_INSTALL_DIR`（默认 `/usr/local/bin`，不可写时 `~/.local/bin`）、`RAILSE_BASE_URL`（默认 `https://github.com/$RAILSE_REPO/releases/download/v$VERSION`，测试用）；流程：检测 `uname -s/-m` → `darwin/arm64`、`linux/amd64`、`linux/arm64`，其他报错；版本为最新时从 `https://github.com/$RAILSE_REPO/releases/latest/download/checksums.txt` 取文件名里的版本号；下载 `checksums.txt` 与对应 tar.gz 到临时目录；`sha256sum` 或 `shasum -a 256` 校验；解包；`install -m 755 railse $DIR/railse`（目录不可写且有 sudo 时提示并用 sudo）；打印 `railse version` 与下一步（`railse setup all …`、`railse doctor`）
 - `scripts/test-install.sh`：本地造一个假发布（`go build` 当前代码、打包成 `railse_0.0.1_<os>_<arch>.tar.gz`、生成 `checksums.txt`），用 `python3 -m http.server` 在随机端口提供，`RAILSE_BASE_URL=http://127.0.0.1:端口 RAILSE_VERSION=0.0.1 RAILSE_INSTALL_DIR=<临时目录> sh install.sh`，断言装出的 `railse version` 输出含 `railse`；再把 checksums 改坏一位，断言 install.sh 失败退出且不安装
 
 - [ ] **Step 1: 写配置与脚本**
@@ -3010,7 +3010,7 @@ changelog:
       - "^ci"
 release:
   github:
-    owner: railse
+    owner: xufei547
     name: railse-opc
   prerelease: auto
 ```
@@ -3051,12 +3051,12 @@ jobs:
 `install.sh`:
 ```sh
 #!/bin/sh
-# Railse 一行安装：curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sh
-# 环境变量：RAILSE_REPO（默认 railse/railse-opc）、RAILSE_VERSION（默认最新）、RAILSE_INSTALL_DIR（默认 /usr/local/bin）、
+# Railse 一行安装：curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sh
+# 环境变量：RAILSE_REPO（默认 xufei547/railse-opc）、RAILSE_VERSION（默认最新）、RAILSE_INSTALL_DIR（默认 /usr/local/bin）、
 #          RAILSE_BASE_URL（下载根地址，默认 GitHub Releases；测试用）
 set -eu
 
-REPO="${RAILSE_REPO:-railse/railse-opc}"
+REPO="${RAILSE_REPO:-xufei547/railse-opc}"
 VERSION="${RAILSE_VERSION:-}"
 INSTALL_DIR="${RAILSE_INSTALL_DIR:-/usr/local/bin}"
 

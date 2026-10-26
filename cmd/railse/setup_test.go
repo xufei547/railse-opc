@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
 
 func TestSetupHooksWritesAllThree(t *testing.T) {

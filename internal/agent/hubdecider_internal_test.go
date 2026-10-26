@@ -11,7 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
 )
 
 // 这里用假 hub 测真实 hub 发不出来的决定（非 allow/deny 的动作、超长字段），以及 SendPending 撞上坏连接时的宽限等待。

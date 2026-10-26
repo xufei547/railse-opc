@@ -1,4 +1,4 @@
-module github.com/railse/railse-opc
+module github.com/xufei547/railse-opc
 
 go 1.26.0
 

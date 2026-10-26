@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 const placeholder = "<redacted>"

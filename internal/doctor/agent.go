@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/railse/railse-opc/internal/autostart"
-	"github.com/railse/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/autostart"
+	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
 
 // quoteAll 把路径逐个按 shell 引起来、以空格连接：提示里的命令遇到带空格的路径也能直接复制运行。

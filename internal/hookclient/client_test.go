@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func startAgent(t *testing.T) (string, string) {

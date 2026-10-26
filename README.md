@@ -25,12 +25,12 @@ Railse 自身出任何故障都不会卡住 agent，也不会误批：守护进�
 ## 安装
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sh
 ```
 
 支持 macOS（Apple Silicon）与 Linux（amd64、arm64）。脚本从 GitHub Releases 下载对应的包，按同一发布的 `checksums.txt` 校验 sha256，校验不过不安装；不调用 sudo：`/usr/local/bin` 可写就装那里，否则装到 `~/.local/bin`（不在 PATH 里时会提示）。指定版本或目录：`curl -fsSL … | RAILSE_VERSION=0.1.0 RAILSE_INSTALL_DIR=~/bin sh`。Linux 上跑 hub 的机器改用 `curl -fsSL … | sudo sh`，以 root 运行时装进 `/usr/local/bin`（看输出里的“已安装 …”确认，见下面第 1 步）。升级就是重跑一遍。
 
-或者用 Go 自己编译：`go install github.com/railse/railse-opc/cmd/railse@latest`。这样装出的二进制不带手机网页（网页路径回 503“网页未构建”），只适合工作机；跑 hub 的机器请用上面的安装脚本，或在仓库里 `make build`。
+或者用 Go 自己编译：`go install github.com/xufei547/railse-opc/cmd/railse@latest`。这样装出的二进制不带手机网页（网页路径回 503“网页未构建”），只适合工作机；跑 hub 的机器请用上面的安装脚本，或在仓库里 `make build`。
 
 ## 三步上手
 
@@ -42,7 +42,7 @@ curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh |
    ```
    Linux 上普通用户绑不了 443/80，hub 也不该以 root 跑：装成系统服务（以普通用户运行，只给绑定特权端口的 `CAP_NET_BIND_SERVICE`，开机自启）。服务用户要能读、能执行 railse 本身，所以 hub 机器上用 root 安装，装到 `/usr/local/bin`（属主 root、0755）；sudo 的 `secure_path` 不一定含它（RHEL 系默认只有 `/sbin:/bin:/usr/sbin:/usr/bin`），sudo 时一律写绝对路径：
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sudo sh
+   curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sudo sh
    sudo /usr/local/bin/railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com
    railse hub password --dir /var/lib/railse-hub    # 不加 sudo，以服务用户（默认就是执行 sudo 的你）运行
    railse hub token --dir /var/lib/railse-hub

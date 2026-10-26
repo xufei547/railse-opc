@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // Outcome 是引擎之外的决定来源（hub、手机）给出的结论。

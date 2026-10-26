@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 const (

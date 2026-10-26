@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
 )
 
 // 交给钩子的理由一律是这里的固定文案。hub 送来的自由文本（手机上的备注、hub 拒收的原因）只进 Outcome.Note，

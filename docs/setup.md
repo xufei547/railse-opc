@@ -5,23 +5,23 @@
 ## 安装
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sh
 ```
 
 - **平台。** macOS（Apple Silicon）、Linux amd64 与 arm64；不支持 Windows 与 Intel Mac。
 - **校验和。** 脚本从 GitHub Releases 下载 `railse_<版本>_<系统>_<架构>.tar.gz`，按同一发布的 `checksums.txt` 校验 sha256，不符就不装（只有校验和，没有签名：两者来自同一处）。新文件先写到安装目录里的临时名再改名替换，正在运行的旧二进制不受影响。
 - **安装目录。** 脚本不调用 sudo：`/usr/local/bin` 可写就装那里，否则装 `~/.local/bin`（不存在时等下载与校验都过了才建），它不在 `PATH` 里时打印要加进 shell 配置的那一行。
-- **环境变量**（经管道运行时写在 `sh` 前面）：`RAILSE_VERSION`（如 `0.1.0`，带 `v` 也行，默认最新正式版）、`RAILSE_INSTALL_DIR`（安装目录，不存在就建）、`RAILSE_REPO`（默认 `railse/railse-opc`）。例如：
+- **环境变量**（经管道运行时写在 `sh` 前面）：`RAILSE_VERSION`（如 `0.1.0`，带 `v` 也行，默认最新正式版）、`RAILSE_INSTALL_DIR`（安装目录，不存在就建）、`RAILSE_REPO`（默认 `xufei547/railse-opc`）。例如：
   ```sh
-  curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | RAILSE_VERSION=0.1.0 RAILSE_INSTALL_DIR="$HOME/bin" sh
+  curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | RAILSE_VERSION=0.1.0 RAILSE_INSTALL_DIR="$HOME/bin" sh
   ```
 - **Linux 上的 hub 机器装到系统目录。** 系统单元（见下文）的服务用户必须能读、能执行这个二进制，所以 hub 机器用 root 装：脚本以 root 运行时 `/usr/local/bin` 可写，就装在那里（属主 root、0755，任何用户都能执行）。
   ```sh
-  curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sudo sh
+  curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sudo sh
   ```
   看输出里的“已安装 /usr/local/bin/railse”确认位置。sudo 会清掉环境变量，要指定版本时写在 `sudo` 后面：`… | sudo RAILSE_VERSION=0.1.0 sh`。没有 `/usr/local/bin` 的系统上脚本会退到 `$HOME/.local/bin`，而 sudo 下的 `HOME` 是 root 的还是你的取决于 sudo 的配置（老版本 Ubuntu 保留你的 `HOME`，会在你的 `~/.local/bin` 里留下 root 属主的文件），这时显式指定：`… | sudo RAILSE_INSTALL_DIR=/usr/local/bin sh`。
 - **sudo 时写绝对路径。** sudo 只在 `secure_path` 里找命令：它没有 `~/.local/bin`，RHEL 系（RHEL、CentOS、Rocky、Alma、Amazon Linux）默认连 `/usr/local/bin` 都没有（只有 `/sbin:/bin:/usr/sbin:/usr/bin`），`sudo railse …` 会报 `command not found`。所以下文凡要 sudo 的都写 `sudo /usr/local/bin/railse …`；railse 装在别处时写 `sudo "$(command -v railse)" …`。
-- **自己编译。** `go install github.com/railse/railse-opc/cmd/railse@latest` 装出的二进制不带手机网页（网页路径回 503“网页未构建”），只适合工作机；hub 用安装脚本，或在仓库里 `make build`。
+- **自己编译。** `go install github.com/xufei547/railse-opc/cmd/railse@latest` 装出的二进制不带手机网页（网页路径回 503“网页未构建”），只适合工作机；hub 用安装脚本，或在仓库里 `make build`。
 - **升级**就是重跑一遍安装脚本，再重启守护进程与 hub（见“升级”）。
 - **卸载。** 先停掉托管（数据目录保留），再删钩子与二进制：
   ```sh
@@ -62,7 +62,7 @@ railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com --tr
 普通用户绑不了 443/80，hub 也不该以 root 跑：系统单元以普通用户运行，只多给一项 `CAP_NET_BIND_SERVICE`（`AmbientCapabilities=`），整个文件系统只读、只有数据目录可写。
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sudo sh    # 装到 /usr/local/bin（见“安装”）
+curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sudo sh    # 装到 /usr/local/bin（见“安装”）
 sudo /usr/local/bin/railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com
 railse hub password --dir /var/lib/railse-hub     # 不加 sudo：以服务用户（默认就是执行 sudo 的你）运行
 railse hub token --dir /var/lib/railse-hub

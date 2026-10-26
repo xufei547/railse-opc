@@ -15,9 +15,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/railse/railse-opc/internal/hub/push"
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/hub/push"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 const (

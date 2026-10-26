@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/railse/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
 
 // codexNotifyRe 认 notify = [..., "hook", "codex-notify"]，后面可以再跟 "--socket", "<路径>"（第 1 个子匹配是带引号的路径）；

@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 // Version 是当前协议版本，所有消息的 v 字段必须等于它。

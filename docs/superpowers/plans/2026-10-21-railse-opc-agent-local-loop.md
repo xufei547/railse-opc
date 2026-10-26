@@ -16,7 +16,7 @@
 
 ## Global Constraints
 
-- 模块路径 `github.com/railse/railse-opc`，`go 1.24`，不新增第三方依赖。
+- 模块路径 `github.com/xufei547/railse-opc`，`go 1.24`，不新增第三方依赖。
 - `internal/policy` 仍不做 IO；本计划所有 IO 都在 `internal/agent`、`internal/hookclient`、`cmd/railse` 里。项目根目录由守护进程向上查找 `.git` 得到，再通过 `policy.Context.ProjectRoot` 传入引擎；找不到时传空字符串，引擎按项目外处理（fail closed）。
 - 钩子进程（`railse hook`）绝不把自身环境变量写日志或上报：Claude 会注入 `CLAUDE_CODE_MESSAGING_TOKEN`。stdout 只能有一个 JSON 对象或为空。
 - 钩子遇到任何异常（守护进程未运行、连不上、输入不认识、超时、收到 SIGTERM）都输出“不作决定”：stdout 为空、退出码 0。Gemini 绝不输出 `allow`（实测 allow 不跳过原生框），绝不输出 `ask`（headless 下永久挂起），退出码只用 0。
@@ -92,7 +92,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 func TestRequestRoundTrip(t *testing.T) {
@@ -178,7 +178,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 // Version 是当前协议版本，所有消息的 v 字段必须等于它。
@@ -353,7 +353,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 func TestString(t *testing.T) {
@@ -404,7 +404,7 @@ package redact
 import (
 	"regexp"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 const placeholder = "<redacted>"
@@ -491,7 +491,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 func sample(t *testing.T, rel string) []byte {
@@ -655,8 +655,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // Kind 是翻译结果的种类。
@@ -843,7 +843,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func init() { register(claude{}) }
@@ -944,7 +944,7 @@ package adapter
 import (
 	"testing"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 func TestCodexParsePermissionRequest(t *testing.T) {
@@ -1038,7 +1038,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func init() { register(codex{}) }
@@ -1152,7 +1152,7 @@ package adapter
 import (
 	"testing"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 func TestGeminiParseBeforeTool(t *testing.T) {
@@ -1260,7 +1260,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func init() { register(gemini{}) }
@@ -1471,8 +1471,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func TestAuditAppendsJSONL(t *testing.T) {
@@ -1668,8 +1668,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // AuditEntry 是审计日志的一行。Payload 已脱敏。
@@ -1760,7 +1760,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 func TestLoadRulesCreatesDefaultFile(t *testing.T) {
@@ -1847,7 +1847,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 const rulesHeader = `# Railse OPC 本机规则文件。守护进程启动和 reload 时读取，改错了会保留上一版。
@@ -1985,8 +1985,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // blockingDecider 等到 release 被关闭才返回，用来模拟 hub 等待。
@@ -2257,8 +2257,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // Outcome 是引擎之外的决定来源（hub、手机）给出的结论。
@@ -2359,9 +2359,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
-	"github.com/railse/railse-opc/internal/redact"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/redact"
 )
 
 // Server 监听 Unix socket，一次连接处理一条消息。
@@ -2627,7 +2627,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func event(kind, session, msg string) proto.Event {
@@ -2908,9 +2908,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func startAgent(t *testing.T) (string, string) {
@@ -2985,8 +2985,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hookclient"
 )
 
 func startTestAgent(t *testing.T) (sock string, repo string, cfg agent.Config) {
@@ -3120,7 +3120,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // Client 指向守护进程的 socket。
@@ -3233,10 +3233,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/railse/railse-opc/internal/adapter"
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hookclient"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/adapter"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // stdinReader 让测试能替换 stdin。
@@ -3395,7 +3395,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/agent"
 )
 
 func TestAgentServeAndControl(t *testing.T) {
@@ -3513,8 +3513,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hookclient"
 )
 
 const agentUsage = `用法:

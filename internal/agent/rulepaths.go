@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 // normalizeRulePaths 把规则里写成符号链接形式的路径换成真实路径，与守护进程对 cwd、项目根的处理

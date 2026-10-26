@@ -43,6 +43,6 @@ changelog:
       - "^ci"
 release:
   github:
-    owner: railse
+    owner: xufei547
     name: railse-opc
   prerelease: auto

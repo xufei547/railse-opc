@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/autostart"
-	"github.com/railse/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/autostart"
+	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
 
 // systemDirEnv 在 autostartEnv 之上记下 chown 了哪些目录（经 fd，记 fd 的名字）。

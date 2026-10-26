@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- 模块路径 `github.com/railse/railse-opc`，仓库根目录即本地 `/Users/xufei/RailseWork`。将来换 GitHub 用户名只改 go.mod 一处再 `gofmt -r` 全局替换。
+- 模块路径 `github.com/xufei547/railse-opc`，仓库根目录即本地 `/Users/xufei/RailseWork`。将来换 GitHub 用户名只改 go.mod 一处再 `gofmt -r` 全局替换。
 - `go.mod` 的 `go` 指令为 `1.24`。
 - `internal/policy` 不做任何 IO：不读文件、不访问网络、不读环境变量。所有路径和家目录由调用方通过 `Context` 传入。
 - 不依赖 herdr，不引入 herdr 的任何代码或协议。
@@ -89,7 +89,7 @@ Expected: `go version go1.27.3 darwin/arm64`（小版本号可能更高）。
 
 `go.mod`:
 ```
-module github.com/railse/railse-opc
+module github.com/xufei547/railse-opc
 
 go 1.24
 ```
@@ -211,7 +211,7 @@ package policy
 - [ ] **Step 6: 跑测试确认通过**
 
 Run: `gofmt -l . && go vet ./... && go test ./...`
-Expected: `ok  	github.com/railse/railse-opc/cmd/railse`；`internal/policy` 显示 `no test files`。
+Expected: `ok  	github.com/xufei547/railse-opc/cmd/railse`；`internal/policy` 显示 `no test files`。
 
 - [ ] **Step 7: 提交**
 
@@ -2822,7 +2822,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 const policyUsage = `用法:

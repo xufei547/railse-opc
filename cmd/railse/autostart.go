@@ -18,9 +18,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/autostart"
-	"github.com/railse/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/autostart"
+	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
 
 const autostartUsage = `用法:

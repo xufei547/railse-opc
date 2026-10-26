@@ -19,10 +19,10 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hookclient"
-	"github.com/railse/railse-opc/internal/hub"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/hub"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 const agentUsage = `用法:

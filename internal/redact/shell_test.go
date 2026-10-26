@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 // shellCase 是命令行语境的一条回归用例：in 交给 String，得到的必须正好是 want。

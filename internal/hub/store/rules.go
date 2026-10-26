@@ -9,7 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 // RuleRow 是 rules 表的一行。YAML 是单条规则，不带 enabled；启停只看 Enabled（enabled 列）。

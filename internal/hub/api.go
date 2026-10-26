@@ -16,8 +16,8 @@ import (
 	"github.com/coder/websocket"
 	"gopkg.in/yaml.v3"
 
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 const (

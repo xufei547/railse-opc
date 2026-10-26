@@ -15,8 +15,8 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hookclient"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // Status 是一项检查的结果。

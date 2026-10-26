@@ -17,10 +17,10 @@ import (
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hub/push"
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hub/push"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
 )
 
 // hubClientChecks 在机器侧看 hub 是否可达、协议是否一致：GET machine.json 里 hub_url 的 /api/version，不带凭据。

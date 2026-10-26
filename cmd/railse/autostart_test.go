@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/autostart"
+	"github.com/xufei547/railse-opc/internal/autostart"
 )
 
 // cmdRec 记下 runCommand 收到的每条命令；respond 不为空时由它给输出与错误，否则一律成功、无输出。

@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hub"
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hub"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 // cancelledHubRun 让 hub run 的运行期一开始就已取消：即使误把它跑起来，也会立刻关停而不是挂住测试。

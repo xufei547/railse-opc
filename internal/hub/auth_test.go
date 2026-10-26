@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 type testHub struct {

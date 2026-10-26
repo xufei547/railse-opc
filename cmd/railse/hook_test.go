@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hookclient"
 )
 
 func startTestAgent(t *testing.T) (sock string, repo string, cfg agent.Config) {

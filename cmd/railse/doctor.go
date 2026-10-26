@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/railse/railse-opc/internal/doctor"
+	"github.com/xufei547/railse-opc/internal/doctor"
 )
 
 const doctorUsage = `用法:

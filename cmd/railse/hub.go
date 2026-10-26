@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub"
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 const hubUsage = `用法:

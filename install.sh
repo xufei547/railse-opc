@@ -1,12 +1,12 @@
 #!/bin/sh
 # Railse 一行安装：
-#   curl -fsSL https://raw.githubusercontent.com/railse/railse-opc/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sh
 #
 # 按系统下载 GitHub Release 里的 railse_<版本>_<系统>_<架构>.tar.gz，用同一发布的 checksums.txt 校验 sha256，
 # 校验通过才安装。支持 macOS（Apple Silicon）、Linux amd64 与 arm64。不调用 sudo。
 #
 # 环境变量（经管道运行时写在 sh 前面，例如 curl -fsSL … | RAILSE_VERSION=0.1.0 sh）：
-#   RAILSE_REPO         GitHub 仓库，默认 railse/railse-opc
+#   RAILSE_REPO         GitHub 仓库，默认 xufei547/railse-opc
 #   RAILSE_VERSION      要装的版本（如 0.1.0，前面带 v 也行），默认最新正式版
 #   RAILSE_INSTALL_DIR  安装目录（不存在就建）；不给时 /usr/local/bin 可写就装那里，否则装 ~/.local/bin
 #   RAILSE_BASE_URL     下载根地址（测试用，只接受 http:// 或 https://），默认 https://github.com/$RAILSE_REPO/releases/download/v<版本>；
@@ -84,7 +84,7 @@ main() {
   trap cleanup EXIT
   trap 'exit 1' HUP INT TERM
 
-  repo="${RAILSE_REPO:-railse/railse-opc}"
+  repo="${RAILSE_REPO:-xufei547/railse-opc}"
   case "$repo" in
     */*/* | /* | */ | *[!A-Za-z0-9._/-]*) fail "RAILSE_REPO 应形如 owner/name：$repo" ;;
     */*) ;;

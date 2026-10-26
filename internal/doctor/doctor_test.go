@@ -19,12 +19,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/autostart"
-	"github.com/railse/railse-opc/internal/hooksconf"
-	"github.com/railse/railse-opc/internal/hub/push"
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/hub/wire"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/autostart"
+	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/hub/push"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func find(t *testing.T, r Report, id string) Check {

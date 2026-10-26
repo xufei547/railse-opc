@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/doctor"
+	"github.com/xufei547/railse-opc/internal/doctor"
 )
 
 // fakeDoctorCLIs 让测试里的 doctor 不碰本机环境：看不到任何 CLI（LookPath 一律找不到，RunCmd 被调到就算测试失败），

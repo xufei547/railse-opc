@@ -25,7 +25,7 @@ import (
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 // 这些测试绝不连 Let's Encrypt：证书用现场生成的自签证书注入（tlsConfigFn），真实的 autocert 只对不在白名单的域名调用

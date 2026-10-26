@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 func TestLoadRulesCreatesDefaultFile(t *testing.T) {

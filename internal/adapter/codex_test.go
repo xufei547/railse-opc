@@ -3,7 +3,7 @@ package adapter
 import (
 	"testing"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 func TestCodexParsePermissionRequest(t *testing.T) {

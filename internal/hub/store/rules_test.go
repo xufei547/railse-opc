@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 // ensureDefaults 导入内置规则并检查错误。

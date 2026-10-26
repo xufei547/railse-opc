@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // ErrNotPending 表示请求已经不是待处理状态。

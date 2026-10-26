@@ -13,9 +13,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/redact"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/redact"
 )
 
 // webhookMachineID 是 webhook 请求的 machine_id。它不是任何机器（机器 id 是 32 个十六进制字符，撞不上）：

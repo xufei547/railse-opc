@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- 模块路径 `github.com/railse/railse-opc`，`go 1.26.0`。本计划 Go 侧不新增依赖；网页侧只用 Tech Stack 列出的包，`package-lock.json` 入库，安装用 `npm ci`。
+- 模块路径 `github.com/xufei547/railse-opc`，`go 1.26.0`。本计划 Go 侧不新增依赖；网页侧只用 Tech Stack 列出的包，`package-lock.json` 入库，安装用 `npm ci`。
 - 网页与 hub 同源：开发时 Vite 代理 `/api`、`/ws` 到本机 hub 并把 `Origin` 改写成 hub 的源；生产只经 hub 托管。cookie 认证沿用第 3 份（`railse_session`，HttpOnly、SameSite=Lax）。
 - 网页里所有可见文案中文；不引入 UI 组件库、CSS 框架、状态管理库；样式用一个 `app.css` 加 CSS 变量，手机优先，跟随系统深浅色，适配 iOS 安全区（`env(safe-area-inset-*)`）。
 - 推送只在新请求产生时发：`kind` 为 `permission`、`webhook`、`question`；`done` 不推。每条推送的 Service Worker 必须 `showNotification`（iOS 多次静默推送会吊销订阅）。推送载荷 JSON 不超过 3 KiB（Apple 上限 4 KiB），标题、正文截断。
@@ -1784,8 +1784,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub/push"
-	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/hub/push"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
 )
 
 // fakePushEndpoint 冒充推送服务：记每次收到的请求，按 status 回应。
@@ -2025,9 +2025,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub/push"
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/hub/push"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 const (
@@ -2260,8 +2260,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub/push"
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/push"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 const (
@@ -2419,7 +2419,7 @@ func hostOf(endpoint string) string {
 			fmt.Fprintf(stdout, "已换新密钥，删除了 %d 条推送订阅；所有手机要在网页里重新开启通知。\n", removed)
 		}
 ```
-（导入 `github.com/railse/railse-opc/internal/hub/push`。）
+（导入 `github.com/xufei547/railse-opc/internal/hub/push`。）
 - `runHubServe` 启动日志加一行：推送启用与否（`--public-url` 有无）。
 
 `docs/hub.md`：API 表加五个 `/api/push/*`；`/api/status` 加两字段；“启动”一节加 `--public-url` 与 `railse hub vapid`；“安全要点”加“VAPID 私钥与订阅密钥明文存库（设计 5.3 例外），永不经接口返回；`railse hub vapid --rotate` 换钥后所有手机重新开启通知”；“故障排查”加 `push_sent`、`push_subscription_removed` 审计的含义。
@@ -2678,7 +2678,7 @@ func serveFile(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) 
 ```
 （`http.ServeFileFS` 是 Go 1.22 加的。若它对 `index.html` 仍做重定向，改用 `fs.ReadFile` 读出内容后 `http.ServeContent(w, r, name, modTime, bytes.NewReader(b))`，`modTime` 取文件的 `ModTime()`。）
 
-`internal/hub/server.go` 的 `routes()` 末尾加 `s.mux.Handle("/", webui.Handler(webui.FS()))`（导入 `github.com/railse/railse-opc/internal/hub/webui`）。Go 1.22 的 mux 里 `GET /api/status` 这类带方法与路径的模式比 `/` 更具体，接口路由不受影响；没注册的 `/api/x` 落到 `/`，由 `webui` 回 404。
+`internal/hub/server.go` 的 `routes()` 末尾加 `s.mux.Handle("/", webui.Handler(webui.FS()))`（导入 `github.com/xufei547/railse-opc/internal/hub/webui`）。Go 1.22 的 mux 里 `GET /api/status` 这类带方法与路径的模式比 `/` 更具体，接口路由不受影响；没注册的 `/api/x` 落到 `/`，由 `webui` 回 404。
 
 - [ ] **Step 4: 跑测试确认通过**
 

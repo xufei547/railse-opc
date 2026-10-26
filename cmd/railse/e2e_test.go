@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/hookclient"
 )
 
 // 用真实录制的样本走完整链路，只把 cwd 改到临时仓库。

@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- 模块路径 `github.com/railse/railse-opc`，`go 1.24`。本计划只允许新增上述三个依赖，版本固定。
+- 模块路径 `github.com/xufei547/railse-opc`，`go 1.24`。本计划只允许新增上述三个依赖，版本固定。
 - `internal/policy` 仍不做 IO。hub 调用 `policy.ParseRuleSet`、`NewEngine`、`ProposeRule`、`Validate`，把它们的结果存进 SQLite。
 - hub 的数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`（与守护进程的 `~/.railse` 分开，同一台机器可以两者都跑）；目录 0700，数据库文件 `hub.db` 0600。
 - 守护进程到 hub 的认证：`railse hub token` 生成 10 分钟有效的一次性接入码；`railse agent enroll` 用它换取本机长期密钥，存 `~/.railse/machine.json`（0600）；WebSocket 握手用 `Authorization: Bearer <密钥>`；hub 只存密钥的 SHA-256。例外：webhook 出站回调令牌明文存储，回调完成或重试用尽后清空（2026-10-22 用户决定 D）。
@@ -104,8 +104,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func TestRoundTripAndKind(t *testing.T) {
@@ -164,8 +164,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // MaxFrame 是单帧最大字节数。
@@ -1022,8 +1022,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func newReq(machine, id, cmd string) Request {
@@ -1148,8 +1148,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // ErrNotPending 表示请求已经不是待处理状态。
@@ -1368,7 +1368,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 func TestEnsureDefaultRulesAndRuleSet(t *testing.T) {
@@ -1508,7 +1508,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 // RuleRow 是 rules 表的一行。
@@ -1811,7 +1811,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 type testHub struct {
@@ -1979,7 +1979,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 // Config 是 hub 的配置。
@@ -2115,7 +2115,7 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 const (
@@ -2354,7 +2354,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
 )
 
 type agentClient struct {
@@ -2553,8 +2553,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
 )
 
 // agentConn 是一台机器的活动连接。
@@ -2842,11 +2842,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/hub/wire"
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func pendingFrame(id, session, turn, cmd string) wire.PendingRequest {
@@ -3086,9 +3086,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
 )
 
 var errBadAction = errors.New("action 只能是 allow 或 deny")
@@ -3349,7 +3349,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/railse/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
 )
 
 func doReq(t *testing.T, method, url string, body []byte, ct string, cookie *http.Cookie) *http.Response {
@@ -3563,9 +3563,9 @@ package hub
 import (
 	"fmt"
 
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/hub/wire"
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 // pushRules 把当前规则快照发给所有守护进程并通知网页。
@@ -3646,8 +3646,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 func (s *Server) apiRoutes() {
@@ -3979,7 +3979,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 func TestWebhookIngestAndCallback(t *testing.T) {
@@ -4080,8 +4080,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 type webhookCallback struct {
@@ -4225,8 +4225,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 type recordingSink struct {
@@ -4546,11 +4546,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hub"
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hub"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
@@ -4802,8 +4802,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/railse/railse-opc/internal/hub/wire"
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 // ErrHubDisconnected 表示此刻没有到 hub 的连接。
@@ -5182,10 +5182,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hub"
-	"github.com/railse/railse-opc/internal/policy"
-	"github.com/railse/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hub"
+	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func pendingFor(tool, id string) agent.PendingRequest {
@@ -5444,8 +5444,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub"
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 type testHub struct {
@@ -5680,7 +5680,7 @@ func TestAgentRunWithoutHubStillWorks(t *testing.T) {
 	}
 }
 ```
-（`agent_test.go` 需要导入 `time`、`github.com/railse/railse-opc/internal/agent` 已有；若缺 `time` 则加。）
+（`agent_test.go` 需要导入 `time`、`github.com/xufei547/railse-opc/internal/agent` 已有；若缺 `time` 则加。）
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -5707,8 +5707,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/railse/railse-opc/internal/hub"
-	"github.com/railse/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/hub"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 )
 
 const hubUsage = `用法:
@@ -6010,10 +6010,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/railse/railse-opc/internal/agent"
-	"github.com/railse/railse-opc/internal/hub"
-	"github.com/railse/railse-opc/internal/hub/store"
-	"github.com/railse/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hub"
+	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/policy"
 )
 
 // sampleWithCommand 在录制样本上改 cwd 与 tool_input.command。
