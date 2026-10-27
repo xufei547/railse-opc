@@ -24,4 +24,4 @@ labels: bug
 
 ### 相关日志 / Logs
 
-<!-- 工作机的 `~/.railse/agent.log`，hub 数据目录（默认 `~/.railse-hub`）里的 `hub.log`。贴之前删掉密钥、令牌和密码 / `~/.railse/agent.log` on the work machine, `hub.log` in the hub data directory (default `~/.railse-hub`). Remove keys, tokens and passwords before pasting -->
+<!-- 工作机的 `~/.railse/agent.log`，hub 数据目录里的 `hub.log`（默认 `~/.railse-hub`，Fly.io 上是 `/data`）。贴之前删掉密钥、令牌和密码 / `~/.railse/agent.log` on the work machine, `hub.log` in the hub data directory (default `~/.railse-hub`, `/data` on Fly.io). Remove keys, tokens and passwords before pasting -->
