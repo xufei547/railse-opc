@@ -41,7 +41,8 @@ type Payload struct {
 type Context struct {
 	// ProjectRoot 是项目根目录的绝对路径，由守护进程按请求的 cwd 定（见 agent.ResolveProjectRoot）：git 仓库根；
 	// 不在 git 仓库里时，cwd 是家目录下的普通目录（不在点开头的目录或 ~/Library 之下）才是 cwd 自身，否则为空；
-	// cwd 是家目录、家目录的祖先或根目录时为空。
+	// 在系统目录里（/opt、/usr、/etc、/var、/System、/Library、/private 及其下面，/private/tmp 与守护进程的临时目录除外）
+	// 时为空，git 仓库也一样；cwd 是家目录、家目录的祖先或根目录时为空。
 	// 为空时引擎 fail closed，认为没有任何改动在项目内，写入一律按 write_outside 询问；
 	// 是家目录、家目录的祖先或根目录时同样按空处理，见 Root。本包分不出 git 仓库根与按 cwd 定的根，只做这一道守卫。
 	ProjectRoot string

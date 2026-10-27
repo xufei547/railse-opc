@@ -85,6 +85,7 @@ func TestResolveProjectRoot(t *testing.T) {
 
 // 非 git 目录只在家目录下的普通目录里按 cwd 当项目根：家目录之外、点开头的某一段之下、~/Library 之下都不回退
 // （RootNotPlain，没有项目根）；指向这些地方的符号链接按目标判断。点目录自己是 git 仓库时照常是项目根。
+// /etc、/usr/local、/opt 这类系统目录先按系统目录判（RootSystem），见 TestResolveProjectRootSystemDir。
 func TestResolveProjectRootNotPlain(t *testing.T) {
 	base := shortTempDir(t)
 	home := filepath.Join(base, "home")
@@ -106,33 +107,38 @@ func TestResolveProjectRootNotPlain(t *testing.T) {
 		{"~/Library/LaunchAgents", filepath.Join(home, "Library", "LaunchAgents"), "", RootNotPlain},
 		{"~/.config/x", filepath.Join(home, ".config", "x"), "", RootNotPlain},
 		{"~/dev/.hidden/x", filepath.Join(home, "dev", ".hidden", "x"), "", RootNotPlain},
-		{"/etc（只 stat）", "/etc", "", RootNotPlain},
-		{"链到 /etc 的 ~/dev/etc-link", filepath.Join(home, "dev", "etc-link"), "", RootNotPlain},
+		{"/etc（只 stat）", "/etc", "", RootSystem},
+		{"链到 /etc 的 ~/dev/etc-link", filepath.Join(home, "dev", "etc-link"), "", RootSystem},
 		{"链到 ~/.config/x 的 ~/dev/cfg-link", filepath.Join(home, "dev", "cfg-link"), "", RootNotPlain},
 		{"点目录自己是 git 仓库", filepath.Join(nvim, "lua"), resolved(nvim), RootGit},
 		{"/tmp 下新建的目录", tmpUnder(t, "/tmp"), "", RootNotPlain},
 	}
 	if _, err := os.Stat("/usr/local"); err == nil {
-		cases = append(cases, rootCase{"/usr/local（只 stat）", "/usr/local", "", RootNotPlain})
+		cases = append(cases, rootCase{"/usr/local（只 stat）", "/usr/local", "", RootSystem})
 	}
 	if runtime.GOOS == "darwin" {
 		cases = append(cases, rootCase{"/private/tmp 下的目录", tmpUnder(t, "/private/tmp"), "", RootNotPlain})
 	}
-	// 家目录之外的系统前缀：只 stat 现成的目录与它下面第一个不在 git 仓库里的子目录，没有就不测
-	for _, parent := range []string{"/Applications", "/opt"} {
-		if st, err := os.Stat(parent); err == nil && st.IsDir() {
-			if _, kind := ResolveProjectRoot(parent); kind != RootGit {
-				cases = append(cases, rootCase{parent + "（只 stat）", parent, "", RootNotPlain})
+	// 家目录之外的前缀：只 stat 现成的目录与它下面第一个不被当成 git 仓库根的子目录，没有就不测。
+	// /Applications 不是系统目录，按普通的家目录之外判；/opt 是系统目录，里面的 git 仓库（/opt/homebrew）也一样
+	for _, p := range []struct {
+		dir  string
+		kind RootKind
+	}{{"/Applications", RootNotPlain}, {"/opt", RootSystem}} {
+		if st, err := os.Stat(p.dir); err == nil && st.IsDir() {
+			if _, kind := ResolveProjectRoot(p.dir); kind != RootGit {
+				cases = append(cases, rootCase{p.dir + "（只 stat）", p.dir, "", p.kind})
 			}
 		}
-		if d, ok := firstSubdir(parent); ok {
-			cases = append(cases, rootCase{parent + " 下的目录（只 stat）", d, "", RootNotPlain})
+		if d, ok := firstSubdir(p.dir); ok {
+			cases = append(cases, rootCase{p.dir + " 下的目录（只 stat）", d, "", p.kind})
 		}
 	}
 	checkRoots(t, cases)
 }
 
-// firstSubdir 返回 parent 下第一个不在 git 仓库里的子目录（按名字排序；只读目录项与 stat，不写）。
+// firstSubdir 返回 parent 下第一个不被 ResolveProjectRoot 当成 git 仓库根（RootGit）的子目录
+// （按名字排序；只读目录项与 stat，不写）。系统目录里的 git 仓库不是 RootGit，也会被选中。
 func firstSubdir(parent string) (string, bool) {
 	entries, err := os.ReadDir(parent)
 	if err != nil {
@@ -267,4 +273,161 @@ func TestHomeSpellingsFirmlinkThroughSymlink(t *testing.T) {
 		}
 	}
 	checkRoots(t, []rootCase{{"数据卷", "/System/Volumes/Data", "", RootNone}})
+}
+
+// 系统目录（/opt、/usr、/etc、/var、/System、/Library、/private 和它们下面）里的目录不当项目根，git 仓库也不当
+// （RootSystem）：/opt/homebrew 这类仓库归用户可写、在 PATH 上。用替换的系统目录列表在临时目录里造出“系统目录里的
+// git 仓库”，本进程的临时目录指到别处，免得临时目录除外把它们放过。按路径分段比较：同级的 opt-x、optional 不在 opt 里。
+// cwd 不存在时向上找到的仓库根是未解析链接的写法（macOS 的 /var/folders/…），也要按解析后的写法判。
+func TestResolveProjectRootSystemDir(t *testing.T) {
+	base := shortTempDir(t)
+	t.Setenv("HOME", filepath.Join(base, "home"))
+	sys := filepath.Join(base, "opt")
+	brew := filepath.Join(sys, "homebrew")
+	plain := filepath.Join(sys, "plain")
+	sib, optional := filepath.Join(base, "opt-x"), filepath.Join(base, "optional")
+	mkdirs(t, filepath.Join(base, "home"), filepath.Join(brew, ".git"), filepath.Join(brew, "bin"), plain,
+		filepath.Join(sib, ".git"), filepath.Join(optional, ".git"))
+	setVar(t, &systemDirs, []string{resolved(sys)})
+	t.Setenv("TMPDIR", filepath.Join(base, "elsewhere"))
+
+	checkRoots(t, []rootCase{
+		{"系统目录里的 git 仓库根", brew, "", RootSystem},
+		{"系统目录里 git 仓库的子目录", filepath.Join(brew, "bin"), "", RootSystem},
+		{"系统目录里 git 仓库下不存在的 cwd", filepath.Join(brew, "gone", "x"), "", RootSystem},
+		{"系统目录本身", sys, "", RootSystem},
+		{"系统目录里的非 git 目录", plain, "", RootSystem},
+		{"同级的 opt-x 不在 opt 里", sib, resolved(sib), RootGit},
+		{"同级的 optional 不在 opt 里", optional, resolved(optional), RootGit},
+	})
+	if got := RootSystem.String(); got != "system" {
+		t.Errorf("RootSystem.String() = %q", got)
+	}
+}
+
+// 系统目录里照常判断的两处：除外列表（/private/tmp，macOS 上 /tmp 解析后的写法）与本进程的临时目录（os.TempDir()，
+// 解析链接后）和它们下面。临时目录是相对路径、根目录或某个系统目录本身时不除外；按分段比较，T-x 不在 T 里。
+// 用替换的系统目录与除外列表，$TMPDIR 逐个换。
+func TestResolveProjectRootSystemExempt(t *testing.T) {
+	base := shortTempDir(t)
+	t.Setenv("HOME", filepath.Join(base, "home"))
+	sys := filepath.Join(base, "private")
+	pubTmp := filepath.Join(sys, "tmp", "repo")
+	tmp := filepath.Join(sys, "var", "T")
+	repo := filepath.Join(tmp, "repo")
+	sib := filepath.Join(sys, "var", "T-x")
+	link := filepath.Join(base, "tlink")
+	mkdirs(t, filepath.Join(base, "home"), filepath.Join(pubTmp, ".git"), filepath.Join(repo, ".git"), filepath.Join(sib, ".git"),
+		filepath.Join(sys, "tmpx", ".git"))
+	if err := os.Symlink(tmp, link); err != nil {
+		t.Fatal(err)
+	}
+	setVar(t, &systemDirs, []string{resolved(sys)})
+	setVar(t, &systemExempt, []string{resolved(filepath.Join(sys, "tmp"))})
+
+	t.Setenv("TMPDIR", filepath.Join(base, "elsewhere"))
+	checkRoots(t, []rootCase{
+		{"除外列表里的仓库", pubTmp, resolved(pubTmp), RootGit},
+		{"除外列表按分段比较", filepath.Join(sys, "tmpx"), "", RootSystem},
+	})
+	for _, c := range []struct {
+		name, tmpdir string
+		kind         RootKind
+	}{
+		{"临时目录在系统目录里", tmp, RootGit},
+		{"临时目录带结尾斜杠", tmp + "/", RootGit},
+		{"临时目录经过符号链接", link, RootGit},
+		{"临时目录是系统目录本身", sys, RootSystem},
+		{"临时目录是根目录", "/", RootSystem},
+		{"临时目录是相对路径", "T", RootSystem},
+		{"临时目录在别处", filepath.Join(base, "elsewhere"), RootSystem},
+	} {
+		t.Setenv("TMPDIR", c.tmpdir)
+		want := ""
+		if c.kind == RootGit {
+			want = resolved(repo)
+		}
+		checkRoots(t, []rootCase{{c.name, repo, want, c.kind}})
+		if c.kind == RootGit {
+			checkRoots(t, []rootCase{
+				{c.name + "：cwd 不存在时按解析后的仓库根判", filepath.Join(repo, "gone"), repo, RootGit},
+				{c.name + "：T-x 不在 T 里", sib, "", RootSystem},
+			})
+		}
+	}
+}
+
+// 真实的公共临时目录：/tmp 与 /private/tmp 下的 git 仓库照常是项目根（macOS 上 /tmp 解析成 /private/tmp，在 /private 里但除外）。
+// $TMPDIR 指到别处，确认不是靠临时目录除外。没有的跳过。
+func TestResolveProjectRootPublicTmp(t *testing.T) {
+	base := shortTempDir(t)
+	t.Setenv("HOME", filepath.Join(base, "home"))
+	t.Setenv("TMPDIR", filepath.Join(base, "elsewhere"))
+	for _, parent := range []string{"/tmp", "/private/tmp"} {
+		t.Run(parent, func(t *testing.T) {
+			d := tmpUnder(t, parent)
+			mkdirs(t, filepath.Join(d, ".git"), filepath.Join(d, "src"))
+			checkRoots(t, []rootCase{{parent + " 下的 git 仓库", filepath.Join(d, "src"), resolved(d), RootGit}})
+		})
+	}
+}
+
+// 真实的临时目录除外：macOS 的 $TMPDIR 是 /var/folders/…/T，解析后在 /private/var 下（系统目录里），里面的 git 仓库照常是
+// 项目根；$TMPDIR 指到别处后同一个仓库就在系统目录里了。$TMPDIR 不在 /private/var 下时跳过（Linux 上通常是 /tmp）。
+func TestResolveProjectRootTempDirExempt(t *testing.T) {
+	if !pathUnder(CleanCwd(os.TempDir()), "/private/var") {
+		t.Skipf("临时目录 %s 不在 /private/var 下", os.TempDir())
+	}
+	base := shortTempDir(t)
+	t.Setenv("HOME", filepath.Join(base, "home"))
+	repo := filepath.Join(base, "repo")
+	mkdirs(t, filepath.Join(repo, ".git"), filepath.Join(repo, "src"))
+	checkRoots(t, []rootCase{{"临时目录里的 git 仓库", filepath.Join(repo, "src"), resolved(repo), RootGit}})
+	t.Setenv("TMPDIR", "/tmp")
+	checkRoots(t, []rootCase{{"临时目录指到 /tmp 后", filepath.Join(repo, "src"), "", RootSystem}})
+}
+
+// darwin 上不分大小写：默认的卷上 /OPT/homebrew 就是 /opt/homebrew（EvalSymlinks 不改大小写），同样是系统目录；
+// 除外的临时目录同样不分。区分大小写的卷上跳过。
+func TestResolveProjectRootSystemDirCase(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("只有 darwin 不分大小写比较")
+	}
+	base := shortTempDir(t)
+	t.Setenv("HOME", filepath.Join(base, "home"))
+	sys := filepath.Join(base, "opt")
+	tmp := filepath.Join(sys, "T")
+	mkdirs(t, filepath.Join(sys, "homebrew", ".git"), filepath.Join(tmp, "repo", ".git"))
+	upper := filepath.Join(base, "OPT", "homebrew")
+	if _, err := os.Stat(upper); err != nil {
+		t.Skip("区分大小写的卷")
+	}
+	setVar(t, &systemDirs, []string{resolved(sys)})
+	t.Setenv("TMPDIR", tmp)
+	lowerTmp := filepath.Join(base, "OPT", "t", "repo")
+	checkRoots(t, []rootCase{
+		{"大写的系统目录", upper, "", RootSystem},
+		{"大小写不同的临时目录", lowerTmp, resolved(lowerTmp), RootGit},
+	})
+}
+
+// 真实的系统目录只 stat 不写：/etc、/usr/local 是系统目录；/opt/homebrew 是 git 仓库时也不当项目根。darwin 上换成
+// 大写写法（/USR/local、/OPT/homebrew）也一样。没有的跳过。
+func TestResolveProjectRootRealSystemDirs(t *testing.T) {
+	t.Setenv("HOME", shortTempDir(t))
+	cases := []rootCase{{"/etc（只 stat）", "/etc", "", RootSystem}}
+	if _, err := os.Stat("/usr/local"); err == nil {
+		cases = append(cases, rootCase{"/usr/local（只 stat）", "/usr/local", "", RootSystem})
+	}
+	if _, err := os.Stat("/USR/local"); err == nil && runtime.GOOS == "darwin" {
+		cases = append(cases, rootCase{"/USR/local（只 stat）", "/USR/local", "", RootSystem})
+	}
+	if _, err := os.Stat("/opt/homebrew/.git"); err == nil {
+		cases = append(cases, rootCase{"/opt/homebrew（只 stat）", "/opt/homebrew", "", RootSystem},
+			rootCase{"/opt/homebrew 下不存在的目录", "/opt/homebrew/railse-missing", "", RootSystem})
+		if _, err := os.Stat("/OPT/homebrew/.git"); err == nil && runtime.GOOS == "darwin" {
+			cases = append(cases, rootCase{"/OPT/homebrew（只 stat）", "/OPT/homebrew", "", RootSystem})
+		}
+	}
+	checkRoots(t, cases)
 }

@@ -1644,6 +1644,7 @@ func TestHubDBUncheckpointedWALWithoutShm(t *testing.T) {
 
 // project.root：项目目录会被守护进程当成哪个项目根，排在钩子检查之后。git 仓库 ok（细节是仓库根）；不是 git 仓库时
 // 按目录本身当项目根：显式给的（--project）warn 并建议 git init，隐式默认的当前目录只告知（skip，不建议 git init）；
+// 不是家目录下的普通目录与在系统目录里的没有项目根，显式给的 warn，隐式的只告知；
 // 家目录、它的上级、根目录与不存在的目录不当项目根，skip 并说明写入都算项目外（显式与否一样）；没给 Project 时 skip。
 func TestProjectRootCheck(t *testing.T) {
 	o, home := fakeOpts(t)
@@ -1699,13 +1700,33 @@ func TestProjectRootCheck(t *testing.T) {
 	// 不是家目录下的普通目录（点目录里、家目录之外）的非 git 目录：没有项目根。显式给的 warn，提示 git init 或换到项目目录；
 	// 隐式默认的当前目录只告知（skip），细节相同、不给提示
 	dot := filepath.Join(home, ".config", "x")
-	if err := os.MkdirAll(dot, 0o755); err != nil {
-		t.Fatal(err)
+	outside := filepath.Join(filepath.Dir(home), "outside") // 临时目录里，不算系统目录
+	for _, d := range []string{dot, outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	for _, d := range []string{dot, "/etc"} { // /etc 只 stat
+	for _, d := range []string{dot, outside} {
 		want := "目录 " + resolved(d) + " 不在家目录下的普通目录里，不按项目根处理"
 		o.Project, o.ProjectExplicit = d, true
 		if c := find(t, Run(o), "project.root"); c.Status != Warn || c.Detail != want || c.Hint != "要自动放行请 git init 或换到项目目录" {
+			t.Fatalf("显式的 %s: %+v", d, c)
+		}
+		o.ProjectExplicit = false
+		if c := find(t, Run(o), "project.root"); c.Status != Skip || c.Detail != want || c.Hint != "" {
+			t.Fatalf("隐式的 %s 应只告知: %+v", d, c)
+		}
+	}
+	// 系统目录里的目录（/etc；/opt/homebrew 这类 git 仓库也一样，有就测）：没有项目根，与上面同一口径，细节说清是系统目录，
+	// 显式给的提示换到系统目录之外。只 stat
+	sysDirs := []string{"/etc"}
+	if _, err := os.Stat("/opt/homebrew/.git"); err == nil {
+		sysDirs = append(sysDirs, "/opt/homebrew")
+	}
+	for _, d := range sysDirs {
+		want := "目录 " + resolved(d) + " 在系统目录里，不按项目根处理（是 git 仓库也一样）"
+		o.Project, o.ProjectExplicit = d, true
+		if c := find(t, Run(o), "project.root"); c.Status != Warn || c.Detail != want || c.Hint != "要自动放行请换到系统目录之外的项目目录" {
 			t.Fatalf("显式的 %s: %+v", d, c)
 		}
 		o.ProjectExplicit = false

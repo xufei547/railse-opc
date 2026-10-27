@@ -23,7 +23,8 @@ import (
 // maxSocketPath 是 socket 路径的字节上限。macOS 的 sun_path 只有 104 字节，留些余量。
 const maxSocketPath = 100
 
-// maxNonGitLogged 是记住“已在日志里说明过项目根怎么定”的非 git 目录数上限：满了不再说明新目录，判定不受影响。
+// maxNonGitLogged 是记住“已在日志里说明过项目根怎么定”的目录（非 git 目录与系统目录里的目录）数上限：满了不再说明新目录，
+// 判定不受影响。
 const maxNonGitLogged = 1024
 
 // errHookGone 是钩子连接断开时取消请求 ctx 的原因，用来和守护进程关停区分开。
@@ -61,8 +62,8 @@ type Server struct {
 	localPaused bool
 	hubPaused   bool
 
-	// nonGitLogged 是已在日志里说明过项目根怎么定的非 git 目录（见 noteRoot），每个目录只说明一次，最多记 maxNonGitLogged 个；
-	// 由 nonGitMu 保护。
+	// nonGitLogged 是已在日志里说明过项目根怎么定的目录（非 git 目录与系统目录里的目录，见 noteRoot），每个目录只说明一次，
+	// 最多记 maxNonGitLogged 个；由 nonGitMu 保护。
 	nonGitMu     sync.Mutex
 	nonGitLogged map[string]struct{}
 
@@ -305,7 +306,7 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 		switch root, kind = ResolveProjectRoot(cwd); kind {
 		case RootCwd:
 			s.noteRoot(root, kind)
-		case RootNotPlain:
+		case RootNotPlain, RootSystem:
 			s.noteRoot(cwd, kind)
 		}
 	}
@@ -313,8 +314,9 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx
 }
 
-// noteRoot 在日志里说明不在 git 仓库里的目录 dir 的项目根怎么定：RootCwd 按当前目录当项目根，RootNotPlain 不当项目根。
-// 两种说明共用一个集合，同一目录只说明一次；记住的目录满了（maxNonGitLogged）就不再说明新目录，免得每条请求都记一行。
+// noteRoot 在日志里说明目录 dir 的项目根怎么定：不在 git 仓库里时 RootCwd 按当前目录当项目根，RootNotPlain 不当项目根；
+// RootSystem 是 dir 在系统目录里，git 仓库也不当项目根。
+// 三种说明共用一个集合，同一目录只说明一次；记住的目录满了（maxNonGitLogged）就不再说明新目录，免得每条请求都记一行。
 // 路径来自钩子，按 %q 记，换行伪造不出另一行。
 func (s *Server) noteRoot(dir string, kind RootKind) {
 	s.nonGitMu.Lock()
@@ -330,9 +332,12 @@ func (s *Server) noteRoot(dir string, kind RootKind) {
 	if !first {
 		return
 	}
-	if kind == RootCwd {
+	switch kind {
+	case RootCwd:
 		s.log.Printf("目录 %q 不是 git 仓库，按当前目录当项目根；建议 git init", dir)
-	} else {
+	case RootSystem:
+		s.log.Printf("目录 %q 在系统目录里，不按项目根处理；要自动放行请换到系统目录之外的项目目录", dir)
+	default:
 		s.log.Printf("目录 %q 不在家目录下的普通目录里，不按项目根处理；要自动放行请 git init 或换到项目目录", dir)
 	}
 }

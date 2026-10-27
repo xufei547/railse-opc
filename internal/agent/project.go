@@ -23,13 +23,15 @@ type RootKind int
 const (
 	// RootNone：没有项目根。cwd 是家目录、家目录的祖先、根目录，不存在、不是目录，或是相对路径。
 	RootNone RootKind = iota
-	// RootGit：项目根是 cwd 所在的 git 仓库根。
+	// RootGit：项目根是 cwd 所在的 git 仓库根（不在系统目录里）。
 	RootGit
 	// RootCwd：不在 git 仓库里，cwd 是家目录下的普通目录（见 plainUnderHome），按 cwd 自身当项目根。
 	RootCwd
-	// RootNotPlain：cwd 是存在的目录、不在 git 仓库里、不太宽，但不是家目录下的普通目录（家目录之外、点开头的某一段之下、
-	// ~/Library 之下），不当项目根。
+	// RootNotPlain：cwd 是存在的目录、不在 git 仓库里、不太宽、不在系统目录里，但不是家目录下的普通目录（家目录之外、
+	// 点开头的某一段之下、~/Library 之下），不当项目根。
 	RootNotPlain
+	// RootSystem：cwd 所在的 git 仓库根，或不在 git 仓库里时的 cwd 自身，在系统目录里（见 inSystemDir），不当项目根。
+	RootSystem
 )
 
 // String 给测试的失败信息与调试输出用。
@@ -41,16 +43,19 @@ func (k RootKind) String() string {
 		return "cwd"
 	case RootNotPlain:
 		return "not_plain"
+	case RootSystem:
+		return "system"
 	default:
 		return "none"
 	}
 }
 
-// ResolveProjectRoot 定项目根：从清理后的 cwd 向上找含 .git（目录或 worktree 的 .git 文件）的目录，
-// 找到且不 tooBroad 时返回它与 RootGit（不论在哪里，/tmp、/opt 下的仓库也是）。找不到，或找到的仓库根太宽
-// （用 git 管 dotfiles 的人家目录里有 .git）时看 cwd 自身：不是存在的目录或 tooBroad 时返回空串与 RootNone；
-// 是家目录下的普通目录时返回它与 RootCwd；否则返回空串与 RootNotPlain（~/.config、~/Library/LaunchAgents、/etc、
-// /usr/local 这类目录里自动放行写入太危险）。空的项目根引擎按项目外处理。
+// ResolveProjectRoot 定项目根：从清理后的 cwd 向上找含 .git（目录或 worktree 的 .git 文件）的目录，找到且不 tooBroad 时
+// 按它定（classifyRoot）：在系统目录里返回空串与 RootSystem（/opt/homebrew 这类仓库归用户可写、在 PATH 上），不再看 cwd；
+// 否则返回它与 RootGit（/tmp、~/.config/nvim 下的仓库也是）。找不到，或找到的仓库根太宽（用 git 管 dotfiles 的人家目录里
+// 有 .git）时按 cwd 自身定：不是存在的目录或 tooBroad 时返回空串与 RootNone；在系统目录里返回空串与 RootSystem（/etc、
+// /usr/local）；是家目录下的普通目录时返回它与 RootCwd；否则返回空串与 RootNotPlain（~/.config、~/Library/LaunchAgents
+// 这类目录里自动放行写入太危险）。空的项目根引擎按项目外处理。
 // cwd 要是绝对路径：相对路径会按本进程的工作目录解析，一律返回空串与 RootNone。
 func ResolveProjectRoot(cwd string) (root string, kind RootKind) {
 	dir := CleanCwd(cwd)
@@ -59,10 +64,10 @@ func ResolveProjectRoot(cwd string) (root string, kind RootKind) {
 	}
 	for d := dir; ; {
 		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
-			if !tooBroad(d) {
-				return d, RootGit
+			if r, k := classifyRoot(d, true); k != RootNone {
+				return r, k
 			}
-			break // 再往上只会更宽
+			break // 仓库根太宽：再往上只会更宽，看 cwd 自身
 		}
 		parent := filepath.Dir(d)
 		if parent == d {
@@ -70,13 +75,81 @@ func ResolveProjectRoot(cwd string) (root string, kind RootKind) {
 		}
 		d = parent
 	}
+	return classifyRoot(dir, false)
+}
+
+// classifyRoot 定一个候选目录 dir 能不能当项目根、是哪一类：git 为真时 dir 是 cwd 所在的 git 仓库根，否则是不在 git 仓库里的
+// cwd 自身。依次看：不是存在的目录或 tooBroad → RootNone；在系统目录里 → RootSystem；是 git 仓库根 → RootGit；
+// 家目录下的普通目录 → RootCwd；否则 RootNotPlain。只有 RootGit 与 RootCwd 返回 dir，其余返回空串。
+func classifyRoot(dir string, git bool) (string, RootKind) {
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() || tooBroad(dir) {
 		return "", RootNone
 	}
-	if !plainUnderHome(dir) {
-		return "", RootNotPlain
+	switch {
+	case inSystemDir(dir):
+		return "", RootSystem
+	case git:
+		return dir, RootGit
+	case plainUnderHome(dir):
+		return dir, RootCwd
 	}
-	return dir, RootCwd
+	return "", RootNotPlain
+}
+
+// systemDirs 是系统目录：它们本身与下面的目录不当项目根，git 仓库也不当。/opt/homebrew、/usr/local 这类目录可能归用户
+// 可写、又在 PATH 上，当项目根会让“项目内可写”的放行改写装好的程序。macOS 上 /etc、/var、/tmp 都链到 /private 下，
+// 比较的是解析过链接的写法。测试会替换它。
+var systemDirs = []string{"/opt", "/usr", "/etc", "/var", "/System", "/Library", "/private"}
+
+// systemExempt 是系统目录里照常判断的目录（含它们下面）：/private/tmp 是 macOS 上 /tmp 解析后的写法，是公共临时目录。
+// 测试会替换它。
+var systemExempt = []string{"/private/tmp"}
+
+// inSystemDir 报告存在的目录 dir 是否在系统目录里：解析链接后（cwd 不存在时向上找到的仓库根是未解析的写法）是 systemDirs
+// 之一或在其下面，又不在 systemExempt、本进程的临时目录（见 tempExempt）下面。按路径分段比较（/optional 不在 /opt 下），
+// darwin 上不分大小写（默认的卷不分，/OPT/homebrew 就是 /opt/homebrew，EvalSymlinks 不改大小写）。
+// macOS 数据卷上的 firmlink 写法（/System/Volumes/Data/...）都在 /System 下，一律算系统目录。
+func inSystemDir(dir string) bool {
+	p := CleanCwd(dir)
+	under := func(d string) bool { return pathUnder(p, d) }
+	if !slices.ContainsFunc(systemDirs, under) || slices.ContainsFunc(systemExempt, under) {
+		return false
+	}
+	t := tempExempt()
+	return t == "" || !pathUnder(p, t)
+}
+
+// tempExempt 返回本进程的临时目录（os.TempDir()，即 $TMPDIR，没有时是 /tmp；解析链接后）。macOS 的 $TMPDIR 是
+// /var/folders/…/T，解析后在 /private/var 下，是每个用户私有的临时目录，与 /tmp 同类，里面的目录照常判断；守护进程由
+// launchd 起时也有它。它是相对路径，或是某个系统目录本身或其上级（根目录）时返回空串，不除外任何目录：否则整个系统目录都放过了。
+func tempExempt() string {
+	t := CleanCwd(os.TempDir())
+	if !filepath.IsAbs(t) || slices.ContainsFunc(systemDirs, func(d string) bool { return pathUnder(d, t) }) {
+		return ""
+	}
+	return t
+}
+
+// pathUnder 报告清理过的绝对路径 p 是否是 dir 或在 dir 下面：按 / 分成各段逐段比（sameName），/optional 不在 /opt 下。
+func pathUnder(p, dir string) bool {
+	ps, ds := segments(p), segments(dir)
+	return len(ps) >= len(ds) && slices.EqualFunc(ps[:len(ds)], ds, sameName)
+}
+
+// segments 把清理过的绝对路径拆成各段：/ 没有段，/a/b 是 a、b 两段。
+func segments(p string) []string {
+	if p = strings.Trim(p, "/"); p == "" {
+		return nil
+	}
+	return strings.Split(p, "/")
+}
+
+// sameName 比较路径的一段：darwin 上不分大小写（默认的卷不分），其余系统区分。
+func sameName(a, b string) bool {
+	if runtime.GOOS == "darwin" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // plainUnderHome 报告 dir（解析过链接的绝对路径，存在且不太宽）是否在家目录下的普通目录里：从 dir 逐级往上，
