@@ -24,7 +24,7 @@ railse setup hooks [--project <目录>] [--claude] [--codex] [--gemini] [--dir �
 
 不带 CLI 开关时三个都装，默认都是用户级（对所有项目生效）：Claude 写 `~/.claude/settings.json`，Gemini 写 `~/.gemini/settings.json`，Codex 写 `~/.codex/hooks.json`（`--codex-file` 可改）。`~/.claude/settings.json`、`~/.gemini/settings.json` 里多是你自己的设置：第一次改它们之前各备份一次到同目录的 `<文件>.railse-bak-<时间>`（0600，是链接时备份链接指向的内容；原来不存在、是空的、内容没变或已有备份时不备份），打印“已备份 … 到 …”。给了 `--project <目录>` 时 Claude 改写项目级的 `<目录>/.claude/settings.local.json`，Gemini 改写 `<目录>/.gemini/settings.json`（不备份；项目里的文件就是用户级那份时，如 `--project ~` 的 Gemini，照样按用户级备份），Codex 照旧是用户级。用户级与项目级都装了：Gemini 的钩子会触发两次；Claude Code 对写在多个配置文件里的相同处理器只跑一次，两处的命令、超时等完全相同时不重复，不同（如程序路径、`--socket` 不同）时也会触发两次；装用户级时当前目录的项目级文件里有 Railse 的条目，会在 stderr 逐个提醒（见 [setup.md](setup.md)）。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dir` 是守护进程的数据目录（默认 `$RAILSE_HOME` 或 `~/.railse`），不是 `~/.railse` 时钩子命令变成 `<railse> hook <cli> --socket <目录>/agent.sock`；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
 
-Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（不是 hooks.json），Codex 只认一条，所以另用 `railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]`（`setup hooks` 装 Codex 时会提示）：它在数据目录生成 `codex-notify.sh`，依次调用原来的 `notify`（有的话，原样保留）与 `railse hook codex-notify`（数据目录不是 `~/.railse` 时带 `--socket`），再把 `notify` 换成 `["<数据目录>/codex-notify.sh"]`，改之前备份到 `config.toml.railse-bak-<时间>`。重跑不会重复串接，详见 [setup.md](setup.md) 的 Codex 一条。
+Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（不是 hooks.json），Codex 只认一条，所以另用 `railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]`（`setup all` 装完钩子会自动做这一步，单独跑 `setup hooks` 装 Codex 时会提示）：它在数据目录生成 `codex-notify.sh`，依次调用原来的 `notify`（有的话，原样保留）与 `railse hook codex-notify`（数据目录不是 `~/.railse` 时带 `--socket`），再把 `notify` 换成 `["<数据目录>/codex-notify.sh"]`，改之前备份到 `config.toml.railse-bak-<时间>`。重跑不会重复串接，详见 [setup.md](setup.md) 的 Codex 一条。
 
 装项目级时 Claude 的钩子放在 `settings.local.json`，因为钩子命令里是本机的 railse 路径，不该随项目入库；按 Claude Code 的约定这个文件不入库，若 `git status` 里看到它，把它加进 `.gitignore`。旧版写在 `.claude/settings.json` 的 Railse 钩子会在装 Claude 钩子时迁走：只删 Railse 自己的条目（`hooks` 删空了连键一起去掉），别人的钩子与其他设置保留，打印“已从 … 迁走 Railse 钩子”；`--dry-run` 两份都打印。`settings.json` 里没有 Railse 条目时不碰它；它（解开链接后）就是用户级的 `~/.claude/settings.json` 时（`--project` 是家目录，或项目的 `settings.json` 链到它）也不迁，只警告：那里的钩子对所有项目生效，要迁请手动删；它不是合法 JSON 时只警告、不迁移，照样装好 `settings.local.json`，这时请手动删掉里面旧的 Railse 钩子，否则同一个事件会触发两次。
 
@@ -69,7 +69,19 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 
 ## 项目根
 
-内置规则放行的“项目内改动”（`write_in_project`）以项目根为界，项目根之外的写入（`write_outside`）要审批。守护进程从请求的工作目录向上找 `.git`（目录，或 worktree 的 `.git` 文件），找到的那一层就是项目根。git 仓库在哪里都算（`/tmp`、`/opt`、`~/.config/nvim` 下的仓库也是）。不在 git 仓库里时，只有家目录下的普通目录按工作目录本身当项目根（不取它的上级）：要在家目录之下（不是家目录本身），从家目录往下的每一段都不以点开头（`~/.config`、`~/.local`、`~/dev/.hidden/x` 都不算），也不在 `~/Library` 之下（不分大小写）；符号链接按它指向的目标判断。这时在 `agent.log` 里提示“目录 "X" 不是 git 仓库，按当前目录当项目根；建议 git init”。不满足这三条的（`/etc`、`/usr/local`、`/tmp` 下、`~/Library/LaunchAgents`、`~/.config/x` 等）没有项目根，所有写入都要审批，`agent.log` 里提示“目录 "X" 不在家目录下的普通目录里，不按项目根处理；要自动放行请 git init 或换到项目目录”。两种提示的路径都带引号、转义，每个目录只提示一次。家目录、它的上级与根目录永远不当项目根：工作目录就是它们时没有项目根，所有写入都算项目外；用 git 管 dotfiles、家目录里有 `.git` 的，家目录下的子目录照上面三条判断。规则的 `scope: {project: …}` 与 hub 上“记住”的项目范围也按这个项目根（引擎与 hub 分不出 git 仓库根与按工作目录定的根），项目根是家目录、它的上级或根目录时一律按没有项目根处理。`railse doctor --project <目录>` 的 `project.root` 一项显示这个目录会被当成哪个项目根（不给 `--project` 时看当前目录，它不是 git 仓库时只告知、不给修复提示）。
+内置规则放行的“项目内改动”（`write_in_project`）以项目根为界，项目根之外的写入（`write_outside`）要审批。守护进程从请求的工作目录向上找 `.git`（目录，或 worktree 的 `.git` 文件），找到的那一层就是项目根。系统目录之外的 git 仓库都算（`/tmp`、`~/.config/nvim` 下的仓库也是）。
+
+系统目录是 `/opt`、`/usr`、`/etc`、`/var`、`/System`、`/Library`、`/private` 和它们下面的目录；第一段以点开头的路径也算（macOS 的 `/.nofollow/opt/homebrew` 就是 `/opt/homebrew`）。工作目录在系统目录里时没有项目根，是 git 仓库也一样：`/opt/homebrew` 归用户可写、又在 PATH 上，当项目根会让 agent 不经审批改写装好的程序。判断用解析过链接的路径，与列出的写法和它解析后的写法都比（macOS 上 `/etc`、`/var`、`/tmp` 都在 `/private` 下），按整段比较（`/optional` 不算 `/opt`），macOS 上不分大小写。macOS 数据卷上的写法 `/System/Volumes/Data/…` 在 `/System` 下，也算系统目录：从这种写法进入的家目录和项目同样没有项目根。Linux 上 `/opt`、`/var/www` 下的仓库同样没有项目根，所有写入都要审批。这时在 `agent.log` 里提示“目录 "X" 在系统目录里，不按项目根处理；要自动放行请换到系统目录之外的项目目录”。
+
+系统目录里有三处照常判断：
+
+- **`/private/tmp`**：macOS 上的 `/tmp`。
+- **守护进程的临时目录**：`$TMPDIR`（macOS 上是 `/var/folders/…/T`），要它归你、权限 700，也不是某个系统目录本身或它的上级。
+- **家目录**：解析后落在系统目录里时（如 Fedora Silverblue 的 `/home` 链到 `/var/home`），要它归你、不是某个系统目录本身或它的上级、在系统目录下至少两层（`/var/home/x` 可以，macOS root 的 `/var/root` 不行）。
+
+不在 git 仓库里时，只有家目录下的普通目录按工作目录本身当项目根（不取它的上级）：要在家目录之下（不是家目录本身），从家目录往下的每一段都不以点开头（`~/.config`、`~/.local`、`~/dev/.hidden/x` 都不算），也不在 `~/Library` 之下（不分大小写）；符号链接按它指向的目标判断。这时在 `agent.log` 里提示“目录 "X" 不是 git 仓库，按当前目录当项目根；建议 git init”。不满足这三条的（`/tmp` 下、`~/Library/LaunchAgents`、`~/.config/x` 等）没有项目根，所有写入都要审批，`agent.log` 里提示“目录 "X" 不在家目录下的普通目录里，不按项目根处理；要自动放行请 git init 或换到项目目录”。三种提示的路径都带引号、转义，每个目录只提示一次。
+
+家目录、它的上级与根目录永远不当项目根：工作目录就是它们时没有项目根，所有写入都算项目外；用 git 管 dotfiles、家目录里有 `.git` 的，家目录下的子目录照上面三条判断。规则的 `scope: {project: …}` 与 hub 上“记住”的项目范围也按这个项目根（引擎与 hub 分不出 git 仓库根与按工作目录定的根），项目根是家目录、它的上级或根目录时一律按没有项目根处理。`railse doctor --project <目录>` 的 `project.root` 一项显示这个目录会被当成哪个项目根（不给 `--project` 时看当前目录，它不是 git 仓库或在系统目录里时只告知、不给修复提示）。
 
 ## 暂停与恢复
 
@@ -83,7 +95,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | 自动拒绝 | 能 | 能 | 能 |
 | 事件 | question、done、session_end | done、session_end | question、done、session_end |
 | 钩子配置 | 用户级 `~/.claude/settings.json`（`--project` 时项目级 `.claude/settings.local.json`） | 用户级 `~/.codex/hooks.json` | 用户级 `~/.gemini/settings.json`（`--project` 时项目级 `.gemini/settings.json`） |
-| 注意 | 全功能 | 只在交互会话里审批（`codex exec` 不触发）；首次使用在 Codex 里用 `/hooks` 审核；notify 用 `railse setup codex-notify` 写进 `~/.codex/config.toml`（串接脚本，保留已有的 notify） | 需要 0.65.0 以上；不要开 yolo 模式 |
+| 注意 | 全功能 | 只在交互会话里审批（`codex exec` 不触发）；首次使用在 Codex 里用 `/hooks` 审核；notify 用 `railse setup codex-notify` 写进 `~/.codex/config.toml`（串接脚本，保留已有的 notify；`setup all` 会自动做） | 需要 0.65.0 以上；不要开 yolo 模式 |
 
 ## 交回终端的两种情况
 

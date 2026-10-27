@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 网页端到端：构建网页与二进制，Playwright 起真实的 hub 与守护进程（临时目录、随机端口）跑 web/e2e 里的用例。
 # 不碰真实的 ~/.railse、~/.railse-hub 与任何 CLI 的配置：各进程的数据目录与 HOME 都在临时目录里，
-# 钩子用 railse hook claude --socket 直接调用，不装进 ~/.claude。额外参数原样传给 playwright test（如 --headed、-g 关键字）。
+# 钩子用 railse hook claude --socket 直接调用，不装进 ~/.claude。额外参数原样传给 playwright test（如 --headed、-g 关键字）；
+# scripts/demo.sh（make demo）也经它跑，传 --config scripts/record-demo.config.ts 只跑录制脚本。
 # 退出时（成功、失败或被中断）停掉这次起的所有 railse 进程并删掉临时目录；失败时先打印 hub 与守护进程日志的末尾，
 # 并把临时目录下的全部 *.log、*.stderr 按原相对路径复制到 web/test-results/logs/（CI 失败时连同 Playwright 的结果一起上传）。
 set -euo pipefail

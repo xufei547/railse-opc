@@ -21,13 +21,15 @@ import (
 
 const setupAllUsage = `  railse setup all --hub URL --token 接入码 [--name 名字] [--project 目录] [--dir 目录] [--bin 路径] [--no-autostart] [--no-hooks] [--force]
     一键：接入 hub → 装三个 CLI 的钩子 → 开机自启 → 体检（railse doctor）。钩子默认装用户级（对所有项目生效），
-    给了 --project 才把 Claude、Gemini 的装成那个项目的项目级（同 setup hooks）。
+    给了 --project 才把 Claude、Gemini 的装成那个项目的项目级（同 setup hooks）；装完钩子接着接 Codex 的 notify
+    （同 setup codex-notify，没接上不算 setup all 失败，最后的“注意”里给命令）。--no-hooks 两样都不做。
     已接入过（有 machine.json）时跳过接入，这时可以不给 --hub 与 --token；--force 重新接入。体检的失败只展示，不算 setup all 失败。
+    已接入过的在终端里重跑，重装钩子、重启守护进程之前先问一次（回车继续）；不在终端里不问。
     要接入却缺 --hub 或 --token 时，在终端里逐个问缺的（--name 没给时也问名字）；不在终端里是用法错误。`
 
 const setupUsage = `用法:
   railse setup
-    不带子命令、在终端里运行：逐个问 hub 地址、接入码、本机名字，再照 setup all 做完（已接入过的不问，直接跑）。
+    不带子命令、在终端里运行：逐个问 hub 地址、接入码、本机名字，再照 setup all 做完（已接入过的不问这些，只确认一次再重装）。
 ` + setupAllUsage + `
   railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--dir 目录] [--bin 路径] [--dry-run]
     默认三个都装，都是用户级（对所有项目生效）：Claude 写 ~/.claude/settings.json，Gemini 写 ~/.gemini/settings.json
@@ -229,6 +231,12 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, setupUsage)
 		return 2
 	}
+	return runSetupHooks(args[1:], true, stdout, stderr)
+}
+
+// runSetupHooks 是 railse setup hooks（args 是 hooks 之后的参数）。装了 Codex 时末尾的提醒里，notifyHint 为真才叫用户
+// 去跑 setup codex-notify；setup all 装完钩子自己接 notify，传假。
+func runSetupHooks(args []string, notifyHint bool, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("setup hooks", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	project := fs.String("project", "", "项目目录：给了才把 Claude、Gemini 的钩子写成这个项目的项目级，默认写用户级")
@@ -239,7 +247,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse；不是 ~/.railse 时钩子命令带 --socket")
 	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
 	dryRun := fs.Bool("dry-run", false, "只打印不写")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 0 {
@@ -392,16 +400,16 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "钩子命令带 --socket %s：守护进程数据目录 %s 不是 %s，CLI 起钩子时的环境里不一定有指向它的 RAILSE_HOME\n", hooksconf.ShellQuote(socket), filepath.Dir(socket), base)
 	}
-	if *doCodex {
+	switch {
+	case *doCodex && notifyHint:
 		// notify 另由 setup codex-notify 写（串接脚本，保留已有的 notify）；这里给的 --dir、--bin 原样带上，脚本与钩子连同一个守护进程
-		notify := "railse setup codex-notify"
-		if socket != "" {
-			notify += " --dir " + hooksconf.ShellQuote(filepath.Dir(socket))
-		}
+		given := ""
 		if binGiven {
-			notify += " --bin " + hooksconf.ShellQuote(*bin)
+			given = *bin
 		}
-		fmt.Fprintf(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify（完成与提问事件）请运行 %s（会保留已有的 notify）。\n", notify)
+		fmt.Fprintf(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify（完成与提问事件）请运行 %s（会保留已有的 notify）。\n", codexNotifyCmd(socket, given))
+	case *doCodex:
+		fmt.Fprintln(stdout, "提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核。")
 	}
 	if *doGemini {
 		fmt.Fprintln(stdout, "提醒 Gemini：钩子只能拒绝不能放行，需要 Gemini CLI 0.65.0 以上，不要开 yolo 模式。")
@@ -522,8 +530,8 @@ func agentJobRunning() bool {
 	return autostartStatus(runtime.GOOS, autostartSpec{Kind: "agent", Home: home, UID: os.Getuid()}, false, io.Discard) == 0
 }
 
-// runSetupAll 是 railse setup all：依次接入 hub、装三个 CLI 的钩子、托管开机自启、体检。要接入却缺 --hub 或 --token 时，
-// stdin 是终端就先逐个问（askSetupAll），再走同样的四步。
+// runSetupAll 是 railse setup all：依次接入 hub、装三个 CLI 的钩子（连同 Codex 的 notify）、托管开机自启、体检。要接入却缺
+// --hub 或 --token 时，stdin 是终端就先逐个问（askSetupAll），再走同样的四步；已接入过的在终端里重跑，第 2 步之前确认一次（confirmRerun）。
 // 任一步失败立即退出 1 并说明停在哪一步、哪些已做完；体检只展示（刚托管的守护进程可能还没起来），不影响退出码。
 func runSetupAll(args []string, stdout, stderr io.Writer) int {
 	return runSetupAllAs(runtime.GOOS, os.Geteuid(), args, stdout, stderr)
@@ -544,7 +552,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse")
 	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
 	noAutostart := fs.Bool("no-autostart", false, "不托管开机自启")
-	noHooks := fs.Bool("no-hooks", false, "不装钩子")
+	noHooks := fs.Bool("no-hooks", false, "不装钩子，也不接 Codex 的 notify")
 	force := fs.Bool("force", false, "已接入过也重新接入，覆盖 machine.json")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -694,6 +702,31 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		if hubBase != "" && hubBase != m.HubURL {
 			fmt.Fprintf(stdout, "注意：本机接的是 %s，不是 --hub 给的 %s；要改接那个 hub，加 --force 重新接入\n", m.HubURL, hubBase)
 		}
+		// 已接入的机器在终端里重跑：重装钩子、重启守护进程之前先问一次。首次接入、--force 不走这里；不是终端（脚本、管道）时不问
+		if stdinIsTerminal() {
+			// 第 3 步对守护进程要做的事（与下面第 3 步同一判定）：托管的作业在跑（哪怕它用的是别的数据目录、还没开始监听），重装会
+			// 把它停掉再拉起；没在跑、socket 也没人监听就托管并启动；手动起的占着 socket 时第 3 步跳过托管，不碰它
+			daemon := ""
+			if !*noAutostart {
+				switch {
+				case agentJobRunning():
+					daemon = "重启守护进程"
+				case !socketOccupied(cfg.SocketPath):
+					daemon = "托管并启动守护进程"
+				}
+			}
+			if what, untouched := rerunWork(!*noHooks, daemon); what != "" { // 没有要重做的不问
+				ok, err := confirmRerun(setupStdin, stdout, m.HubURL, what)
+				switch {
+				case err != nil && !errors.Is(err, io.EOF):
+					fmt.Fprintf(stderr, "读输入失败，%s：%v\n", untouched, err)
+					return 1
+				case !ok: // n、no 或 EOF（Ctrl-D）
+					fmt.Fprintf(stderr, "已取消，%s\n", untouched)
+					return 1
+				}
+			}
+		}
 	} else if err := agentEnroll(cfg, *hubURL, *token, *name, *force, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "接入失败：%v\n", err)
 		return fail(1, "")
@@ -705,18 +738,28 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		fmt.Fprintln(stdout, "已跳过（--no-hooks）")
 	} else {
 		// --dir 也交给钩子：目录不是 ~/.railse 时钩子命令带 --socket，才连得上下面托管的、带 RAILSE_HOME=<目录> 的守护进程。
-		// --bin 只在用户给了时才传（setup hooks 默认就是当前程序），它末尾的 Codex 提醒才与体检的提示是同一条命令
-		hookArgs := []string{"hooks", "--dir", cfg.Dir}
+		// --bin 只在用户给了时才传（setup hooks 默认就是当前程序）
+		hookArgs := []string{"--dir", cfg.Dir}
+		given := "" // 用户给的 --bin（取了绝对路径），没给为空
 		if *bin != "" {
+			given = b
 			hookArgs = append(hookArgs, "--bin", b)
 		}
+		notifyArgs := slices.Clone(hookArgs)
 		if proj != "" {
 			hookArgs = append(hookArgs, "--project", proj)
 		}
-		if code := runSetup(hookArgs, stdout, stderr); code != 0 {
+		if code := runSetupHooks(hookArgs, false, stdout, stderr); code != 0 {
 			return fail(2, "钩子文件的问题见上面（已写入的会列出来）。")
 		}
 		done = append(done, steps[1])
+		// Codex 只认一条 notify：钩子装完接着做 setup codex-notify 的事，--dir、--bin 与钩子同一口径，已有的 notify 由它保留为前一跳，
+		// 重跑不重复串接。它失败（如 config.toml 看不懂）不算 setup all 失败：原因它已打印，最后的“注意”里给处理好后要跑的命令
+		if code := runSetupCodexNotify(notifyArgs, stdout, stderr); code != 0 {
+			socket, _, _ := hookSocket(cfg.Dir) // 上面装钩子时已算过一次，不会出错
+			notes = append(notes, "Codex 的 notify 没有接上（原因见第 2 步），完成与提问事件进不了收件箱；处理好后运行 "+
+				codexNotifyCmd(socket, given)+"（会保留已有的 notify）")
+		}
 	}
 
 	step(3)
@@ -752,7 +795,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	}
 
 	step(4)
-	// 给了 --project 才交给 doctor（不给时 doctor 看当前目录，它不是 git 仓库时项目根只告知），复查命令同理
+	// 给了 --project 才交给 doctor（不给时 doctor 看当前目录，它不是 git 仓库或在系统目录里时项目根只告知），复查命令同理
 	doctorArgs, recheck := []string{"--dir", cfg.Dir, "--bin", b}, "railse doctor"+projArg+dirBin
 	if proj != "" {
 		doctorArgs = append([]string{"--project", proj}, doctorArgs...)

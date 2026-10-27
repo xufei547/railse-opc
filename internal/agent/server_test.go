@@ -201,11 +201,11 @@ func TestProjectRootNonGitDir(t *testing.T) {
 	}
 }
 
-// rootNotes 取日志里说明项目根怎么定的行：“不是 git 仓库”与“不在家目录下的普通目录里”两种。
+// rootNotes 取日志里说明项目根怎么定的行：“不是 git 仓库”“不在家目录下的普通目录里”“在系统目录里”三种。
 func rootNotes(logs string) []string {
 	var out []string
 	for _, l := range strings.Split(logs, "\n") {
-		if strings.Contains(l, "不是 git 仓库") || strings.Contains(l, "不在家目录下的普通目录里") {
+		if strings.Contains(l, "不是 git 仓库") || strings.Contains(l, "不在家目录下的普通目录里") || strings.Contains(l, "在系统目录里") {
 			out = append(out, l)
 		}
 	}
@@ -220,7 +220,11 @@ func notPlainNote(dir string) string {
 	return fmt.Sprintf("test 目录 %q 不在家目录下的普通目录里，不按项目根处理；要自动放行请 git init 或换到项目目录", CleanCwd(dir))
 }
 
-// 项目根怎么定在日志里每个目录只说明一次（两种说明共用一个集合）：同一目录再来请求不重复，换一个目录再记一行；
+func systemNote(dir string) string {
+	return fmt.Sprintf("test 目录 %q 在系统目录里，不按项目根处理；要自动放行请换到系统目录之外的项目目录", CleanCwd(dir))
+}
+
+// 项目根怎么定在日志里每个目录只说明一次（三种说明共用一个集合）：同一目录再来请求不重复，换一个目录再记一行；
 // git 仓库与家目录里不记。路径按 %q 记：目录名里带换行也伪造不出另一行日志。
 func TestRootNoteLoggedOncePerDir(t *testing.T) {
 	logs := &logBuf{}
@@ -236,11 +240,40 @@ func TestRootNoteLoggedOncePerDir(t *testing.T) {
 	for _, cwd := range []string{a, a, env.repo, filepath.Join(env.repo, "src"), env.cfg.HomeDir, b, cfg, a, b, cfg, evil, outside, "/etc", outside} {
 		roundTrip(t, env.cfg.SocketPath, permission(cwd, "touch x"))
 	}
-	want := []string{nonGitNote(a), nonGitNote(b), notPlainNote(cfg), nonGitNote(evil), notPlainNote(outside), notPlainNote("/etc")}
+	want := []string{nonGitNote(a), nonGitNote(b), notPlainNote(cfg), nonGitNote(evil), notPlainNote(outside), systemNote("/etc")}
 	if strings.Contains(logs.String(), "\n2026/10/27 12:00:00 伪造的一行") {
 		t.Fatalf("目录名里的换行不该进日志:\n%s", logs.String())
 	}
 	if got := rootNotes(logs.String()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("说明行 = %q，想要 %q\n日志:\n%s", got, want, logs.String())
+	}
+}
+
+// 系统目录里的 git 仓库（如 /opt/homebrew）不当项目根：里面的写入按项目外（fail closed），不按项目内放行；日志里每个目录
+// 说明一次“在系统目录里”。用替换的系统目录列表造仓库，除外列表清空、本进程的临时目录指到别处，免得除外把它放过。
+func TestProjectRootSystemDir(t *testing.T) {
+	logs := &logBuf{}
+	env := startServerLog(t, LocalDecider{}, setHome(t), logs)
+	sys := filepath.Join(filepath.Dir(env.repo), "opt")
+	brew := filepath.Join(sys, "homebrew")
+	bin := filepath.Join(brew, "bin")
+	os.MkdirAll(filepath.Join(brew, ".git"), 0o755)
+	os.MkdirAll(bin, 0o755)
+	setVar(t, &systemDirs, []string{CleanCwd(sys)})
+	setVar(t, &systemExempt, nil) // $TMPDIR=/tmp 时临时目录在 /private/tmp 下
+	t.Setenv("TMPDIR", filepath.Join(filepath.Dir(env.repo), "elsewhere"))
+	var resp proto.Response
+	for _, cwd := range []string{brew, bin, brew} {
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(cwd, "touch a")), &resp)
+		if resp.Decision != "passthrough" || resp.Risk != "write_outside" {
+			t.Fatalf("系统目录里的 git 仓库 %s 里写文件应按项目外: %+v", cwd, resp)
+		}
+	}
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(env.repo, "touch a")), &resp)
+	if resp.Decision != "allow" || resp.Risk != "write_in_project" {
+		t.Fatalf("系统目录之外的仓库照常放行: %+v", resp)
+	}
+	if got, want := rootNotes(logs.String()), []string{systemNote(brew), systemNote(bin)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("说明行 = %q，想要 %q\n日志:\n%s", got, want, logs.String())
 	}
 }

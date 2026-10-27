@@ -2,27 +2,30 @@
 
 # Railse 一人公司（Railse OPC）
 
-Railse 一人公司（Railse OPC）用策略引擎自动审批 AI 编程 agent（Claude Code、Codex CLI、Gemini CLI）的工具调用，定不了的进手机收件箱，在手机上批准或拒绝（Gemini CLI 只能自动拒绝，定不了的交回终端，不进手机）。
+[English](README.en.md)
 
-状态：第一版自用中，未发布正式版。
+一个人同时开几个 AI 编程 agent 时用的审批工具：Claude Code、Codex CLI、Gemini CLI 的工具调用先由策略引擎按规则处理，定不了的进手机收件箱，你在手机上批准或拒绝（Gemini CLI 定不了的交回终端）。
+
+- **先按规则定**：内置规则只放行只读和项目内改动，`git push`、`curl` 这类才推到手机。
+- **出故障就交回终端**：守护进程不在、hub 连不上超过 30 秒，CLI 照常弹自己的审批框，最坏就是回到没装 Railse 时的样子。
+- **可以「记住」**：批准或拒绝时勾上「记住」，存成规则，下次同类请求自动处理；对外和不可逆的操作记不成放行。
+- **hub 自己部署，载荷先脱敏**：命令里规则认得出的令牌、密码在本机就换成 `<redacted>` 再上报（认不出的原样进 hub 和手机，见 [SECURITY.md](SECURITY.md)），hub 里的机器密钥和登录会话只存哈希。
+
+<p align="center"><img src="assets/demo.gif" width="390" alt="演示：手机网页上登录；Claude Code 要跑 curl，规则定不了，请求出现在收件箱；批准时勾上「记住」；规则页多了一条「学来的」规则"></p>
 
 ## 怎么工作
 
-1. **钩子**：`railse setup` 把 `railse hook <cli>` 装进三个 CLI 的权限钩子，每次工具调用前把请求经本机 Unix socket 交给守护进程。
-2. **守护进程与策略引擎**：每台工作机跑一个 `railse agent`，按 `rules.yaml` 给请求定风险档并放行或拒绝，每一步写本地审计；定不了的送 hub（Gemini CLI 只能自动拒绝，定不了的交回终端，不进手机）。
-3. **hub 与手机网页**：`railse hub` 自托管在一台有公网域名的机器上，同源托管手机网页（PWA，可收 Web Push）；你在手机上做的决定经 hub 回到守护进程，再由钩子答复 CLI。
-
 ```
 Claude Code / Codex CLI / Gemini CLI
-        │ 权限钩子 railse hook <cli>
-        ▼
-railse agent（守护进程 + 策略引擎）──规则定了──▶ 放行 / 拒绝，答复钩子（Gemini CLI 只能自动拒绝）
-        │ 定不了（Gemini CLI 的交回终端，不进手机；其余经 WebSocket，守护进程只向外连）
-        ▼
-railse hub（自托管）──Web Push──▶ 手机网页收件箱 ──批准 / 拒绝──▶ hub ▶ 守护进程 ▶ 钩子
+   │ 权限钩子
+   ▼
+railse agent（策略引擎）──规则定了──▶ 批准 / 拒绝
+   │ 定不了
+   ▼
+railse hub ──Web Push──▶ 手机 ──批准 / 拒绝──▶ hub ▶ 守护进程 ▶ 钩子
 ```
 
-Railse 自身出任何故障都不会卡住 agent，也不会误批：守护进程不在、hub 连不上（最多等 30 秒）时请求交回终端，由 CLI 自己的审批处理。
+每台写代码的机器跑一个守护进程，它主动连 hub（WebSocket），把规则定不了的送过去。手机网页由 hub 托管，不用另外部署。
 
 ## 安装
 
@@ -30,47 +33,55 @@ Railse 自身出任何故障都不会卡住 agent，也不会误批：守护进�
 curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sh
 ```
 
-支持 macOS（Apple Silicon）与 Linux（amd64、arm64）。脚本从 GitHub Releases 下载对应的包，按同一发布的 `checksums.txt` 校验 sha256，校验不过不安装；不调用 sudo：`/usr/local/bin` 可写就装那里，否则装到 `~/.local/bin`（不在 PATH 里时会提示）。指定版本或目录：`curl -fsSL … | RAILSE_VERSION=0.1.0 RAILSE_INSTALL_DIR=~/bin sh`。Linux 上跑 hub 的机器改用 `curl -fsSL … | sudo sh`，以 root 运行时装进 `/usr/local/bin`（看输出里的“已安装 …”确认，见下面第 1 步）。升级就是重跑一遍。
-
-或者用 Go 自己编译：`go install github.com/xufei547/railse-opc/cmd/railse@latest`。这样装出的二进制不带手机网页（网页路径回 503“网页未构建”），只适合工作机；跑 hub 的机器请用上面的安装脚本，或在仓库里 `make build`。
+支持 macOS（Apple Silicon）和 Linux（amd64、arm64）。不调用 sudo，`/usr/local/bin` 可写就装那里，否则装 `~/.local/bin`；升级就是重跑一遍。也可以 `go install github.com/xufei547/railse-opc/cmd/railse@latest`，但不带手机网页，只适合工作机。
 
 ## 三步上手
 
-1. **hub 机器**（域名已解析到这台机器，443 与 80 对公网开放）。macOS 绑定 443/80 不需要特权，直接跑：
+1. **hub 机器**：域名已解析到这台机器，443、80 对公网开放。macOS 上：
    ```sh
-   railse hub password    # 从标准输入读一行设为网页登录密码
-   railse hub token       # 打印一次性接入码，默认 10 分钟有效
-   railse hub run --acme-domain hub.example.com --acme-email me@example.com
+   railse hub password    # 设网页登录密码
+   railse hub run --acme-domain hub.example.com
    ```
-   Linux 上普通用户绑不了 443/80，hub 也不该以 root 跑：装成系统服务（以普通用户运行，只给绑定特权端口的 `CAP_NET_BIND_SERVICE`，开机自启）。服务用户要能读、能执行 railse 本身，所以 hub 机器上用 root 安装，装到 `/usr/local/bin`（属主 root、0755）；sudo 的 `secure_path` 不一定含它（RHEL 系默认只有 `/sbin:/bin:/usr/sbin:/usr/bin`），sudo 时一律写绝对路径：
+   Linux 上要装成系统服务或用反向代理，见 [docs/setup.md](docs/setup.md)。
+2. **每台工作机**：在 hub 机器上跑 `railse hub token` 拿接入码（10 分钟有效，一台一个），再在工作机上：
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sudo sh
-   sudo /usr/local/bin/railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com
-   railse hub password --dir /var/lib/railse-hub    # 不加 sudo，以服务用户（默认就是执行 sudo 的你）运行
-   railse hub token --dir /var/lib/railse-hub
+   railse setup
    ```
-   数据目录 `/var/lib/railse-hub` 由 systemd 在服务第一次启动时建好并交给服务用户，所以 `password`、`token` 要在 `setup autostart` 之后跑；用 `--user 名字` 指定了别的服务用户时，以那个用户身份（`sudo -u 名字 /usr/local/bin/railse hub …`）运行。railse 装在别处时写 `sudo "$(command -v railse)" setup autostart --hub --system -- …`（单元里的程序路径随之取它），但服务用户必须能执行那个路径：程序在你的家目录（常是 0750）下而 `--user` 换成了别的用户时，服务用户执行不了它，单元会以 `203/EXEC` 反复重启。详见 [docs/setup.md](docs/setup.md)。
-2. **每台工作机**：在终端里跑一次 `railse setup`，按提问填 hub 地址、接入码（第 1 步 `railse hub token` 打印的）和本机名字（直接回车用主机名）；也可以一次给全：`railse setup all --hub https://hub.example.com --token <接入码>`。一次做完接入 hub、装三个 CLI 的钩子、开机自启与体检（钩子默认装用户级，对所有项目生效；只想让某个项目用的，加 `--project <目录>` 把 Claude、Gemini 的装成那个项目的项目级），最后把手机要打开的地址框起来打印。之后随时可以 `railse doctor` 检查。
-3. **手机**：打开上一步框里的地址（如 `https://hub.example.com/`），用第 1 步的密码登录；iPhone 上用 Safari 打开后分享→添加到主屏幕，再从图标打开，在设置里开启通知。
+   按提问填 hub 地址、接入码和本机名字，或一次给全：`railse setup all --hub https://hub.example.com --token <接入码>`。它接入 hub、装钩子（连同 Codex 的 `notify`）、设开机自启、跑 `railse doctor`，最后打印手机要打开的地址。
+3. **手机**：打开这个地址，用第 1 步的密码登录。iPhone 用 Safari 点「分享」→「添加到主屏幕」，从图标打开，到「设置」里点「开启通知」。
+
+## 部署到 Fly.io
+
+`deploy/fly/` 里有现成配置，部署前改 `fly.toml` 三处：`app` 改成你的应用名；`RAILSE_PUBLIC_URL` 改成 `https://<应用名>.fly.dev`，定下后不要再换；`primary_region` 改成建卷的区域。命令见 [docs/hub.md](docs/hub.md) 的「部署到 Fly.io」。
 
 ## 文档
 
-- [docs/setup.md](docs/setup.md)：安装、hub 部署、工作机接入、开机自启、`railse doctor` 各检查项、升级与发布
-- [docs/agent-local-loop.md](docs/agent-local-loop.md)：本机闭环（守护进程、钩子、规则、审计）
-- [docs/hub.md](docs/hub.md)：hub 的部署、接口、推送、安全与故障排查
-- [docs/web.md](docs/web.md)：手机网页（PWA）
-- [docs/superpowers/specs/2026-10-21-railse-opc-design.md](docs/superpowers/specs/2026-10-21-railse-opc-design.md)：第一版设计
+- [docs/setup.md](docs/setup.md)：安装、hub 部署（Linux 服务、反向代理）、接入、开机自启、`railse doctor` 各检查项、升级
+- [docs/hub.md](docs/hub.md)：hub 的接口、推送、安全、Fly.io、故障排查
+- [docs/web.md](docs/web.md)：手机网页
+- [docs/agent-local-loop.md](docs/agent-local-loop.md)：守护进程、钩子、规则、审计
+- [设计文档](docs/superpowers/specs/2026-10-21-railse-opc-design.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md)
+
+## 现状与限制
+
+- v0.1.1，第一版，作者自用中。
+- Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。
+- Codex 的钩子只在交互会话里生效，`codex exec` 不触发；第一次使用前在 Codex 里跑 `/hooks` 审核一遍。
+- hub 单机单库（SQLite），不能多实例部署。
+- 项目在 `/opt`、`/usr`、`/var` 这类系统目录里时没有项目根（`/opt/homebrew` 是 git 仓库也一样），所有写入都要审批；家目录、`/tmp` 和 macOS 的 `$TMPDIR` 下的项目不受影响。
+- iPhone 要 iOS 16.4 以上，先加到主屏幕、从图标打开才能收推送。划掉应用、锁屏、几小时后还能不能收到，还没在真机上完整测过。
+- hub 的域名第一天就定下：推送订阅和主屏幕图标都绑在域名上，换域名要每台手机删掉图标、重新添加、重新开启通知。
 
 ## 开发
 
-需要 Go（版本见 `go.mod`）与 Node 20。`make release-check`（校验 `.goreleaser.yaml`）要 Go ≥ 1.27.3 才编得出 goreleaser（`GOTOOLCHAIN=auto` 会自动取）；CI 发布用 goreleaser Action 的预编译二进制，不受影响。
-
 ```sh
 make test    # gofmt、golangci-lint、go vet、go test -race、网页检查
-make e2e     # 网页端到端（真实的 hub、守护进程与钩子，Playwright）
-make lint    # 只跑 golangci-lint（配置见 .golangci.yml）
-make build   # 构建网页并编译带网页的 ./railse
+make e2e     # 端到端：真实的 hub、守护进程与钩子（Playwright）
+make demo    # 重录 assets/demo.gif（要装 ffmpeg）
 ```
+
+要装的工具和提交方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

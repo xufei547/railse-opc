@@ -136,7 +136,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 
 ## 安全要点
 
-- **只存哈希。** 机器密钥、登录会话 token、webhook 来源令牌、接入码存 SHA-256；网页密码用 argon2id（time 1、memory 64 MiB、threads 4、盐 16 字节）。**例外**：webhook 的出站回调令牌（`callback_token`）回调时要原样带上，明文存在 `requests.callback`，回调成功、3 次重试用尽或因关停中止后立即清空（用户决定 D）。
+- **只存哈希。** 机器密钥、登录会话 token、webhook 来源令牌、接入码存 SHA-256；网页密码用 argon2id（time 1、memory 64 MiB、threads 4、盐 16 字节）。**例外**：webhook 的出站回调令牌（`callback_token`）回调时要原样带上，明文存在 `requests.callback`，回调成功、3 次都失败或因关停中止后立即清空（用户决定 D）。
 - **登录。** 每个来源 IP 每分钟 5 次（IPv6 按 /64 算一个来源），同时校验密码的上限 2 个，等不到名额回 503 且不占限速名额。cookie `railse_session`：HttpOnly、SameSite=Lax、Path=/、30 天，请求经 TLS、开了 `--secure-cookies` 或配了 https 的 `--public-url` 时加 Secure（hub 在终止 TLS 的反向代理后面时自己收到的是明文 HTTP，靠后两者判断）；所以配了 `--public-url` 后要经它的 https 地址登录，浏览器一般不接受明文 http 地址（如局域网 IP）上设的 Secure cookie。换密码使所有已登录会话失效，并删除全部推送订阅。
 - **退出登录与设备丢失。** 推送订阅与登录会话是分开存的：只删会话的话，这台设备的锁屏上照样会收到“机器名 · 项目”与命令摘要。所以网页的“退出登录”先尽力关闭这台设备的通知（让 hub 删掉它的订阅，同时退掉浏览器里的订阅；最多等 3 秒，关不掉也照常退出），再删会话。设备丢了、或在别人的浏览器上开过通知，在服务器上按顺序做：
   1. 先 `railse hub password` 换密码：同一事务里删掉全部登录会话与全部推送订阅（审计 `push_subscriptions_cleared`），丢掉的设备立即登不进、也不再收到推送；
@@ -206,7 +206,7 @@ cd deploy/fly && fly deploy --app <应用名> --ha=false        # 单机加单�
 fly ssh console -a <应用名> -C "railse hub token"             # 接入码，给工作机 railse setup all 用
 ```
 
-`fly.toml` 里的 `app` 与 `RAILSE_PUBLIC_URL` 改成自己的应用名（`https://<应用名>.fly.dev`，域名一旦定下不要再换，推送订阅绑在它上面）。`auto_stop_machines` 必须是 `off`：守护进程与手机的长连接和推送都要求机器常驻。升级就改 `RAILSE_VERSION` 再 `fly deploy`。
+`fly.toml` 里的 `app` 与 `RAILSE_PUBLIC_URL` 改成自己的应用名（`https://<应用名>.fly.dev`，域名一旦定下不要再换，推送订阅绑在它上面），`primary_region` 改成上面建卷的区域（卷只能挂到同一区域的机器上）。`auto_stop_machines` 必须是 `off`：守护进程与手机的长连接和推送都要求机器常驻。升级就改 `RAILSE_VERSION` 再 `fly deploy`。
 
 ## 故障排查
 

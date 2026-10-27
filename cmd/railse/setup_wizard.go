@@ -10,8 +10,8 @@ import (
 	"unicode/utf8"
 )
 
-// setupStdin 是向导读答案的地方；stdinIsTerminal 判断 stdin 是不是终端（见 isTerminal）：是才提问，
-// 不是（脚本、管道、/dev/null）照旧报用法错误。是变量只为测试能替换。
+// setupStdin 是向导与重跑确认读答案的地方；stdinIsTerminal 判断 stdin 是不是终端（见 isTerminal）：是才提问，
+// 不是（脚本、管道、/dev/null）时缺接入信息照旧报用法错误、已接入的重跑不确认直接做。是变量只为测试能替换。
 var (
 	setupStdin      io.Reader = os.Stdin
 	stdinIsTerminal           = func() bool { return isTerminal(os.Stdin) }
@@ -31,7 +31,7 @@ func isTerminal(f *os.File) bool {
 // askSetupAll 在终端里逐个问 setup all 接入 hub 还缺的值，填进 hubURL、token、name：已经给了（非空）的不问。
 // 名字直接回车取 defaultName（主机名）。提示与重问的原因写到 stdout；整个问答只用一个 bufio.Reader。
 // 问了 hub 地址时 hubURL 填的是规范化后的基地址（同 parseHubURL 返回的），并作为 hubBase 返回；没问时 hubBase 为空。
-// 任一问题读到 EOF（Ctrl-D）返回 io.EOF，这时什么都还没做。
+// 任一问题读到 EOF（Ctrl-D）返回 io.EOF，这时什么都还没做；读失败时先往 stdout 换一行。
 func askSetupAll(in io.Reader, stdout io.Writer, hubURL, token, name *string, defaultName string) (hubBase string, err error) {
 	r := bufio.NewReader(in)
 	// ask 打印 prompt 读一行，去掉首尾空白后交给 check：不合格就打印原因再问，直到合格或读不到
@@ -40,6 +40,7 @@ func askSetupAll(in io.Reader, stdout io.Writer, hubURL, token, name *string, de
 			fmt.Fprint(stdout, prompt)
 			line, err := r.ReadString('\n')
 			if err != nil {
+				fmt.Fprintln(stdout) // 终端不会替 Ctrl-D 换行：调用方接着说的“已取消”不跟在提示后面
 				return "", err
 			}
 			v, err := check(strings.TrimSpace(line))
@@ -82,6 +83,43 @@ func askSetupAll(in io.Reader, stdout io.Writer, hubURL, token, name *string, de
 		}
 	}
 	return hubBase, nil
+}
+
+// rerunWork 说已接入的机器重跑 setup all 接下来要重做的事：hooks 为真要重装钩子，第 2 步连同 Codex 的 notify（可能改写 ~/.codex/config.toml），
+// 问句里一并说出；daemon 是第 3 步对守护进程要做的事（“重启守护进程”“托管并启动守护进程”，空表示不碰它）。
+// what 放进确认的问句，untouched 是取消时说的哪些没动；都没有要做的时两个都是空。
+func rerunWork(hooks bool, daemon string) (what, untouched string) {
+	switch {
+	case hooks && daemon != "":
+		return "重装钩子（连同 Codex 的 notify）、" + daemon, "钩子与守护进程都没动"
+	case hooks:
+		return "重装钩子（连同 Codex 的 notify）", "钩子没动"
+	case daemon != "":
+		return daemon, "守护进程没动"
+	}
+	return "", ""
+}
+
+// confirmRerun 在终端里问已接入 hubURL 的机器要不要接着做 what（见 rerunWork）。直接回车或 y、yes 返回 true，n、no 返回 false，
+// 大小写不论；别的答案说明怎么答再问。读到 EOF（Ctrl-D）返回 io.EOF，调用方当取消；读失败时先往 stdout 换一行。
+// 提示与重问的说明写到 stdout。
+func confirmRerun(in io.Reader, stdout io.Writer, hubURL, what string) (bool, error) {
+	r := bufio.NewReader(in)
+	for {
+		fmt.Fprintf(stdout, "本机已接入 %s。接下来%s，继续吗？[Y/n] ", hubURL, what)
+		line, err := r.ReadString('\n')
+		if err != nil {
+			fmt.Fprintln(stdout) // 同 askSetupAll：“已取消”不跟在 [Y/n] 后面
+			return false, err
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "", "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		}
+		fmt.Fprintln(stdout, "请回答 y 或 n（直接回车算 y）")
+	}
 }
 
 // checkHubAnswer 按 --hub 的口径（parseHubAddr）校验向导里答的 hub 地址，返回去掉末尾 / 的基地址；原因里不提用户没输入过的 --hub。
