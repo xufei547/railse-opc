@@ -795,7 +795,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	}
 
 	step(4)
-	// 给了 --project 才交给 doctor（不给时 doctor 看当前目录，它不是 git 仓库时项目根只告知），复查命令同理
+	// 给了 --project 才交给 doctor（不给时 doctor 看当前目录，它不是 git 仓库或在系统目录里时项目根只告知），复查命令同理
 	doctorArgs, recheck := []string{"--dir", cfg.Dir, "--bin", b}, "railse doctor"+projArg+dirBin
 	if proj != "" {
 		doctorArgs = append([]string{"--project", proj}, doctorArgs...)

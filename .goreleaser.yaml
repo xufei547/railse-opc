@@ -1,6 +1,6 @@
 # goreleaser v2 配置。版本钉在 Makefile 的 GORELEASER_VERSION（本地 make release-check 与
-# .github/workflows/release.yml 用同一个值）。本地出快照包：
-#   GOTOOLCHAIN=local go run github.com/goreleaser/goreleaser/v2@<GORELEASER_VERSION> release --snapshot --clean --skip=publish
+# .github/workflows/release.yml 用同一个值）。本地出快照包（要 Go ≥ 1.27.3，更旧的靠 GOTOOLCHAIN=auto 自动取，同 Makefile）：
+#   go run github.com/goreleaser/goreleaser/v2@<GORELEASER_VERSION> release --snapshot --clean --skip=publish
 version: 2
 project_name: railse
 before:

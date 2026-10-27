@@ -85,14 +85,15 @@ func askSetupAll(in io.Reader, stdout io.Writer, hubURL, token, name *string, de
 	return hubBase, nil
 }
 
-// rerunWork 说已接入的机器重跑 setup all 接下来要重做的事：hooks 为真要重装钩子；daemon 是第 3 步对守护进程要做的事
-// （“重启守护进程”“托管并启动守护进程”，空表示不碰它）。what 放进确认的问句，untouched 是取消时说的哪些没动；都没有要做的时两个都是空。
+// rerunWork 说已接入的机器重跑 setup all 接下来要重做的事：hooks 为真要重装钩子，第 2 步连同 Codex 的 notify（可能改写 ~/.codex/config.toml），
+// 问句里一并说出；daemon 是第 3 步对守护进程要做的事（“重启守护进程”“托管并启动守护进程”，空表示不碰它）。
+// what 放进确认的问句，untouched 是取消时说的哪些没动；都没有要做的时两个都是空。
 func rerunWork(hooks bool, daemon string) (what, untouched string) {
 	switch {
 	case hooks && daemon != "":
-		return "重装钩子、" + daemon, "钩子与守护进程都没动"
+		return "重装钩子（连同 Codex 的 notify）、" + daemon, "钩子与守护进程都没动"
 	case hooks:
-		return "重装钩子", "钩子没动"
+		return "重装钩子（连同 Codex 的 notify）", "钩子没动"
 	case daemon != "":
 		return daemon, "守护进程没动"
 	}

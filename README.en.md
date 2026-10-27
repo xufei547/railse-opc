@@ -11,7 +11,7 @@ OPC stands for "one-person company".
 - **Rules decide first.** The built-in rules allow read-only commands and edits inside the project; anything else, like `git push` or `curl`, goes to your phone.
 - **Failures go back to the terminal.** If the daemon isn't running, or the hub can't be reached for 30 seconds, the CLI shows its own permission prompt. Worst case, it's as if Railse weren't installed.
 - **Decisions can become rules.** Turn on 记住 (remember) when you approve or deny, and the decision is saved as a rule for that project or for all projects. Pushes, publishing and destructive commands (recursive deletes, force pushes) can't be remembered as allowed.
-- **You run the hub.** Tokens and passwords in commands become `<redacted>` before they leave your machine, and the hub stores machine secrets and login sessions as hashes.
+- **You run the hub, and payloads are redacted first.** Tokens and passwords in commands that the redaction rules recognize become `<redacted>` before they leave your machine (a secret they don't recognize reaches the hub and the phone unchanged; see [SECURITY.md](SECURITY.md)), and the hub stores machine secrets and login sessions as hashes.
 
 <p align="center"><img src="assets/demo.gif" width="390" alt="Demo: log in to the phone web app; Claude Code wants to run curl, no rule decides it, and the request shows up in the inbox; approve it with remember turned on; the rules page now has a learned rule"></p>
 
@@ -62,7 +62,7 @@ Supported: macOS on Apple Silicon, Linux on amd64 and arm64. The script download
 
 ## Docs
 
-The docs are in Chinese.
+The docs under `docs/` are in Chinese.
 
 - [docs/setup.md](docs/setup.md): install, hub deployment (Linux service, reverse proxy), enrolling machines, autostart, `railse doctor` checks, upgrades
 - [docs/hub.md](docs/hub.md): hub API, push notifications, security, Fly.io, troubleshooting
@@ -74,10 +74,11 @@ The docs are in Chinese.
 ## Status and limitations
 
 - This is v0.1.1, the first version, and the author is dogfooding it.
-- The phone web app, the CLI output and the docs are in Chinese only for now.
+- The phone web app, the CLI output and the docs under `docs/` are in Chinese only for now.
 - Gemini CLI hooks can deny but can't approve: rule denials still apply, and everything else goes back to Gemini's own prompt and never reaches the phone. Needs Gemini CLI 0.65.0 or later.
 - Codex hooks only fire in interactive sessions (`codex exec` doesn't trigger them). Before the first use, review them with `/hooks` inside Codex.
 - The hub is one process with one SQLite database and can't run as multiple instances.
+- A project inside a system directory such as `/opt`, `/usr` or `/var` has no project root, even if it's a git repo (`/opt/homebrew` is one), so every write needs approval. Projects under your home directory, `/tmp` or macOS's per-user `$TMPDIR` aren't affected.
 - On iPhone (iOS 16.4 or later), push notifications only work after you add the page to the Home Screen and open it from there.
 - Push on a real iPhone hasn't been fully tested yet: after the app is swiped away, with the screen locked, or hours later.
 - Pick the hub's domain on day one. Push subscriptions and the Home Screen app are tied to it, so changing it means deleting the icon, adding it again and re-enabling notifications on every phone.

@@ -8,8 +8,8 @@
 
 - **先按规则定**：内置规则只放行只读和项目内改动，`git push`、`curl` 这类才推到手机。
 - **出故障就交回终端**：守护进程不在、hub 连不上超过 30 秒，CLI 照常弹自己的审批框，最坏就是回到没装 Railse 时的样子。
-- **可以「记住」**：批准或拒绝时打开「记住」，存成规则，下次同类请求自动处理；对外和不可逆的操作记不成放行。
-- **hub 自己部署**：命令里的 token、密码在本机就换成 `<redacted>` 再上报，hub 里的机器密钥和登录会话只存哈希。
+- **可以「记住」**：批准或拒绝时勾上「记住」，存成规则，下次同类请求自动处理；对外和不可逆的操作记不成放行。
+- **hub 自己部署，载荷先脱敏**：命令里规则认得出的令牌、密码在本机就换成 `<redacted>` 再上报（认不出的原样进 hub 和手机，见 [SECURITY.md](SECURITY.md)），hub 里的机器密钥和登录会话只存哈希。
 
 <p align="center"><img src="assets/demo.gif" width="390" alt="演示：手机网页上登录；Claude Code 要跑 curl，规则定不了，请求出现在收件箱；批准时勾上「记住」；规则页多了一条「学来的」规则"></p>
 
@@ -56,10 +56,10 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
 
 ## 文档
 
-- [docs/setup.md](docs/setup.md)：安装与部署
-- [docs/hub.md](docs/hub.md)：hub 的接口与安全
+- [docs/setup.md](docs/setup.md)：安装、hub 部署（Linux 服务、反向代理）、接入、开机自启、`railse doctor` 各检查项、升级
+- [docs/hub.md](docs/hub.md)：hub 的接口、推送、安全、Fly.io、故障排查
 - [docs/web.md](docs/web.md)：手机网页
-- [docs/agent-local-loop.md](docs/agent-local-loop.md)：守护进程与规则
+- [docs/agent-local-loop.md](docs/agent-local-loop.md)：守护进程、钩子、规则、审计
 - [设计文档](docs/superpowers/specs/2026-10-21-railse-opc-design.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md)
 
@@ -69,12 +69,19 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
 - Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。
 - Codex 的钩子只在交互会话里生效，`codex exec` 不触发；第一次使用前在 Codex 里跑 `/hooks` 审核一遍。
 - hub 单机单库（SQLite），不能多实例部署。
+- 项目在 `/opt`、`/usr`、`/var` 这类系统目录里时没有项目根（`/opt/homebrew` 是 git 仓库也一样），所有写入都要审批；家目录、`/tmp` 和 macOS 的 `$TMPDIR` 下的项目不受影响。
 - iPhone 要 iOS 16.4 以上，先加到主屏幕、从图标打开才能收推送。划掉应用、锁屏、几小时后还能不能收到，还没在真机上完整测过。
 - hub 的域名第一天就定下：推送订阅和主屏幕图标都绑在域名上，换域名要每台手机删掉图标、重新添加、重新开启通知。
 
 ## 开发
 
-测试用 `make test`，端到端用 `make e2e`，README 里的演示用 `make demo` 重录（要装 ffmpeg），工具和提交方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+```sh
+make test    # gofmt、golangci-lint、go vet、go test -race、网页检查
+make e2e     # 端到端：真实的 hub、守护进程与钩子（Playwright）
+make demo    # 重录 assets/demo.gif（要装 ffmpeg）
+```
+
+要装的工具和提交方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

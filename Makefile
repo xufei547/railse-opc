@@ -41,7 +41,7 @@ e2e:
 	scripts/e2e-web.sh
 
 # README 里的演示：同样起真实的 hub、守护进程与钩子，Playwright 只跑 web/scripts/record-demo.ts 录像，
-# ffmpeg 转成 assets/demo.gif。没装 ffmpeg 或不在 PATH 上时用 make demo FFMPEG=<路径>
+# ffmpeg 转成 assets/demo.gif。ffmpeg 不在 PATH 上时用 make demo FFMPEG=<路径>
 FFMPEG ?= ffmpeg
 demo:
 	FFMPEG="$(FFMPEG)" scripts/demo.sh

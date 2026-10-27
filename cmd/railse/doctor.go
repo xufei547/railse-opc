@@ -47,7 +47,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, doctorUsage)
 		fs.PrintDefaults()
 	}
-	project := fs.String("project", ".", "项目目录（检查项目级钩子与项目根）；不给时看当前目录，它不是 git 仓库时项目根只告知")
+	project := fs.String("project", ".", "项目目录（检查项目级钩子与项目根）；不给时看当前目录，它不是 git 仓库或在系统目录里时项目根只告知")
 	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse")
 	hubDir := fs.String("hub-dir", "", "hub 数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub，Linux 上再看 "+systemHubDir+"（默认目录都不在则跳过 hub 侧）")
 	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
@@ -93,7 +93,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	// 显式给的 --project（哪怕是 .）才按要检查的项目报项目根；默认的当前目录不是 git 仓库时只告知
+	// 显式给的 --project（哪怕是 .）才按要检查的项目报项目根；默认的当前目录不是 git 仓库或在系统目录里时只告知
 	projExplicit := false
 	fs.Visit(func(f *flag.Flag) { projExplicit = projExplicit || f.Name == "project" })
 	home, _ := os.UserHomeDir()

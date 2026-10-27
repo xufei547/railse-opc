@@ -252,7 +252,7 @@ func TestSetupWizardSkipsQuestionsWhenEnrolled(t *testing.T) {
 	if strings.Contains(s, askHubPrompt) || strings.Contains(s, askTokenPrompt) || strings.Contains(s, askNamePrompt) {
 		t.Fatalf("已接入时不该问接入的问题:\n%s", s)
 	}
-	if strings.Count(s, askRerunPrompt) != 1 || !strings.Contains(s, rerunPrompt(h.http.URL, "重装钩子、托管并启动守护进程")) {
+	if strings.Count(s, askRerunPrompt) != 1 || !strings.Contains(s, rerunPrompt(h.http.URL, "重装钩子（连同 Codex 的 notify）、托管并启动守护进程")) {
 		t.Fatalf("重装钩子、托管守护进程之前应确认一次:\n%s", s)
 	}
 	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "已托管") || !strings.Contains(s, "║  "+h.http.URL+"  ║") {
@@ -303,7 +303,7 @@ func TestSetupAllRerunAsksFirst(t *testing.T) {
 	needUserAutostart(t)
 	f, hub := enrolledFixture(t)
 	f.rec.respond = jobState(false) // 托管的作业没在跑、socket 没人监听：问句说托管并启动
-	prompt := rerunPrompt(hub, "重装钩子、托管并启动守护进程")
+	prompt := rerunPrompt(hub, "重装钩子（连同 Codex 的 notify）、托管并启动守护进程")
 	const reask = "请回答 y 或 n（直接回车算 y）\n"
 	for _, input := range []string{"n\n", "No\n", "", "maybe\nn\n"} {
 		f.removeInstalled(t)
@@ -395,19 +395,19 @@ func TestSetupAllRerunPromptNamesOnlyWhatIsRedone(t *testing.T) {
 	}
 	// socket 没人监听
 	check([]tc{
-		{false, nil, "重装钩子、托管并启动守护进程", "钩子与守护进程都没动"},
-		{true, nil, "重装钩子、重启守护进程", "钩子与守护进程都没动"},
+		{false, nil, "重装钩子（连同 Codex 的 notify）、托管并启动守护进程", "钩子与守护进程都没动"},
+		{true, nil, "重装钩子（连同 Codex 的 notify）、重启守护进程", "钩子与守护进程都没动"},
 		{false, []string{"--no-hooks"}, "托管并启动守护进程", "守护进程没动"},
-		{false, []string{"--no-autostart"}, "重装钩子", "钩子没动"},
+		{false, []string{"--no-autostart"}, "重装钩子（连同 Codex 的 notify）", "钩子没动"},
 		{false, []string{"--no-hooks", "--no-autostart"}, "", ""},
 	})
 	serveAgent(t, agent.ConfigIn(f.dir))
 	check([]tc{
-		{true, nil, "重装钩子、重启守护进程", "钩子与守护进程都没动"},
+		{true, nil, "重装钩子（连同 Codex 的 notify）、重启守护进程", "钩子与守护进程都没动"},
 		{true, []string{"--no-hooks"}, "重启守护进程", "守护进程没动"},
-		{true, []string{"--no-autostart"}, "重装钩子", "钩子没动"},
+		{true, []string{"--no-autostart"}, "重装钩子（连同 Codex 的 notify）", "钩子没动"},
 		{true, []string{"--no-hooks", "--no-autostart"}, "", ""},
-		{false, nil, "重装钩子", "钩子没动"},
+		{false, nil, "重装钩子（连同 Codex 的 notify）", "钩子没动"},
 		{false, []string{"--no-hooks"}, "", ""},
 	})
 }

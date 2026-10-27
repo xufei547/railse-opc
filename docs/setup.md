@@ -99,7 +99,7 @@ railse setup all --hub https://hub.example.com --token <接入码>   # 或者一
 **重跑。** 已接入过的机器（有 `machine.json`、没加 `--force`）在终端里重跑 `railse setup` 或 `railse setup all`，第 1 步说完「已接入过…跳过」后先问一次：
 
 ```text
-本机已接入 https://hub.example.com。接下来重装钩子、重启守护进程，继续吗？[Y/n]
+本机已接入 https://hub.example.com。接下来重装钩子（连同 Codex 的 notify）、重启守护进程，继续吗？[Y/n]
 ```
 
 直接回车或 `y`、`yes` 继续；`n`、`no` 或 Ctrl-D 打印「已取消，钩子与守护进程都没动」，退出 1；别的答案说明怎么答再问。问句只提这次真要做的：托管的守护进程没在跑时是「托管并启动守护进程」；`--no-hooks` 时只提守护进程，`--no-autostart` 时只提钩子，取消时的说明也一样；手动 `railse agent run` 起的守护进程占着 socket 时第 3 步不碰它，只提钩子。没有要重做的（如 `--no-hooks` 加 `--no-autostart`）时不问。首次接入、`--force` 重新接入、stdin 不是终端（脚本、管道、`< /dev/null`）时都不问，直接做。

@@ -42,7 +42,7 @@ These are deliberate. The details are in the "安全要点" (security) section o
 
 - **Most credentials on the hub are stored as hashes.** Machine secrets, login sessions, webhook source tokens and enrollment codes are stored as SHA-256 hashes. The web login password is hashed with argon2id.
 - **A few things are stored in plaintext.** They're needed as-is, so a hash won't do. Treat them as private when you back up or copy them.
-  - `hub.db` in the hub's data directory holds the VAPID private key and the push subscription keys, which sending a push needs.
+  - `hub.db` in the hub's data directory holds the VAPID private key and the push subscription keys; sending a push needs them.
   - The outgoing webhook callback token (`callback_token`) has to be sent back as-is. It's kept until the callback ends (it succeeds, all 3 attempts fail, or the hub shuts down mid-callback) and then cleared.
   - With `--acme-domain`, the ACME account key and the certificate's private key are stored in plaintext in `acme/` in the data directory.
   - On work machines, `~/.railse/machine.json` (mode 0600) holds the machine secret the daemon uses to connect to the hub.

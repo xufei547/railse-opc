@@ -11,7 +11,7 @@ make test    # gofmt、golangci-lint、go vet、go test -race、网页的 tsc �
 make e2e     # Playwright 驱动真实的 hub、守护进程与钩子，第一次会下载 Chromium
 ```
 
-`make e2e` 起的进程用临时目录和随机端口，不碰你的 `~/.railse` 和各 CLI 的配置。
+`make e2e` 起的进程用临时目录和随机端口，不碰你的 `~/.railse` 和各 CLI 的配置。临时目录要在系统目录之外：`TMPDIR` 指到 `/var/tmp` 这类目录时，项目根相关的测试与 `make e2e` 会失败，换成 `/tmp` 再跑。
 
 ## 改规则引擎（internal/policy）
 
@@ -40,7 +40,7 @@ make test    # gofmt, golangci-lint, go vet, go test -race, web tsc and vitest
 make e2e     # Playwright drives a real hub, daemon and hooks; downloads Chromium the first time
 ```
 
-`make e2e` runs everything in temp directories on random ports and doesn't touch your `~/.railse` or any CLI's config.
+`make e2e` runs everything in temp directories on random ports and doesn't touch your `~/.railse` or any CLI's config. The temp directory has to be outside system directories: with `TMPDIR` set to something like `/var/tmp`, the project-root tests and `make e2e` fail, so point it at `/tmp` and run them again.
 
 ## Changing the policy engine (internal/policy)
 
