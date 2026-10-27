@@ -167,3 +167,24 @@
 - doctor `project.root`：git ok、非 git warn（细节含“不是 git 仓库”）、家目录 skip、Project 空 skip。
 - policy：ProjectRoot = HomeDir 时家目录下的写入是 write_outside、范围是家目录的规则不匹配、`ProposeRule` 对 shell 与 file_write 报“没有项目根”；ProjectRoot 是家目录的祖先、`/` 同理；正常项目根不受影响。
 - hub：请求的 ProjectRoot 是机器家目录时“拒绝并记住”记成全局规则、按项目范围记住报“没有项目根”。
+
+### Task 5: 收紧非 git 回退（终审 I3 拍板）
+
+**背景**：Task 4 让非 git 的 cwd 都当项目根，终审指出 `~/Library/LaunchAgents`、`~/.config`、`/usr/local`、`/etc` 这类目录也会因此自动放行写入。发起会话 2026-10-27 拍板：收紧。
+
+**目标**：非 git 目录按当前目录当项目根，只在同时满足下面条件时生效；不满足时保持原行为（没有项目根，改动都走 ask），并在守护进程日志（每个目录只记一次）与 doctor 的 `project.root` 里说明“目录 X 不在家目录下的普通目录里，不按项目根处理；要自动放行请 git init 或换到项目目录”。
+
+1. 路径在家目录之下（不是家目录本身，也不是它的祖先）。家目录之外一律不回退：`/usr`、`/etc`、`/opt`、`/var`、`/System`、`/Library`、`/tmp`、`/private/tmp` 等都算。
+2. 从家目录往下的每一段都不以点开头（排除 `~/.config`、`~/.local`、`~/.cache`、`~/dev/.hidden/x` 等）。
+3. 不在 `~/Library` 之下（macOS 文件系统默认不分大小写，`~/library/x` 也算）。
+
+**文件**：`internal/agent/project.go`、`internal/agent/server.go`、`internal/doctor/agent.go`、对应测试；`internal/policy/payload.go`（`Context.ProjectRoot` 注释）、`docs/agent-local-loop.md`（项目根一节）、`docs/setup.md`（doctor 表 `project.root` 一行）、设计文档里描述项目根的那句。
+
+**要求**：
+
+1. `ResolveProjectRoot` 区分四种结果（返回值改成带类别的形式，导出类别供 doctor 用）：git 仓库根；回退到 cwd；cwd 存在、不是 git、不太宽、但不满足上面三条（“不是普通目录”）；空（家目录、它的祖先、根目录、不存在、相对路径）。git 仓库根的判定不变（`/tmp`、`/opt` 下的 git 仓库照常当项目根，冒烟与测试不受影响）；用 git 管 dotfiles（家目录有 `.git`）时的回退也按这三条判断。
+2. “在家目录之下”按文件身份判断：从解析链接后的 cwd 逐级往上，直到某一级与家目录（`homeSpellings` 的任一写法）是同一个文件；到根都没碰到就是在家目录之外。经过的各段名字用来判断点开头；紧挨家目录的那一段与 `<家目录>/Library` 是同一个文件，或名字等于 `Library`（darwin 上不分大小写），就算在 `~/Library` 之下。指向家目录之外或点目录里的符号链接，解析后按目标判断。
+3. 守护进程：“不是普通目录”时记 `目录 %q 不在家目录下的普通目录里，不按项目根处理；要自动放行请 git init 或换到项目目录`，与“不是 git 仓库”共用每目录只记一次的集合；项目根为空。
+4. doctor `project.root`：“不是普通目录”时，显式 `--project` → warn，细节写上面那句的前半，提示“要自动放行请 git init 或换到项目目录”；隐式默认（当前目录）→ skip，细节同样说明，不给提示。其余情况不变。
+5. policy 与 hub：项目根是否回退只有守护进程知道（它们分不出 git 根与回退根），继续共用 `Context.Root()` 的家目录守卫，不额外改判断；只同步注释与文档的说法。
+6. 测试（临时 HOME）：`~/dev/foo` 回退；`~/Library/LaunchAgents`、`~/library/x`（darwin、不分大小写的卷上）、`~/.config/x`、`~/dev/.hidden/x`、`/usr/local`、`/etc`（只 stat）、`/tmp` 下新建的目录、darwin 上 `/private/tmp` 下的目录都不回退；`~/dev/link` 指向 `/etc` 或 `~/.config/x` 不回退；家目录有 `.git` 时 `~/dev/foo` 回退、`~/.config/nvim` 不回退；`~/.config/nvim` 自己是 git 仓库时照常是项目根。守护进程日志与 doctor（显式/隐式）各一组。Task 4 里用家目录之外的临时目录当非 git cwd 的测试改到临时 HOME 之下。
