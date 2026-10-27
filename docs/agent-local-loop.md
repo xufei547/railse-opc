@@ -71,7 +71,13 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 
 内置规则放行的“项目内改动”（`write_in_project`）以项目根为界，项目根之外的写入（`write_outside`）要审批。守护进程从请求的工作目录向上找 `.git`（目录，或 worktree 的 `.git` 文件），找到的那一层就是项目根。系统目录之外的 git 仓库都算（`/tmp`、`~/.config/nvim` 下的仓库也是）。
 
-系统目录是 `/opt`、`/usr`、`/etc`、`/var`、`/System`、`/Library`、`/private` 和它们下面的目录，`/private/tmp` 与守护进程的临时目录（`$TMPDIR`，macOS 上是 `/var/folders/…/T`）除外。工作目录在系统目录里时没有项目根，是 git 仓库也一样：`/opt/homebrew` 归用户可写、又在 PATH 上，当项目根会让 agent 不经审批改写装好的程序。判断用解析过链接的路径（macOS 上 `/etc`、`/var`、`/tmp` 都在 `/private` 下），按整段比较（`/optional` 不算 `/opt`），macOS 上不分大小写。Linux 上 `/opt`、`/var/www` 下的仓库同样没有项目根，所有写入都要审批。这时在 `agent.log` 里提示“目录 "X" 在系统目录里，不按项目根处理；要自动放行请换到系统目录之外的项目目录”。
+系统目录是 `/opt`、`/usr`、`/etc`、`/var`、`/System`、`/Library`、`/private` 和它们下面的目录；第一段以点开头的路径也算（macOS 的 `/.nofollow/opt/homebrew` 就是 `/opt/homebrew`）。工作目录在系统目录里时没有项目根，是 git 仓库也一样：`/opt/homebrew` 归用户可写、又在 PATH 上，当项目根会让 agent 不经审批改写装好的程序。判断用解析过链接的路径，与列出的写法和它解析后的写法都比（macOS 上 `/etc`、`/var`、`/tmp` 都在 `/private` 下），按整段比较（`/optional` 不算 `/opt`），macOS 上不分大小写。macOS 数据卷上的写法 `/System/Volumes/Data/…` 在 `/System` 下，也算系统目录：从这种写法进入的家目录和项目同样没有项目根。Linux 上 `/opt`、`/var/www` 下的仓库同样没有项目根，所有写入都要审批。这时在 `agent.log` 里提示“目录 "X" 在系统目录里，不按项目根处理；要自动放行请换到系统目录之外的项目目录”。
+
+系统目录里有三处照常判断：
+
+- **`/private/tmp`**：macOS 上的 `/tmp`。
+- **守护进程的临时目录**：`$TMPDIR`（macOS 上是 `/var/folders/…/T`），要它归你、权限 700，也不是某个系统目录本身或它的上级。
+- **家目录**：解析后落在系统目录里时（如 Fedora Silverblue 的 `/home` 链到 `/var/home`），要它归你、不是某个系统目录本身或它的上级、在系统目录下至少两层（`/var/home/x` 可以，macOS root 的 `/var/root` 不行）。
 
 不在 git 仓库里时，只有家目录下的普通目录按工作目录本身当项目根（不取它的上级）：要在家目录之下（不是家目录本身），从家目录往下的每一段都不以点开头（`~/.config`、`~/.local`、`~/dev/.hidden/x` 都不算），也不在 `~/Library` 之下（不分大小写）；符号链接按它指向的目标判断。这时在 `agent.log` 里提示“目录 "X" 不是 git 仓库，按当前目录当项目根；建议 git init”。不满足这三条的（`/tmp` 下、`~/Library/LaunchAgents`、`~/.config/x` 等）没有项目根，所有写入都要审批，`agent.log` 里提示“目录 "X" 不在家目录下的普通目录里，不按项目根处理；要自动放行请 git init 或换到项目目录”。三种提示的路径都带引号、转义，每个目录只提示一次。
 

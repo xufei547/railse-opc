@@ -250,7 +250,7 @@ func TestRootNoteLoggedOncePerDir(t *testing.T) {
 }
 
 // 系统目录里的 git 仓库（如 /opt/homebrew）不当项目根：里面的写入按项目外（fail closed），不按项目内放行；日志里每个目录
-// 说明一次“在系统目录里”。用替换的系统目录列表造仓库，本进程的临时目录指到别处，免得临时目录除外把它放过。
+// 说明一次“在系统目录里”。用替换的系统目录列表造仓库，除外列表清空、本进程的临时目录指到别处，免得除外把它放过。
 func TestProjectRootSystemDir(t *testing.T) {
 	logs := &logBuf{}
 	env := startServerLog(t, LocalDecider{}, setHome(t), logs)
@@ -260,6 +260,7 @@ func TestProjectRootSystemDir(t *testing.T) {
 	os.MkdirAll(filepath.Join(brew, ".git"), 0o755)
 	os.MkdirAll(bin, 0o755)
 	setVar(t, &systemDirs, []string{CleanCwd(sys)})
+	setVar(t, &systemExempt, nil) // $TMPDIR=/tmp 时临时目录在 /private/tmp 下
 	t.Setenv("TMPDIR", filepath.Join(filepath.Dir(env.repo), "elsewhere"))
 	var resp proto.Response
 	for _, cwd := range []string{brew, bin, brew} {
