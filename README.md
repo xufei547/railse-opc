@@ -65,7 +65,7 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
 
 - v0.1.1，第一版，作者自用中。
 - Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。
-- Codex 的钩子只在交互会话里生效，`codex exec` 不触发；第一次用要在 Codex 里用 `/hooks` 审核一遍。
+- Codex 的钩子只在交互会话里生效，`codex exec` 不触发；第一次使用前在 Codex 里跑 `/hooks` 审核一遍。
 - hub 单机单库（SQLite），不能多实例部署。
 - iPhone 要 iOS 16.4 以上，先加到主屏幕、从图标打开才能收推送。划掉应用、锁屏、几小时后还能不能收到，还没在真机上完整测过。
 - hub 的域名第一天就定下：推送订阅和主屏幕图标都绑在域名上，换域名要每台手机删掉图标、重新添加、重新开启通知。

@@ -25,7 +25,7 @@ railse agent (policy engine) ──rule matched──▶ allow / deny
 railse hub ──Web Push──▶ phone ──allow / deny──▶ hub ▶ daemon ▶ hook
 ```
 
-Each machine you write code on runs a daemon, `railse agent`. It gets requests from the CLIs' permission hooks over a local Unix socket and sends the ones the rules can't decide to the hub over a WebSocket it opens itself. The hub can only answer allow or deny, and it also serves the phone web app (a PWA), so there's nothing else to deploy.
+Each machine you write code on runs a daemon, `railse agent`. It gets requests from the CLIs' permission hooks over a local Unix socket and sends the ones the rules can't decide to the hub over a WebSocket it opens itself. For each request the hub can only answer allow or deny. It also serves the phone web app (a PWA), so there's nothing else to deploy.
 
 ## Install
 
@@ -58,6 +58,8 @@ Supported: macOS on Apple Silicon, Linux on amd64 and arm64. The script download
 
 ## Docs
 
+The docs are in Chinese.
+
 - [docs/setup.md](docs/setup.md): install, hub deployment (Linux service, reverse proxy), enrolling machines, autostart, `railse doctor` checks, upgrades
 - [docs/hub.md](docs/hub.md): hub API, push notifications, security, Fly.io, troubleshooting
 - [docs/web.md](docs/web.md): the phone web app
@@ -70,7 +72,7 @@ Supported: macOS on Apple Silicon, Linux on amd64 and arm64. The script download
 - This is v0.1.1, the first version, and the author is dogfooding it.
 - The phone web app, the CLI output and the docs are in Chinese only for now.
 - Gemini CLI hooks can deny but can't approve: rule denials still apply, and everything else goes back to Gemini's own prompt and never reaches the phone. Needs Gemini CLI 0.65.0 or later.
-- Codex hooks only fire in interactive sessions (`codex exec` doesn't trigger them), and the first time you have to review them once with `/hooks` inside Codex.
+- Codex hooks only fire in interactive sessions (`codex exec` doesn't trigger them). Before the first use, review them with `/hooks` inside Codex.
 - The hub is one process with one SQLite database and can't run as multiple instances.
 - On iPhone (iOS 16.4 or later), push notifications only work after you add the page to the Home Screen and open it from there.
 - Push on a real iPhone hasn't been fully tested yet: after the app is swiped away, with the screen locked, or hours later.

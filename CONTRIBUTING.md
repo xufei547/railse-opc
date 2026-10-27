@@ -55,5 +55,5 @@ Add cases to `internal/policy/testdata/shell_corpus.tsv`: one command per line, 
 ## Commits and pull requests
 
 - **Commit messages are mostly in Chinese.** If you don't write Chinese, English is fine. Start with a type and an optional scope, like `fix(policy):`, `feat(hub):` or `docs:`.
-- **Pull requests need to pass CI.** There are five jobs in `.github/workflows/ci.yml`: `go` and `web` run the checks in `make test`, and `web` also builds the web app (same as `make web`); `e2e` runs `make e2e`; `install-script` runs `scripts/test-install.sh`, so run it locally if you change `install.sh`; `cross` builds for macOS arm64 and Linux amd64 and arm64.
+- **Pull requests need to pass CI.** There are five jobs in `.github/workflows/ci.yml`: `go` and `web` run the checks in `make test`, and `web` also builds the web app (same as `make web`); `e2e` runs `make e2e`; `install-script` runs `scripts/test-install.sh` (run it locally first if you change `install.sh`); `cross` builds for macOS arm64 and Linux amd64 and arm64.
 - **Don't open an issue for security problems.** See [SECURITY.md](SECURITY.md).
