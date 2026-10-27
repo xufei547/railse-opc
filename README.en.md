@@ -93,6 +93,12 @@ make demo    # re-records assets/demo.gif the same way (needs ffmpeg)
 
 [CONTRIBUTING.md](CONTRIBUTING.md) covers the required tools and how to send changes.
 
+## Buy me a coffee
+
+I open-sourced this because I use it every day. If it helps you too, you can buy me a coffee on Ko-fi.
+
+<a href="https://ko-fi.com/railsexu"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Buy me a coffee on Ko-fi" height="36"></a>
+
 ## License
 
 [Apache License 2.0](LICENSE)

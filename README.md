@@ -83,6 +83,12 @@ make demo    # 重录 assets/demo.gif（要装 ffmpeg）
 
 要装的工具和提交方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+## 请我喝杯咖啡
+
+这个工具是我自己每天在用才开源的。要是它也帮到了你，可以在爱发电上请我喝杯咖啡。
+
+<a href="https://afdian.com/a/railse"><img src="https://img.shields.io/badge/%E7%88%B1%E5%8F%91%E7%94%B5-%E8%AF%B7%E6%88%91%E5%96%9D%E6%9D%AF%E5%92%96%E5%95%A1-946ce6?style=for-the-badge" alt="爱发电" height="36"></a>
+
 ## 许可证
 
 [Apache License 2.0](LICENSE)
