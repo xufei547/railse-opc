@@ -7,7 +7,7 @@ primary_region = "nrt"
 [build]
   dockerfile = "Dockerfile"
   [build.args]
-    RAILSE_VERSION = "0.1.0"
+    RAILSE_VERSION = "0.1.1"
 
 [env]
   RAILSE_HUB_HOME = "/data"
