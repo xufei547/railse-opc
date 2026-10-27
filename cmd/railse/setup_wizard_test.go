@@ -138,7 +138,8 @@ func TestSetupWizardReasksBadAnswers(t *testing.T) {
 	}
 }
 
-// 任一问题读到 EOF（Ctrl-D）：退出 1，说已取消，一个文件都不写、什么命令都不跑。
+// 任一问题读到 EOF（Ctrl-D）：退出 1，说已取消，一个文件都不写、什么命令都不跑。终端不会替 Ctrl-D 换行，
+// 所以先往 stdout 换一行，“已取消”不跟在提示后面。
 func TestSetupWizardEOFCancels(t *testing.T) {
 	h := startTestHub(t)
 	f := setupAllEnv(t)
@@ -151,6 +152,9 @@ func TestSetupWizardEOFCancels(t *testing.T) {
 		}
 		if strings.Contains(out.String(), "== 1.") {
 			t.Fatalf("%q: 取消后不该开始任何一步: %q", input, out.String())
+		}
+		if !strings.HasSuffix(out.String(), "：\n") {
+			t.Fatalf("%q: 读到 EOF 时应在提示后面换行: %q", input, out.String())
 		}
 	}
 	for _, p := range []string{f.dir, filepath.Join(f.home, ".railse"), filepath.Join(f.proj, ".claude"), filepath.Join(f.proj, ".gemini"),
@@ -293,6 +297,7 @@ func (f setupAllFixture) removeInstalled(t *testing.T) {
 
 // 已接入的机器在终端里重跑 setup all：重装钩子、托管守护进程之前问一次（在“已接入过”之后、第 2 步之前）。
 // n、no 与 EOF（Ctrl-D）取消：退出 1，说钩子与守护进程都没动，第 2 步不开始，一个文件都不写、不托管；读输入出错同样不动。
+// 读到 EOF 或出错时先往 stdout 换一行（终端不会替 Ctrl-D 换行），“已取消”不跟在 [Y/n] 后面。
 // 回车、y、yes（大小写不论）继续，照常做完。别的答案说明怎么答再问。
 func TestSetupAllRerunAsksFirst(t *testing.T) {
 	needUserAutostart(t)
@@ -308,8 +313,11 @@ func TestSetupAllRerunAsksFirst(t *testing.T) {
 			t.Fatalf("%q: 应取消、退出 1: %d %q", input, code, errOut.String())
 		}
 		s := out.String()
-		asks := 1 + strings.Count(input, "maybe")
-		if !strings.Contains(s, "已接入过") || !strings.HasSuffix(s, prompt) || strings.Count(s, askRerunPrompt) != asks || strings.Count(s, reask) != asks-1 {
+		asks, end := 1+strings.Count(input, "maybe"), prompt
+		if input == "" {
+			end += "\n"
+		}
+		if !strings.Contains(s, "已接入过") || !strings.HasSuffix(s, end) || strings.Count(s, askRerunPrompt) != asks || strings.Count(s, reask) != asks-1 {
 			t.Fatalf("%q: 应在“已接入过”之后问 %d 次（乱答的说明后重问）:\n%s", input, asks, s)
 		}
 		if strings.Contains(s, "== 2.") {
@@ -328,7 +336,7 @@ func TestSetupAllRerunAsksFirst(t *testing.T) {
 	fakeStdin(t, true, "")
 	setupStdin = iotest.ErrReader(errors.New("坏了"))
 	var out, errOut bytes.Buffer
-	if code := run(f.args(), &out, &errOut); code != 1 || errOut.String() != "读输入失败，钩子与守护进程都没动：坏了\n" || strings.Contains(out.String(), "== 2.") {
+	if code := run(f.args(), &out, &errOut); code != 1 || errOut.String() != "读输入失败，钩子与守护进程都没动：坏了\n" || !strings.HasSuffix(out.String(), prompt+"\n") {
 		t.Fatalf("读输入出错应不动、退出 1: %d %q", code, errOut.String())
 	}
 	for _, input := range []string{"\n", "y\n", "YES\n", "嗯\ny\n"} {

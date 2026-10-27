@@ -31,7 +31,7 @@ func isTerminal(f *os.File) bool {
 // askSetupAll 在终端里逐个问 setup all 接入 hub 还缺的值，填进 hubURL、token、name：已经给了（非空）的不问。
 // 名字直接回车取 defaultName（主机名）。提示与重问的原因写到 stdout；整个问答只用一个 bufio.Reader。
 // 问了 hub 地址时 hubURL 填的是规范化后的基地址（同 parseHubURL 返回的），并作为 hubBase 返回；没问时 hubBase 为空。
-// 任一问题读到 EOF（Ctrl-D）返回 io.EOF，这时什么都还没做。
+// 任一问题读到 EOF（Ctrl-D）返回 io.EOF，这时什么都还没做；读失败时先往 stdout 换一行。
 func askSetupAll(in io.Reader, stdout io.Writer, hubURL, token, name *string, defaultName string) (hubBase string, err error) {
 	r := bufio.NewReader(in)
 	// ask 打印 prompt 读一行，去掉首尾空白后交给 check：不合格就打印原因再问，直到合格或读不到
@@ -40,6 +40,7 @@ func askSetupAll(in io.Reader, stdout io.Writer, hubURL, token, name *string, de
 			fmt.Fprint(stdout, prompt)
 			line, err := r.ReadString('\n')
 			if err != nil {
+				fmt.Fprintln(stdout) // 终端不会替 Ctrl-D 换行：调用方接着说的“已取消”不跟在提示后面
 				return "", err
 			}
 			v, err := check(strings.TrimSpace(line))
@@ -99,13 +100,15 @@ func rerunWork(hooks bool, daemon string) (what, untouched string) {
 }
 
 // confirmRerun 在终端里问已接入 hubURL 的机器要不要接着做 what（见 rerunWork）。直接回车或 y、yes 返回 true，n、no 返回 false，
-// 大小写不论；别的答案说明怎么答再问。读到 EOF（Ctrl-D）返回 io.EOF，调用方当取消。提示与重问的说明写到 stdout。
+// 大小写不论；别的答案说明怎么答再问。读到 EOF（Ctrl-D）返回 io.EOF，调用方当取消；读失败时先往 stdout 换一行。
+// 提示与重问的说明写到 stdout。
 func confirmRerun(in io.Reader, stdout io.Writer, hubURL, what string) (bool, error) {
 	r := bufio.NewReader(in)
 	for {
 		fmt.Fprintf(stdout, "本机已接入 %s。接下来%s，继续吗？[Y/n] ", hubURL, what)
 		line, err := r.ReadString('\n')
 		if err != nil {
+			fmt.Fprintln(stdout) // 同 askSetupAll：“已取消”不跟在 [Y/n] 后面
 			return false, err
 		}
 		switch strings.ToLower(strings.TrimSpace(line)) {
