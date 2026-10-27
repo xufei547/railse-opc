@@ -129,4 +129,4 @@ make demo    # 重录 assets/demo.gif（要装 ffmpeg）
 
 ## 许可证
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](LICENSE)，版权归 xufei547。「Railse」名称和道岔图标不在授权范围内，再分发请保留 [NOTICE](NOTICE)。

@@ -139,4 +139,4 @@ I open-sourced this because I use it every day. If it helps you too, you can buy
 
 ## License
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](LICENSE), copyright xufei547. The "Railse" name and the switch-track logo are not covered by the license; keep [NOTICE](NOTICE) when you redistribute.
