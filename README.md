@@ -11,6 +11,8 @@
 - **可以「记住」**：批准或拒绝时打开「记住」，存成规则，下次同类请求自动处理；对外和不可逆的操作记不成放行。
 - **hub 自己部署**：命令里的 token、密码在本机就换成 `<redacted>` 再上报，hub 里的机器密钥和登录会话只存哈希。
 
+<p align="center"><img src="assets/demo.gif" width="390" alt="演示：手机网页上登录；Claude Code 要跑 curl，规则定不了，请求出现在收件箱；批准时勾上「记住」；规则页多了一条「学来的」规则"></p>
+
 ## 怎么工作
 
 ```
@@ -72,7 +74,7 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
 
 ## 开发
 
-测试用 `make test`，端到端用 `make e2e`，工具和提交方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+测试用 `make test`，端到端用 `make e2e`，README 里的演示用 `make demo` 重录（要装 ffmpeg），工具和提交方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

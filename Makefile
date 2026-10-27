@@ -1,4 +1,4 @@
-.PHONY: web build test gofmt lint release-check e2e
+.PHONY: web build test gofmt lint release-check e2e demo
 
 # 工具版本钉死在这里；CI（.github/workflows）与发布 Action 用同一个值，升级时一起改。
 # 本地两个工具都经 go run 使用，不进 go.mod。goreleaser v2.19.0 要 Go ≥ 1.27.3 才编得出来（go.mod 是 1.26.0）：
@@ -39,3 +39,9 @@ release-check:
 # 网页端到端：真实的 hub、守护进程与钩子（临时目录、随机端口），Playwright 跑 web/e2e
 e2e:
 	scripts/e2e-web.sh
+
+# README 里的演示：同样起真实的 hub、守护进程与钩子，Playwright 只跑 web/scripts/record-demo.ts 录像，
+# ffmpeg 转成 assets/demo.gif。没装 ffmpeg 或不在 PATH 上时用 make demo FFMPEG=<路径>
+FFMPEG ?= ffmpeg
+demo:
+	FFMPEG="$(FFMPEG)" scripts/demo.sh

@@ -13,6 +13,10 @@ OPC stands for "one-person company".
 - **Decisions can become rules.** Turn on 记住 (remember) when you approve or deny, and the decision is saved as a rule for that project or for all projects. Pushes, publishing and destructive commands (recursive deletes, force pushes) can't be remembered as allowed.
 - **You run the hub.** Tokens and passwords in commands become `<redacted>` before they leave your machine, and the hub stores machine secrets and login sessions as hashes.
 
+<p align="center"><img src="assets/demo.gif" width="390" alt="Demo: log in to the phone web app; Claude Code wants to run curl, no rule decides it, and the request shows up in the inbox; approve it with remember turned on; the rules page now has a learned rule"></p>
+
+The demo shows the phone web app, whose UI is in Chinese. Claude Code wants to run `curl`, no rule decides it, so it goes to the phone. Approving it with 记住 (remember) turned on adds a learned rule.
+
 ## How it works
 
 ```
@@ -83,6 +87,7 @@ The docs are in Chinese.
 ```sh
 make test    # gofmt, golangci-lint, go vet, go test -race, web checks
 make e2e     # end-to-end with a real hub, daemon and hooks (Playwright)
+make demo    # re-records assets/demo.gif the same way (needs ffmpeg)
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) covers the required tools and how to send changes.
