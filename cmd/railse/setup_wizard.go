@@ -10,8 +10,8 @@ import (
 	"unicode/utf8"
 )
 
-// setupStdin 是向导读答案的地方；stdinIsTerminal 判断 stdin 是不是终端（见 isTerminal）：是才提问，
-// 不是（脚本、管道、/dev/null）照旧报用法错误。是变量只为测试能替换。
+// setupStdin 是向导与重跑确认读答案的地方；stdinIsTerminal 判断 stdin 是不是终端（见 isTerminal）：是才提问，
+// 不是（脚本、管道、/dev/null）时缺接入信息照旧报用法错误、已接入的重跑不确认直接做。是变量只为测试能替换。
 var (
 	setupStdin      io.Reader = os.Stdin
 	stdinIsTerminal           = func() bool { return isTerminal(os.Stdin) }
@@ -82,6 +82,40 @@ func askSetupAll(in io.Reader, stdout io.Writer, hubURL, token, name *string, de
 		}
 	}
 	return hubBase, nil
+}
+
+// rerunWork 说已接入的机器重跑 setup all 接下来要重做的事：hooks 为真要重装钩子；daemon 是第 3 步对守护进程要做的事
+// （“重启守护进程”“托管并启动守护进程”，空表示不碰它）。what 放进确认的问句，untouched 是取消时说的哪些没动；都没有要做的时两个都是空。
+func rerunWork(hooks bool, daemon string) (what, untouched string) {
+	switch {
+	case hooks && daemon != "":
+		return "重装钩子、" + daemon, "钩子与守护进程都没动"
+	case hooks:
+		return "重装钩子", "钩子没动"
+	case daemon != "":
+		return daemon, "守护进程没动"
+	}
+	return "", ""
+}
+
+// confirmRerun 在终端里问已接入 hubURL 的机器要不要接着做 what（见 rerunWork）。直接回车或 y、yes 返回 true，n、no 返回 false，
+// 大小写不论；别的答案说明怎么答再问。读到 EOF（Ctrl-D）返回 io.EOF，调用方当取消。提示与重问的说明写到 stdout。
+func confirmRerun(in io.Reader, stdout io.Writer, hubURL, what string) (bool, error) {
+	r := bufio.NewReader(in)
+	for {
+		fmt.Fprintf(stdout, "本机已接入 %s。接下来%s，继续吗？[Y/n] ", hubURL, what)
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "", "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		}
+		fmt.Fprintln(stdout, "请回答 y 或 n（直接回车算 y）")
+	}
 }
 
 // checkHubAnswer 按 --hub 的口径（parseHubAddr）校验向导里答的 hub 地址，返回去掉末尾 / 的基地址；原因里不提用户没输入过的 --hub。

@@ -81,8 +81,12 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 	script := filepath.Join(dataDir, hooksconf.NotifyScriptName)
 	n, err := hooksconf.ParseCodexNotify(existing)
 	if err != nil {
+		given := ""
+		if *bin != "" {
+			given = b
+		}
 		fmt.Fprintf(stderr, "%s 看不懂（%v），什么都没改：请手动改好这一处（notify 要写成第一个 [表] 之前的字符串数组，"+
-			"如 notify = [\"/path/to/cmd\", \"--flag\"]）再重跑 railse setup codex-notify\n", show, err)
+			"如 notify = [\"/path/to/cmd\", \"--flag\"]）再重跑 %s\n", show, err, codexNotifyCmd(socket, given))
 		return 1
 	}
 	for _, t := range n.Tables {
@@ -149,6 +153,19 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "Codex 的 notify 只调 railse（没有前一跳）")
 	}
 	return 0
+}
+
+// codexNotifyCmd 是给人照抄的 railse setup codex-notify 命令：socket 非空（数据目录不是 ~/.railse，见 hookSocket）时带 --dir
+// 它所在的目录，bin 非空（用户给了 --bin）时带 --bin。setup hooks 末尾的提醒、setup all 里 notify 没接上时的“注意”都用它。
+func codexNotifyCmd(socket, bin string) string {
+	cmd := "railse setup codex-notify"
+	if socket != "" {
+		cmd += " --dir " + hooksconf.ShellQuote(filepath.Dir(socket))
+	}
+	if bin != "" {
+		cmd += " --bin " + hooksconf.ShellQuote(bin)
+	}
+	return cmd
 }
 
 // codexPrevNotify 定串接脚本的前一跳：config.toml 顶层原有的 notify（n）。

@@ -1510,35 +1510,149 @@ func TestSetupAllDoctorOnlyInformsAboutCwd(t *testing.T) {
 	}
 }
 
-// setup all 不给 --bin：setup hooks 也不带 --bin（它默认就是当前程序），末尾的 Codex 提醒与体检的提示是同一条命令；
-// 给了 --bin 才原样带上。
+// setup all 不给 --bin：钩子与 Codex 的 notify 脚本都指向当前程序（setup hooks、setup codex-notify 默认就是它）；
+// 给了 --bin 才都指向它。
 func TestSetupAllPassesBinToHooksOnlyWhenGiven(t *testing.T) {
 	h := startTestHub(t)
 	f := setupAllEnv(t)
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	exe, _ = filepath.Abs(exe)
+	exe := testExe(t)
 	var out, errOut bytes.Buffer
 	args := []string{"setup", "all", "--dir", f.dir, "--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"}
 	if code := run(args, &out, &errOut); code != 0 {
 		t.Fatalf("setup all: %d\n%s\n%s", code, out.String(), errOut.String())
 	}
-	fix := "railse setup codex-notify --dir " + hooksconf.ShellQuote(f.dir)
-	s := out.String()
-	if !strings.Contains(s, "notify（完成与提问事件）请运行 "+fix+"（") || !strings.Contains(s, "修复：运行 "+fix+"（") || strings.Contains(s, fix+" --bin") {
-		t.Fatalf("不给 --bin 时 Codex 提醒与体检应给同一条命令（%s）:\n%s", fix, s)
-	}
 	if got := hookCommand(t, hooksconf.ClaudeUserPath(f.home), "Stop"); !strings.HasPrefix(got, hooksconf.ShellQuote(exe)+" hook claude") {
 		t.Fatalf("不给 --bin 时钩子指向当前程序 %s: %q", exe, got)
+	}
+	script, sock := filepath.Join(f.dir, hooksconf.NotifyScriptName), filepath.Join(f.dir, "agent.sock")
+	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, exe, sock)) {
+		t.Fatalf("不给 --bin 时 notify 脚本指向当前程序 %s:\n%s", exe, got)
 	}
 	out.Reset()
 	if code := run([]string{"setup", "all", "--dir", f.dir, "--bin", f.bin, "--no-autostart"}, &out, &errOut); code != 0 {
 		t.Fatalf("setup all --bin: %d\n%s\n%s", code, out.String(), errOut.String())
 	}
-	if !strings.Contains(out.String(), "请运行 "+fix+" --bin "+hooksconf.ShellQuote(f.bin)+"（") {
-		t.Fatalf("给了 --bin 时 Codex 提醒带上它:\n%s", out.String())
+	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, f.bin, sock)) {
+		t.Fatalf("给了 --bin 时 notify 脚本指向它:\n%s", got)
+	}
+}
+
+// setup all 装完钩子接着接 Codex 的 notify（同 setup codex-notify --dir <目录>）：config.toml 顶层的 notify 指向数据目录里生成的脚本，
+// 原有的 notify 记为前一跳，其余内容不变；输出里不再叫用户去跑 setup codex-notify（Codex 的其余提醒照旧），体检里 Codex notify 是 ok。
+// 重跑不重复串接：脚本与 config.toml 都已是最新，不再备份。
+func TestSetupAllWiresCodexNotify(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	cfg := hooksconf.CodexConfigPath(f.home)
+	script := filepath.Join(f.dir, hooksconf.NotifyScriptName)
+	oldNotify := `notify = ["/usr/bin/say", "done"]`
+	orig := "model = \"o3\"\n" + oldNotify + "\n\n[tui]\nnotifications = true\n"
+	writeTestFile(t, cfg, orig)
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if got, want := string(readFile(t, cfg)), strings.Replace(orig, oldNotify, notifyLine(script), 1); got != want {
+		t.Fatalf("config.toml 的 notify 应指向 %s、其余不变，想要:\n%s\n得到:\n%s", script, want, got)
+	}
+	body := readFile(t, script)
+	if !bytes.Equal(body, hooksconf.NotifyScript([]string{"/usr/bin/say", "done"}, f.bin, filepath.Join(f.dir, "agent.sock"))) {
+		t.Fatalf("脚本应先调原来的 notify、再调 --bin 的 railse（带 --socket）:\n%s", body)
+	}
+	if b := backups(t, cfg); len(b) != 1 || !bytes.Equal(readFile(t, b[0]), []byte(orig)) {
+		t.Fatalf("改 config.toml 之前应备份一次原样: %v", b)
+	}
+	s := out.String()
+	if strings.Contains(s+errOut.String(), "请运行 railse setup codex-notify") {
+		t.Fatalf("setup all 自己接了 notify，不该再叫用户去跑:\n%s\n%s", s, errOut.String())
+	}
+	for _, want := range []string{"提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核。\n",
+		"已写入 " + script + "\n", "notify 指向 " + script, "Codex 的 notify 先调原来的 /usr/bin/say done，再调 railse", "[ok]    Codex notify："} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("输出缺 %q:\n%s", want, s)
+		}
+	}
+	if strings.Index(s, "notify 指向") < strings.Index(s, "== 2. ") || strings.Index(s, "notify 指向") > strings.Index(s, "== 3. ") {
+		t.Fatalf("notify 应在第 2 步里接:\n%s", s)
+	}
+	// 重跑：前一跳仍是原来的 notify，不把脚本自己串进去；两个文件都没变、不再备份
+	wantCfg := readFile(t, cfg)
+	out.Reset()
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("重跑: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if !bytes.Equal(readFile(t, script), body) || !bytes.Equal(readFile(t, cfg), wantCfg) || len(backups(t, cfg)) != 1 {
+		t.Fatalf("重跑不该重复串接、不该再备份:\n%s\n%s", readFile(t, script), readFile(t, cfg))
+	}
+	if s = out.String(); !strings.Contains(s, script+" 已是最新") || !strings.Contains(s, cfg+" 已是最新") {
+		t.Fatalf("重跑时两个文件都应已是最新:\n%s", s)
+	}
+}
+
+// --no-hooks：不装钩子，也不碰 Codex 的 config.toml、不生成脚本。
+func TestSetupAllNoHooksLeavesCodexConfig(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	cfg := hooksconf.CodexConfigPath(f.home)
+	orig := "notify = [\"/usr/bin/say\"]\n"
+	writeTestFile(t, cfg, orig)
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-hooks", "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("setup all --no-hooks: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if string(readFile(t, cfg)) != orig || len(backups(t, cfg)) != 0 {
+		t.Fatalf("--no-hooks 不该改 config.toml: %q", readFile(t, cfg))
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, hooksconf.NotifyScriptName)); !os.IsNotExist(err) {
+		t.Fatal("--no-hooks 不该生成 notify 脚本")
+	}
+	if strings.Contains(out.String(), "notify 指向") {
+		t.Fatalf("--no-hooks 不该接 notify:\n%s", out.String())
+	}
+}
+
+// config.toml 看不懂：notify 没接上不让 setup all 失败。原因照常打印（重跑的命令带 --dir、--bin），钩子照装、照常体检，
+// 最后的“注意”里给修好后要跑的完整命令；不给 --bin 时命令里也不带。
+func TestSetupAllBadCodexConfigStillSucceeds(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	cfg := hooksconf.CodexConfigPath(f.home)
+	bad := "model = \"x\"\nnotify = [\"/bin/x\",\n"
+	writeTestFile(t, cfg, bad)
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("notify 没接上不该让 setup all 失败: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if string(readFile(t, cfg)) != bad || len(backups(t, cfg)) != 0 {
+		t.Fatal("看不懂的 config.toml 不该改、不该备份")
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, hooksconf.NotifyScriptName)); !os.IsNotExist(err) {
+		t.Fatal("看不懂 config.toml 时不该生成脚本")
+	}
+	if ins, _ := hooksconf.Inspect(readFile(t, hooksconf.CodexPath(f.home)), f.bin); len(ins.Events) == 0 {
+		t.Fatal("Codex 的钩子应照装")
+	}
+	fix := "railse setup codex-notify --dir " + hooksconf.ShellQuote(f.dir) + " --bin " + hooksconf.ShellQuote(f.bin)
+	if e := errOut.String(); !strings.Contains(e, cfg+" 看不懂") || !strings.Contains(e, "再重跑 "+fix+"\n") {
+		t.Fatalf("应打印原因与带 --dir、--bin 的重跑命令:\n%s", e)
+	}
+	s := out.String()
+	note := "\n注意：Codex 的 notify 没有接上（原因见第 2 步），完成与提问事件进不了收件箱；处理好后运行 " + fix + "（会保留已有的 notify）。"
+	if !strings.Contains(s, note) || strings.Index(s, note) < strings.Index(s, "== 4. ") || strings.Index(s, note) > strings.Index(s, "下一步") {
+		t.Fatalf("体检之后、下一步之前的“注意”里应有修复命令，想要 %q:\n%s", note, s)
+	}
+	if strings.Contains(s+errOut.String(), "请运行 railse setup codex-notify") {
+		t.Fatalf("不该出现钩子那条叫人去跑 setup codex-notify 的提醒:\n%s", s)
+	}
+	// 不给 --bin：命令里也不带
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"setup", "all", "--dir", f.dir, "--no-autostart"}, &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	fix = "railse setup codex-notify --dir " + hooksconf.ShellQuote(f.dir)
+	if !strings.Contains(out.String(), "后运行 "+fix+"（") || strings.Contains(out.String(), fix+" --bin") {
+		t.Fatalf("不给 --bin 时修复命令不带它（%s）:\n%s", fix, out.String())
 	}
 }
 

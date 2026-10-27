@@ -53,7 +53,7 @@ Supported: macOS on Apple Silicon, Linux on amd64 and arm64. The script download
    ```sh
    railse setup
    ```
-   It asks for the hub URL, the code and a machine name (defaults to the hostname). To pass everything up front: `railse setup all --hub https://hub.example.com --token <code>`. It enrolls the machine, installs user-level hooks for all three CLIs, sets up autostart, runs `railse doctor`, and prints the URL to open on your phone.
+   It asks for the hub URL, the code and a machine name (defaults to the hostname). To pass everything up front: `railse setup all --hub https://hub.example.com --token <code>`. It enrolls the machine, installs user-level hooks for all three CLIs and Codex's `notify`, sets up autostart, runs `railse doctor`, and prints the URL to open on your phone.
 3. **Phone.** Open that URL and log in with the password from step 1. On iPhone, open it in Safari, tap Share, then Add to Home Screen, open it from the Home Screen icon, and tap 开启通知 (enable notifications) under 设置 (settings).
 
 ## Running the hub on Fly.io

@@ -47,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
    ```sh
    railse setup
    ```
-   按提问填 hub 地址、接入码和本机名字，或一次给全：`railse setup all --hub https://hub.example.com --token <接入码>`。它接入 hub、装钩子、设开机自启、跑 `railse doctor`，最后打印手机要打开的地址。
+   按提问填 hub 地址、接入码和本机名字，或一次给全：`railse setup all --hub https://hub.example.com --token <接入码>`。它接入 hub、装钩子（连同 Codex 的 `notify`）、设开机自启、跑 `railse doctor`，最后打印手机要打开的地址。
 3. **手机**：打开这个地址，用第 1 步的密码登录。iPhone 用 Safari 点「分享」→「添加到主屏幕」，从图标打开，到「设置」里点「开启通知」。
 
 ## 部署到 Fly.io

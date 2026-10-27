@@ -24,7 +24,7 @@ railse setup hooks [--project <目录>] [--claude] [--codex] [--gemini] [--dir �
 
 不带 CLI 开关时三个都装，默认都是用户级（对所有项目生效）：Claude 写 `~/.claude/settings.json`，Gemini 写 `~/.gemini/settings.json`，Codex 写 `~/.codex/hooks.json`（`--codex-file` 可改）。`~/.claude/settings.json`、`~/.gemini/settings.json` 里多是你自己的设置：第一次改它们之前各备份一次到同目录的 `<文件>.railse-bak-<时间>`（0600，是链接时备份链接指向的内容；原来不存在、是空的、内容没变或已有备份时不备份），打印“已备份 … 到 …”。给了 `--project <目录>` 时 Claude 改写项目级的 `<目录>/.claude/settings.local.json`，Gemini 改写 `<目录>/.gemini/settings.json`（不备份；项目里的文件就是用户级那份时，如 `--project ~` 的 Gemini，照样按用户级备份），Codex 照旧是用户级。用户级与项目级都装了：Gemini 的钩子会触发两次；Claude Code 对写在多个配置文件里的相同处理器只跑一次，两处的命令、超时等完全相同时不重复，不同（如程序路径、`--socket` 不同）时也会触发两次；装用户级时当前目录的项目级文件里有 Railse 的条目，会在 stderr 逐个提醒（见 [setup.md](setup.md)）。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dir` 是守护进程的数据目录（默认 `$RAILSE_HOME` 或 `~/.railse`），不是 `~/.railse` 时钩子命令变成 `<railse> hook <cli> --socket <目录>/agent.sock`；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
 
-Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（不是 hooks.json），Codex 只认一条，所以另用 `railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]`（`setup hooks` 装 Codex 时会提示）：它在数据目录生成 `codex-notify.sh`，依次调用原来的 `notify`（有的话，原样保留）与 `railse hook codex-notify`（数据目录不是 `~/.railse` 时带 `--socket`），再把 `notify` 换成 `["<数据目录>/codex-notify.sh"]`，改之前备份到 `config.toml.railse-bak-<时间>`。重跑不会重复串接，详见 [setup.md](setup.md) 的 Codex 一条。
+Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（不是 hooks.json），Codex 只认一条，所以另用 `railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]`（`setup all` 装完钩子会自动做这一步，单独跑 `setup hooks` 装 Codex 时会提示）：它在数据目录生成 `codex-notify.sh`，依次调用原来的 `notify`（有的话，原样保留）与 `railse hook codex-notify`（数据目录不是 `~/.railse` 时带 `--socket`），再把 `notify` 换成 `["<数据目录>/codex-notify.sh"]`，改之前备份到 `config.toml.railse-bak-<时间>`。重跑不会重复串接，详见 [setup.md](setup.md) 的 Codex 一条。
 
 装项目级时 Claude 的钩子放在 `settings.local.json`，因为钩子命令里是本机的 railse 路径，不该随项目入库；按 Claude Code 的约定这个文件不入库，若 `git status` 里看到它，把它加进 `.gitignore`。旧版写在 `.claude/settings.json` 的 Railse 钩子会在装 Claude 钩子时迁走：只删 Railse 自己的条目（`hooks` 删空了连键一起去掉），别人的钩子与其他设置保留，打印“已从 … 迁走 Railse 钩子”；`--dry-run` 两份都打印。`settings.json` 里没有 Railse 条目时不碰它；它（解开链接后）就是用户级的 `~/.claude/settings.json` 时（`--project` 是家目录，或项目的 `settings.json` 链到它）也不迁，只警告：那里的钩子对所有项目生效，要迁请手动删；它不是合法 JSON 时只警告、不迁移，照样装好 `settings.local.json`，这时请手动删掉里面旧的 Railse 钩子，否则同一个事件会触发两次。
 
@@ -95,7 +95,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | 自动拒绝 | 能 | 能 | 能 |
 | 事件 | question、done、session_end | done、session_end | question、done、session_end |
 | 钩子配置 | 用户级 `~/.claude/settings.json`（`--project` 时项目级 `.claude/settings.local.json`） | 用户级 `~/.codex/hooks.json` | 用户级 `~/.gemini/settings.json`（`--project` 时项目级 `.gemini/settings.json`） |
-| 注意 | 全功能 | 只在交互会话里审批（`codex exec` 不触发）；首次使用在 Codex 里用 `/hooks` 审核；notify 用 `railse setup codex-notify` 写进 `~/.codex/config.toml`（串接脚本，保留已有的 notify） | 需要 0.65.0 以上；不要开 yolo 模式 |
+| 注意 | 全功能 | 只在交互会话里审批（`codex exec` 不触发）；首次使用在 Codex 里用 `/hooks` 审核；notify 用 `railse setup codex-notify` 写进 `~/.codex/config.toml`（串接脚本，保留已有的 notify；`setup all` 会自动做） | 需要 0.65.0 以上；不要开 yolo 模式 |
 
 ## 交回终端的两种情况
 
