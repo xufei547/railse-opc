@@ -6,12 +6,12 @@
 
 Railse OPC uses a rule-based policy engine to approve or deny tool calls from Claude Code, Codex CLI and Gemini CLI, and sends the ones the rules can't decide to an inbox on your phone (for Gemini CLI they go back to the terminal). It's for one person running several AI coding agents at the same time.
 
-OPC stands for "one-person company". The phone web app, the CLI messages and the docs are in Chinese only for now.
+OPC stands for "one-person company".
 
-- **Rules first, phone second.** The built-in rules only allow read-only operations and edits inside the project, so things like `git push` and `curl` go to your phone.
-- **Failures fall back to the terminal.** If the daemon isn't running or the hub can't be reached within 30 seconds, the request goes back to the CLI's own permission prompt, so a failure never blocks the agent or approves anything.
-- **Decisions can become rules.** Turn on 记住 (remember) when you approve or deny, and the decision is saved as a rule for that project or for all projects; outward-facing and destructive actions can never be saved as allowed.
-- **Self-hosted hub, hashes only.** Tokens and passwords in commands are replaced with `<redacted>` before they leave your machine, and the hub stores machine secrets and login sessions only as hashes.
+- **Rules decide first.** The built-in rules allow read-only commands and edits inside the project; anything else, like `git push` or `curl`, goes to your phone.
+- **Failures go back to the terminal.** If the daemon isn't running, or the hub can't be reached for 30 seconds, the CLI shows its own permission prompt. Worst case, it's as if Railse weren't installed.
+- **Decisions can become rules.** Turn on 记住 (remember) when you approve or deny, and the decision is saved as a rule for that project or for all projects. Pushes, publishing and destructive commands (recursive deletes, force pushes) can't be remembered as allowed.
+- **You run the hub.** Tokens and passwords in commands become `<redacted>` before they leave your machine, and the hub stores machine secrets and login sessions as hashes.
 
 ## How it works
 
@@ -22,10 +22,10 @@ Claude Code / Codex CLI / Gemini CLI
 railse agent (policy engine) ──rule matched──▶ allow / deny
    │ undecided
    ▼
-railse hub ──Web Push──▶ phone ──allow / deny──▶ hub ▶ agent ▶ hook
+railse hub ──Web Push──▶ phone ──allow / deny──▶ hub ▶ daemon ▶ hook
 ```
 
-Each machine you write code on runs a daemon, `railse agent`. The CLIs' permission hooks pass each request to it over a local Unix socket, and anything the rules can't decide goes to the hub over a WebSocket that the daemon opens outbound. The hub can only answer allow or deny; it has no way to send commands to your machines. It also serves the phone web app (a PWA), so there is nothing else to deploy.
+Each machine you write code on runs a daemon, `railse agent`. It gets requests from the CLIs' permission hooks over a local Unix socket and sends the ones the rules can't decide to the hub over a WebSocket it opens itself. The hub can only answer allow or deny, and it also serves the phone web app (a PWA), so there's nothing else to deploy.
 
 ## Install
 
@@ -50,11 +50,11 @@ Supported: macOS on Apple Silicon, Linux on amd64 and arm64. The script download
    railse setup
    ```
    It asks for the hub URL, the code and a machine name (defaults to the hostname). To pass everything up front: `railse setup all --hub https://hub.example.com --token <code>`. It enrolls the machine, installs user-level hooks for all three CLIs, sets up autostart, runs `railse doctor`, and prints the URL to open on your phone.
-3. **Phone.** Open that URL and log in with the password from step 1. On iPhone, open it in Safari, tap Share, then Add to Home Screen, open it from the home screen icon, and tap 开启通知 (enable notifications) under 设置 (settings).
+3. **Phone.** Open that URL and log in with the password from step 1. On iPhone, open it in Safari, tap Share, then Add to Home Screen, open it from the Home Screen icon, and tap 开启通知 (enable notifications) under 设置 (settings).
 
 ## Running the hub on Fly.io
 
-`deploy/fly/` has a Dockerfile and a `fly.toml`. Fly terminates TLS and the hub's data lives on a 1 GB volume. Before deploying, edit `fly.toml`: set `app` to your app name, `RAILSE_PUBLIC_URL` to `https://<app>.fly.dev` (push subscriptions are tied to this URL, so pick it once), and `primary_region` to the region you create the volume in. Leave `auto_stop_machines` set to `"off"`, because daemons and phones keep long-lived connections to the hub. The commands (create the app and volume, set the initial password secret, deploy, get an enrollment code) are in the "部署到 Fly.io" section of [docs/hub.md](docs/hub.md).
+`deploy/fly/` has a Dockerfile and a `fly.toml`. Fly terminates TLS and the hub's data lives on a 1 GB volume. Before deploying, edit three things in `fly.toml`: set `app` to your app name, set `RAILSE_PUBLIC_URL` to `https://<app>.fly.dev` and don't change it later, and set `primary_region` to the region you create the volume in. Leave `auto_stop_machines` set to `"off"`, because daemons and phones keep long-lived connections to the hub. The commands (create the app and volume, set the initial password secret, deploy, get an enrollment code) are in the "部署到 Fly.io" section of [docs/hub.md](docs/hub.md).
 
 ## Docs
 
@@ -68,12 +68,13 @@ Supported: macOS on Apple Silicon, Linux on amd64 and arm64. The script download
 ## Status and limitations
 
 - This is v0.1.1, the first version, and the author is dogfooding it.
-- The phone web app and CLI output are Chinese only.
-- Gemini CLI hooks can deny but can't approve. Rule denials still apply; everything else goes back to Gemini's own prompt and never reaches the phone. Needs Gemini CLI 0.65.0 or later.
-- Codex hooks only fire in interactive sessions. `codex exec` doesn't trigger them.
+- The phone web app, the CLI output and the docs are in Chinese only for now.
+- Gemini CLI hooks can deny but can't approve: rule denials still apply, and everything else goes back to Gemini's own prompt and never reaches the phone. Needs Gemini CLI 0.65.0 or later.
+- Codex hooks only fire in interactive sessions (`codex exec` doesn't trigger them), and the first time you have to review them once with `/hooks` inside Codex.
 - The hub is one process with one SQLite database and can't run as multiple instances.
-- On iPhone, push notifications only work after you add the page to the Home Screen and open it from there (iOS 16.4 or later).
-- Push subscriptions are tied to the hub's domain. Change the domain and every phone has to enable notifications again.
+- On iPhone (iOS 16.4 or later), push notifications only work after you add the page to the Home Screen and open it from there.
+- Push on a real iPhone hasn't been fully tested yet: after the app is swiped away, with the screen locked, or hours later.
+- Pick the hub's domain on day one. Push subscriptions and the Home Screen app are tied to it, so changing it means deleting the icon, adding it again and re-enabling notifications on every phone.
 
 ## Development
 

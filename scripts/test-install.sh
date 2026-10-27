@@ -59,8 +59,8 @@ FILE="railse_${VERSION}_${os}_${arch}.tar.gz"
 rel="$tmp/rel"
 mkdir -p "$rel" "$tmp/pkg" "$tmp/log"
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$tmp/pkg/railse" ./cmd/railse
-cp LICENSE README.md "$tmp/pkg/"
-COPYFILE_DISABLE=1 tar -czf "$rel/$FILE" -C "$tmp/pkg" railse LICENSE README.md
+cp LICENSE README.md README.en.md "$tmp/pkg/"
+COPYFILE_DISABLE=1 tar -czf "$rel/$FILE" -C "$tmp/pkg" railse LICENSE README.md README.en.md
 good_sum="$(sum_of "$rel/$FILE")"
 dummy_sum="$(printf 'placeholder' | sha256 | awk '{print $1}')"
 {

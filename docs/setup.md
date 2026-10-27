@@ -179,4 +179,4 @@ hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux
    ```sh
    git tag v0.1.0 && git push origin v0.1.0
    ```
-3. 产物是 `railse_<版本>_darwin_arm64.tar.gz`、`railse_<版本>_linux_amd64.tar.gz`、`railse_<版本>_linux_arm64.tar.gz`（各含 `railse`、`LICENSE`、`README.md` 与 `docs/*.md`）和 `checksums.txt`；版本号取自 tag（去掉 `v`），经 `-X main.version` 注入。带后缀的 tag（如 `v0.2.0-rc.1`）发成预发布，安装脚本默认的“最新正式版”不会取到它。发布后在一台干净的机器上跑一行安装，确认打印出新版本。
+3. 产物是 `railse_<版本>_darwin_arm64.tar.gz`、`railse_<版本>_linux_amd64.tar.gz`、`railse_<版本>_linux_arm64.tar.gz`（各含 `railse`、`LICENSE`、`README.md`、`README.en.md` 与 `docs/*.md`）和 `checksums.txt`；版本号取自 tag（去掉 `v`），经 `-X main.version` 注入。带后缀的 tag（如 `v0.2.0-rc.1`）发成预发布，安装脚本默认的“最新正式版”不会取到它。发布后在一台干净的机器上跑一行安装，确认打印出新版本。
