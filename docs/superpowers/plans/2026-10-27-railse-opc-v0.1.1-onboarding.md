@@ -188,3 +188,8 @@
 4. doctor `project.root`：“不是普通目录”时，显式 `--project` → warn，细节写上面那句的前半，提示“要自动放行请 git init 或换到项目目录”；隐式默认（当前目录）→ skip，细节同样说明，不给提示。其余情况不变。
 5. policy 与 hub：项目根是否回退只有守护进程知道（它们分不出 git 根与回退根），继续共用 `Context.Root()` 的家目录守卫，不额外改判断；只同步注释与文档的说法。
 6. 测试（临时 HOME）：`~/dev/foo` 回退；`~/Library/LaunchAgents`、`~/library/x`（darwin、不分大小写的卷上）、`~/.config/x`、`~/dev/.hidden/x`、`/usr/local`、`/etc`（只 stat）、`/tmp` 下新建的目录、darwin 上 `/private/tmp` 下的目录都不回退；`~/dev/link` 指向 `/etc` 或 `~/.config/x` 不回退；家目录有 `.git` 时 `~/dev/foo` 回退、`~/.config/nvim` 不回退；`~/.config/nvim` 自己是 git 仓库时照常是项目根。守护进程日志与 doctor（显式/隐式）各一组。Task 4 里用家目录之外的临时目录当非 git cwd 的测试改到临时 HOME 之下。
+
+**追加（用户 2026-10-27 在对话里直接要求）**：
+
+7. 敏感路径表（`internal/policy/paths.go` 的 `sensitivePatterns`）加：`~/Library/LaunchAgents/**`、`/Library/LaunchAgents/**`、`/Library/LaunchDaemons/**`、`.config/systemd`、`.config/autostart` 下的一切、`.codex/hooks.json`。写法沿用表里的惯例：家目录规则同时给 `**/` 版本兜住 firmlink 与别人的家目录（例如 `**/Library/LaunchAgents/**`、`**/Library/LaunchDaemons/**`、`**/.config/systemd/**`、`**/.config/autostart/**`、`**/.codex/hooks.json`）。命中即 destructive（读也算，这是表的既有语义）。测试：在这些位置写文件、`cat` 读文件都是 destructive；相邻的普通路径（`~/Library/Caches/x`、`~/.config/nvim/init.lua`、`~/.codex/notes.md`）不受影响。railse 自己写 `~/.codex/hooks.json` 不经过策略引擎，不受影响。
+8. 用户还列了“非 git 回退时排除 ~/Library、家目录下的点目录和 /etc、/usr、/opt、/Library、/Applications、/System、/private 这些系统前缀”：上面 1–3 条（家目录之外一律不回退）已全部覆盖且更严，按 1–3 条做；测试里加上 `/Applications/x`（只 stat 一个现成目录，如 `/Applications`下任一子目录，没有就跳过）与 `/opt` 下的目录（有才测）。

@@ -1696,6 +1696,25 @@ func TestProjectRootCheck(t *testing.T) {
 	}
 	o.ProjectExplicit = true
 
+	// 不是家目录下的普通目录（点目录里、家目录之外）的非 git 目录：没有项目根。显式给的 warn，提示 git init 或换到项目目录；
+	// 隐式默认的当前目录只告知（skip），细节相同、不给提示
+	dot := filepath.Join(home, ".config", "x")
+	if err := os.MkdirAll(dot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{dot, "/etc"} { // /etc 只 stat
+		want := "目录 " + resolved(d) + " 不在家目录下的普通目录里，不按项目根处理"
+		o.Project, o.ProjectExplicit = d, true
+		if c := find(t, Run(o), "project.root"); c.Status != Warn || c.Detail != want || c.Hint != "要自动放行请 git init 或换到项目目录" {
+			t.Fatalf("显式的 %s: %+v", d, c)
+		}
+		o.ProjectExplicit = false
+		if c := find(t, Run(o), "project.root"); c.Status != Skip || c.Detail != want || c.Hint != "" {
+			t.Fatalf("隐式的 %s 应只告知: %+v", d, c)
+		}
+	}
+	o.ProjectExplicit = true
+
 	o.Project = ""
 	if c := find(t, Run(o), "project.root"); c.Status != Skip {
 		t.Fatalf("没给 Project: %+v", c)

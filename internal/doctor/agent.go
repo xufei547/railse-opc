@@ -55,8 +55,9 @@ func agentChecks(o Options) []Check {
 
 // projectRootCheck 看 Project 会被守护进程当成哪个项目根（同一个 agent.ResolveProjectRoot）：git 仓库 ok；
 // 不是 git 仓库、按目录本身当项目根时：显式给的（ProjectExplicit）warn，建议 git init；隐式默认的当前目录只告知（skip）：
-// 用户多半只是在某个目录里跑 railse setup 或 doctor，那里不是要用 agent 的项目；不当项目根（家目录、它的上级、根目录、
-// 不存在）时 skip。
+// 用户多半只是在某个目录里跑 railse setup 或 doctor，那里不是要用 agent 的项目。不是 git 仓库、也不是家目录下的普通目录
+// （agent.RootNotPlain）时没有项目根：显式给的 warn，提示 git init 或换到项目目录；隐式的同样只告知。不当项目根（家目录、
+// 它的上级、根目录、不存在）时 skip。
 // 相对的 Project 按 doctor 的工作目录取绝对路径。家目录与守护进程一样按本进程的 $HOME（agent 包的 userHome）认，
 // 不用 Options.Home：两者在 railse doctor 里都来自 os.UserHomeDir，测试要用 t.Setenv("HOME") 改。
 func projectRootCheck(o Options) Check {
@@ -68,15 +69,21 @@ func projectRootCheck(o Options) Check {
 	if err != nil {
 		return Check{ID: id, Name: name, Status: Skip, Detail: fmt.Sprintf("取不到 %s 的绝对路径: %v", o.Project, err)}
 	}
-	root, git := agent.ResolveProjectRoot(proj)
+	root, kind := agent.ResolveProjectRoot(proj)
 	switch {
-	case git:
+	case kind == agent.RootGit:
 		return Check{ID: id, Name: name, Status: OK, Detail: root}
-	case root != "" && !o.ProjectExplicit:
+	case kind == agent.RootCwd && !o.ProjectExplicit:
 		return Check{ID: id, Name: name, Status: Skip, Detail: "目录 " + root + " 不是 git 仓库，在这里起 agent 会按当前目录当项目根"}
-	case root != "":
+	case kind == agent.RootCwd:
 		return Check{ID: id, Name: name, Status: Warn, Detail: "目录 " + root + " 不是 git 仓库，按当前目录当项目根",
 			Hint: "建议在 " + root + " 里 git init（项目根决定哪些写入算项目内）"}
+	case kind == agent.RootNotPlain:
+		c := Check{ID: id, Name: name, Status: Skip, Detail: "目录 " + agent.CleanCwd(proj) + " 不在家目录下的普通目录里，不按项目根处理"}
+		if o.ProjectExplicit {
+			c.Status, c.Hint = Warn, "要自动放行请 git init 或换到项目目录"
+		}
+		return c
 	default:
 		why := "是家目录、它的上级或根目录"
 		if st, err := os.Stat(proj); err != nil || !st.IsDir() {

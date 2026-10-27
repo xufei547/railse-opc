@@ -92,3 +92,39 @@ func TestClassifyEmptyProjectRootFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// 登录或开机时自动运行的配置（launchd、systemd 用户单元、XDG 自启动）与 Codex 的钩子：在这些位置写文件、cat 读文件都是
+// destructive；相邻的普通路径不受影响。
+func TestClassifyAutostartPaths(t *testing.T) {
+	ctx := Context{ProjectRoot: "/home/u/proj", HomeDir: "/home/u"}
+	for _, path := range []string{
+		"~/Library/LaunchAgents/com.x.plist", "/home/u/Library/LaunchAgents/com.x.plist", "/Library/LaunchAgents/com.x.plist",
+		"/Library/LaunchDaemons/com.x.plist", "~/.config/systemd/user/x.service", "~/.config/autostart/x.desktop",
+		"~/.codex/hooks.json",
+	} {
+		if got := Classify(Payload{Type: PayloadFileWrite, Path: path, Cwd: "/home/u/proj"}, ctx); got != RiskDestructive {
+			t.Errorf("写 %s: %s，想要 destructive", path, got)
+		}
+		for _, cmd := range []string{"cat " + path, "echo x > " + path} {
+			if got := Classify(Payload{Type: PayloadShell, Command: cmd, Cwd: "/home/u/proj"}, ctx); got != RiskDestructive {
+				t.Errorf("%s: %s，想要 destructive", cmd, got)
+			}
+		}
+	}
+	for _, c := range []struct {
+		path        string
+		write, read Risk
+	}{
+		{"~/Library/Caches/x", RiskWriteOutside, RiskRead},
+		{"~/.config/nvim/init.lua", RiskWriteOutside, RiskRead},
+		{"~/.codex/notes.md", RiskWriteOutside, RiskRead},
+		{"/home/u/proj/LaunchAgents/x.plist", RiskWriteInProject, RiskRead},
+	} {
+		if got := Classify(Payload{Type: PayloadFileWrite, Path: c.path, Cwd: "/home/u/proj"}, ctx); got != c.write {
+			t.Errorf("写 %s: %s，想要 %s", c.path, got, c.write)
+		}
+		if got := Classify(Payload{Type: PayloadShell, Command: "cat " + c.path, Cwd: "/home/u/proj"}, ctx); got != c.read {
+			t.Errorf("cat %s: %s，想要 %s", c.path, got, c.read)
+		}
+	}
+}

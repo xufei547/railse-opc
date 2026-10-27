@@ -74,12 +74,20 @@ func TestIsSensitive(t *testing.T) {
 		// railse setup 留下的用户级配置备份（同一秒的第二个加 -2）
 		"/home/u/.claude/settings.json.railse-bak-20261027-050729", "/home/u/.gemini/settings.json.railse-bak-20261027-050729",
 		"/home/u/.codex/config.toml.railse-bak-20261027-050729-2", "/home/u/dotfiles/config.toml.RAILSE-BAK-20261027-050729",
+		// 登录或开机时自动运行的配置与 Codex 的钩子：写进去之后会自动执行任意命令
+		"/home/u/Library/LaunchAgents/com.x.plist", "/home/u/library/launchagents/com.x.plist",
+		"/Library/LaunchAgents/com.x.plist", "/Library/LaunchDaemons/com.x.plist",
+		"/home/u/.config/systemd/user/x.service", "/home/u/.config/autostart/x.desktop", "/home/u/.codex/hooks.json",
+		"/System/Volumes/Data/Users/u/Library/LaunchAgents/com.x.plist", "/home/other/.config/systemd/user/y.service",
+		"/home/other/.codex/hooks.json",
 	}
 	no := []string{
 		"/home/u/proj/src/a.go", "/home/u/proj/README.md", "/home/u/proj/.envrc.example",
 		"/home/u/proj/src/env.go", "/home/u/.sshx/config",
 		"/home/u/.config/gitx/config", "/home/u/.config/github-copilot/x.json", "/home/u/proj/tfstate.go",
 		"/home/u/proj/docs/tfstate.md", "/home/u/proj/docs/railse-bak.md",
+		"/home/u/Library/Caches/x", "/Library/Caches/x", "/home/u/.config/nvim/init.lua", "/home/u/.codex/notes.md",
+		"/home/u/proj/docs/LaunchAgents.md", "/home/u/.config/systemd-notes.md",
 	}
 	for _, p := range yes {
 		if !isSensitive(p, "/home/u") {

@@ -219,7 +219,7 @@ Claude Code 的 Notification 钩子映射为 `question`，Stop 钩子映射为 `
 每条请求先定级，不看规则。七档由低到高：`read`、`write_in_project`、`unknown`、`write_outside`、`network`、`outward`、`destructive`。`unknown` 是命令表之外无法判断的命令，默认询问。
 
 - `shell`：命令按 `&&`、`;`、`||`、`|` 拆段，每段按内置表定级，取最高档。只读表含 ls、cat、grep、find、git status、git diff、git log、go test、npm test 等；对外表含 git push、gh pr create、gh release、npm publish、各云 deploy、发邮件与付款 CLI；不可逆表含 rm -rf、git reset --hard、git push --force、DROP TABLE、docker system prune。安装类命令（npm install、pip install、brew install）归 `network`。表外命令一律 ask。读敏感路径与写一样按 `destructive`。
-- `file_write`：路径在项目根目录内为 `write_in_project`，之外为 `write_outside`。项目根是工作目录所在的 git 仓库根，不在 git 仓库里时是工作目录本身；家目录、它的上级与根目录不当项目根，这时没有路径在项目内。敏感路径表（`.env*`、`*.pem`、`*.key`、`~/.ssh/**`、`~/.aws/**` 等）按 `destructive` 处理。路径为空或无法解析（含变量、通配符、`~user`）时为 `unknown`。
+- `file_write`：路径在项目根目录内为 `write_in_project`，之外为 `write_outside`。项目根是工作目录所在的 git 仓库根；不在 git 仓库里时，工作目录是家目录下的普通目录（不在点开头的目录或 `~/Library` 之下）才是工作目录本身，否则没有项目根；家目录、它的上级与根目录不当项目根。没有项目根时没有路径在项目内。敏感路径表（`.env*`、`*.pem`、`*.key`、`~/.ssh/**`、`~/.aws/**`，以及登录或开机时自动运行的配置如 `~/Library/LaunchAgents/**`、`~/.config/systemd/**` 等）按 `destructive` 处理。路径为空或无法解析（含变量、通配符、`~user`）时为 `unknown`。
 - `mcp`：默认 `network`，即默认 ask，按服务名与工具名放行。
 - `network`：默认 `network`，按域名放行。
 
