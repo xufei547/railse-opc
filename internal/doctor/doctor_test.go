@@ -77,7 +77,11 @@ func fakeOpts(t *testing.T) (Options, string) {
 }
 
 func TestAgentChecksHappyAndPermissions(t *testing.T) {
-	o, _ := fakeOpts(t)
+	o, home := fakeOpts(t)
+	// 钩子都装在用户级：没给 Project 时只看用户级，也全部正常
+	writeFile(t, hooksconf.ClaudeUserPath(home), planDoc(t, "claude", "/usr/local/bin/railse"))
+	writeFile(t, hooksconf.GeminiUserPath(home), planDoc(t, "gemini", "/usr/local/bin/railse"))
+	writeFile(t, hooksconf.CodexPath(home), planDoc(t, "codex", "/usr/local/bin/railse"))
 	r := Run(o)
 	for _, id := range []string{"agent.dir", "agent.files", "agent.socket", "agent.running"} {
 		if c := find(t, r, id); c.Status != OK {
@@ -90,8 +94,10 @@ func TestAgentChecksHappyAndPermissions(t *testing.T) {
 	if c := find(t, r, "agent.hub"); c.Status != Warn || !strings.Contains(c.Detail, "未接入") {
 		t.Fatalf("agent.hub = %+v", c)
 	}
-	if c := find(t, r, "hooks.claude"); c.Status != Skip {
-		t.Fatalf("没给 Project 应 skip: %+v", c)
+	for _, id := range []string{"hooks.claude", "hooks.codex", "hooks.gemini"} {
+		if c := find(t, r, id); c.Status != OK {
+			t.Fatalf("没给 Project 时按用户级检查 %s: %+v", id, c)
+		}
 	}
 	if r.Failed() {
 		t.Fatalf("全部正常时不应失败: %+v", r.Checks)
@@ -388,11 +394,17 @@ func TestHookChecks(t *testing.T) {
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Fail || !strings.Contains(c.Detail, "JSON") || c.Hint == "" {
 		t.Fatalf("坏 JSON: %+v", c)
 	}
-	// 两处都装了
+	// 两处都装了、Railse 的条目完全相同：Claude Code 对相同的处理器只跑一次，不因两处降级，细节说可以删掉旧位置的
 	writeFile(t, local, doc)
 	writeFile(t, shared, doc)
+	if c := find(t, Run(o), "hooks.claude"); c.Status != OK || strings.Contains(c.Detail, "两次") || !strings.Contains(c.Detail, shared+" 也装了相同的钩子") ||
+		!strings.Contains(c.Detail, "只跑一次") || !strings.Contains(c.Detail, "可以删掉 "+shared) {
+		t.Fatalf("两处都装、条目相同: %+v", c)
+	}
+	// 两处的条目不同（旧位置是别的程序路径）：会触发两次
+	writeFile(t, shared, planDoc(t, "claude", "/old/railse"))
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "两次") || !strings.Contains(c.Hint, "setup hooks") {
-		t.Fatalf("两处都装: %+v", c)
+		t.Fatalf("两处都装、条目不同: %+v", c)
 	}
 	os.Remove(shared)
 	// 指向别的程序
@@ -401,11 +413,23 @@ func TestHookChecks(t *testing.T) {
 		t.Fatalf("程序路径不同: %+v", c)
 	}
 	o.Bin = bin
-	// codex notify
-	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || c.Hint == "" {
-		t.Fatalf("没有 notify: %+v", c)
-	}
+	// codex notify：没有 config.toml 时说它不存在（不是权限问题），提示运行 railse setup codex-notify
 	cfg := filepath.Join(home, ".codex", "config.toml")
+	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Hint, "railse setup codex-notify") ||
+		!strings.Contains(c.Detail, cfg+" 不存在") || strings.Contains(c.Detail, "读不到") {
+		t.Fatalf("没有 config.toml: %+v", c)
+	}
+	// 读不了（权限）才说读不到
+	if os.Geteuid() != 0 {
+		writeFile(t, cfg, []byte("model = \"x\"\n"))
+		os.Chmod(cfg, 0)
+		c := find(t, Run(o), "hooks.codex_notify")
+		os.Chmod(cfg, 0o600)
+		os.Remove(cfg)
+		if c.Status != Warn || !strings.Contains(c.Detail, cfg+" 读不到") || strings.Contains(c.Detail, "不存在") {
+			t.Fatalf("config.toml 读不了: %+v", c)
+		}
+	}
 	writeFile(t, cfg, []byte("model = \"x\"\nnotify = [\"/usr/local/bin/railse\", \"hook\", \"codex-notify\"]\n"))
 	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != OK {
 		t.Fatalf("notify: %+v", c)
@@ -417,8 +441,91 @@ func TestHookChecks(t *testing.T) {
 	}
 	// 写在某个表下面：Codex 读不到顶层的 notify
 	writeFile(t, cfg, []byte("model = \"x\"\n[mcp_servers.foo]\ncommand = \"foo\"\nnotify = [\"/usr/local/bin/railse\", \"hook\", \"codex-notify\"]\n"))
-	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, "[mcp_servers.foo]") {
+	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, "[mcp_servers.foo]") || !strings.Contains(c.Hint, "railse setup codex-notify") {
 		t.Fatalf("notify 在表下面: %+v", c)
+	}
+	// 顶层的 notify 是别人的命令：warn，提示运行 railse setup codex-notify（会保留它）
+	// 参数逐个 ShellQuote，带空格的不会看不清边界
+	writeFile(t, cfg, []byte("notify = [\"/usr/local/bin/notify wrap\", \"--title=a b\"]\n"))
+	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, `（'/usr/local/bin/notify wrap' '--title=a b'）`) || !strings.Contains(c.Hint, "railse setup codex-notify") {
+		t.Fatalf("别人的 notify: %+v", c)
+	}
+	// 看不懂的写法：warn，说明看不懂
+	writeFile(t, cfg, []byte("notify = \"\"\"x\"\"\"\n"))
+	if c := find(t, Run(o), "hooks.codex_notify"); c.Status != Warn || !strings.Contains(c.Detail, "第 1 行") || c.Hint == "" {
+		t.Fatalf("看不懂的 notify: %+v", c)
+	}
+}
+
+// notify 是 railse setup codex-notify 写的串接脚本：脚本在、可执行、里面有 railse 那一行才 ok；脚本里 railse 那一行连的
+// socket 与 --dir 的守护进程对不上时 warn（与旧写法同一规则）；脚本不在、不可执行、没有 railse 那一行都 warn，提示重跑。
+// 用户自己的 codex-notify.sh（不在数据目录里、没有标记行）不说“重新生成”，说重跑会把它保留为前一跳。
+func TestCodexNotifyScript(t *testing.T) {
+	o, home := fakeOpts(t)
+	bin := "/usr/local/bin/railse"
+	o.Bin = bin
+	cfg := hooksconf.CodexConfigPath(home)
+	script := filepath.Join(o.AgentDir, hooksconf.NotifyScriptName)
+	writeFile(t, cfg, []byte(fmt.Sprintf("model = \"x\"\nnotify = [%q]\n[tui]\nx = 1\n", script)))
+	check := func() Check { t.Helper(); return find(t, Run(o), "hooks.codex_notify") }
+	chmod := func(p string, mode os.FileMode) {
+		t.Helper()
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, script) || !strings.Contains(c.Hint, "railse setup codex-notify") {
+		t.Fatalf("脚本不在: %+v", c)
+	}
+	writeFile(t, script, hooksconf.NotifyScript([]string{"/usr/local/bin/notify-wrap"}, bin, ""))
+	chmod(script, 0o644)
+	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, "不可执行") || !strings.Contains(c.Hint, "railse setup codex-notify") {
+		t.Fatalf("脚本不可执行: %+v", c)
+	}
+	chmod(script, 0o755)
+	if c := check(); c.Status != OK || !strings.Contains(c.Detail, script) {
+		t.Fatalf("脚本写法: %+v", c)
+	}
+	// 数据目录里的脚本没有 railse 那一行（被改过）：重跑会重新生成它
+	writeFile(t, script, []byte("#!/bin/sh\n/usr/local/bin/notify-wrap \"$@\"\n"))
+	chmod(script, 0o755)
+	if c := check(); c.Status != Warn || !strings.Contains(c.Hint, "railse setup codex-notify") || !strings.Contains(c.Hint, "重新生成") {
+		t.Fatalf("脚本里没有 railse: %+v", c)
+	}
+	// 用户自己的 codex-notify.sh（别处、没有标记行）：重跑会把它保留为前一跳，不说重新生成
+	own := filepath.Join(home, "bin", hooksconf.NotifyScriptName)
+	writeFile(t, own, []byte("#!/bin/sh\nterminal-notifier -message \"$1\"\n"))
+	chmod(own, 0o755)
+	writeFile(t, cfg, []byte(fmt.Sprintf("notify = [%q]\n", own)))
+	if c := check(); c.Status != Warn || !strings.Contains(c.Hint, "railse setup codex-notify") || !strings.Contains(c.Hint, "保留为前一跳") || strings.Contains(c.Hint, "重新生成") {
+		t.Fatalf("用户自己的 codex-notify.sh: %+v", c)
+	}
+	writeFile(t, cfg, []byte(fmt.Sprintf("notify = [%q]\n", script)))
+	// railse 那一行带 --socket 指向别处：warn，提示重跑或给 doctor 加 --dir
+	data := filepath.Join(home, "data dir")
+	dataSock := filepath.Join(data, "agent.sock")
+	writeFile(t, script, hooksconf.NotifyScript(nil, bin, dataSock))
+	chmod(script, 0o755)
+	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, "连的是 "+dataSock) || !strings.Contains(c.Hint, "doctor 加 --dir "+hooksconf.ShellQuote(data)) {
+		t.Fatalf("socket 对不上: %+v", c)
+	}
+	// 守护进程确实在 data：脚本在 data 里、带 --socket 的 ok；不带 --socket 的旧脚本 warn，重跑命令带 --dir
+	o.AgentDir = data
+	script = filepath.Join(data, hooksconf.NotifyScriptName)
+	writeFile(t, cfg, []byte(fmt.Sprintf("notify = [%q]\n", script)))
+	writeFile(t, script, hooksconf.NotifyScript(nil, bin, dataSock))
+	chmod(script, 0o755)
+	if c := check(); c.Status != OK {
+		t.Fatalf("--dir 的脚本: %+v", c)
+	}
+	writeFile(t, script, hooksconf.NotifyScript(nil, bin, ""))
+	if c := check(); c.Status != Warn || !strings.Contains(c.Detail, "连的是 "+o.DefaultSocket) || !strings.Contains(c.Hint, "railse setup codex-notify --dir "+hooksconf.ShellQuote(data)) {
+		t.Fatalf("不带 --socket 的脚本: %+v", c)
+	}
+	// 旧写法仍 ok
+	writeFile(t, cfg, []byte(fmt.Sprintf("notify = [%q, \"hook\", \"codex-notify\", \"--socket\", %q]\n", bin, dataSock)))
+	if c := check(); c.Status != OK {
+		t.Fatalf("旧写法: %+v", c)
 	}
 }
 
@@ -544,6 +651,171 @@ func TestClaudeHooksOldLocation(t *testing.T) {
 	}
 	if c := find(t, Run(o), "hooks.claude"); c.Status != OK {
 		t.Fatalf("同一文件: %+v", c)
+	}
+}
+
+// Claude、Gemini 的钩子：用户级（Home 下）或项目级（Project 下）任一装了就算装了。只有用户级：按用户级文件查，修复提示
+// 不带 --project；只有项目级：沿用项目级的检查，提示带 --project；两处都装：按用户级查，Gemini 至少 warn、说会触发两次，
+// Claude 两处 Railse 的条目完全相同时只跑一次、不降级，不同才 warn；都没装：fail，列出看过的位置（项目级文件坏了时
+// 报它，提示修好它的 JSON）；用户级是坏 JSON：fail。
+func TestHookChecksUserOrProject(t *testing.T) {
+	o, home := fakeOpts(t)
+	proj := filepath.Join(home, "proj")
+	bin := "/usr/local/bin/railse"
+	o.Bin = bin
+	user := map[string]string{"claude": hooksconf.ClaudeUserPath(home), "gemini": hooksconf.GeminiUserPath(home)}
+	local, shared := hooksconf.ClaudePaths(proj)
+	project := map[string]string{"claude": local, "gemini": hooksconf.GeminiPath(proj)}
+	ids := map[string]string{"claude": "hooks.claude", "gemini": "hooks.gemini"}
+	check := func(cli string) Check { t.Helper(); return find(t, Run(o), ids[cli]) }
+	userHint := func(cli string) string { return "railse setup hooks --" + cli }
+
+	// Project 为空、用户级没装：fail，细节是看过的用户级文件，提示装用户级；Codex 两项照样检查
+	for cli := range ids {
+		if c := check(cli); c.Status != Fail || !strings.Contains(c.Detail, user[cli]) || c.Hint != userHint(cli) {
+			t.Fatalf("%s 没装: %+v", cli, c)
+		}
+	}
+	if c := find(t, Run(o), "hooks.codex"); c.Status == Skip {
+		t.Fatalf("没给 Project 时 Codex 照样检查: %+v", c)
+	}
+	// 只有用户级装了：ok
+	for cli, p := range user {
+		writeFile(t, p, planDoc(t, cli, bin))
+	}
+	for cli := range ids {
+		if c := check(cli); c.Status != OK || c.Detail != user[cli] {
+			t.Fatalf("%s 只有用户级: %+v", cli, c)
+		}
+	}
+	// 用户级不全：fail，提示装用户级
+	writeFile(t, user["claude"], []byte(strings.Replace(string(planDoc(t, "claude", bin)), `"timeout": 86400`, `"timeout": 60`, 1)))
+	if c := check("claude"); c.Status != Fail || !strings.Contains(c.Detail, user["claude"]) || c.Hint != userHint("claude") {
+		t.Fatalf("用户级不全: %+v", c)
+	}
+	writeFile(t, user["claude"], planDoc(t, "claude", bin))
+	// 给了 Project、项目级没装：仍按用户级，ok
+	o.Project = proj
+	for cli := range ids {
+		if c := check(cli); c.Status != OK || c.Detail != user[cli] {
+			t.Fatalf("%s 给了 Project、只有用户级: %+v", cli, c)
+		}
+	}
+	// 两处都装了、条目相同：Gemini 仍 warn（文档没说去重），说会触发两次，提示删掉项目级的条目；
+	// Claude 对相同的处理器只跑一次：不降级，细节说项目级也装了相同的钩子、可以删掉
+	for cli, p := range project {
+		writeFile(t, p, planDoc(t, cli, bin))
+	}
+	if c := check("gemini"); c.Status != Warn || !strings.Contains(c.Detail, user["gemini"]) || !strings.Contains(c.Detail, project["gemini"]) ||
+		!strings.Contains(c.Detail, "触发两次") || !strings.Contains(c.Hint, "删掉") || !strings.Contains(c.Hint, project["gemini"]) {
+		t.Fatalf("gemini 两处都装: %+v", c)
+	}
+	if c := check("claude"); c.Status != OK || !strings.HasPrefix(c.Detail, user["claude"]) || strings.Contains(c.Detail, "两次") ||
+		!strings.Contains(c.Detail, local+" 也装了相同的钩子") || !strings.Contains(c.Detail, "只跑一次") || !strings.Contains(c.Detail, "可以删掉 "+local) {
+		t.Fatalf("claude 两处都装、条目相同: %+v", c)
+	}
+	// Claude 两处的条目不同（项目级是别的程序路径）：会触发两次，warn，提示删掉项目级的条目
+	writeFile(t, local, planDoc(t, "claude", "/old/railse"))
+	if c := check("claude"); c.Status != Warn || !strings.Contains(c.Detail, local) || !strings.Contains(c.Detail, "触发两次") ||
+		!strings.Contains(c.Hint, "删掉") || !strings.Contains(c.Hint, local) {
+		t.Fatalf("claude 两处都装、条目不同: %+v", c)
+	}
+	// Claude 项目级的旧位置也算：相同只跑一次，不同触发两次
+	os.Remove(local)
+	writeFile(t, shared, planDoc(t, "claude", bin))
+	if c := check("claude"); c.Status != OK || !strings.Contains(c.Detail, shared+" 也装了相同的钩子") || strings.Contains(c.Detail, "两次") {
+		t.Fatalf("用户级与项目级旧位置都装、条目相同: %+v", c)
+	}
+	writeFile(t, shared, planDoc(t, "claude", bin, "/x/agent.sock"))
+	if c := check("claude"); c.Status != Warn || !strings.Contains(c.Detail, shared) || !strings.Contains(c.Detail, "触发两次") {
+		t.Fatalf("用户级与项目级旧位置都装、条目不同: %+v", c)
+	}
+	os.Remove(shared)
+	writeFile(t, local, planDoc(t, "claude", bin))
+	// 只有项目级装了（用户级文件在，但没有 Railse 的条目）：沿用项目级的检查，ok；不全时 fail，提示带 --project
+	writeFile(t, user["claude"], []byte(`{"model":"opus"}`))
+	os.Remove(user["gemini"])
+	for cli := range ids {
+		if c := check(cli); c.Status != OK || c.Detail != project[cli] {
+			t.Fatalf("%s 只有项目级: %+v", cli, c)
+		}
+	}
+	writeFile(t, project["gemini"], []byte(strings.Replace(string(planDoc(t, "gemini", bin)), `"timeout": 86400000`, `"timeout": 5`, 1)))
+	if c := check("gemini"); c.Status != Fail || c.Hint != "railse setup hooks --project "+hooksconf.ShellQuote(proj)+" --gemini" {
+		t.Fatalf("只有项目级且不全: %+v", c)
+	}
+	// 都没装：fail，细节列出看过的用户级与项目级位置，提示装用户级
+	os.Remove(local)
+	os.Remove(project["gemini"])
+	for cli := range ids {
+		c := check(cli)
+		if c.Status != Fail || !strings.Contains(c.Detail, user[cli]) || !strings.Contains(c.Detail, project[cli]) || c.Hint != userHint(cli) {
+			t.Fatalf("%s 都没装: %+v", cli, c)
+		}
+	}
+	// 都没装、项目级文件是坏 JSON：报那个文件，提示修好它的 JSON（带 --project 的命令；装用户级不碰它），细节里也说看过的用户级
+	writeFile(t, local, []byte("{bad"))
+	if c := check("claude"); c.Status != Fail || !strings.Contains(c.Detail, local) || !strings.Contains(c.Detail, "JSON") || !strings.Contains(c.Detail, user["claude"]) ||
+		c.Hint != "修好 JSON 后再 railse setup hooks --project "+hooksconf.ShellQuote(proj)+" --claude" {
+		t.Fatalf("都没装、项目级坏 JSON: %+v", c)
+	}
+	// 用户级是坏 JSON：fail，提示修好再装（项目级装着也一样）
+	writeFile(t, local, planDoc(t, "claude", bin))
+	writeFile(t, user["claude"], []byte("{bad"))
+	if c := check("claude"); c.Status != Fail || !strings.Contains(c.Detail, user["claude"]) || !strings.Contains(c.Detail, "JSON") ||
+		!strings.Contains(c.Hint, "修好 JSON") || !strings.Contains(c.Hint, userHint("claude")) {
+		t.Fatalf("用户级坏 JSON: %+v", c)
+	}
+}
+
+// 同一个文件不算两处：项目就是家目录时 Gemini 的项目级就是用户级；Claude 项目级的旧位置 <项目>/.claude/settings.json
+// 可能就是用户级文件（项目就是家目录，或链过去）。Home 为空时只看项目级，两者都空时 skip。
+func TestHookChecksSameFileAndMissingLevels(t *testing.T) {
+	o, home := fakeOpts(t)
+	bin := "/usr/local/bin/railse"
+	o.Bin, o.Project = bin, home
+	writeFile(t, hooksconf.ClaudeUserPath(home), planDoc(t, "claude", bin))
+	writeFile(t, hooksconf.GeminiUserPath(home), planDoc(t, "gemini", bin))
+	for _, id := range []string{"hooks.claude", "hooks.gemini"} {
+		if c := find(t, Run(o), id); c.Status != OK {
+			t.Fatalf("项目就是家目录时 %s 不算两处: %+v", id, c)
+		}
+	}
+	// 项目就是家目录、又装了 ~/.claude/settings.local.json（在 ~ 里是项目级的本机配置），条目不同：真是两处
+	local, _ := hooksconf.ClaudePaths(home)
+	writeFile(t, local, planDoc(t, "claude", "/old/railse"))
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, local) || !strings.Contains(c.Detail, "触发两次") {
+		t.Fatalf("~/.claude/settings.local.json 也装了: %+v", c)
+	}
+	os.Remove(local)
+	// 项目的 .claude/settings.json 链到用户级文件：同一个文件
+	proj := filepath.Join(home, "proj")
+	_, shared := hooksconf.ClaudePaths(proj)
+	os.MkdirAll(filepath.Dir(shared), 0o755)
+	if err := os.Symlink(hooksconf.ClaudeUserPath(home), shared); err != nil {
+		t.Fatal(err)
+	}
+	o.Project = proj
+	if c := find(t, Run(o), "hooks.claude"); c.Status != OK || c.Detail != hooksconf.ClaudeUserPath(home) {
+		t.Fatalf("项目的 settings.json 链到用户级文件不算两处: %+v", c)
+	}
+	// Home 为空：只看项目级（沿用项目级的检查与提示）
+	t.Setenv("HOME", "")
+	o.Home = ""
+	if c := find(t, Run(o), "hooks.gemini"); c.Status != Fail || !strings.Contains(c.Detail, hooksconf.GeminiPath(proj)) || !strings.Contains(c.Hint, "--project") {
+		t.Fatalf("Home 为空时只看项目级: %+v", c)
+	}
+	writeFile(t, hooksconf.GeminiPath(proj), planDoc(t, "gemini", bin))
+	if c := find(t, Run(o), "hooks.gemini"); c.Status != OK {
+		t.Fatalf("Home 为空、项目级装了: %+v", c)
+	}
+	// 两者都空：skip
+	o.Project = ""
+	r := Run(o)
+	for _, id := range []string{"hooks.claude", "hooks.codex", "hooks.codex_notify", "hooks.gemini"} {
+		if c := find(t, r, id); c.Status != Skip {
+			t.Fatalf("Home 与 Project 都空时 %s 应 skip: %+v", id, c)
+		}
 	}
 }
 
@@ -1367,5 +1639,91 @@ func TestHubDBUncheckpointedWALWithoutShm(t *testing.T) {
 		if a := after[name]; a != b {
 			t.Fatalf("%s 变了：前 %+v，后 %+v", name, b, a)
 		}
+	}
+}
+
+// project.root：项目目录会被守护进程当成哪个项目根，排在钩子检查之后。git 仓库 ok（细节是仓库根）；不是 git 仓库时
+// 按目录本身当项目根：显式给的（--project）warn 并建议 git init，隐式默认的当前目录只告知（skip，不建议 git init）；
+// 家目录、它的上级、根目录与不存在的目录不当项目根，skip 并说明写入都算项目外（显式与否一样）；没给 Project 时 skip。
+func TestProjectRootCheck(t *testing.T) {
+	o, home := fakeOpts(t)
+	t.Setenv("HOME", home) // 守护进程按 $HOME 认家目录
+	resolved := func(p string) string { r, _ := filepath.EvalSymlinks(p); return r }
+	repo := filepath.Join(home, "repo")
+	writeFile(t, filepath.Join(repo, ".git", "HEAD"), []byte("ref: refs/heads/main\n"))
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(home, "plain")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, explicit := range []bool{true, false} {
+		o.ProjectExplicit = explicit
+		o.Project = filepath.Join(repo, "src")
+		r := Run(o)
+		if c := find(t, r, "project.root"); c.Status != OK || c.Name != "项目根" || c.Detail != resolved(repo) {
+			t.Fatalf("显式 %v，git 仓库: %+v", explicit, c)
+		}
+		for i, c := range r.Checks {
+			if c.ID == "hooks.gemini" && (i+1 == len(r.Checks) || r.Checks[i+1].ID != "project.root") {
+				t.Fatalf("project.root 应紧跟在钩子检查之后: %+v", r.Checks)
+			}
+		}
+		for _, tc := range []struct{ dir, why string }{
+			{home, "是家目录"}, {filepath.Dir(home), "它的上级"}, {"/", "根目录"}, {filepath.Join(home, "gone"), "不是存在的目录"},
+		} {
+			o.Project = tc.dir
+			if c := find(t, Run(o), "project.root"); c.Status != Skip || !strings.HasPrefix(c.Detail, tc.dir+" ") || !strings.Contains(c.Detail, tc.why) ||
+				!strings.Contains(c.Detail, "不当项目根") || !strings.Contains(c.Detail, "所有写入都算项目外") {
+				t.Fatalf("显式 %v，%s: %+v", explicit, tc.dir, c)
+			}
+		}
+	}
+
+	// 显式给的非 git 目录：warn，建议 git init
+	o.Project, o.ProjectExplicit = plain, true
+	if c := find(t, Run(o), "project.root"); c.Status != Warn || c.Detail != "目录 "+resolved(plain)+" 不是 git 仓库，按当前目录当项目根" ||
+		c.Hint != "建议在 "+resolved(plain)+" 里 git init（项目根决定哪些写入算项目内）" {
+		t.Fatalf("显式的非 git 目录: %+v", c)
+	}
+	// 隐式默认的当前目录（没给 --project，如在 ~/Downloads 里跑 railse setup）不是 git 仓库：只告知，不建议 git init
+	o.ProjectExplicit = false
+	if c := find(t, Run(o), "project.root"); c.Status != Skip || c.Detail != "目录 "+resolved(plain)+" 不是 git 仓库，在这里起 agent 会按当前目录当项目根" ||
+		c.Hint != "" {
+		t.Fatalf("隐式的非 git 目录应只告知: %+v", c)
+	}
+	o.ProjectExplicit = true
+
+	// 不是家目录下的普通目录（点目录里、家目录之外）的非 git 目录：没有项目根。显式给的 warn，提示 git init 或换到项目目录；
+	// 隐式默认的当前目录只告知（skip），细节相同、不给提示
+	dot := filepath.Join(home, ".config", "x")
+	if err := os.MkdirAll(dot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{dot, "/etc"} { // /etc 只 stat
+		want := "目录 " + resolved(d) + " 不在家目录下的普通目录里，不按项目根处理"
+		o.Project, o.ProjectExplicit = d, true
+		if c := find(t, Run(o), "project.root"); c.Status != Warn || c.Detail != want || c.Hint != "要自动放行请 git init 或换到项目目录" {
+			t.Fatalf("显式的 %s: %+v", d, c)
+		}
+		o.ProjectExplicit = false
+		if c := find(t, Run(o), "project.root"); c.Status != Skip || c.Detail != want || c.Hint != "" {
+			t.Fatalf("隐式的 %s 应只告知: %+v", d, c)
+		}
+	}
+	o.ProjectExplicit = true
+
+	o.Project = ""
+	if c := find(t, Run(o), "project.root"); c.Status != Skip {
+		t.Fatalf("没给 Project: %+v", c)
+	}
+
+	// 相对的 Project 按 doctor 的工作目录取绝对路径再定
+	t.Chdir(repo)
+	o.Project = "src"
+	if c := find(t, Run(o), "project.root"); c.Status != OK || c.Detail != resolved(repo) {
+		t.Fatalf("相对的 Project: %+v", c)
 	}
 }

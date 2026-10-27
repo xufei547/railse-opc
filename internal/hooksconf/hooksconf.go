@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -136,13 +138,16 @@ type Command struct {
 
 // ParseCommand 认出 Plan 写过的命令形状“<词> hook claude|codex|gemini”，后面可以再跟“ --socket <词>”（见 HookCommand）。
 // “词”是不含空白的裸词，或 ShellQuote 产生的单引号词（内部单引号按 ShellQuote 的写法转义）。其他形状一律不认。
-func ParseCommand(cmd string) (Command, bool) {
+func ParseCommand(cmd string) (Command, bool) { return parseHook(cmd, "claude", "codex", "gemini") }
+
+// parseHook 认“<词> hook <clis 之一>”，后面可以再跟“ --socket <词>”（见 ParseCommand）。
+func parseHook(cmd string, clis ...string) (Command, bool) {
 	prog, rest, ok := shellWord(cmd)
 	if !ok {
 		return Command{}, false
 	}
 	var c Command
-	for _, cli := range []string{"claude", "codex", "gemini"} {
+	for _, cli := range clis {
 		if r, found := strings.CutPrefix(rest, " hook "+cli); found && (r == "" || strings.HasPrefix(r, " --socket ")) {
 			c, rest = Command{Program: prog, CLI: cli}, r
 			break
@@ -365,6 +370,57 @@ func Inspect(doc []byte, bin string) (Installed, error) {
 	return ins, nil
 }
 
+// SameOurs 报告两份钩子配置里我们的条目是否完全相同：每个事件里我们的条目作为集合相同。条目按整条比（type、command、
+// timeout、name 等全部字段，连同所在组的 matcher），用规范化后的 JSON（键排序、无空白）比，不挑字段；别人的条目、别的设置、
+// 键的顺序与排版不影响。Claude Code 对写在多个配置文件里的相同处理器只跑一次，doctor 据此判断两处都装时会不会触发两次。
+// 只读；任一份解析不了时返回 false。bin 同 IsOurs。
+func SameOurs(a, b []byte, bin string) bool {
+	sa, err := ourEntries(a, bin)
+	if err != nil {
+		return false
+	}
+	sb, err := ourEntries(b, bin)
+	if err != nil {
+		return false
+	}
+	return maps.EqualFunc(sa, sb, slices.Equal[[]string])
+}
+
+// ourEntries 是一份配置里我们的条目：事件名 → 条目（连同所在组的 matcher）规范化后的 JSON，排好序、去掉重复。
+func ourEntries(doc []byte, bin string) (map[string][]string, error) {
+	_, hooks, err := parse(doc)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]string{}
+	for ev, raw := range hooks {
+		groups, _ := raw.([]any)
+		for _, g := range groups {
+			gm, _ := g.(map[string]any)
+			list, _ := gm["hooks"].([]any)
+			for _, e := range list {
+				if !IsOurs(e, bin) {
+					continue
+				}
+				key := map[string]any{"entry": e}
+				if m, ok := gm["matcher"]; ok {
+					key["matcher"] = m
+				}
+				j, err := json.Marshal(key) // map 按键排序；数字是 json.Number，原样输出
+				if err != nil {
+					return nil, err
+				}
+				out[ev] = append(out[ev], string(j))
+			}
+		}
+	}
+	for ev, list := range out {
+		slices.Sort(list)
+		out[ev] = slices.Compact(list)
+	}
+	return out, nil
+}
+
 // ClaudePaths 返回项目级的本机配置与共享配置：钩子写进 settings.local.json（不入库），settings.json 里只做清理。
 func ClaudePaths(project string) (local, shared string) {
 	return filepath.Join(project, ".claude", "settings.local.json"), filepath.Join(project, ".claude", "settings.json")
@@ -375,3 +431,9 @@ func GeminiPath(project string) string { return filepath.Join(project, ".gemini"
 
 // CodexPath 是 Codex 的用户级钩子文件。
 func CodexPath(home string) string { return filepath.Join(home, ".codex", "hooks.json") }
+
+// ClaudeUserPath 是 Claude Code 的用户级配置（对所有项目生效）：railse setup hooks 不给 --project 时钩子写在这里。
+func ClaudeUserPath(home string) string { return filepath.Join(home, ".claude", "settings.json") }
+
+// GeminiUserPath 是 Gemini CLI 的用户级配置（对所有项目生效）：railse setup hooks 不给 --project 时钩子写在这里。
+func GeminiUserPath(home string) string { return filepath.Join(home, ".gemini", "settings.json") }

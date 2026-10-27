@@ -61,8 +61,10 @@ func (e *Engine) SetPaused(p bool) { e.paused.Store(p) }
 
 func (e *Engine) Paused() bool { return e.paused.Load() }
 
-// Evaluate 先定级，再按范围、条件、底线和优先级选出一条规则；没有则 ask。
+// Evaluate 先定级，再按范围、条件、底线和优先级选出一条规则；没有则 ask。项目根太宽时按没有项目根处理（见 Context.Root），
+// 范围是那个目录的规则也就不匹配。
 func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
+	ctx = ctx.normalized()
 	risk := Classify(p, ctx)
 	var best *compiledRule
 	for i := range e.rules {

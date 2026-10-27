@@ -175,11 +175,11 @@ func agentEnroll(cfg agent.Config, hubURL, token, name string, force bool, stdou
 	if name == "" {
 		name = cfg.MachineID // 主机名
 	}
-	if err := checkDisplayName(name); err != nil {
-		return fmt.Errorf("名字 %w（用 --name 另取一个）", err)
+	if err := checkNameFlag(name); err != nil {
+		return err
 	}
-	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
-		fmt.Fprintln(stderr, "警告: hub 地址是 http://，明文传输密钥，只适合本机或可信内网；公网请用 https://")
+	if plaintextHub(u) {
+		fmt.Fprintln(stderr, "警告: "+plaintextHubNote)
 	}
 	if _, err := os.Lstat(cfg.MachinePath); err == nil && !force {
 		return fmt.Errorf("%s 已存在，本机已接入过；要换 hub 或重新接入请加 --force", cfg.MachinePath)
@@ -230,20 +230,38 @@ func agentEnroll(cfg agent.Config, hubURL, token, name string, force bool, stdou
 	return nil
 }
 
-// parseHubURL 校验 --hub：只收 http、https，要有主机名，不带 user:pass（凭据只走接入码与机器密钥）、查询与片段。
-// 返回解析结果与去掉末尾 / 的基地址。错误信息不带原文（里面可能有密码）。
+// parseHubURL 校验 --hub（见 parseHubAddr），错误信息前面带“--hub ”。
 func parseHubURL(raw string) (*url.URL, string, error) {
+	u, base, err := parseHubAddr(raw)
+	if err != nil {
+		return nil, "", fmt.Errorf("--hub %w", err)
+	}
+	return u, base, nil
+}
+
+// parseHubAddr 校验 hub 地址：只收 http、https，要有主机名，不带 user:pass（凭据只走接入码与机器密钥）、查询与片段。
+// 返回解析结果与去掉末尾 / 的基地址。错误信息不带原文（里面可能有密码），也不带标志名：--hub 用 parseHubURL，
+// setup 的向导在前面加“hub 地址”。
+func parseHubAddr(raw string) (*url.URL, string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" || u.Hostname() == "" {
-		return nil, "", errors.New("--hub 必须是 http:// 或 https:// 开头、带主机名的地址")
+		return nil, "", errors.New("必须是 http:// 或 https:// 开头、带主机名的地址")
 	}
 	if u.User != nil {
-		return nil, "", errors.New("--hub 不能带用户名或密码")
+		return nil, "", errors.New("不能带用户名或密码")
 	}
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return nil, "", errors.New("--hub 不能带 ? 查询或 # 片段")
+		return nil, "", errors.New("不能带 ? 查询或 # 片段")
 	}
 	return u, u.Scheme + "://" + u.Host + strings.TrimRight(u.EscapedPath(), "/"), nil
+}
+
+// plaintextHubNote 说明非本机的 http:// hub 地址为什么不妥（见 plaintextHub）。
+const plaintextHubNote = "hub 地址是 http://，明文传输密钥，只适合本机或可信内网；公网请用 https://"
+
+// plaintextHub 报告 hub 地址是不是非本机的 http://：接入码与机器密钥会明文经过网络。enroll 时只警告，setup 的向导不收。
+func plaintextHub(u *url.URL) bool {
+	return u.Scheme == "http" && !isLoopbackHost(u.Hostname())
 }
 
 // isLoopbackHost 报告主机是否只在本机：localhost、*.localhost（RFC 6761）、127.0.0.0/8、::1。
@@ -263,6 +281,14 @@ func checkDisplayName(s string) error {
 	}
 	if !hub.ValidName(s) {
 		return errors.New("必须是合法 UTF-8，且不能含控制字符或不可见的格式字符")
+	}
+	return nil
+}
+
+// checkNameFlag 按 checkDisplayName 检查本机名字（--name，没给时是主机名），错误说明带上怎么改。
+func checkNameFlag(name string) error {
+	if err := checkDisplayName(name); err != nil {
+		return fmt.Errorf("名字 %w（用 --name 另取一个）", err)
 	}
 	return nil
 }

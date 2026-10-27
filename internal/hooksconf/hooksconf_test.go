@@ -55,9 +55,53 @@ func TestMergeRemoveOnly(t *testing.T) {
 	}
 }
 
+// 两份配置里 Railse 的条目完全相同（整条条目连同所在组的 matcher，按规范化后的 JSON 比）才算相同：别人的条目、别的设置、
+// 键的顺序与空白不影响；程序路径、--socket、超时、matcher 不同，少了事件，或解析不了都不算。
+func TestSameOurs(t *testing.T) {
+	bin := "/opt/railse"
+	merge := func(existing, b, socket string) string {
+		t.Helper()
+		doc, err := Merge([]byte(existing), b, Plan("claude", b, socket))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(doc)
+	}
+	a := merge("", bin, "")
+	same := []string{
+		merge(`{"model":"opus","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"my-guard"}]}]}}`, bin, ""),
+		`{"hooks":{"Stop":[{"hooks":[{"command":"/opt/railse hook claude","type":"command"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}],` +
+			`"Notification":[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]},{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}],` +
+			`"PermissionRequest":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":""}]}}`,
+	}
+	for _, b := range same {
+		if !SameOurs([]byte(a), []byte(b), bin) || !SameOurs([]byte(b), []byte(a), bin) {
+			t.Fatalf("Railse 的条目相同时应算相同:\n%s\n---\n%s", a, b)
+		}
+	}
+	var noStop map[string]any
+	json.Unmarshal([]byte(a), &noStop)
+	delete(noStop["hooks"].(map[string]any), "Stop")
+	missing, _ := json.Marshal(noStop)
+	for what, b := range map[string]string{
+		"程序路径":    merge("", "/other/railse", ""),
+		"socket":  merge("", bin, "/x/agent.sock"),
+		"超时":      strings.Replace(a, `"timeout": 86400`, `"timeout": 60`, 1),
+		"matcher": strings.Replace(a, `"matcher": ""`, `"matcher": "Bash"`, 1),
+		"少了事件":    string(missing),
+		"没有我们的条目": `{"model":"opus"}`,
+		"不是 JSON": "{bad",
+	} {
+		if SameOurs([]byte(a), []byte(b), bin) || SameOurs([]byte(b), []byte(a), bin) {
+			t.Fatalf("%s不同时不该算相同:\n%s", what, b)
+		}
+	}
+}
+
 func TestPaths(t *testing.T) {
 	local, shared := ClaudePaths("/p")
-	if local != "/p/.claude/settings.local.json" || shared != "/p/.claude/settings.json" || GeminiPath("/p") != "/p/.gemini/settings.json" || CodexPath("/h") != "/h/.codex/hooks.json" {
+	if local != "/p/.claude/settings.local.json" || shared != "/p/.claude/settings.json" || GeminiPath("/p") != "/p/.gemini/settings.json" || CodexPath("/h") != "/h/.codex/hooks.json" ||
+		ClaudeUserPath("/h") != "/h/.claude/settings.json" || GeminiUserPath("/h") != "/h/.gemini/settings.json" {
 		t.Fatal("路径不对")
 	}
 }

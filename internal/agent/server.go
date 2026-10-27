@@ -23,6 +23,9 @@ import (
 // maxSocketPath 是 socket 路径的字节上限。macOS 的 sun_path 只有 104 字节，留些余量。
 const maxSocketPath = 100
 
+// maxNonGitLogged 是记住“已在日志里说明过项目根怎么定”的非 git 目录数上限：满了不再说明新目录，判定不受影响。
+const maxNonGitLogged = 1024
+
 // errHookGone 是钩子连接断开时取消请求 ctx 的原因，用来和守护进程关停区分开。
 var errHookGone = errors.New("钩子连接已断开")
 
@@ -57,6 +60,11 @@ type Server struct {
 	pauseMu     sync.Mutex
 	localPaused bool
 	hubPaused   bool
+
+	// nonGitLogged 是已在日志里说明过项目根怎么定的非 git 目录（见 noteRoot），每个目录只说明一次，最多记 maxNonGitLogged 个；
+	// 由 nonGitMu 保护。
+	nonGitMu     sync.Mutex
+	nonGitLogged map[string]struct{}
 
 	mu      sync.Mutex
 	closed  bool
@@ -293,10 +301,40 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	// 相对路径（含空 cwd 清理后的 "."）会按守护进程自己的工作目录解析，不能拿来找项目根。
 	var root string
 	if filepath.IsAbs(cwd) {
-		root = FindProjectRoot(cwd)
+		var kind RootKind
+		switch root, kind = ResolveProjectRoot(cwd); kind {
+		case RootCwd:
+			s.noteRoot(root, kind)
+		case RootNotPlain:
+			s.noteRoot(cwd, kind)
+		}
 	}
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID}
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx
+}
+
+// noteRoot 在日志里说明不在 git 仓库里的目录 dir 的项目根怎么定：RootCwd 按当前目录当项目根，RootNotPlain 不当项目根。
+// 两种说明共用一个集合，同一目录只说明一次；记住的目录满了（maxNonGitLogged）就不再说明新目录，免得每条请求都记一行。
+// 路径来自钩子，按 %q 记，换行伪造不出另一行。
+func (s *Server) noteRoot(dir string, kind RootKind) {
+	s.nonGitMu.Lock()
+	_, seen := s.nonGitLogged[dir]
+	first := !seen && len(s.nonGitLogged) < maxNonGitLogged
+	if first {
+		if s.nonGitLogged == nil {
+			s.nonGitLogged = map[string]struct{}{}
+		}
+		s.nonGitLogged[dir] = struct{}{}
+	}
+	s.nonGitMu.Unlock()
+	if !first {
+		return
+	}
+	if kind == RootCwd {
+		s.log.Printf("目录 %q 不是 git 仓库，按当前目录当项目根；建议 git init", dir)
+	} else {
+		s.log.Printf("目录 %q 不在家目录下的普通目录里，不按项目根处理；要自动放行请 git init 或换到项目目录", dir)
+	}
 }
 
 // handlePermission 是审批主路径：引擎能定就定，定不了交给 Decider。

@@ -15,8 +15,8 @@ import (
 var ErrCannotLearn = errors.New("只有只读、项目内改动和联网操作能记住为自动放行规则，其余请手写规则")
 
 // ProposeRule 从一条用户已批准的请求生成 learned 规则草案：action 为 allow，risk 固定为请求当前的风险等级，
-// 范围为当前项目。没有项目根时文件与命令规则没有可限定的项目范围，学出来的 global 规则会放行任何项目里的同类请求，
-// 所以 shell 与 file_write 报错，mcp 与 network 学成 global。
+// 范围为当前项目。没有项目根（含项目根太宽，见 Context.Root）时文件与命令规则没有可限定的项目范围，
+// 学出来的 global 规则会放行任何项目里的同类请求，所以 shell 与 file_write 报错，mcp 与 network 学成 global。
 // 风险等级不是 read、write_in_project 或 network 时返回 ErrCannotLearn；outward 与 destructive 最先判断，
 // 命令同时含通配或命令替换时也返回 ErrCannotLearn。
 // shell 只接受单段命令，并且不能含无法静态分析的写法、引号外的通配或 $ 展开、指向文件的重定向：
@@ -25,6 +25,7 @@ var ErrCannotLearn = errors.New("只有只读、项目内改动和联网操作�
 // file_write 取所在目录，文件就在项目根下时只取它的精确路径；mcp 取服务加工具；network 取主机名。
 // 路径按字面转义通配元字符。草案在返回前经过 Validate。
 func ProposeRule(p Payload, ctx Context, requestID string) (Rule, error) {
+	ctx = ctx.normalized()
 	risk := Classify(p, ctx)
 	if risk >= RiskOutward {
 		return Rule{}, ErrCannotLearn

@@ -49,7 +49,14 @@ var sensitivePatterns = []string{
 	"**/.codex/auth.json",
 	"**/.gemini/settings.json",
 	"**/.gemini/oauth_creds.json",
+	"**/*.railse-bak-*", // railse setup 改用户级配置前留的原样备份（settings.json、config.toml 的副本，可能带密钥）
 	"**/.railse/**",
+	// 登录或开机时自动运行的配置（launchd、systemd 用户单元、XDG 自启动）与 Codex 的钩子：写进去之后会自动执行任意命令
+	"**/Library/LaunchAgents/**",
+	"**/Library/LaunchDaemons/**",
+	"**/.config/systemd/**",
+	"**/.config/autostart/**",
+	"**/.codex/hooks.json",
 	"~/.ssh/**",
 	"~/.aws/**",
 	"~/.gnupg/**",
@@ -71,6 +78,12 @@ var sensitivePatterns = []string{
 	"~/.gemini/oauth_creds.json",
 	"~/.railse/**",
 	"~/Library/Keychains/**",
+	"~/Library/LaunchAgents/**",
+	"~/.config/systemd/**",
+	"~/.config/autostart/**",
+	"~/.codex/hooks.json",
+	"/Library/LaunchAgents/**",
+	"/Library/LaunchDaemons/**",
 	// 写入即可让任意命令在之后自动执行：shell 启动文件、git 钩子与配置（core.hooksPath、core.fsmonitor 等）
 	"**/.git/hooks/**",
 	"**/.git/config",
@@ -281,7 +294,7 @@ func literalPathRisk(p string, cwd string, ctx Context) Risk {
 
 // resolvedPathRisk 给一个已确认可解析的路径定级：无害的伪设备 read，敏感路径 destructive，
 // 项目内 write_in_project，其余 write_outside。项目根未知时 fail closed：没有路径在项目内
-// （不以 cwd 代替，否则 cd 或在家目录下执行就能把任意路径变成项目内）。
+// （本包不以 cwd 代替；项目根由守护进程定，见 agent.ResolveProjectRoot 与 Context.Root）。
 func resolvedPathRisk(p, cwd string, ctx Context) Risk {
 	abs := resolvePath(p, cwd, ctx.HomeDir)
 	switch {

@@ -245,6 +245,8 @@ for shell in $shells; do
   # 下一步里装系统服务的命令用实际装好的路径；不在 /usr/local/bin 时提示 hub 机器用 | sudo sh 装到系统目录
   grep -qF "sudo $dir/railse setup autostart --hub --system -- " "$tmp/log/$shell-explicit.out" || { show explicit; fail "$shell explicit：下一步没用实际安装路径"; }
   grep -qF "install.sh | sudo sh" "$tmp/log/$shell-explicit.out" || { show explicit; fail "$shell explicit：没提示 hub 机器装到系统目录"; }
+  # 工作机也可以不带参数在终端里问答
+  grep -qF "或直接运行 railse setup（终端里问答）" "$tmp/log/$shell-explicit.out" || { show explicit; fail "$shell explicit：下一步没提 railse setup 的问答"; }
   # 安装路径带空格与单引号：照抄得了（单引号括起来，内部的 ' 写成 '\''）
   odd="$w/my bin's"
   expect_ok odd-dir RAILSE_BASE_URL="$URL" RAILSE_VERSION="$VERSION" RAILSE_INSTALL_DIR="$odd"

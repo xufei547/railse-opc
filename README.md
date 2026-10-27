@@ -50,8 +50,8 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
    railse hub token --dir /var/lib/railse-hub
    ```
    数据目录 `/var/lib/railse-hub` 由 systemd 在服务第一次启动时建好并交给服务用户，所以 `password`、`token` 要在 `setup autostart` 之后跑；用 `--user 名字` 指定了别的服务用户时，以那个用户身份（`sudo -u 名字 /usr/local/bin/railse hub …`）运行。railse 装在别处时写 `sudo "$(command -v railse)" setup autostart --hub --system -- …`（单元里的程序路径随之取它），但服务用户必须能执行那个路径：程序在你的家目录（常是 0750）下而 `--user` 换成了别的用户时，服务用户执行不了它，单元会以 `203/EXEC` 反复重启。详见 [docs/setup.md](docs/setup.md)。
-2. **每台工作机**：在项目目录里跑 `railse setup all --hub https://hub.example.com --token <接入码>`，一次做完接入 hub、装三个 CLI 的钩子、开机自启与体检（Claude、Gemini 的钩子是项目级的，别的项目再跑 `railse setup hooks --project <目录>`）。之后随时可以 `railse doctor` 检查。
-3. **手机**：打开 `https://hub.example.com/`，用第 1 步的密码登录；iPhone 上加到主屏幕后在设置里开启通知。
+2. **每台工作机**：在终端里跑一次 `railse setup`，按提问填 hub 地址、接入码（第 1 步 `railse hub token` 打印的）和本机名字（直接回车用主机名）；也可以一次给全：`railse setup all --hub https://hub.example.com --token <接入码>`。一次做完接入 hub、装三个 CLI 的钩子、开机自启与体检（钩子默认装用户级，对所有项目生效；只想让某个项目用的，加 `--project <目录>` 把 Claude、Gemini 的装成那个项目的项目级），最后把手机要打开的地址框起来打印。之后随时可以 `railse doctor` 检查。
+3. **手机**：打开上一步框里的地址（如 `https://hub.example.com/`），用第 1 步的密码登录；iPhone 上用 Safari 打开后分享→添加到主屏幕，再从图标打开，在设置里开启通知。
 
 ## 文档
 

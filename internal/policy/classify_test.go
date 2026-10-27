@@ -24,6 +24,12 @@ func TestClassify(t *testing.T) {
 		{"file_write 伪设备不低于项目内写", Payload{Type: PayloadFileWrite, Path: "/dev/null", Cwd: "/home/u/proj"}, RiskWriteInProject},
 		{"file_write 含变量", Payload{Type: PayloadFileWrite, Path: "$FOO/x", Cwd: "/home/u/proj"}, RiskUnknown},
 		{"file_write 相对路径无 Cwd 用 ProjectRoot", Payload{Type: PayloadFileWrite, Path: "docs/x.md"}, RiskWriteInProject},
+		// railse setup 在用户级配置旁边留的备份是原样副本（可能带 API key、MCP token），读写都按敏感文件
+		{"cat Claude 配置的备份", Payload{Type: PayloadShell, Command: "cat /home/u/.claude/settings.json.railse-bak-20261027-050729", Cwd: "/home/u/proj"}, RiskDestructive},
+		{"cat Codex 配置同一秒的第二个备份", Payload{Type: PayloadShell, Command: "cat ~/.codex/config.toml.railse-bak-20261027-050729-2", Cwd: "/home/u/proj"}, RiskDestructive},
+		{"cat Gemini 配置的备份", Payload{Type: PayloadShell, Command: "cat /home/u/.gemini/settings.json.railse-bak-20261027-050729", Cwd: "/home/u/proj"}, RiskDestructive},
+		{"file_write 写备份", Payload{Type: PayloadFileWrite, Path: "/home/u/.claude/settings.json.railse-bak-20261027-050729", Cwd: "/home/u/proj"}, RiskDestructive},
+		{"file_write 项目内写备份名的文件", Payload{Type: PayloadFileWrite, Path: "conf.toml.railse-bak-20261027-050729", Cwd: "/home/u/proj"}, RiskDestructive},
 		{"mcp", Payload{Type: PayloadMCP, Server: "github", Tool: "create_issue"}, RiskNetwork},
 		{"network", Payload{Type: PayloadNetwork, URL: "https://example.com"}, RiskNetwork},
 		{"未知类型", Payload{Type: "bogus"}, RiskUnknown},
@@ -83,6 +89,42 @@ func TestClassifyEmptyProjectRootFailsClosed(t *testing.T) {
 	} {
 		if d := e.Evaluate(p, ctx); d.Action != ActionAsk || d.Risk != RiskWriteOutside {
 			t.Errorf("无项目根时 %+v 应询问, 得到 %+v", p, d)
+		}
+	}
+}
+
+// 登录或开机时自动运行的配置（launchd、systemd 用户单元、XDG 自启动）与 Codex 的钩子：在这些位置写文件、cat 读文件都是
+// destructive；相邻的普通路径不受影响。
+func TestClassifyAutostartPaths(t *testing.T) {
+	ctx := Context{ProjectRoot: "/home/u/proj", HomeDir: "/home/u"}
+	for _, path := range []string{
+		"~/Library/LaunchAgents/com.x.plist", "/home/u/Library/LaunchAgents/com.x.plist", "/Library/LaunchAgents/com.x.plist",
+		"/Library/LaunchDaemons/com.x.plist", "~/.config/systemd/user/x.service", "~/.config/autostart/x.desktop",
+		"~/.codex/hooks.json",
+	} {
+		if got := Classify(Payload{Type: PayloadFileWrite, Path: path, Cwd: "/home/u/proj"}, ctx); got != RiskDestructive {
+			t.Errorf("写 %s: %s，想要 destructive", path, got)
+		}
+		for _, cmd := range []string{"cat " + path, "echo x > " + path} {
+			if got := Classify(Payload{Type: PayloadShell, Command: cmd, Cwd: "/home/u/proj"}, ctx); got != RiskDestructive {
+				t.Errorf("%s: %s，想要 destructive", cmd, got)
+			}
+		}
+	}
+	for _, c := range []struct {
+		path        string
+		write, read Risk
+	}{
+		{"~/Library/Caches/x", RiskWriteOutside, RiskRead},
+		{"~/.config/nvim/init.lua", RiskWriteOutside, RiskRead},
+		{"~/.codex/notes.md", RiskWriteOutside, RiskRead},
+		{"/home/u/proj/LaunchAgents/x.plist", RiskWriteInProject, RiskRead},
+	} {
+		if got := Classify(Payload{Type: PayloadFileWrite, Path: c.path, Cwd: "/home/u/proj"}, ctx); got != c.write {
+			t.Errorf("写 %s: %s，想要 %s", c.path, got, c.write)
+		}
+		if got := Classify(Payload{Type: PayloadShell, Command: "cat " + c.path, Cwd: "/home/u/proj"}, ctx); got != c.read {
+			t.Errorf("cat %s: %s，想要 %s", c.path, got, c.read)
 		}
 	}
 }

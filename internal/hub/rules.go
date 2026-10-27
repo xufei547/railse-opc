@@ -68,7 +68,8 @@ func validScope(scope string) bool {
 //     所以“记住”永远产生不了能放行这几类的规则。
 //   - 拒绝：denyRule 直接构造 user 来源的 deny，压过一切放行（见 policy.betterRule）。
 //
-// 两者都在有项目根时限定该项目、没有时为 global；scope 为 global 时再去掉项目范围，为空时保持原样。
+// 两者都在有项目根时限定该项目、没有时为 global；scope 为 global 时再去掉项目范围，为空时保持原样。项目根是机器的家目录、
+// 它的上级或根目录时按没有项目根处理（policy.Context.Root，与引擎同一守卫），免得记下范围是家目录、永远匹配不上的规则。
 // deny 的引擎自检（denySelfCheck）在范围改写之后做，查的就是要入库的那条；草案最后再经 RuleSet.Validate。
 // 显式 scope 为 project 而请求没有项目根时拒绝，这一步放在最后：此时全局规则一定生成得出来，文案“只能记成全局”才属实。
 //
@@ -118,7 +119,7 @@ func (s *Server) draftRule(r store.Request, action, scope string) (policy.Rule, 
 	if err := (policy.RuleSet{Version: policy.RuleSetVersion, Rules: []policy.Rule{rule}}).Validate(); err != nil {
 		return policy.Rule{}, fmt.Errorf("%w：%w", errLearn, err)
 	}
-	if scope == scopeProject && r.ProjectRoot == "" {
+	if scope == scopeProject && ctx.Root() == "" {
 		return policy.Rule{}, fmt.Errorf("%w：没有项目根，只能记成全局", errLearn)
 	}
 	return rule, nil
@@ -207,7 +208,7 @@ func (s *Server) rollbackLearned(r store.Request, ruleID string) {
 	s.pushRules()
 }
 
-// denyRule 构造“拒绝并记住”的规则：user 来源的 deny，有项目根时限定该项目、否则 global；不限风险等级
+// denyRule 构造“拒绝并记住”的规则：user 来源的 deny，有项目根（ctx.Root()）时限定该项目、否则 global；不限风险等级
 // （引擎按整条请求定级，限了会被风险更高的复合命令绕过）。按载荷类型锚定：
 //   - shell：command_regex 锚定整条命令（去掉首尾空白）的字面原文，只拒这条命令，不连带同前缀的命令；
 //   - file_write：精确路径（相对路径接在 cwd 或项目根后，~ 按家目录展开），通配元字符转义；
@@ -218,8 +219,9 @@ func denyRule(r store.Request, ctx policy.Context) (policy.Rule, error) {
 	p := r.Payload
 	rule := policy.Rule{ID: "deny-" + shortRuleID(r.ID), Source: policy.SourceUser, Action: policy.ActionDeny, CreatedFrom: r.ID,
 		Match: policy.Match{Payload: p.Type}}
-	if r.ProjectRoot != "" {
-		rule.Scope = policy.Scope{Project: escapeGlob(r.ProjectRoot)}
+	root := ctx.Root()
+	if root != "" {
+		rule.Scope = policy.Scope{Project: escapeGlob(root)}
 	}
 	switch p.Type {
 	case policy.PayloadShell:
@@ -231,7 +233,7 @@ func denyRule(r store.Request, ctx policy.Context) (policy.Rule, error) {
 	case policy.PayloadFileWrite:
 		cwd := p.Cwd
 		if cwd == "" {
-			cwd = r.ProjectRoot
+			cwd = root
 		}
 		abs, ok := absPath(p.Path, cwd, ctx.HomeDir)
 		if !ok {

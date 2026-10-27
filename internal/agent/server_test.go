@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -167,18 +169,139 @@ func TestPermissionRedactsAudit(t *testing.T) {
 	}
 }
 
-func TestProjectRootFailsClosed(t *testing.T) {
-	env := startServer(t, LocalDecider{}, nil)
-	plain := filepath.Join(filepath.Dir(env.repo), "plain")
-	os.MkdirAll(plain, 0o755)
+// setHome 把 HOME 设成守护进程配置里的家目录：项目根的 tooBroad 按 $HOME 认家目录。
+func setHome(t *testing.T) func(*Config) {
+	return func(c *Config) { t.Setenv("HOME", c.HomeDir) }
+}
+
+// 家目录下的普通非 git 目录按它自己当项目根，里面的写入按项目内放行；家目录之外、点目录里的非 git 目录与家目录本身
+// 都没有项目根，写入按项目外（fail closed）。
+func TestProjectRootNonGitDir(t *testing.T) {
+	env := startServerLog(t, LocalDecider{}, setHome(t), &logBuf{}) // 提示行由 TestRootNoteLoggedOncePerDir 查
+	plain := filepath.Join(env.cfg.HomeDir, "dev", "plain")
+	outside := filepath.Join(filepath.Dir(env.repo), "plain")
+	dot := filepath.Join(env.cfg.HomeDir, ".config", "x")
+	for _, d := range []string{plain, outside, dot} {
+		os.MkdirAll(d, 0o755)
+	}
 	var resp proto.Response
 	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(plain, "touch a")), &resp)
-	if resp.Decision != "passthrough" || resp.Risk != "write_outside" {
-		t.Fatalf("没有 .git 的目录里写文件应按项目外: %+v", resp)
+	if resp.Decision != "allow" || resp.Risk != "write_in_project" {
+		t.Fatalf("家目录下没有 .git 的普通目录里写文件应按项目内放行: %+v", resp)
+	}
+	for _, d := range []string{outside, dot, env.cfg.HomeDir} {
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(d, "touch a")), &resp)
+		if resp.Decision != "passthrough" || resp.Risk != "write_outside" {
+			t.Fatalf("%s 里写文件应按项目外: %+v", d, resp)
+		}
 	}
 	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(env.repo, "touch a")), &resp)
 	if resp.Decision != "allow" || resp.Risk != "write_in_project" {
 		t.Fatalf("仓库内写文件应放行: %+v", resp)
+	}
+}
+
+// rootNotes 取日志里说明项目根怎么定的行：“不是 git 仓库”与“不在家目录下的普通目录里”两种。
+func rootNotes(logs string) []string {
+	var out []string
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, "不是 git 仓库") || strings.Contains(l, "不在家目录下的普通目录里") {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func nonGitNote(dir string) string {
+	return fmt.Sprintf("test 目录 %q 不是 git 仓库，按当前目录当项目根；建议 git init", CleanCwd(dir))
+}
+
+func notPlainNote(dir string) string {
+	return fmt.Sprintf("test 目录 %q 不在家目录下的普通目录里，不按项目根处理；要自动放行请 git init 或换到项目目录", CleanCwd(dir))
+}
+
+// 项目根怎么定在日志里每个目录只说明一次（两种说明共用一个集合）：同一目录再来请求不重复，换一个目录再记一行；
+// git 仓库与家目录里不记。路径按 %q 记：目录名里带换行也伪造不出另一行日志。
+func TestRootNoteLoggedOncePerDir(t *testing.T) {
+	logs := &logBuf{}
+	env := startServerLog(t, LocalDecider{}, setHome(t), logs)
+	dev := filepath.Join(env.cfg.HomeDir, "dev")
+	a, b := filepath.Join(dev, "a"), filepath.Join(dev, "b")
+	evil := filepath.Join(dev, "x\n2026/10/27 12:00:00 伪造的一行")
+	cfg := filepath.Join(env.cfg.HomeDir, ".config", "x")
+	outside := filepath.Join(filepath.Dir(env.repo), "outside")
+	for _, d := range []string{filepath.Join(env.repo, "src"), a, b, evil, cfg, outside} {
+		os.MkdirAll(d, 0o755)
+	}
+	for _, cwd := range []string{a, a, env.repo, filepath.Join(env.repo, "src"), env.cfg.HomeDir, b, cfg, a, b, cfg, evil, outside, "/etc", outside} {
+		roundTrip(t, env.cfg.SocketPath, permission(cwd, "touch x"))
+	}
+	want := []string{nonGitNote(a), nonGitNote(b), notPlainNote(cfg), nonGitNote(evil), notPlainNote(outside), notPlainNote("/etc")}
+	if strings.Contains(logs.String(), "\n2026/10/27 12:00:00 伪造的一行") {
+		t.Fatalf("目录名里的换行不该进日志:\n%s", logs.String())
+	}
+	if got := rootNotes(logs.String()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("说明行 = %q，想要 %q\n日志:\n%s", got, want, logs.String())
+	}
+}
+
+// 同一个目录的请求并发到达，也只说明一次（-race 下跑）。
+func TestRootNoteConcurrent(t *testing.T) {
+	logs := &logBuf{}
+	env := startServerLog(t, LocalDecider{}, setHome(t), logs)
+	plain := filepath.Join(env.cfg.HomeDir, "dev", "plain")
+	dot := filepath.Join(env.cfg.HomeDir, ".config", "x")
+	os.MkdirAll(plain, 0o755)
+	os.MkdirAll(dot, 0o755)
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cwd := plain
+			if i%2 == 1 {
+				cwd = dot
+			}
+			env.srv.evaluate(permission(cwd, "touch x"))
+		}()
+	}
+	wg.Wait()
+	if got := rootNotes(logs.String()); len(got) != 2 {
+		t.Fatalf("并发请求每个目录应只说明一次: %q", got)
+	}
+}
+
+// 记住的目录满了（maxNonGitLogged）就不再说明新目录，判定照常。
+func TestRootNoteCap(t *testing.T) {
+	logs := &logBuf{}
+	env := startServerLog(t, LocalDecider{}, setHome(t), logs)
+	env.srv.nonGitMu.Lock()
+	env.srv.nonGitLogged = map[string]struct{}{}
+	for i := range maxNonGitLogged {
+		env.srv.nonGitLogged[fmt.Sprintf("/x/%d", i)] = struct{}{}
+	}
+	env.srv.nonGitMu.Unlock()
+	plain := filepath.Join(env.cfg.HomeDir, "dev", "plain")
+	dot := filepath.Join(env.cfg.HomeDir, ".config", "x")
+	os.MkdirAll(plain, 0o755)
+	os.MkdirAll(dot, 0o755)
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(plain, "touch a")), &resp)
+	if resp.Decision != "allow" || resp.Risk != "write_in_project" {
+		t.Fatalf("满了也照常按项目内判定: %+v", resp)
+	}
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, permission(dot, "touch a")), &resp)
+	if resp.Decision != "passthrough" || resp.Risk != "write_outside" {
+		t.Fatalf("满了也照常按项目外判定: %+v", resp)
+	}
+	if got := rootNotes(logs.String()); len(got) != 0 {
+		t.Fatalf("满了不应再说明: %q", got)
+	}
+	env.srv.nonGitMu.Lock()
+	n := len(env.srv.nonGitLogged)
+	env.srv.nonGitMu.Unlock()
+	if n != maxNonGitLogged {
+		t.Fatalf("满了不应再记: %d", n)
 	}
 }
 

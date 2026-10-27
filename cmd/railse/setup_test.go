@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -54,8 +55,8 @@ func TestSetupHooksWritesAllThree(t *testing.T) {
 	if !strings.Contains(out.String(), "Codex") || !strings.Contains(out.String(), "Gemini") || !strings.Contains(out.String(), "yolo") {
 		t.Fatalf("应打印提醒: %s", out.String())
 	}
-	if !strings.Contains(out.String(), `notify = ["/opt/railse", "hook", "codex-notify"]`) {
-		t.Fatalf("Codex 提醒应给出 TOML 数组形式的 notify: %s", out.String())
+	if !strings.Contains(out.String(), "notify（完成与提问事件）请运行 railse setup codex-notify --bin /opt/railse") || !strings.Contains(out.String(), "保留已有的 notify") {
+		t.Fatalf("Codex 提醒应让用户运行 railse setup codex-notify: %s", out.String())
 	}
 }
 
@@ -382,8 +383,8 @@ func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 	if got := hookCommand(t, codexFile, "Stop"); got != "/opt/railse hook codex --socket "+q {
 		t.Fatalf("Codex 钩子命令应带 --socket: %q", got)
 	}
-	if want := fmt.Sprintf(`notify = ["/opt/railse", "hook", "codex-notify", "--socket", %q]`, sock); !strings.Contains(out, want) {
-		t.Fatalf("Codex notify 的建议也应带 --socket（%s）:\n%s", want, out)
+	if want := "railse setup codex-notify --dir " + hooksconf.ShellQuote(data) + " --bin /opt/railse"; !strings.Contains(out, want) {
+		t.Fatalf("Codex notify 的建议也应带 --dir（%s）:\n%s", want, out)
 	}
 	if !strings.Contains(out, "--socket") || !strings.Contains(out, data) {
 		t.Fatalf("应说明为什么带 --socket:\n%s", out)
@@ -402,8 +403,8 @@ func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 				t.Fatalf("%v: 默认目录时 %s 不应带 --socket:\n%s", extra, p, b)
 			}
 		}
-		if !strings.Contains(out, `notify = ["/opt/railse", "hook", "codex-notify"]`) {
-			t.Fatalf("%v: 默认目录时 notify 建议不带 --socket:\n%s", extra, out)
+		if !strings.Contains(out, "railse setup codex-notify --bin /opt/railse（") {
+			t.Fatalf("%v: 默认目录时 notify 建议不带 --dir:\n%s", extra, out)
 		}
 	}
 	// 设了 $RAILSE_HOME：基准仍是 ~/.railse（只在跑 setup 的命令上设的 RAILSE_HOME 不会进 CLI 的环境），
@@ -415,8 +416,8 @@ func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 			if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude --socket "+q {
 				t.Fatalf("RAILSE_HOME=%s %v: 应带 --socket %s: %q", env, extra, q, got)
 			}
-			if !strings.Contains(out, fmt.Sprintf(`"--socket", %q]`, sock)) {
-				t.Fatalf("RAILSE_HOME=%s %v: notify 建议也应带 --socket:\n%s", env, extra, out)
+			if !strings.Contains(out, "railse setup codex-notify --dir "+hooksconf.ShellQuote(data)) {
+				t.Fatalf("RAILSE_HOME=%s %v: notify 建议也应带 --dir:\n%s", env, extra, out)
 			}
 		}
 	}
@@ -819,7 +820,7 @@ func TestSetupHooksLocalLinkedToSharedIsNotMigratedAway(t *testing.T) {
 	}
 }
 
-// 在家目录里运行（项目就是 ~，或项目的 settings.json 链到 ~/.claude/settings.json）：那是 Claude Code 的用户级配置，
+// 在家目录里装项目级（--project 是 ~，或项目的 settings.json 链到 ~/.claude/settings.json）：那是 Claude Code 的用户级配置，
 // 迁走会让所有项目失去钩子，跳过迁移并警告，照样装好 settings.local.json。
 func TestSetupHooksDoesNotMigrateUserSettings(t *testing.T) {
 	home, _ := os.MkdirTemp("", "rs")
@@ -852,9 +853,9 @@ func TestSetupHooksDoesNotMigrateUserSettings(t *testing.T) {
 		}
 	}
 	t.Chdir(home)
-	out, errOut := setup() // --project 默认是当前目录，即 ~
+	out, errOut := setup("--project", ".") // 当前目录，即 ~
 	check("在 ~ 下运行", out, errOut, filepath.Join(home, ".claude", "settings.local.json"))
-	out, errOut = setup("--dry-run")
+	out, errOut = setup("--project", ".", "--dry-run")
 	if strings.Contains(out, "迁走") || !strings.Contains(errOut, "用户级配置") {
 		t.Fatalf("dry-run 也不显示迁移: %q %q", out, errOut)
 	}
@@ -869,7 +870,7 @@ func TestSetupHooksDoesNotMigrateUserSettings(t *testing.T) {
 	}
 	// 用户级配置里没有 Railse 的条目：不警告
 	os.WriteFile(userSettings, []byte(`{"model":"opus"}`), 0o644)
-	if _, errOut = setup(); strings.Contains(errOut, "用户级配置") {
+	if _, errOut = setup("--project", "."); strings.Contains(errOut, "用户级配置") {
 		t.Fatalf("没有要迁的就不警告: %q", errOut)
 	}
 }
@@ -881,6 +882,386 @@ func readFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// writeTestFile 建好上级目录再写 path（0644）。
+func writeTestFile(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// userLevelEnv 给不带 --project 的 setup hooks 一个临时家目录（RAILSE_HOME 清空），并把当前目录换到其中一个空目录：
+// 用户级的配置写进这个家目录，当前目录里应什么都不写。
+func userLevelEnv(t *testing.T) (home, cwd string) {
+	t.Helper()
+	home, _ = os.MkdirTemp("", "rs")
+	t.Cleanup(func() { os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	t.Setenv("RAILSE_HOME", "")
+	cwd = filepath.Join(home, "proj")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+	return home, cwd
+}
+
+// backups 列出 path 旁边的备份 <文件名>.railse-bak-*。
+func backups(t *testing.T, path string) []string {
+	t.Helper()
+	m, err := filepath.Glob(path + ".railse-bak-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// 不给 --project：Claude、Gemini 写用户级 ~/.claude/settings.json、~/.gemini/settings.json（对所有项目生效），Codex 照旧写
+// ~/.codex/hooks.json；写的就是 Merge 进 Plan 的结果，已有的用户设置（别的键、别人的钩子）原样保留；当前目录里什么都不写。
+func TestSetupHooksDefaultsToUserLevel(t *testing.T) {
+	home, cwd := userLevelEnv(t)
+	claude, gemini, codex := hooksconf.ClaudeUserPath(home), hooksconf.GeminiUserPath(home), hooksconf.CodexPath(home)
+	origClaude := `{"model":"opus","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"my-guard"}]}]}}`
+	origGemini := `{"theme":"dark","hooks":{"enabled":true}}`
+	writeTestFile(t, claude, origClaude)
+	writeTestFile(t, gemini, origGemini)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
+		t.Fatalf("setup hooks: %d %s", code, errOut.String())
+	}
+	for _, tc := range []struct{ cli, path, orig string }{{"claude", claude, origClaude}, {"gemini", gemini, origGemini}, {"codex", codex, ""}} {
+		want, err := hooksconf.Merge([]byte(tc.orig), "/opt/railse", hooksconf.Plan(tc.cli, "/opt/railse", ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := readFile(t, tc.path); !bytes.Equal(got, want) {
+			t.Fatalf("%s 应是 Merge 进 Plan 的结果:\n%s\n---\n%s", tc.path, got, want)
+		}
+	}
+	if doc := readJSON(t, claude); doc["model"] != "opus" || !strings.Contains(string(readFile(t, claude)), "my-guard") {
+		t.Fatalf("用户已有的 Claude 设置与钩子应保留: %+v", doc)
+	}
+	if hooks := readJSON(t, gemini)["hooks"].(map[string]any); hooks["enabled"] != true || readJSON(t, gemini)["theme"] != "dark" {
+		t.Fatalf("用户已有的 Gemini 设置应保留: %+v", hooks)
+	}
+	if ents, _ := os.ReadDir(cwd); len(ents) != 0 {
+		t.Fatalf("不给 --project 时当前目录里不该写东西: %v", ents)
+	}
+	for _, p := range []string{claude, gemini} {
+		if !strings.Contains(out.String(), "已写入 "+p+"（用户级，对所有项目生效）") {
+			t.Fatalf("应说明 %s 是用户级、对所有项目生效:\n%s", p, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "迁走") || errOut.Len() != 0 {
+		t.Fatalf("用户级不做迁移，也不该警告: out=%q err=%q", out.String(), errOut.String())
+	}
+}
+
+// 用户级配置第一次被改之前备份一次：已有的非空文件 → 一个 0600 的 <文件>.railse-bak-<时间>，内容是原文件；
+// 内容没变、已有备份（哪怕内容又变了）、文件原来不存在或是空的，都不再备份。项目级不备份。
+func TestSetupHooksBacksUpUserSettingsOnce(t *testing.T) {
+	home, _ := userLevelEnv(t)
+	claude, gemini := hooksconf.ClaudeUserPath(home), hooksconf.GeminiUserPath(home)
+	orig := `{"model":"opus"}`
+	writeTestFile(t, claude, orig)
+	setup := func(args ...string) string {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		args = append([]string{"setup", "hooks"}, args...)
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatalf("%v: %d %s", args, code, errOut.String())
+		}
+		return out.String()
+	}
+	out := setup("--claude", "--gemini", "--bin", "/opt/railse")
+	baks := backups(t, claude)
+	if len(baks) != 1 {
+		t.Fatalf("应有一个备份: %v", baks)
+	}
+	if !regexp.MustCompile(`^settings\.json\.railse-bak-\d{8}-\d{6}$`).MatchString(filepath.Base(baks[0])) {
+		t.Fatalf("备份名应是 <文件>.railse-bak-<年月日-时分秒>: %s", baks[0])
+	}
+	if got := string(readFile(t, baks[0])); got != orig {
+		t.Fatalf("备份内容应是原文件: %q", got)
+	}
+	if st, _ := os.Stat(baks[0]); st.Mode().Perm() != 0o600 {
+		t.Fatalf("备份应是 0600, 得到 %o", st.Mode().Perm())
+	}
+	if !strings.Contains(out, "已备份 "+claude+" 到 "+baks[0]) {
+		t.Fatalf("应打印备份到了哪里:\n%s", out)
+	}
+	if b := backups(t, gemini); len(b) != 0 {
+		t.Fatalf("原来不存在的文件不备份: %v", b)
+	}
+	// 再跑一次：内容不变，不备份
+	if out = setup("--claude", "--bin", "/opt/railse"); strings.Contains(out, "已备份") || len(backups(t, claude)) != 1 {
+		t.Fatalf("内容不变时不该再备份: %v\n%s", backups(t, claude), out)
+	}
+	// 换 --bin，内容变了：已有备份，不再备份
+	if out = setup("--claude", "--bin", "/opt/new/railse"); strings.Contains(out, "已备份") || len(backups(t, claude)) != 1 {
+		t.Fatalf("已有备份时不该再备份: %v\n%s", backups(t, claude), out)
+	}
+	if !strings.Contains(string(readFile(t, claude)), "/opt/new/railse hook claude") {
+		t.Fatal("换了 --bin 应照样写入")
+	}
+	// 空文件：没有可丢的内容，不备份
+	writeTestFile(t, gemini, "")
+	if out = setup("--gemini", "--bin", "/opt/railse"); strings.Contains(out, "已备份") || len(backups(t, gemini)) != 0 {
+		t.Fatalf("空文件不该备份: %v\n%s", backups(t, gemini), out)
+	}
+	// 项目级不备份
+	proj := filepath.Join(home, "p")
+	local, _ := hooksconf.ClaudePaths(proj)
+	writeTestFile(t, local, orig)
+	writeTestFile(t, hooksconf.GeminiPath(proj), orig)
+	if out = setup("--project", proj, "--claude", "--gemini", "--bin", "/opt/railse"); strings.Contains(out, "已备份") || len(backups(t, local)) != 0 || len(backups(t, hooksconf.GeminiPath(proj))) != 0 {
+		t.Fatalf("项目级不该备份:\n%s", out)
+	}
+}
+
+// 用户级文件本来就是这次要写的内容（旁边也没有备份）：内容没变，不备份。
+func TestSetupHooksNoBackupWhenUnchanged(t *testing.T) {
+	home, _ := userLevelEnv(t)
+	claude := hooksconf.ClaudeUserPath(home)
+	want, err := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, claude, string(want))
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
+		t.Fatalf("setup hooks: %d %s", code, errOut.String())
+	}
+	if b := backups(t, claude); len(b) != 0 || strings.Contains(out.String(), "已备份") {
+		t.Fatalf("内容没变时不该备份: %v\n%s", b, out.String())
+	}
+	if !bytes.Equal(readFile(t, claude), want) {
+		t.Fatal("内容应保持不变")
+	}
+}
+
+// 项目级写入的文件（解开链接后）就是用户级配置时（--project 是家目录时的 Gemini、项目的 settings.local.json 链到
+// ~/.claude/settings.json）：同样第一次改它之前备份一次，备份放在用户级配置旁边，已有备份就不再备份。
+func TestSetupHooksBacksUpUserFileViaProject(t *testing.T) {
+	home, _ := userLevelEnv(t)
+	setup := func(args ...string) string {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		args = append([]string{"setup", "hooks"}, args...)
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatalf("%v: %d %s", args, code, errOut.String())
+		}
+		return out.String()
+	}
+	gemini := hooksconf.GeminiUserPath(home)
+	writeTestFile(t, gemini, `{"theme":"dark"}`)
+	out := setup("--project", home, "--gemini", "--bin", "/opt/railse")
+	baks := backups(t, gemini)
+	if len(baks) != 1 || string(readFile(t, baks[0])) != `{"theme":"dark"}` || !strings.Contains(out, "已备份 "+gemini+" 到 "+baks[0]) {
+		t.Fatalf("--project ~ 时改的就是用户级的 Gemini 配置，应备份一次: %v\n%s", baks, out)
+	}
+	if out = setup("--project", home, "--gemini", "--bin", "/opt/new/railse"); strings.Contains(out, "已备份") || len(backups(t, gemini)) != 1 {
+		t.Fatalf("已有备份时不该再备份: %v\n%s", backups(t, gemini), out)
+	}
+
+	if runtime.GOOS == "windows" {
+		t.Skip("符号链接用例只在 Unix 上跑")
+	}
+	claude := hooksconf.ClaudeUserPath(home)
+	writeTestFile(t, claude, `{"model":"opus"}`)
+	proj := filepath.Join(home, "p")
+	local, _ := hooksconf.ClaudePaths(proj)
+	os.MkdirAll(filepath.Dir(local), 0o755)
+	if err := os.Symlink(claude, local); err != nil {
+		t.Fatal(err)
+	}
+	out = setup("--project", proj, "--claude", "--bin", "/opt/railse")
+	baks = backups(t, claude)
+	if len(baks) != 1 || string(readFile(t, baks[0])) != `{"model":"opus"}` || !strings.Contains(out, "已备份 "+claude+" 到 "+baks[0]) {
+		t.Fatalf("项目的 settings.local.json 链到用户级配置时应备份用户级配置: %v\n%s", baks, out)
+	}
+	if b := backups(t, local); len(b) != 0 {
+		t.Fatalf("备份应放在用户级配置旁边，不放在项目里: %v", b)
+	}
+}
+
+// --dry-run 不备份不写，只说会先备份到哪里；用户级配置是符号链接（dotfiles）时备份内容取链接指向的文件，
+// 备份放在链接旁边（~/.claude/ 下），不放进 dotfiles 目录；备份不了就不写这个文件、退出 1。
+func TestSetupHooksUserBackupDryRunAndSymlink(t *testing.T) {
+	home, _ := userLevelEnv(t)
+	claude := hooksconf.ClaudeUserPath(home)
+	orig := `{"model":"opus"}`
+	writeTestFile(t, claude, orig)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--claude", "--bin", "/opt/railse", "--dry-run"}, &out, &errOut); code != 0 {
+		t.Fatalf("dry-run: %d %s", code, errOut.String())
+	}
+	if got := string(readFile(t, claude)); got != orig || len(backups(t, claude)) != 0 {
+		t.Fatalf("dry-run 不该写也不该备份: %q %v", got, backups(t, claude))
+	}
+	if !strings.Contains(out.String(), "会先备份到 "+claude+".railse-bak-") {
+		t.Fatalf("dry-run 应说明会先备份到哪里:\n%s", out.String())
+	}
+
+	if runtime.GOOS == "windows" {
+		t.Skip("符号链接用例只在 Unix 上跑")
+	}
+	dotfiles := filepath.Join(home, "dotfiles")
+	real := filepath.Join(dotfiles, "claude.json")
+	writeTestFile(t, real, `{"model":"sonnet"}`)
+	os.Remove(claude)
+	if err := os.Symlink(real, claude); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := run([]string{"setup", "hooks", "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
+		t.Fatalf("setup hooks: %d %s", code, errOut.String())
+	}
+	baks := backups(t, claude)
+	if len(baks) != 1 || string(readFile(t, baks[0])) != `{"model":"sonnet"}` {
+		t.Fatalf("备份应在链接旁边、内容取链接指向的文件: %v", baks)
+	}
+	if st, err := os.Lstat(baks[0]); err != nil || !st.Mode().IsRegular() {
+		t.Fatalf("备份应是普通文件: %v %v", st, err)
+	}
+	if ents, _ := os.ReadDir(dotfiles); len(ents) != 1 {
+		t.Fatalf("dotfiles 目录里不该有备份或临时文件: %v", ents)
+	}
+	if st, err := os.Lstat(claude); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("符号链接应保留: %v %v", st, err)
+	}
+	if !strings.Contains(string(readFile(t, real)), "/opt/railse hook claude") {
+		t.Fatal("链接指向的文件应写入钩子")
+	}
+
+	// 备份不了（链接所在的 ~/.claude 不可写，链接指向的文件却可写）：不写这个文件，退出 1
+	if os.Getuid() == 0 {
+		t.Skip("root 不受目录权限限制")
+	}
+	for _, b := range baks {
+		os.Remove(b)
+	}
+	writeTestFile(t, real, `{"model":"haiku"}`)
+	if err := os.Chmod(filepath.Dir(claude), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Dir(claude), 0o755) })
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"setup", "hooks", "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 1 {
+		t.Fatalf("备份失败应退出 1: %d %q %q", code, out.String(), errOut.String())
+	}
+	if got := string(readFile(t, real)); got != `{"model":"haiku"}` {
+		t.Fatalf("备份失败时不该写这个文件: %s", got)
+	}
+	if !strings.Contains(errOut.String(), "备份") || strings.Contains(out.String(), "已写入") {
+		t.Fatalf("应说明备份失败、没有写入: out=%q err=%q", out.String(), errOut.String())
+	}
+}
+
+// 给了 --project：照旧写项目级，用户级的 ~/.claude/settings.json、~/.gemini/settings.json 不碰。
+func TestSetupHooksProjectLeavesUserLevelAlone(t *testing.T) {
+	home, _ := userLevelEnv(t)
+	claude, gemini := hooksconf.ClaudeUserPath(home), hooksconf.GeminiUserPath(home)
+	writeTestFile(t, claude, `{"model":"opus"}`)
+	proj := filepath.Join(home, "p")
+	os.MkdirAll(proj, 0o755)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--project", proj, "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
+		t.Fatalf("setup hooks --project: %d %s", code, errOut.String())
+	}
+	local, _ := hooksconf.ClaudePaths(proj)
+	for _, p := range []string{local, hooksconf.GeminiPath(proj)} {
+		if ins, _ := hooksconf.Inspect(readFile(t, p), "/opt/railse"); len(ins.Events) == 0 {
+			t.Fatalf("%s 应装好钩子", p)
+		}
+	}
+	if got := string(readFile(t, claude)); got != `{"model":"opus"}` || len(backups(t, claude)) != 0 {
+		t.Fatalf("给了 --project 时不该碰用户级的 Claude 配置: %s %v", got, backups(t, claude))
+	}
+	if _, err := os.Stat(gemini); !os.IsNotExist(err) {
+		t.Fatal("给了 --project 时不该写用户级的 Gemini 配置")
+	}
+	if strings.Contains(out.String(), "已写入 "+local+"（用户级") {
+		t.Fatalf("项目级不该说成用户级:\n%s", out.String())
+	}
+}
+
+// 从 0.1.0 升级：当前目录的项目里用 --project 装过，再按用户级装。stderr 逐个文件提醒项目级还有 Railse 的条目：Gemini 会触发两次、
+// Claude 条目不同时也会两次，建议删掉；Claude 两边条目完全相同时说只跑一次、可删可不删。项目级文件不改；只看这次装的 CLI；
+// 在家目录里跑时 .claude/settings.json、.gemini/settings.json 就是用户级那份，不算；没有项目级条目时不提醒。
+func TestSetupHooksUserLevelRemindsProjectLevel(t *testing.T) {
+	home, cwd := userLevelEnv(t)
+	local, shared := hooksconf.ClaudePaths(cwd)
+	gemini := hooksconf.GeminiPath(cwd)
+	hooks := func(args ...string) (string, string) {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		if code := run(append([]string{"setup", "hooks"}, args...), &out, &errOut); code != 0 {
+			t.Fatalf("setup hooks %v: %d %s", args, code, errOut.String())
+		}
+		return out.String(), errOut.String()
+	}
+	if _, errOut := hooks("--bin", "/opt/railse"); errOut != "" {
+		t.Fatalf("项目里没装过时不该提醒: %s", errOut)
+	}
+	hooks("--project", cwd, "--bin", "/opt/railse") // 0.1.0 的装法
+	before := map[string][]byte{local: readFile(t, local), gemini: readFile(t, gemini)}
+	_, errOut := hooks("--bin", "/opt/railse")
+	lines := strings.Split(strings.TrimSuffix(errOut, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("应各提醒一行（Claude、Gemini）:\n%s", errOut)
+	}
+	if l := lines[0]; !strings.Contains(l, local) || !strings.Contains(l, "完全相同") || !strings.Contains(l, "只跑一次") || !strings.Contains(l, "可删可不删") {
+		t.Fatalf("Claude 两边条目相同时说只跑一次、可删可不删: %s", l)
+	}
+	if l := lines[1]; !strings.Contains(l, gemini) || !strings.Contains(l, "触发两次") || !strings.Contains(l, "删掉其中 Railse 的条目") {
+		t.Fatalf("Gemini 应提醒会触发两次、建议删掉: %s", l)
+	}
+	for p, b := range before {
+		if !bytes.Equal(readFile(t, p), b) {
+			t.Fatalf("提醒不该改项目级文件 %s", p)
+		}
+	}
+	// Claude 两边条目不同（项目级是旧路径的 railse、旧位置 settings.json 也有）：会触发两次，建议删掉；只装 Claude 时不提 Gemini
+	hooks("--project", cwd, "--claude", "--bin", "/old/railse")
+	writeTestFile(t, shared, string(readFile(t, local)))
+	_, errOut = hooks("--claude", "--bin", "/opt/railse")
+	if strings.Contains(errOut, gemini) || strings.Count(errOut, "\n") != 2 {
+		t.Fatalf("只装 Claude 时只提醒 Claude 的两个项目级文件:\n%s", errOut)
+	}
+	for _, p := range []string{local, shared} {
+		if !strings.Contains(errOut, p+" 里也有 Railse 的钩子，与用户级的条目不同，Claude Code 会触发两次：建议删掉其中 Railse 的条目") {
+			t.Fatalf("%s 的条目不同时应提醒会触发两次:\n%s", p, errOut)
+		}
+	}
+	// 在家目录里跑：.claude/settings.json、.gemini/settings.json 就是用户级那份，不提醒
+	t.Chdir(home)
+	if _, errOut = hooks("--bin", "/opt/railse"); errOut != "" {
+		t.Fatalf("在家目录里跑不该把用户级文件当项目级提醒: %s", errOut)
+	}
+}
+
+// 取不到家目录又没给 --project：装不了用户级，退出 1 并提示用 --project 装项目级；给了 --project 照常装。
+func TestSetupHooksNoHomeNeedsProject(t *testing.T) {
+	_, cwd := userLevelEnv(t)
+	t.Setenv("HOME", "")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "--project") {
+		t.Fatalf("没有家目录、没给 --project 应退出 1 并提示 --project: %d %q", code, errOut.String())
+	}
+	if ents, _ := os.ReadDir(cwd); len(ents) != 0 {
+		t.Fatalf("不该写任何东西: %v", ents)
+	}
+	errOut.Reset()
+	if code := run([]string{"setup", "hooks", "--project", cwd, "--claude", "--gemini", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
+		t.Fatalf("给了 --project 时不需要家目录: %d %s", code, errOut.String())
+	}
 }
 
 // needUserAutostart 在装不了用户级托管的环境里跳过：开机自启只有 macOS 与 Linux，root 装用户级托管会被拒绝。
@@ -1048,6 +1429,116 @@ func TestSetupAllEnrollsHooksAutostartAndDoctor(t *testing.T) {
 	}
 	if code := run([]string{"setup", "all", "--project", f.proj}, &out, &errOut); code != 2 {
 		t.Fatalf("缺 --hub/--token 应退出 2: %d", code)
+	}
+}
+
+// setup all 不给 --project：钩子装用户级，体检也不带 --project（doctor 用它自己的默认）；给了 --project 才装成那个项目的项目级，
+// 用户级的不动，体检带上 --project。
+func TestSetupAllHooksUserLevelUnlessProject(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	t.Chdir(f.proj)
+	claude, gemini := hooksconf.ClaudeUserPath(f.home), hooksconf.GeminiUserPath(f.home)
+	var out, errOut bytes.Buffer
+	args := []string{"setup", "all", "--dir", f.dir, "--bin", f.bin, "--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"}
+	if code := run(args, &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	for _, p := range []string{claude, gemini, hooksconf.CodexPath(f.home)} {
+		if ins, _ := hooksconf.Inspect(readFile(t, p), f.bin); len(ins.Events) == 0 {
+			t.Fatalf("不给 --project 时应装用户级的 %s", p)
+		}
+	}
+	for _, d := range []string{".claude", ".gemini"} {
+		if _, err := os.Stat(filepath.Join(f.proj, d)); !os.IsNotExist(err) {
+			t.Fatalf("不给 --project 时不该写项目里的 %s", d)
+		}
+	}
+	s := out.String()
+	for _, want := range []string{"[ok]    Claude Code 钩子：" + claude, "[ok]    Gemini 钩子：" + gemini, "再跑 railse doctor --dir " + f.dir + " --bin " + f.bin + " 复查"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("输出缺 %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "doctor --project") {
+		t.Fatalf("不给 --project 时复查命令不该带 --project:\n%s", s)
+	}
+	before := readFile(t, claude)
+	out.Reset()
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("setup all --project: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	local, _ := hooksconf.ClaudePaths(f.proj)
+	for _, p := range []string{local, hooksconf.GeminiPath(f.proj)} {
+		if ins, _ := hooksconf.Inspect(readFile(t, p), f.bin); len(ins.Events) == 0 {
+			t.Fatalf("给了 --project 时应装项目级的 %s", p)
+		}
+	}
+	if !bytes.Equal(readFile(t, claude), before) {
+		t.Fatal("给了 --project 时不该动用户级的配置")
+	}
+	// 两处的命令一样：Claude Code 只跑一次，Gemini 仍报会触发两次
+	if s = out.String(); !strings.Contains(s, "[ok]    Claude Code 钩子："+claude+"；"+local+" 也装了相同的钩子") ||
+		!strings.Contains(s, "[warn]  Gemini 钩子："+gemini+"；项目级 "+hooksconf.GeminiPath(f.proj)+" 也装了，钩子会触发两次") ||
+		!strings.Contains(s, "再跑 railse doctor --project "+f.proj+" --dir ") {
+		t.Fatalf("体检应带 --project，并报出两处都装了:\n%s", s)
+	}
+}
+
+// 在不是 git 仓库的目录（如 ~/Downloads）里跑 setup all、不给 --project：体检的项目根只告知（skip），不建议 git init，
+// 复查命令也不带 --project；给了 --project 才按那个项目查。
+func TestSetupAllDoctorOnlyInformsAboutCwd(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	dl := filepath.Join(f.home, "Downloads")
+	if err := os.MkdirAll(dl, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dl)
+	root, _ := filepath.EvalSymlinks(dl)
+	var out, errOut bytes.Buffer
+	args := []string{"setup", "all", "--dir", f.dir, "--bin", f.bin, "--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"}
+	if code := run(args, &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "[skip]  项目根：目录 "+root+" 不是 git 仓库，在这里起 agent 会按当前目录当项目根\n") || strings.Contains(s, "git init") {
+		t.Fatalf("不给 --project 时体检对当前目录只告知、不建议 git init:\n%s", s)
+	}
+	if strings.Contains(s, "doctor --project") {
+		t.Fatalf("复查命令不该带 --project:\n%s", s)
+	}
+}
+
+// setup all 不给 --bin：setup hooks 也不带 --bin（它默认就是当前程序），末尾的 Codex 提醒与体检的提示是同一条命令；
+// 给了 --bin 才原样带上。
+func TestSetupAllPassesBinToHooksOnlyWhenGiven(t *testing.T) {
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, _ = filepath.Abs(exe)
+	var out, errOut bytes.Buffer
+	args := []string{"setup", "all", "--dir", f.dir, "--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"}
+	if code := run(args, &out, &errOut); code != 0 {
+		t.Fatalf("setup all: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	fix := "railse setup codex-notify --dir " + hooksconf.ShellQuote(f.dir)
+	s := out.String()
+	if !strings.Contains(s, "notify（完成与提问事件）请运行 "+fix+"（") || !strings.Contains(s, "修复：运行 "+fix+"（") || strings.Contains(s, fix+" --bin") {
+		t.Fatalf("不给 --bin 时 Codex 提醒与体检应给同一条命令（%s）:\n%s", fix, s)
+	}
+	if got := hookCommand(t, hooksconf.ClaudeUserPath(f.home), "Stop"); !strings.HasPrefix(got, hooksconf.ShellQuote(exe)+" hook claude") {
+		t.Fatalf("不给 --bin 时钩子指向当前程序 %s: %q", exe, got)
+	}
+	out.Reset()
+	if code := run([]string{"setup", "all", "--dir", f.dir, "--bin", f.bin, "--no-autostart"}, &out, &errOut); code != 0 {
+		t.Fatalf("setup all --bin: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "请运行 "+fix+" --bin "+hooksconf.ShellQuote(f.bin)+"（") {
+		t.Fatalf("给了 --bin 时 Codex 提醒带上它:\n%s", out.String())
 	}
 }
 
@@ -1240,8 +1731,9 @@ func TestSetupAllSkipsEnrollWhenMachineExists(t *testing.T) {
 	os.WriteFile(mpath, []byte("{"), 0o600)
 	os.RemoveAll(filepath.Join(f.proj, ".claude"))
 	errOut.Reset()
-	if code := run(f.args("--no-autostart"), &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "第 1 步") || !strings.Contains(errOut.String(), "--force") {
-		t.Fatalf("坏的 machine.json: %d %q", code, errOut.String())
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "第 1 步") ||
+		!strings.Contains(errOut.String(), "用 railse setup all --force --project "+f.proj+" --dir "+f.dir+" --bin "+f.bin+" 重新接入") {
+		t.Fatalf("坏的 machine.json 应给出照抄得了的重新接入命令: %d %q", code, errOut.String())
 	}
 	if _, err := os.Stat(filepath.Join(f.proj, ".claude")); !os.IsNotExist(err) {
 		t.Fatal("第 1 步失败后不该装钩子")
