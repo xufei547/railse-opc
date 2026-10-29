@@ -471,7 +471,11 @@ func localHubCheck(o Options) Check {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&v); err != nil || v.Version == "" {
 		return Check{ID: id, Name: name, Status: Warn, Detail: endpoint + " 回的不是 hub 的版本信息", Hint: notHub}
 	}
-	return Check{ID: id, Name: name, Status: OK, Detail: fmt.Sprintf("%s，hub 版本 %s", origin, v.Version)}
+	detail := fmt.Sprintf("%s，hub 版本 %s", origin, v.Version)
+	if lh.Provider == "tailscale" { // 本机经 MagicDNS 解析到自己的 tailnet 地址，访问到不等于公网上打得开
+		detail += "（从本机经 tailnet 访问到，没经过 Funnel 的公网入口；公网上打不打得开用手机 4G 验证）"
+	}
+	return Check{ID: id, Name: name, Status: OK, Detail: detail}
 }
 
 // dropWarnings 去掉 tailscale 输出里以 Warning: 开头的行（如客户端与 tailscaled 版本不一致），摘要取真正的报错。

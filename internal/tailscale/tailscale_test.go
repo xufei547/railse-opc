@@ -59,7 +59,7 @@ func TestStatusParsesSelf(t *testing.T) {
 	}
 }
 
-func TestStatusNeedsLoginIsError(t *testing.T) {
+func TestStatusNeedsLoginOnlyParses(t *testing.T) {
 	c, _ := fakeCLI(t, `{"BackendState":"NeedsLogin","Self":{"DNSName":"","Online":false}}`, "", "", 0)
 	st, err := c.Status(context.Background())
 	if err != nil || st.BackendState != "NeedsLogin" {
@@ -189,8 +189,8 @@ func TestExecTimesOut(t *testing.T) {
 	old := Timeout
 	Timeout = 200 * time.Millisecond
 	t.Cleanup(func() { Timeout = old })
-	if _, err := Exec(context.Background(), p); err == nil || !strings.Contains(err.Error(), "超过") {
-		t.Fatalf("应超时: %v", err)
+	if _, err := Exec(context.Background(), p); err == nil || !strings.Contains(err.Error(), "超过") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("应超时（错误链上是 context.DeadlineExceeded）: %v", err)
 	}
 }
 

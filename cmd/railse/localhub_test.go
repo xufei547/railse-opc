@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,6 +118,17 @@ func TestHubAnswersOnlyForRailseHub(t *testing.T) {
 	if _, ok := hubAnswers(freePort(t)); ok {
 		t.Fatal("没人监听不算")
 	}
+	// 有 version 却没有协议号（或协议号不是正数）的，不是 railse hub
+	for _, body := range []string{`{"version":"1.0"}`, `{"version":"1.0","agent_proto":0}`, `{"version":"1.0","agent_proto":"1"}`} {
+		fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) }))
+		_, pf, _ := net.SplitHostPort(strings.TrimPrefix(fake.URL, "http://"))
+		portF, _ := strconv.Atoi(pf)
+		if _, ok := hubAnswers(portF); ok {
+			fake.Close()
+			t.Fatalf("%s 不算 hub 的应答", body)
+		}
+		fake.Close()
+	}
 	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, h.http.URL+"/api/version", http.StatusFound)
 	}))
@@ -162,6 +174,25 @@ func TestEnsureHubPassword(t *testing.T) {
 			t.Fatalf("输出泄露了密码: %q", o)
 		}
 	}
+	// 在终端里（这里用同是字符设备的 /dev/null）：setup 打自己的说明（屏幕会回显、不想回显怎么先设好），不打 railse hub password 那句
+	// “read -s 读进变量再通过管道传入”（setup 不在终端里就不问，管道传不进来）
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	dir3 := tempDir(t)
+	st3, _ := store.Open(filepath.Join(dir3, "hub.db"))
+	defer st3.Close()
+	out.Reset()
+	errOut.Reset()
+	if _, err := ensureHubPassword(hub.DefaultConfig(dir3), st3, null, true, &out, &errOut); err == nil {
+		t.Fatal("没读到密码应报错")
+	}
+	if all := out.String() + errOut.String(); strings.Contains(all, "通过管道传入") || !strings.Contains(out.String(), "屏幕会回显") ||
+		!strings.Contains(out.String(), "read -s PW") || !strings.Contains(out.String(), "railse hub password --dir "+dir3) {
+		t.Fatalf("setup 应打自己的说明: stdout=%q stderr=%q", out.String(), errOut.String())
+	}
 	// 太短：报错（同 railse hub password 的规则，至少 8 个字符）
 	dir2 := tempDir(t)
 	st2, _ := store.Open(filepath.Join(dir2, "hub.db"))
@@ -204,6 +235,11 @@ func TestProxyNote(t *testing.T) {
 	if n := proxyNote("darwin", env(nil), fake("SOCKSEnable : 1\n", nil), "https://x.ts.net"); n == "" {
 		t.Fatal("只有 SOCKS 也该提醒")
 	}
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
+		if n := proxyNote("linux", env(map[string]string{k: "socks5://127.0.0.1:7897"}), noRun, "https://x.ts.net"); n == "" {
+			t.Fatalf("%s 设了也该提醒", k)
+		}
+	}
 }
 
 func TestWaitHub(t *testing.T) {
@@ -223,19 +259,33 @@ func TestWaitHub(t *testing.T) {
 
 func TestWaitHubRetriesUntilHubStarts(t *testing.T) {
 	port := freePort(t)
+	var mu sync.Mutex
+	var srv *http.Server
+	started := make(chan struct{})
 	go func() {
+		defer close(started)
 		time.Sleep(300 * time.Millisecond)
 		l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
 		if err != nil {
+			t.Errorf("起假 hub: %v", err)
 			return
 		}
-		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(`{"version":"x","agent_proto":1}`))
 		})}
-		go srv.Serve(l)
-		time.Sleep(5 * time.Second)
-		srv.Close()
+		mu.Lock()
+		srv = s
+		mu.Unlock()
+		go s.Serve(l)
 	}()
+	t.Cleanup(func() { // 等起假 hub 的 goroutine 做完再关它：测试结束之后不留着监听
+		<-started
+		mu.Lock()
+		defer mu.Unlock()
+		if srv != nil {
+			srv.Close()
+		}
+	})
 	if v, ok := waitHub(port, 3*time.Second); !ok || v != "x" {
 		t.Fatalf("应在 hub 起来后应答: %q %v", v, ok)
 	}

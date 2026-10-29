@@ -206,10 +206,10 @@ tailscale funnel --bg 8787    # 在另一个终端里，hub 应答之后再开
 
 `hub run` 是前台进程，关了终端 hub 就停了；长期用把它换成 `railse setup autostart --hub -- --listen 127.0.0.1:8787 --public-url https://<机器名>.<tailnet>.ts.net --trusted-proxy 127.0.0.1,::1`（托管、开机自启）。Funnel 放在最后：先确认 `curl http://127.0.0.1:8787/api/version` 回的是 hub 的版本，免得把 8787 上别的程序（如 wrangler dev、RStudio Server 的默认端口也是它）开到公网。
 
-- **Funnel 的事实。** 只开 443（Funnel 还能开 8443、10000，railse 只用 443）。Funnel 按整个 `<机器名>:443` 开：443 上已有的别的 `tailscale serve` 路径会一起公开（`setup all --local-hub` 见到这种情况会停下）。证书由 Tailscale 签发。入口在 Tailscale 的服务器上，公网流量先到那里再转进本机，所以本机不用开端口、不用公网 IP。机器名就是域名：`https://<机器名>.<tailnet>.ts.net`，改机器名等于换域名，推送订阅与主屏幕图标要重来。tailnet 要先在管理台开通 HTTPS 证书与 Funnel。
+- **Funnel 的事实。** railse 只用 443。Funnel 按整个 `<机器名>:443` 开：443 上已有的别的 `tailscale serve` 路径会一起公开（`setup all --local-hub` 见到这种情况会停下）。证书由 Tailscale 签发。入口在 Tailscale 的服务器上，公网流量先到那里再转进本机，所以本机不用开端口、不用公网 IP。机器名就是域名：`https://<机器名>.<tailnet>.ts.net`，改机器名等于换域名，推送订阅与主屏幕图标要重来。tailnet 要先在管理台开通 HTTPS 证书与 Funnel。
 - **同 B。** Funnel 就是一个把 HTTPS 转到 `127.0.0.1:8787` 的反向代理：hub 只监听本机，所以 `--trusted-proxy 127.0.0.1,::1` 让 hub 认它送来的 `X-Forwarded-For`；`--public-url` 写 Funnel 的地址，推送随之启用，cookie 自动加 Secure。
-- **自己的隧道。** `railse setup all --local-hub --public-url https://…` 不开 Funnel，只托管 hub、接入守护进程。隧道要自己转到 `127.0.0.1:<端口>`，保留原 Host、转发 WebSocket、追加 `X-Forwarded-For`（同 B）。
-- **卸载。** `railse setup autostart --hub --uninstall`，`tailscale funnel --https=443 off`，数据目录 `~/.railse-hub` 不要了再删（含网页密码与推送密钥）。
+- **自己的隧道。** `railse setup all --local-hub --public-url https://…` 不开 Funnel，只托管 hub、接入守护进程（不需要 Tailscale）。隧道要自己转到 `127.0.0.1:<端口>`，保留原 Host、转发 WebSocket、追加 `X-Forwarded-For`（同 B）。
+- **卸载。** `railse setup autostart --hub --uninstall`（数据目录不在默认位置的加 `--dir <目录>`），`tailscale funnel --https=443 off`（关的是 443 上的整个 Funnel，有别的配置先核对），数据目录 `~/.railse-hub` 不要了再删（含网页密码与推送密钥）。
 
 ## 部署到 Fly.io
 

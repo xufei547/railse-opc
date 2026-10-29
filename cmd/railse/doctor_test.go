@@ -26,9 +26,9 @@ import (
 // fakeDoctorCLIs 让测试里的 doctor 不碰本机环境，经 runDoctor 体检的测试（如 setup all）都先调它：
 //   - 看不到任何 CLI（LookPath 一律找不到，RunCmd 被调到就算测试失败），免得在开发机上真的跑 claude、codex、gemini 的
 //     --version（慢，还可能往临时 HOME 里建目录），CI 上又是另一种结果；
-//   - tailscale 只认 fakeTailscale 记下的那一个假脚本（fakeTailscaleBin）：TailscalePath 找到的不是它（没换上假的，找到的是
-//     本机真的 tailscale）时当作找不到，结果不随开发机变；TailscaleRun 只放行这个假脚本的 serve status --json（交给 runDoctor
-//     接上的 tailscaleRun 跑），别的调用都算测试失败；
+//   - tailscale 只认 fakeTailscale 记下的那一个假脚本（fakeTailscaleBin）：没换上假的时 TailscalePath 直接当作找不到（不去找，
+//     也就不碰 TestMain 的兜底），找到的不是它时同样当作找不到，结果不随开发机变；TailscaleRun 只放行这个假脚本的
+//     serve status --json（交给 runDoctor 接上的 tailscaleRun 跑），别的调用都算测试失败；
 //   - HTTP 只放行回环 IP 的字面地址（hub.reachable 要连 127.0.0.1 上的测试 hub），别的主机（连 localhost 这样要解析的名字）
 //     直接报错，不做 DNS、不拨号，记进返回的 doctorGuard：本机 hub 的对外地址（如假 tailscale 给的 ts.net 域名，可能真有其机）
 //     绝不真的去连；
@@ -51,6 +51,9 @@ func fakeDoctorCLIs(t *testing.T) *doctorGuard {
 			t.Fatal("runDoctor 应接上 tailscaleFind 与 tailscaleRun")
 		}
 		o.TailscalePath = func() (string, error) {
+			if fakeTailscaleBin == "" {
+				return "", tailscale.ErrNotFound
+			}
 			p, err := find()
 			if err != nil {
 				return "", err

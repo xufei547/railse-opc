@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xufei547/railse-opc/internal/hooksconf"
 	"github.com/xufei547/railse-opc/internal/hub"
 	"github.com/xufei547/railse-opc/internal/hub/store"
 )
@@ -103,7 +104,8 @@ func localHubRunArgs(lh localHub) []string {
 	return []string{"--listen", "127.0.0.1:" + strconv.Itoa(lh.Port), "--public-url", lh.PublicURL, "--trusted-proxy", "127.0.0.1,::1"}
 }
 
-// hubAnswers 问 http://127.0.0.1:<port>/api/version：是 railse hub 时返回它的版本与 true。超时 2 秒，不跟随重定向。
+// hubAnswers 问 http://127.0.0.1:<port>/api/version：是 railse hub（有 version 与正的 agent_proto）时返回它的版本与 true。
+// 超时 2 秒，不跟随重定向。
 func hubAnswers(port int) (version string, ok bool) {
 	c := &http.Client{
 		Timeout:       2 * time.Second,
@@ -117,11 +119,13 @@ func hubAnswers(port int) (version string, ok bool) {
 	if resp.StatusCode != http.StatusOK {
 		return "", false
 	}
-	// 只认 version；协议是否一致由 doctor 的 hub.reachable 管，这里不比较 agent_proto。
+	// version 非空、agent_proto 是正数才认是 railse hub（别的服务碰巧也有 /api/version、回个 version 的不算）；
+	// 协议是否与本机一致由 doctor 的 hub.reachable 管，这里不比较
 	var v struct {
-		Version string `json:"version"`
+		Version    string `json:"version"`
+		AgentProto int    `json:"agent_proto"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&v); err != nil || v.Version == "" {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&v); err != nil || v.Version == "" || v.AgentProto <= 0 {
 		return "", false
 	}
 	return v.Version, true
@@ -141,12 +145,8 @@ func waitHub(port int, wait time.Duration) (string, bool) {
 	}
 }
 
-// setHubPassword 从 stdin 读一行设为密码（同 railse hub password），返回变更（删了多少订阅）。
-func setHubPassword(cfg hub.Config, st *store.Store, stdin io.Reader, stderr io.Writer) (store.PasswordChange, error) {
-	pw, err := readPassword(stdin, stderr)
-	if err != nil {
-		return store.PasswordChange{}, err
-	}
+// setHubPassword 把 pw 设为网页密码（railse hub password 与 setup 共用；长度等规则由 SetPassword 查），返回变更（删了多少订阅）。
+func setHubPassword(cfg hub.Config, st *store.Store, pw string) (store.PasswordChange, error) {
 	srv, err := hub.New(cfg, st, log.New(io.Discard, "", 0))
 	if err != nil {
 		return store.PasswordChange{}, err
@@ -155,6 +155,7 @@ func setHubPassword(cfg hub.Config, st *store.Store, stdin io.Reader, stderr io.
 }
 
 // ensureHubPassword：已有网页密码返回 false；没有时在终端里提示并设上返回 true，不是终端则报错。
+// 提示是 setup 自己的（不用 readPassword 那句“通过管道传入”：setup 不在终端里就不问，管道传不进来），说清屏幕会回显、不想回显怎么先设好。
 func ensureHubPassword(cfg hub.Config, st *store.Store, stdin io.Reader, terminal bool, stdout, stderr io.Writer) (bool, error) {
 	if _, ok, err := st.GetSetting("password_hash"); err != nil {
 		return false, err
@@ -164,8 +165,13 @@ func ensureHubPassword(cfg hub.Config, st *store.Store, stdin io.Reader, termina
 	if !terminal {
 		return false, fmt.Errorf("hub 还没设网页密码：先运行 railse hub password（--dir %s），或在终端里跑 setup", cfg.Dir)
 	}
-	fmt.Fprintln(stdout, "本机 hub 还没设网页密码，设一个（至少 8 个字符，手机登录用）：")
-	if _, err := setHubPassword(cfg, st, stdin, stderr); err != nil {
+	fmt.Fprintf(stdout, "本机 hub 还没设网页密码，在这里输入一个后回车（至少 8 个字符，手机登录用）。屏幕会回显；不想回显就 Ctrl-C，先这样设好再重跑：\n"+
+		"  read -s PW; printf '%%s\\n' \"$PW\" | railse hub password --dir %s; unset PW\n", hooksconf.ShellQuote(cfg.Dir))
+	pw, err := readPasswordLine(stdin)
+	if err != nil {
+		return false, err
+	}
+	if _, err := setHubPassword(cfg, st, pw); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -174,7 +180,7 @@ func ensureHubPassword(cfg hub.Config, st *store.Store, stdin io.Reader, termina
 // proxyNote 报告本机是否开着系统代理，返回给人看的一句提醒（空表示没开代理）。
 func proxyNote(goos string, getenv func(string) string, run func(name string, args ...string) (string, error), publicURL string) string {
 	on := false
-	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY"} {
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
 		if getenv(k) != "" {
 			on = true
 			break

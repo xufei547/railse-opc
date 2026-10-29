@@ -32,6 +32,7 @@ type localHubOpts struct {
 	Port      int    // 默认 8787
 	PublicURL string // 用户给的 --public-url（自己的隧道）；空则用 Tailscale Funnel
 	Terminal  bool   // stdin 是否终端（没密码时能不能问）
+	NeedToken bool   // 这次要接入本机守护进程：最后生成一次性接入码（已接入、不重新接入的不生成）
 	Stdin     io.Reader
 	Stdout    io.Writer
 	Stderr    io.Writer
@@ -55,7 +56,7 @@ var hubJobRunning = func(hubDir, bin string) bool {
 // 生成接入码。Funnel 放在最后：之前任何一步停下（不在终端没密码、设密码时 Ctrl-C、托管失败、没应答、端口被别的程序抢了）都不会留下
 // 一个指向不归 hub 管的端口的公网入口（Funnel 不随失败回滚）；Funnel 没开通而停下时 hub 已托管，但只监听 127.0.0.1，留着无害，
 // 重跑时走“已在跑、跳过托管”再开 Funnel。
-// 返回描述、接入码（只交给 agentEnroll，不打印）与要在结尾“注意”里说的话（如对外地址变了）。
+// 返回描述、接入码（NeedToken 时才生成，只交给 agentEnroll，不打印）与要在结尾“注意”里说的话（如对外地址变了）。
 // 任何一步失败返回错误，调用方按 fail(步骤名) 处理；Funnel 没在管理台开通时返回 tailscale.ErrFunnelNotEnabled（含开通链接）。
 // hub 只监听 127.0.0.1:<端口>，对外只经 Funnel（或用户自己的隧道）。输出里不带接入码与密码。
 // 托管用 runAutostart、查作业用 hubJobRunning，都按 runtime.GOOS；goos 只用于下面的前置拒绝与没应答时日志在哪儿的提示。
@@ -148,6 +149,11 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 		fmt.Fprintln(o.Stdout, note)
 		notes = append(notes, note)
 	}
+	// 从 Tailscale Funnel 换成自己的隧道：Funnel 不会自己关，旧的 ts.net 地址仍是公网入口。只提醒，不替用户关（443 上可能还有别的配置）
+	if had && old.Provider == "tailscale" && lh.Provider == "custom" {
+		notes = append(notes, fmt.Sprintf("之前用的 Tailscale Funnel 还开着：%s 仍是公网入口（转到本机 127.0.0.1:%d）；不用了就运行 tailscale funnel --https=443 off",
+			old.PublicURL, old.Port))
+	}
 
 	// 4. 托管并启动（用最前面看好的端口情况）。用现有的 setup autostart --hub，-- 之后是本机 hub 的 hub run 参数；
 	// 已托管的会先停掉旧的再拉起
@@ -197,13 +203,14 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 		}
 	}
 
-	// 8. 接入码：只在进程内生成、交给调用方接入本机守护进程，不打印
-	tok, err := st.CreateEnrollToken(10 * time.Minute)
-	if err != nil {
-		return localHub{}, "", notes, err
+	// 8. 接入码：要接入时才在进程内生成、交给调用方接入本机守护进程，不打印
+	if o.NeedToken {
+		if token, err = st.CreateEnrollToken(10 * time.Minute); err != nil {
+			return localHub{}, "", notes, err
+		}
+		fmt.Fprintln(o.Stdout, "已生成一次性接入码（10 分钟内有效，只交给下一步接入本机守护进程，不显示）")
 	}
-	fmt.Fprintln(o.Stdout, "已生成一次性接入码（10 分钟内有效，下一步接入直接用，不显示）")
-	return lh, tok, notes, nil
+	return lh, token, notes, nil
 }
 
 // tsFunnel 是第 1 步只读看好的 Tailscale：跑它的方式与本机的 MagicDNS 域名（末尾不带点）。

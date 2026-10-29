@@ -42,17 +42,17 @@ hub 和守护进程都在这台机器上，手机经 Tailscale Funnel 连进来�
 
 **前提。**
 
-- 本机装好 [Tailscale](https://tailscale.com/download) 并登录（setup 要调 `tailscale` 命令，找不到时会说）。
+- 本机装好 [Tailscale](https://tailscale.com/download) 并登录（setup 要调 `tailscale` 命令，找不到时会说；用 `--public-url` 自己的隧道时不需要 Tailscale）。Linux 上以普通用户跑 `tailscale funnel` 可能要先 `sudo tailscale set --operator=$USER`。
 - tailnet 有 MagicDNS 域名，开了 HTTPS 证书（管理台 DNS 页）。
 - tailnet 开通了 Funnel。没开通时 `tailscale funnel` 会给一个开通链接，有时还会一直等你去开通：setup 最多等 15 秒，然后原样打印开通链接并退出 1（这时 hub 已托管，只监听本机，手机还连不上）；在浏览器里开通后重跑同一条命令。
 - 用平时的用户身份跑，不要 sudo。
 
 **做了什么。** 比 `setup all` 的四步多一步，放在最前面：
 
-1. **本机 hub。** 先看端口：`127.0.0.1:<端口>` 被别的程序或手动起的 hub 占着就停下。再只读地看 Tailscale，定下对外地址：状态（没装、没登录、没有 MagicDNS 域名、没开 HTTPS 证书各有提示）与 serve 配置；443 上除了 `/` 还有别的 serve 配置、Funnel 又没开时停下，因为 Funnel 按整个 443 开，它们会一起公开到公网（先用 `tailscale serve` 撤掉它们，或改用自己的隧道）。到这里什么都没改。没设过网页密码时在终端里问一次（不在终端里就停下，提示先 `railse hub password --dir <目录>`）。接着托管 hub（`setup autostart --hub`，只监听 `127.0.0.1:<端口>`，带 `--trusted-proxy 127.0.0.1,::1`），托管成功就写 `local-hub.json`，再等它应答，并确认应答的是托管的那个 hub。最后才开 Funnel：已经转到这个端口就不动；443 上 `/` 原来指向别处的会被替换，开之前先打一行提示。前面任何一步停下都不会开 Funnel，不会把端口上别的程序开到公网。最后用 hub 数据库生成一次性接入码，直接交给接入，不显示。
+1. **本机 hub。** 先看端口：`127.0.0.1:<端口>` 被别的程序或手动起的 hub 占着就停下。再只读地看 Tailscale，定下对外地址：状态（没装、没登录、没有 MagicDNS 域名、没开 HTTPS 证书各有提示）与 serve 配置；443 上除了 `/` 还有别的 serve 配置、Funnel 又没开时停下，因为 Funnel 按整个 443 开，它们会一起公开到公网（先用 `tailscale serve` 撤掉它们，或改用自己的隧道）。到这里什么都没改。没设过网页密码时在终端里问一次（屏幕会回显，不想回显就照提示先用 `read -s` 配 `railse hub password --dir <目录>` 设好再跑；不在终端里就停下，提示先 `railse hub password --dir <目录>`）。接着托管 hub（`setup autostart --hub`，只监听 `127.0.0.1:<端口>`，带 `--trusted-proxy 127.0.0.1,::1`），托管成功就写 `local-hub.json`，再等它应答，并确认应答的是托管的那个 hub。最后才开 Funnel：已经转到这个端口就不动；443 上 `/` 原来指向别处的会被替换，开之前先打一行提示。前面任何一步停下都不会开 Funnel，不会把端口上别的程序开到公网。要接入时（第一次，或加了 `--force`）最后用 hub 数据库生成一次性接入码，直接交给接入，不显示；已接入的重跑不生成。
 2. 接入、装钩子、开机自启、体检，同下面“工作机”的四步；接入的地址是 `http://127.0.0.1:<端口>`。
 
-做完后框线里打印的是对外地址 `https://<机器名>.<tailnet>.ts.net`。本机开着系统代理时，“注意”里会提醒：手机也挂着同一个代理而打不开地址，就关掉代理，或在代理规则里把 `ts.net` 设为直连。
+做完后框线里打印的是对外地址 `https://<机器名>.<tailnet>.ts.net`。本机开着代理（环境变量或 macOS 系统代理），且地址来自 Tailscale 时，“注意”里会提醒：手机也挂着同一个代理而打不开地址，就关掉代理，或在代理规则里把 `ts.net` 设为直连。
 
 **落下的东西。**
 
@@ -64,7 +64,7 @@ hub 和守护进程都在这台机器上，手机经 Tailscale Funnel 连进来�
 
 **换端口与数据目录。** `--hub-port <端口>`（默认 8787）、`--hub-dir <目录>`（默认 `$RAILSE_HUB_HOME` 或 `~/.railse-hub`）。两个都没给时沿用该数据目录里上次的 `local-hub.json`，所以重跑不用再写一遍。数据目录不是默认位置时，`railse hub password`、`railse hub token`、`railse doctor` 也要带 `--dir`、`--hub-dir`。
 
-**用自己的隧道。** `--public-url https://…` 不开 Tailscale Funnel，对外地址用你给的（Cloudflare Tunnel、frp 之类）。隧道要自己配，把它转到 `127.0.0.1:<端口>`，并且：保留原 Host，转发 WebSocket，追加（不是透传）`X-Forwarded-For`。理由与 nginx 的例子见 [hub.md](hub.md) 的“B. 反向代理”。对外地址定下后不要再换（推送订阅与主屏幕图标绑在它上面）。
+**用自己的隧道。** `--public-url https://…` 不开 Tailscale Funnel，对外地址用你给的（Cloudflare Tunnel、frp 之类）。隧道要自己配，把它转到 `127.0.0.1:<端口>`，并且：保留原 Host，转发 WebSocket，追加（不是透传）`X-Forwarded-For`。理由与 nginx 的例子见 [hub.md](hub.md) 的“B. 反向代理”。对外地址定下后不要再换（推送订阅与主屏幕图标绑在它上面）。`--public-url` 没给时沿用上次的；从 Tailscale 换成自己的隧道时，Funnel 不会自己关，`ts.net` 地址仍是公网入口，“注意”里会提醒，不用了就 `tailscale funnel --https=443 off`；从自己的隧道换回 Tailscale 要显式给空的 `--public-url ""`（或 `--public-url=`）。
 
 **重跑与改机器名。** 重跑同一条命令是安全的：已设的密码不再问，Funnel 已经转到这个端口就不动，hub 已在跑且对外地址、端口都没变就不重新托管，已接入的跳过接入（下面“工作机”的“重跑”一节有确认问句）。本机已接入别的 hub（比如自己部署的）时停下，加 `--force` 才改接本机 hub。跳过接入之前还只读地核对这台机器在不在 hub 数据目录的库里：数据目录删过或换过（比如第一次给了 `--hub-dir`、重跑忘了带），或这台机器被吊销了，就在第 1 步之前停下，不碰 Tailscale、不托管；要接到这个数据目录的 hub 就加 `--force` 重新接入，库是新的时手机上也要重新添加、重新开启通知。对外地址取自 Tailscale 机器名：在 Tailscale 里改了机器名，域名就变了，旧地址作废。重跑一遍会改成新地址并重新托管 hub，同时提醒手机上的主屏幕图标与推送订阅都要删掉重新添加、重新开启通知。
 
@@ -72,7 +72,7 @@ hub 和守护进程都在这台机器上，手机经 Tailscale Funnel 连进来�
 
 - 机器睡眠、关机或断网时 hub 不在，手机连不上，也收不到推送。那时这台机器上的 agent 也停了，单机用户没损失。几台工作机共用一个 hub 的，把 hub 放在常开的那台。
 - Funnel 的入口在 Tailscale 的服务器上：公网流量先到那里，再转进本机；证书由 Tailscale 签，机器名就是域名。这个地址对整个公网开放，任何人都连得到登录页，靠网页密码与登录限速挡。不接受这一点就用自己的服务器（后面的“hub 机器”）。
-- Funnel 只开 443。
+- railse 只用 443：`/` 原来指向别处的会被替换；443 上还有别的路径、Funnel 又没开时 setup 停下（见第 1 步）。
 - 手机挂着代理时，`*.ts.net` 可能打不开：关掉代理，或让 `ts.net` 直连。
 
 **卸载。**
@@ -82,6 +82,8 @@ railse setup autostart --hub --uninstall     # 停掉并移除 hub 的托管（�
 tailscale funnel --https=443 off             # 关掉对外的 Funnel
 rm -r ~/.railse-hub                          # 删数据：含网页密码与推送密钥，删了手机要重新开启通知
 ```
+
+hub 数据目录不在默认位置（装时给了 `--hub-dir`）的，第一条写 `railse setup autostart --hub --uninstall --dir <目录>`，`rm` 的也换成那个目录。卸载 hub 的托管不会关 Funnel：数据目录里的 `local-hub.json` 说地址来自 Tailscale 时，它会多打一行提醒。`tailscale funnel --https=443 off` 关的是 443 上的整个 Funnel，那里有你自己的别的配置的，先用 `tailscale funnel status` 核对。
 
 守护进程与钩子的卸载见前面“安装”里的“卸载”。
 
@@ -232,7 +234,7 @@ hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux
 | `hubsrv.password` | 网页密码 | 设过网页密码 | `railse hub password`（warn） |
 | `hubsrv.vapid` | 推送密钥 | 推送密钥在、解得开 | 还没有（warn）：首次 `railse hub run` 会生成；损坏（fail）：`railse hub vapid --rotate`，所有手机重新开启通知 |
 | `hubsrv.acme` | ACME 证书目录 | `acme/` 是 0700、里面的文件 0600；没有这个目录（没用 ACME）时 skip | 按提示 `chmod` |
-| `hubsrv.local` | 本机 hub 对外地址 | 读 hub 数据目录里 `setup all --local-hub` 写的 `local-hub.json`（没有时 skip）：Tailscale 提供的先看 `tailscale serve status --json` 里 Funnel 是否把 `<机器名>:443` 转到 `127.0.0.1:<端口>`（sudo 下整项 skip）；不论哪种都从本机 GET 一次 `<对外地址>/api/version`，答得上是 hub 为 ok。端口上的 hub 本身由 `hub.reachable` 看 | `local-hub.json` 坏了（只说哪一项不合规，不回显内容）：重跑 `railse setup all --local-hub --hub-dir <目录>`（守护进程不在 `~/.railse` 时带 `--dir`，用自己隧道的再带 `--public-url`）；找不到 tailscale、Funnel 没转到这个端口（fail）：装好并登录 Tailscale，`tailscale funnel --bg <端口>` 或重跑同一条 setup；从本机访问不到（warn）：常是本机代理拦着 `*.ts.net`，用手机 4G 打开验证，Funnel 入口 TLS 握手失败时先关掉代理再试 |
+| `hubsrv.local` | 本机 hub 对外地址 | 读 hub 数据目录里 `setup all --local-hub` 写的 `local-hub.json`（没有时 skip）：Tailscale 提供的先看 `tailscale serve status --json` 里 Funnel 是否把 `<机器名>:443` 转到 `127.0.0.1:<端口>`（sudo 下整项 skip）；不论哪种都从本机 GET 一次 `<对外地址>/api/version`，答得上是 hub 为 ok（Tailscale 提供的，本机经 MagicDNS 走 tailnet 访问到，没经过 Funnel 的公网入口，细节里注明，公网上打不打得开用手机 4G 验证）。端口上的 hub 本身由 `hub.reachable` 看 | `local-hub.json` 坏了（只说哪一项不合规，不回显内容）：重跑 `railse setup all --local-hub --hub-dir <目录>`（守护进程不在 `~/.railse` 时带 `--dir`，用自己隧道的再带 `--public-url`）；找不到 tailscale、Funnel 没转到这个端口（fail）：装好并登录 Tailscale，`tailscale funnel --bg <端口>` 或重跑同一条 setup；从本机访问不到（warn）：常是本机代理拦着 `*.ts.net`，用手机 4G 打开验证，Funnel 入口 TLS 握手失败时先关掉代理再试 |
 | `hubsrv.autostart` | hub 开机自启 | 有没有 hub 的托管文件（plist、用户单元或系统单元） | `railse setup autostart --hub`（warn） |
 
 ## 升级

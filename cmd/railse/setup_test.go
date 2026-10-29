@@ -2093,7 +2093,7 @@ func TestSetupAllWaitsForDaemonThenReports(t *testing.T) {
 // clearProxyEnv 把代理环境变量清空：这台机器的 shell 可能开着代理，本机模式结尾的代理提醒只该在测它的测试里出现。
 func clearProxyEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY"} {
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
 		t.Setenv(k, "")
 	}
 }
@@ -2238,6 +2238,9 @@ func TestSetupAllLocalHubEndToEnd(t *testing.T) {
 	}
 	if strings.Contains(s, "本机开着代理") {
 		t.Fatalf("代理环境变量已清空，不该有代理提醒:\n%s", s)
+	}
+	if !strings.Contains(s, "已生成一次性接入码（10 分钟内有效，只交给下一步接入本机守护进程，不显示）") || strings.Contains(s, "直接用") {
+		t.Fatalf("本机 hub 那一步应说接入码只交给下一步接入、不显示:\n%s", s)
 	}
 	assertNoEnrollSecrets(t, oneEnrollToken(t, spy), s, errOut.String())
 }
@@ -2676,12 +2679,58 @@ func TestSetupAllLocalHubReusesLocalHubFile(t *testing.T) {
 		if f.hostedHub() {
 			t.Fatalf("%v: 设置没变不该重新托管: %v", args, f.rec.calls)
 		}
+		if strings.Contains(s, "接入码") {
+			t.Fatalf("%v: 已接入、跳过接入，不该生成接入码:\n%s", args, s)
+		}
 		if lh, ok, err := loadLocalHub(f.hubDir); err != nil || !ok || lh != (localHub{Port: f.port, PublicURL: "https://hub.example.com", Provider: "custom"}) {
 			t.Fatalf("%v: local-hub.json 不该变: %+v %v %v", args, lh, ok, err)
 		}
 	}
 	if m, err := agent.LoadMachine(f.machinePath()); err != nil || m.HubURL != f.localHubURL() {
 		t.Fatalf("machine.json 应还是本机 hub: %+v %v", m, err)
+	}
+}
+
+// 本机 hub 从 Tailscale Funnel 换成自己的隧道（--public-url）：Funnel 不会自己关，ts.net 仍是公网入口，结尾的“注意：”说清楚、
+// 给出关掉它的命令（不替用户关）；换回 Tailscale 用 --public-url=（空）。
+func TestSetupAllLocalHubSwitchTunnelAndBack(t *testing.T) {
+	f := localSetupEnv(t)
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	spy := startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	fakeStdin(t, true, localHubTestPassword+"\n")
+	var out, errOut bytes.Buffer
+	if code := run(f.localArgs("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("首次（Tailscale）: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	assertNoEnrollSecrets(t, oneEnrollToken(t, spy), out.String(), errOut.String())
+	fakeStdin(t, false, "")
+	noTailscale(t)
+	out.Reset()
+	errOut.Reset()
+	if code := run(f.localArgs("--public-url", "https://hub.example.com", "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("换成自己的隧道: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	at := strings.Index(s, "\n注意：之前用的 Tailscale Funnel 还开着")
+	if at < 0 || !strings.Contains(s[at:], tsPublicURL+" 仍是公网入口") || !strings.Contains(s[at:], "tailscale funnel --https=443 off") {
+		t.Fatalf("应在“注意：”里说 Funnel 还开着、怎么关:\n%s", s)
+	}
+	if lh, _, _ := loadLocalHub(f.hubDir); lh.Provider != "custom" {
+		t.Fatalf("local-hub.json 应改成自己的隧道: %+v", lh)
+	}
+	// 换回 Tailscale：--public-url= 清掉沿用的地址
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	out.Reset()
+	errOut.Reset()
+	if code := run(f.localArgs("--public-url=", "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("换回 Tailscale: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if lh, _, _ := loadLocalHub(f.hubDir); lh != (localHub{Port: f.port, PublicURL: tsPublicURL, Provider: "tailscale"}) {
+		t.Fatalf("--public-url= 应换回 Tailscale: %+v\n%s", lh, out.String())
+	}
+	if strings.Contains(out.String(), "Funnel 还开着") {
+		t.Fatalf("换回 Tailscale 不该再说 Funnel 还开着:\n%s", out.String())
 	}
 }
 
@@ -2791,6 +2840,7 @@ func TestSetupAllRerunBoxShowsEnrolledHub(t *testing.T) {
 		prev(o)
 		o.HTTP = &http.Client{Transport: failingTransport(&doctorHosts)}
 	})
+	// 换的是全局的 http.DefaultTransport：本包的测试不能 t.Parallel，否则会挡掉同时在跑的别的测试的请求
 	oldDefault := http.DefaultTransport
 	http.DefaultTransport = failingTransport(&otherHosts)
 	t.Cleanup(func() { http.DefaultTransport = oldDefault })

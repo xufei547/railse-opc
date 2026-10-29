@@ -33,7 +33,8 @@ const setupAllUsage = `  railse setup all --hub URL --token 接入码 [--name �
     --local-hub：一台机器就够：本机起 hub，Tailscale Funnel 给手机地址，守护进程接本机 hub；--public-url 换成自己的隧道。
     接入之前多一步“本机 hub”：开 Funnel（tailnet 没开通时打印开通链接）、没设过网页密码时在终端里问、托管 hub（只监听
     127.0.0.1:<--hub-port>）并等它应答，再用它生成的一次性接入码接入（不显示；不问 hub 地址、接入码与名字，名字默认主机名）。
-    --hub-dir 默认 $RAILSE_HUB_HOME 或 ~/.railse-hub；--hub-port、--public-url 没给时沿用上次装的（hub 数据目录里的 local-hub.json）。
+    --hub-dir 默认 $RAILSE_HUB_HOME 或 ~/.railse-hub；--hub-port、--public-url 没给时沿用上次装的（hub 数据目录里的 local-hub.json），
+    从自己的隧道换回 Tailscale 给空的 --public-url=。
     --no-autostart 只管守护进程，本机 hub 总是托管。本机已接入别的 hub 时停下，加 --force 改接本机 hub；
     接的就是本机 hub 时不带 --local-hub 重跑也按本机 hub 走（在终端里先问一次再复查 Funnel、托管）。`
 
@@ -622,7 +623,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	localFlag := fs.Bool("local-hub", false, "在本机起 hub（Tailscale Funnel 给手机地址）并接入它，不用 --hub、--token")
 	hubPort := fs.Int("hub-port", localHubDefaultPort, "本机 hub 监听 127.0.0.1 的端口（只配合 --local-hub；不给时沿用上次装的）")
 	hubDirFlag := fs.String("hub-dir", "", "本机 hub 的数据目录（只配合 --local-hub），默认 $RAILSE_HUB_HOME 或 ~/.railse-hub")
-	publicURL := fs.String("public-url", "", "本机 hub 的对外 https 地址（只配合 --local-hub）：用自己的隧道，不开 Tailscale Funnel；不给时沿用上次装的")
+	publicURL := fs.String("public-url", "", "本机 hub 的对外 https 地址（只配合 --local-hub）：用自己的隧道，不开 Tailscale Funnel；不给时沿用上次装的，给空值 --public-url= 换回 Tailscale")
 	name := fs.String("name", "", "本机在 hub 里的名字，默认主机名")
 	project := fs.String("project", "", "项目目录：给了才把 Claude、Gemini 的钩子装成这个项目的项目级，默认装用户级")
 	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse")
@@ -929,7 +930,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		var tok string
 		var lnotes []string
 		lh, tok, lnotes, err = setupLocalHub(runtime.GOOS, localHubOpts{HubDir: hubDir, Bin: b, Port: port, PublicURL: pub,
-			Terminal: stdinIsTerminal(), Stdin: setupStdin, Stdout: stdout, Stderr: stderr})
+			Terminal: stdinIsTerminal(), NeedToken: enroll, Stdin: setupStdin, Stdout: stdout, Stderr: stderr})
 		notes = append(notes, lnotes...)
 		if err != nil {
 			var nf tailscale.ErrFunnelNotEnabled
@@ -941,7 +942,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 			return fail("本机 hub", "")
 		}
 		done = append(done, "本机 hub")
-		// 接入码只在进程里交给下一步接入本机守护进程，不打印
+		// 接入码只在进程里交给下一步接入本机守护进程，不打印（已接入、不重新接入时没有，下一步跳过接入）
 		*hubURL, *token, phoneURL = localAddr, tok, lh.PublicURL
 	}
 

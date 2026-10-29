@@ -209,9 +209,9 @@ func localHubEnv(t *testing.T) localHubFixture {
 	return localHubFixture{setupAllFixture: f, hubDir: filepath.Join(f.home, "hub"), port: freePort(t)}
 }
 
-// opts 是本环境的 localHubOpts：在终端里，stdin 是 input。
+// opts 是本环境的 localHubOpts：在终端里，stdin 是 input，要接入（生成接入码）。
 func (f localHubFixture) opts(input string, out, errOut io.Writer) localHubOpts {
-	return localHubOpts{HubDir: f.hubDir, Bin: f.bin, Port: f.port, Terminal: true, Stdin: strings.NewReader(input), Stdout: out, Stderr: errOut}
+	return localHubOpts{HubDir: f.hubDir, Bin: f.bin, Port: f.port, Terminal: true, NeedToken: true, Stdin: strings.NewReader(input), Stdout: out, Stderr: errOut}
 }
 
 // hubJobPath 是本系统上 hub 的托管文件（与 setup autostart 同一套路径函数）。
@@ -324,6 +324,24 @@ func TestSetupLocalHubHappyPathExistingHub(t *testing.T) {
 		t.Fatalf("Funnel 已开，不该再调 funnel: %v", err)
 	}
 	assertNoSecrets(t, tok, err, notes, out.String(), errOut.String())
+}
+
+// 已接入、不重新接入（NeedToken 为假）：照常复查 hub 与 Funnel，但不生成接入码，也不说生成了。
+func TestSetupLocalHubNoTokenWhenNotNeeded(t *testing.T) {
+	f := localHubEnv(t)
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	var out, errOut bytes.Buffer
+	o := f.opts(localHubTestPassword+"\n", &out, &errOut)
+	o.NeedToken = false
+	lh, tok, _, err := setupLocalHub(runtime.GOOS, o)
+	if err != nil || lh.PublicURL != tsPublicURL {
+		t.Fatalf("%v %+v\n%s", err, lh, errOut.String())
+	}
+	if tok != "" || strings.Contains(out.String(), "接入码") {
+		t.Fatalf("不接入就不该生成接入码: %q\n%s", tok, out.String())
+	}
 }
 
 func TestSetupLocalHubEnablesFunnelWhenOff(t *testing.T) {
@@ -720,6 +738,34 @@ func TestSetupLocalHubReinstallsWhenURLChanged(t *testing.T) {
 		t.Fatalf("托管文件应带新地址:\n%s", job)
 	}
 	assertNoSecrets(t, tok, err, notes, out.String(), errOut.String())
+}
+
+// 上次用的是 Tailscale Funnel、这次给了自己的隧道：Funnel 不会自己关，旧的 ts.net 地址仍是公网入口，提醒怎么关（不替用户关、不碰 tailscale）。
+func TestSetupLocalHubNotesFunnelLeftOnWhenSwitchingToCustom(t *testing.T) {
+	f := localHubEnv(t)
+	noTailscale(t)
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	if err := saveLocalHub(f.hubDir, localHub{Port: f.port, PublicURL: tsPublicURL, Provider: "tailscale"}); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	o := f.opts(localHubTestPassword+"\n", &out, &errOut)
+	o.PublicURL = "https://hub.example.com"
+	_, tok, notes, err := setupLocalHub(runtime.GOOS, o)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	want := "之前用的 Tailscale Funnel 还开着：" + tsPublicURL + " 仍是公网入口（转到本机 127.0.0.1:" + strconv.Itoa(f.port) + "）；不用了就运行 tailscale funnel --https=443 off"
+	if !slices.Contains(notes, want) {
+		t.Fatalf("notes 应有 %q: %q", want, notes)
+	}
+	assertNoSecrets(t, tok, err, notes, out.String(), errOut.String())
+	// 一直用自己的隧道（或之前就是）不说
+	o.Stdin = strings.NewReader("")
+	if _, _, notes, err := setupLocalHub(runtime.GOOS, o); err != nil || slices.ContainsFunc(notes, func(n string) bool { return strings.Contains(n, "Funnel") }) {
+		t.Fatalf("没换来源不该提 Funnel: %v %q", err, notes)
+	}
 }
 
 func TestSetupLocalHubReinstallsWhenPortChanged(t *testing.T) {

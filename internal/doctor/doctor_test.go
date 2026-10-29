@@ -1949,7 +1949,7 @@ func TestLocalHubTailscaleOK(t *testing.T) {
 	var hits func() []string
 	o.HTTP, hits = publicHub(t, nil)
 	c := find(t, Run(o), "hubsrv.local")
-	if c.Status != OK || c.Detail != lhOrigin+"，hub 版本 1.2.3" {
+	if c.Status != OK || c.Detail != lhOrigin+"，hub 版本 1.2.3（从本机经 tailnet 访问到，没经过 Funnel 的公网入口；公网上打不打得开用手机 4G 验证）" {
 		t.Fatalf("%+v", c)
 	}
 	if *ran != 1 {
