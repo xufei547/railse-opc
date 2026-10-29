@@ -21,6 +21,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/doctor"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
@@ -2402,6 +2403,130 @@ func TestSetupAllLocalHubBrokenMachineStopsBeforeStep1(t *testing.T) {
 	if string(readFile(t, f.machinePath())) != "{" {
 		t.Fatal("不该动 machine.json")
 	}
+}
+
+// 本机模式重跑（没 --force）：machine.json 接的是这个本机 hub 的地址还不够，这台机器还得在这个 hub 数据目录的库里。数据目录删过
+// （没有 hub.db）、换过（如第一次给了 --hub-dir、重跑忘了带：库里没有这台机器），或这台机器被吊销了，第 1 步会用这个库托管 hub、
+// 跳过接入，守护进程拿旧密钥连它只会被拒。所以在第 1 步之前停下：不碰 tailscale、不问密码、不托管，库只读地看、不多建文件，
+// 说加 --force 重新接入（给出照抄得了的命令）。这台机器在库里时照常做完。
+func TestSetupAllLocalHubRerunChecksMachineInHubDB(t *testing.T) {
+	f := localSetupEnv(t)
+	stubHubJobRunning(t, true)
+	reenroll := "railse setup all --local-hub --hub-port " + strconv.Itoa(f.port) + " --hub-dir " + hooksconf.ShellQuote(f.hubDir) +
+		" --force --bin " + hooksconf.ShellQuote(f.bin)
+	missing := "本机接的是本机 hub，但 " + f.hubDir + " 里没有这台机器（数据目录换过或删过？）；要接到这个数据目录的 hub，加 --force 重新接入" +
+		"（手机上要重新添加、重新开通知）：" + reenroll + "\n"
+	dbPath := filepath.Join(f.hubDir, "hub.db")
+	if err := os.MkdirAll(filepath.Dir(f.machinePath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var other, revoked string // 库里别的机器、被吊销的这台机器的 id
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T)
+		id    string // machine.json 里的机器 id（密钥都是 s-old）
+		want  string
+	}{
+		{"没有 hub 数据目录", func(t *testing.T) {}, "m-old", missing},
+		{"有 hub.db，没有这台机器", func(t *testing.T) {
+			withHubStore(t, dbPath, func(st *store.Store) {
+				m, err := st.CreateMachine("other", "s-other", "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				other = m.ID
+			})
+		}, "m-old", missing},
+		{"id 对得上、密钥对不上", func(t *testing.T) {}, "@other", missing},
+		{"这台机器被吊销了", func(t *testing.T) {
+			withHubStore(t, dbPath, func(st *store.Store) {
+				m, err := st.CreateMachine("mac", "s-old", "")
+				if err == nil {
+					err = st.RevokeMachine(m.ID)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				revoked = m.ID
+			})
+		}, "@revoked", "本机接的是本机 hub，但这台机器在 " + f.hubDir + " 的 hub 里已被吊销；要重新接入，加 --force：" + reenroll + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			noTailscale(t)
+			tc.setup(t)
+			id := map[string]string{"@other": other, "@revoked": revoked}[tc.id]
+			if id == "" {
+				id = tc.id
+			}
+			if err := agent.SaveMachine(f.machinePath(), agent.MachineConfig{HubURL: f.localHubURL(), MachineID: id, Secret: "s-old", Name: "mac"}); err != nil {
+				t.Fatal(err)
+			}
+			var before []string
+			if ents, err := os.ReadDir(f.hubDir); err == nil {
+				for _, e := range ents {
+					before = append(before, e.Name())
+				}
+			}
+			f.rec.calls = nil
+			in := fakeStdin(t, true, localHubTestPassword+"\n")
+			var out, errOut bytes.Buffer
+			if code := run(f.localArgs("--no-autostart"), &out, &errOut); code != 1 || errOut.String() != tc.want {
+				t.Fatalf("应在第 1 步之前停下、退出 1、说 %q: %d\n%s\n%s", tc.want, code, out.String(), errOut.String())
+			}
+			if out.Len() != 0 || in.n != 0 || len(f.rec.calls) != 0 {
+				t.Fatalf("第 1 步之前就该停（读了 %d 字节）: %v\n%s", in.n, f.rec.calls, out.String())
+			}
+			var after []string
+			if ents, err := os.ReadDir(f.hubDir); err == nil {
+				for _, e := range ents {
+					after = append(after, e.Name())
+				}
+			}
+			if !slices.Equal(before, after) {
+				t.Fatalf("只读地看库，不该多建文件：前 %q，后 %q", before, after)
+			}
+		})
+	}
+
+	// 这台机器在库里（库开着、有 -wal，同在跑的 hub）：照常做完，跳过接入
+	var mine string
+	withHubStore(t, dbPath, func(st *store.Store) {
+		m, err := st.CreateMachine("mac", "s-mine", "")
+		if err == nil {
+			err = st.SetSetting("password_hash", "设过了") // 不在终端里跑：密码要已经设过
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		mine = m.ID
+	})
+	if err := agent.SaveMachine(f.machinePath(), agent.MachineConfig{HubURL: f.localHubURL(), MachineID: mine, Secret: "s-mine", Name: "mac"}); err != nil {
+		t.Fatal(err)
+	}
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	startLocalTestHub(t, f.hubDir, f.port)
+	fakeStdin(t, false, "")
+	var out, errOut bytes.Buffer
+	if code := run(f.localArgs("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("这台机器在库里应照常做完: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if s := out.String(); !strings.Contains(s, "== 1. 本机 hub ==") || !strings.Contains(s, "已接入过") {
+		t.Fatalf("应照本机模式做完、跳过接入:\n%s", s)
+	}
+}
+
+// withHubStore 打开（没有就建）dbPath 这个 hub 库，fn 做完就关上。
+func withHubStore(t *testing.T, dbPath string, fn func(*store.Store)) {
+	t.Helper()
+	if err := ensureHubDir(filepath.Dir(dbPath)); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	fn(st)
 }
 
 // tailnet 没开通 Funnel：真 tailscale 打出开通链接后要么直接退出 0，要么一直等（到时限被杀掉）。两种都原样打印开通链接，停在第 1 步

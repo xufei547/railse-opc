@@ -184,6 +184,36 @@ func openHubDB(path string) (*hubDB, error) {
 	return nil, lastErr
 }
 
+// HubMachine 只读地看 hub 数据目录 hubDir 的 hub.db 里有没有 id 这台机器（setup all 重跑本机 hub、跳过接入之前核对用）：
+// id 在、密钥的哈希也对得上才算 found（对不上的守护进程拿它连 hub 也会被拒），revoked 说找到的这台是否已被吊销。
+// 没有 hub.db 时 found 为 false、err 为空。打开方式同 hubsrv.db（openHubDB）：不跑迁移、不建任何文件、不改库。
+func HubMachine(hubDir, id, secret string) (found, revoked bool, err error) {
+	path := filepath.Join(hubDir, "hub.db")
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		return false, false, nil
+	} else if err != nil {
+		return false, false, err
+	}
+	h, err := openHubDB(path)
+	if err != nil {
+		return false, false, err
+	}
+	defer h.db.Close()
+	var hash string
+	var rev int
+	err = h.db.QueryRow("SELECT secret_hash, revoked FROM machines WHERE id = ?", id).Scan(&hash, &rev)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if hash != store.HashToken(secret) {
+		return false, false, nil
+	}
+	return true, rev != 0, nil
+}
+
 // sqliteCode 取 SQLite 的主结果码（扩展码的低 8 位）；不是 SQLite 的错误时为 0。
 func sqliteCode(err error) int {
 	var e *sqlite.Error

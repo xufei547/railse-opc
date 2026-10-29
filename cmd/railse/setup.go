@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/doctor"
 	"github.com/xufei547/railse-opc/internal/hookclient"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
 	"github.com/xufei547/railse-opc/internal/tailscale"
@@ -852,8 +853,8 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		return true
 	}
 
-	// 本机模式、已接入（没 --force）：接的就是这个本机 hub 才跳过接入；接的是别的 hub 时在第 1 步之前停下（不白开 Funnel、
-	// 不白托管、不白生成接入码）。在终端里重跑的，第 1 步会复查 Funnel、可能重新托管 hub，所以在它之前确认
+	// 本机模式、已接入（没 --force）：接的就是这个本机 hub、这台机器也在它的库里才跳过接入；接的是别的 hub 或不在库里时在第 1 步之前
+	// 停下（不白开 Funnel、不白托管）。在终端里重跑的，第 1 步会复查 Funnel、可能重新托管 hub，所以在它之前确认
 	if localMode && !enroll {
 		m, err := agent.LoadMachine(cfg.MachinePath)
 		if err != nil {
@@ -866,6 +867,22 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 			} else {
 				fmt.Fprintf(stderr, "本机已接入 %s，不是本机 hub；要改接本机 hub，加 --force 重新接入（手机上旧 hub 的图标可以删掉）\n", m.HubURL)
 			}
+			return 1
+		}
+		// 接的是本机 hub 的地址还不够，这台机器还得在这个 hub 数据目录的库里：数据目录删过、换过（如第一次给了 --hub-dir，重跑忘了带）
+		// 时，第 1 步会用这个（空的或别的）库托管 hub（托管标签固定，顶掉原来的），第 2 步跳过接入，守护进程拿旧密钥连它只会被拒（401）。
+		// 只读地看（不跑迁移、不建文件），不在就在第 1 步之前停下，不碰 tailscale、不托管
+		switch found, revoked, err := doctor.HubMachine(hubDir, m.MachineID, m.Secret); {
+		case err != nil:
+			fmt.Fprintf(stderr, "本机接的是本机 hub，但读不了 %s，核对不了这台机器在不在里面：%v\n稍后重跑；一直这样就加 --force 重新接入：%s\n",
+				filepath.Join(hubDir, "hub.db"), err, reenroll)
+			return 1
+		case !found:
+			fmt.Fprintf(stderr, "本机接的是本机 hub，但 %s 里没有这台机器（数据目录换过或删过？）；要接到这个数据目录的 hub，加 --force 重新接入"+
+				"（手机上要重新添加、重新开通知）：%s\n", hubDir, reenroll)
+			return 1
+		case revoked:
+			fmt.Fprintf(stderr, "本机接的是本机 hub，但这台机器在 %s 的 hub 里已被吊销；要重新接入，加 --force：%s\n", hubDir, reenroll)
 			return 1
 		}
 		shown := m.HubURL // 问句里用手机认得的对外地址；还没有 local-hub.json 时只能说 machine.json 里的

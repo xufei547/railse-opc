@@ -1194,6 +1194,60 @@ func TestHubDBReadWhileHubRunning(t *testing.T) {
 	}
 }
 
+// HubMachine 只读地查 hub 库里的机器（setup all 重跑本机 hub 时核对）：没有 hub.db 不算错、找不到；id 与密钥都对上才算找到，
+// 另报是否已吊销。hub 没在跑（没有 -wal）与在跑（库开着）两种都读得到，也都不多建文件、不改库。
+func TestHubMachine(t *testing.T) {
+	hubDir := filepath.Join(t.TempDir(), "hub")
+	if found, revoked, err := HubMachine(hubDir, "m", "s"); found || revoked || err != nil {
+		t.Fatalf("没有 hub 数据目录: %v %v %v", found, revoked, err)
+	}
+	var mine, gone string
+	newHubDB(t, hubDir, func(st *store.Store) {
+		m, err := st.CreateMachine("mac", "s-mine", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mine = m.ID
+		g, err := st.CreateMachine("old", "s-gone", "")
+		if err == nil {
+			err = st.RevokeMachine(g.ID)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		gone = g.ID
+	})
+	check := func(when string) {
+		t.Helper()
+		before := snapshot(t, hubDir)
+		for _, c := range []struct {
+			id, secret     string
+			found, revoked bool
+		}{
+			{mine, "s-mine", true, false},
+			{mine, "s-other", false, false}, // 密钥对不上：守护进程拿它连 hub 也会被拒
+			{"no-such", "s-mine", false, false},
+			{gone, "s-gone", true, true},
+		} {
+			found, revoked, err := HubMachine(hubDir, c.id, c.secret)
+			if err != nil || found != c.found || revoked != c.revoked {
+				t.Fatalf("%s %s/%s: found=%v revoked=%v err=%v，想要 %v %v", when, c.id, c.secret, found, revoked, err, c.found, c.revoked)
+			}
+		}
+		after := snapshot(t, hubDir)
+		if names(after) != names(before) || after["hub.db"] != before["hub.db"] {
+			t.Fatalf("%s：只读地查，不该多建文件、改库：前 %s，后 %s", when, names(before), names(after))
+		}
+	}
+	check("hub 没在跑")
+	st, err := store.Open(filepath.Join(hubDir, "hub.db")) // hub 在跑：库开着，有 -wal、-shm
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	check("hub 在跑")
+}
+
 // 每个 warn 与 fail 都带修复提示，每项都有名称，ID 不重复。
 func TestEveryProblemHasHint(t *testing.T) {
 	o, home := fakeOpts(t)
