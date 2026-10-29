@@ -21,6 +21,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/doctor"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
 func TestSetupHooksWritesAllThree(t *testing.T) {
@@ -2403,35 +2404,55 @@ func TestSetupAllLocalHubBrokenMachineStopsBeforeStep1(t *testing.T) {
 	}
 }
 
-// tailnet 没开通 Funnel：原样打印开通链接，停在第 1 步（本机 hub），说开通后重跑同一条命令（带上用户给的 --hub-port、--hub-dir），
-// 没接入、没装钩子。
+// tailnet 没开通 Funnel：真 tailscale 打出开通链接后要么直接退出 0，要么一直等（到时限被杀掉）。两种都原样打印开通链接，停在第 1 步
+// （本机 hub），说开通后重跑同一条命令（带上用户给的 --hub-port、--hub-dir）；Funnel 是第 1 步的最后一件事，这时 hub 已托管（只监听
+// 127.0.0.1）、local-hub.json 已写，没接入、没装钩子。
 func TestSetupAllLocalHubFunnelNotEnabledStopsAtStep1(t *testing.T) {
-	f := localSetupEnv(t)
 	link := "https://login.tailscale.com/f/funnel?node=nodeABC"
-	fakeTailscale(t, tsStatusOK, "No serve config\n", "Funnel is not enabled on your tailnet.\nTo enable, visit:\n\n         "+link+"\n", 1)
-	fakeStdin(t, true, localHubTestPassword+"\n")
-	var out, errOut bytes.Buffer
-	if code := run(f.localArgs(), &out, &errOut); code != 1 {
-		t.Fatalf("Funnel 没开通应退出 1: %d\n%s\n%s", code, out.String(), errOut.String())
+	for _, wait := range []bool{false, true} {
+		t.Run(map[bool]string{false: "打出链接后退出 0", true: "打出链接后一直等"}[wait], func(t *testing.T) {
+			f := localSetupEnv(t)
+			ts := fakeTailscale(t, tsStatusOK, "No serve config\n", tsNotEnabledOut(link), 0)
+			if wait {
+				ts.waitForever(t)
+			}
+			startLocalTestHub(t, f.hubDir, f.port)
+			stubHubJobRunning(t, true)
+			fakeStdin(t, true, localHubTestPassword+"\n")
+			var out, errOut bytes.Buffer
+			if code := run(f.localArgs(), &out, &errOut); code != 1 {
+				t.Fatalf("Funnel 没开通应退出 1: %d\n%s\n%s", code, out.String(), errOut.String())
+			}
+			e := errOut.String()
+			rerun := "修好后重跑 railse setup all --local-hub --hub-port " + strconv.Itoa(f.port) + " --hub-dir " + hooksconf.ShellQuote(f.hubDir) +
+				" --bin " + hooksconf.ShellQuote(f.bin) + "（"
+			for _, want := range []string{link, "停在第 1 步（本机 hub）", "没做：接入 hub、安装钩子、开机自启、体检", "只监听 127.0.0.1",
+				"在浏览器里开通 Funnel 后重跑同一条命令。", rerun} {
+				if !strings.Contains(e, want) {
+					t.Fatalf("stderr 缺 %q:\n%s", want, e)
+				}
+			}
+			if !strings.Contains(out.String(), funnelWaitNote+tailscale.Timeout.String()) {
+				t.Fatalf("开 Funnel 之前应说 tailscale 最多等多久:\n%s", out.String())
+			}
+			if strings.Contains(out.String(), "== 2.") {
+				t.Fatalf("停在第 1 步，不该开始第 2 步:\n%s", out.String())
+			}
+			if !f.hostedHub() {
+				t.Fatalf("开 Funnel 之前应已托管 hub: %v", f.rec.calls)
+			}
+			if _, ok, _ := loadLocalHub(f.hubDir); !ok {
+				t.Fatal("开 Funnel 之前应已写 local-hub.json")
+			}
+			if _, err := os.Stat(f.machinePath()); !os.IsNotExist(err) {
+				t.Fatal("停在第 1 步，不该有 machine.json")
+			}
+			if _, err := os.Stat(hooksconf.ClaudeUserPath(f.home)); !os.IsNotExist(err) {
+				t.Fatal("停在第 1 步，不该装钩子")
+			}
+			assertNoEnrollSecrets(t, nil, out.String(), e)
+		})
 	}
-	e := errOut.String()
-	rerun := "修好后重跑 railse setup all --local-hub --hub-port " + strconv.Itoa(f.port) + " --hub-dir " + hooksconf.ShellQuote(f.hubDir) +
-		" --bin " + hooksconf.ShellQuote(f.bin) + "（"
-	for _, want := range []string{link, "停在第 1 步（本机 hub）", "没做：接入 hub、安装钩子、开机自启、体检", "在浏览器里开通 Funnel 后重跑同一条命令。", rerun} {
-		if !strings.Contains(e, want) {
-			t.Fatalf("stderr 缺 %q:\n%s", want, e)
-		}
-	}
-	if strings.Contains(out.String(), "== 2.") {
-		t.Fatalf("停在第 1 步，不该开始第 2 步:\n%s", out.String())
-	}
-	if _, err := os.Stat(f.machinePath()); !os.IsNotExist(err) {
-		t.Fatal("停在第 1 步，不该有 machine.json")
-	}
-	if _, err := os.Stat(hooksconf.ClaudeUserPath(f.home)); !os.IsNotExist(err) {
-		t.Fatal("停在第 1 步，不该装钩子")
-	}
-	assertNoEnrollSecrets(t, nil, out.String(), e)
 }
 
 // 已接本机 hub 的机器在终端里重跑：第 1 步会复查 Funnel、可能重新托管 hub，所以在第 1 步之前问一次，问句里是手机认得的

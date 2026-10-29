@@ -174,14 +174,17 @@ func (e ErrFunnelNotEnabled) Error() string {
 
 var enableURLRe = regexp.MustCompile(`https://login\.tailscale\.com/\S+`)
 
-// EnableFunnel 跑 `tailscale funnel --bg <port>`；Funnel 未开通时返回 ErrFunnelNotEnabled。
+// EnableFunnel 跑 `tailscale funnel --bg <port>`。tailnet 没开通 Funnel 时，真 tailscale 先把说明与开通链接打出来，然后要么直接
+// 退出 0（非管理员），要么一直等人在浏览器里开通（管理员；到 Timeout 被杀掉），从不“带链接退出非零”。所以不论退出码，输出里有
+// 开通链接就返回 ErrFunnelNotEnabled；退出 0 时链接未必说明没开通，调用方要复查 serve 配置，真没开再把它交给用户。
+// 没有链接而退出非零是带输出的普通错误。
 func (c CLI) EnableFunnel(ctx context.Context, port int) error {
 	out, err := c.run(ctx, "funnel", "--bg", strconv.Itoa(port))
-	if err == nil {
-		return nil
-	}
 	if u := enableURLRe.FindString(out); u != "" {
 		return ErrFunnelNotEnabled{EnableURL: strings.TrimRight(u, ".,;:)]}>\"'。，；）")}
 	}
-	return fmt.Errorf("tailscale funnel --bg %d: %w（%s）", port, err, strings.TrimSpace(out))
+	if err != nil {
+		return fmt.Errorf("tailscale funnel --bg %d: %w（%s）", port, err, strings.TrimSpace(out))
+	}
+	return nil
 }

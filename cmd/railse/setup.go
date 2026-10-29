@@ -916,9 +916,9 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		notes = append(notes, lnotes...)
 		if err != nil {
 			var nf tailscale.ErrFunnelNotEnabled
-			if errors.As(err, &nf) { // 开通链接原样打出来：要用户在浏览器里开通，不自动绕过
+			if errors.As(err, &nf) { // 开通链接原样打出来：要用户在浏览器里开通，不自动绕过。Funnel 是这一步最后一件事，hub 已托管
 				fmt.Fprintln(stderr, nf.Error())
-				return fail("本机 hub", "在浏览器里开通 Funnel 后重跑同一条命令。")
+				return fail("本机 hub", "本机 hub 已托管、只监听 127.0.0.1，开好 Funnel 之前手机连不上；在浏览器里开通 Funnel 后重跑同一条命令。")
 			}
 			fmt.Fprintln(stderr, err)
 			return fail("本机 hub", "")

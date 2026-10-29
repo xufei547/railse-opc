@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/xufei547/railse-opc/internal/hub"
 	"github.com/xufei547/railse-opc/internal/hub/store"
@@ -59,8 +60,20 @@ func (f *fakeTS) setOn(t *testing.T, serve string) {
 	}
 }
 
-// fakeTailscale 用临时目录里的假脚本替换 tailscaleFind 与 tailscaleRun：status、serve 的输出可改，funnel --bg 会把 serve 输出换成 on。
-// 绝不跑真实的 tailscale。
+// waitForever 让假 tailscale 的 funnel --bg 打完输出后一直等（模拟真 tailscale 打出开通链接后等管理员去浏览器开通），
+// 并把每次调用的时限 tailscale.Timeout 调到 2 秒（不能太短：新写的脚本第一次起来可能要几百毫秒），测试结束还原。
+func (f *fakeTS) waitForever(t *testing.T) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.dir, "funnel.sleep"), []byte("30"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := tailscale.Timeout
+	tailscale.Timeout = 2 * time.Second
+	t.Cleanup(func() { tailscale.Timeout = old })
+}
+
+// fakeTailscale 用临时目录里的假脚本替换 tailscaleFind 与 tailscaleRun：status、serve 的输出可改，funnel --bg 打出 funnelOut 后
+// 按 funnelCode 退出，并把 serve 输出换成 setOn 给的（有的话）；waitForever 之后它打完输出就一直等。绝不跑真实的 tailscale。
 func fakeTailscale(t *testing.T, status, serve string, funnelOut string, funnelCode int) *fakeTS {
 	t.Helper()
 	needUnixShell(t)
@@ -76,7 +89,9 @@ func fakeTailscale(t *testing.T, status, serve string, funnelOut string, funnelC
 		"case \"$*\" in\n" +
 		"  \"status --self --json\") cat \"" + dir + "/status.json\" ;;\n" +
 		"  \"serve status --json\") cat \"" + dir + "/serve.json\" ;;\n" +
-		"  \"funnel --bg \"*) echo funnel >> \"" + dir + "/calls\"; cat \"" + dir + "/funnel.out\"; [ -f \"" + dir + "/serve.on\" ] && cp \"" + dir + "/serve.on\" \"" + dir + "/serve.json\"; exit " + strconv.Itoa(funnelCode) + " ;;\n" +
+		"  \"funnel --bg \"*) echo funnel >> \"" + dir + "/calls\"; cat \"" + dir + "/funnel.out\"; " +
+		"[ -f \"" + dir + "/funnel.sleep\" ] && exec sleep \"$(cat \"" + dir + "/funnel.sleep\")\"; " +
+		"[ -f \"" + dir + "/serve.on\" ] && cp \"" + dir + "/serve.on\" \"" + dir + "/serve.json\"; exit " + strconv.Itoa(funnelCode) + " ;;\n" +
 		"  *) exit 9 ;;\nesac\n"
 	p := filepath.Join(dir, "tailscale")
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
@@ -254,6 +269,14 @@ func assertNoSecrets(t *testing.T, token string, err error, notes []string, outs
 	}
 }
 
+// funnelWaitNote 是开 Funnel 之前打的那一行的开头：tailnet 没开通时 tailscale 会等着，这里先说一声要等多久、之后会打印开通链接。
+const funnelWaitNote = "tailnet 没开通 Funnel 时 tailscale 会等你去浏览器开通，最多等 "
+
+// tsNotEnabledOut 是 tailnet 没开通 Funnel 时真 tailscale 的 funnel --bg 打出的说明与开通链接（之后它要么退出 0，要么一直等）。
+func tsNotEnabledOut(link string) string {
+	return "Funnel is not enabled on your tailnet.\nTo enable, visit:\n\n         " + link + "\n"
+}
+
 func TestSetupLocalHubHappyPathExistingHub(t *testing.T) {
 	f := localHubEnv(t)
 	ts := fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
@@ -326,46 +349,159 @@ func TestSetupLocalHubEnablesFunnelWhenOff(t *testing.T) {
 	if !strings.Contains(out.String(), tsPublicURL) || !strings.Contains(out.String(), "Funnel") {
 		t.Fatalf("stdout 应说对外地址与 Funnel: %s", out.String())
 	}
+	// Funnel 在 hub 应答之后才开（这时 local-hub.json 已写）；开之前先说 tailnet 没开通时 tailscale 会等多久
+	s := out.String()
+	wrote, open, wait := strings.Index(s, "已写入 "+localHubPath(f.hubDir)), strings.Index(s, "开 Tailscale Funnel："), strings.Index(s, funnelWaitNote+tailscale.Timeout.String())
+	if wrote < 0 || open < wrote || wait < open {
+		t.Fatalf("应在写好 local-hub.json、hub 应答之后才开 Funnel，开之前说最多等多久:\n%s", s)
+	}
 	assertNoSecrets(t, tok, err, notes, out.String(), errOut.String())
 }
 
 func TestSetupLocalHubFunnelStillOffAfterEnable(t *testing.T) {
 	f := localHubEnv(t)
 	ts := fakeTailscale(t, tsStatusOK, "No serve config\n", "", 0) // funnel 成功，但 serve 配置里还是没有
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
 	var out, errOut bytes.Buffer
-	_, _, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
+	_, tok, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
 	if err == nil || !strings.Contains(err.Error(), "tailscale funnel status") {
 		t.Fatalf("err = %v", err)
 	}
-	if ts.funnelCalls() != 1 {
-		t.Fatalf("应调一次 funnel，调了 %d 次", ts.funnelCalls())
+	if ts.funnelCalls() != 1 || tok != "" {
+		t.Fatalf("应调一次 funnel、没有接入码，调了 %d 次: %q", ts.funnelCalls(), tok)
 	}
-	if _, err := os.Stat(f.hubDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("第 1 步就停，不该建 hub 数据目录: %v", err)
+	// Funnel 是最后一步：hub 已托管、local-hub.json 已写
+	if !f.hostedHub() {
+		t.Fatalf("开 Funnel 之前应已托管 hub: %v", f.rec.calls)
+	}
+	if _, ok, _ := loadLocalHub(f.hubDir); !ok {
+		t.Fatal("开 Funnel 之前应已写 local-hub.json")
 	}
 }
 
+// tailnet 没开通 Funnel：真 tailscale 打出开通链接后要么直接退出 0，要么一直等（到时限被杀掉）；退出非零也认。三种都返回带链接的
+// ErrFunnelNotEnabled。Funnel 是最后一步：这时密码已设、hub 已托管（只监听 127.0.0.1）、local-hub.json 已写，只是没生成接入码。
 func TestSetupLocalHubFunnelNotEnabledShowsLink(t *testing.T) {
-	f := localHubEnv(t)
 	link := "https://login.tailscale.com/f/funnel?node=nodeABC"
-	fakeTailscale(t, tsStatusOK, "No serve config\n", "Funnel is not enabled on your tailnet.\nTo enable, visit:\n\n         "+link+"\n", 1)
+	for _, tc := range []struct {
+		name string
+		code int
+		wait bool
+	}{{"打出链接后退出 0", 0, false}, {"打出链接后一直等", 0, true}, {"打出链接后退出 1", 1, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := localHubEnv(t)
+			ts := fakeTailscale(t, tsStatusOK, "No serve config\n", tsNotEnabledOut(link), tc.code)
+			if tc.wait {
+				ts.waitForever(t)
+			}
+			startLocalTestHub(t, f.hubDir, f.port)
+			stubHubJobRunning(t, true)
+			var out, errOut bytes.Buffer
+			_, tok, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
+			var nf tailscale.ErrFunnelNotEnabled
+			if !errors.As(err, &nf) || nf.EnableURL != link {
+				t.Fatalf("应是 ErrFunnelNotEnabled: %v\n%s", err, out.String())
+			}
+			if !strings.Contains(err.Error(), link) {
+				t.Fatalf("错误应含开通链接: %v", err)
+			}
+			if tok != "" || ts.funnelCalls() != 1 {
+				t.Fatalf("失败时不该有接入码，funnel 应调一次（%d）", ts.funnelCalls())
+			}
+			if !strings.Contains(out.String(), funnelWaitNote+tailscale.Timeout.String()) { // 一直等的那种已把时限调到 2 秒
+				t.Fatalf("开 Funnel 之前应说 tailscale 最多等多久:\n%s", out.String())
+			}
+			if _, ok, _ := f.openHubStore(t).GetSetting("password_hash"); !ok {
+				t.Fatal("开 Funnel 之前应已设密码")
+			}
+			if !f.hostedHub() {
+				t.Fatalf("开 Funnel 之前应已托管 hub: %v", f.rec.calls)
+			}
+			if lh, ok, _ := loadLocalHub(f.hubDir); !ok || lh.PublicURL != tsPublicURL || lh.Provider != "tailscale" {
+				t.Fatalf("开 Funnel 之前应已写 local-hub.json: %+v %v", lh, ok)
+			}
+			assertNoSecrets(t, "", err, nil, out.String(), errOut.String())
+		})
+	}
+}
+
+// tailscale 打出了开通链接，可复查时 serve 配置里 Funnel 已经对了（比如等的那会儿在浏览器里开通了）：算开好了，不报错。
+func TestSetupLocalHubFunnelLinkButServeOn(t *testing.T) {
+	f := localHubEnv(t)
+	ts := fakeTailscale(t, tsStatusOK, "No serve config\n", tsNotEnabledOut("https://login.tailscale.com/f/funnel?node=nodeABC"), 0)
+	ts.setOn(t, tsServeOn(f.port))
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	var out, errOut bytes.Buffer
+	lh, tok, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
+	if err != nil || lh.PublicURL != tsPublicURL || tok == "" {
+		t.Fatalf("复查时 Funnel 已开就算成功: %v %+v\n%s", err, lh, out.String())
+	}
+}
+
+// 443 上除了 / 还有别的 serve 挂载点、Funnel 又没开：funnel --bg 按“主机:443”整体开 Funnel，它们会一起公开到公网。
+// 在碰任何东西之前拒绝（不建 hub 数据目录、不问密码、不托管、不开 Funnel），列出挂载点与目标。443 上 Funnel 已经开着时它们本来就公开，
+// 照常走（只替换 /）。
+func TestSetupLocalHubRefusesOtherMountsOn443(t *testing.T) {
+	f := localHubEnv(t)
+	mounts := `"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"},"/grafana":{"Proxy":"http://127.0.0.1:9000"},"/files":{"Path":"/Users/me/Public"}}`
+	ts := fakeTailscale(t, tsStatusOK, `{"TCP":{"443":{"HTTPS":true}},"Web":{"`+tsDNS+`:443":{`+mounts+`}}}`, "", 0)
+	ts.setOn(t, tsServeOn(f.port))
+	stubHubJobRunning(t, false)
 	var out, errOut bytes.Buffer
 	_, tok, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
-	var nf tailscale.ErrFunnelNotEnabled
-	if !errors.As(err, &nf) || nf.EnableURL != link {
-		t.Fatalf("应是 ErrFunnelNotEnabled: %v", err)
+	if err == nil {
+		t.Fatalf("应拒绝:\n%s", out.String())
 	}
-	if !strings.Contains(err.Error(), link) {
-		t.Fatalf("错误应含开通链接: %v", err)
+	for _, want := range []string{"/grafana → http://127.0.0.1:9000", "/files → 别的内容", "公开", "tailscale serve", "--public-url"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误应含 %q: %v", want, err)
+		}
 	}
-	if tok != "" {
-		t.Fatal("失败时不该有接入码")
+	if tok != "" || ts.funnelCalls() != 0 || f.hostedHub() {
+		t.Fatalf("拒绝时不该开 Funnel、托管: funnel=%d %v", ts.funnelCalls(), f.rec.calls)
 	}
 	if _, err := os.Stat(f.hubDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("第 1 步就停，不该建 hub 数据目录、设密码、写 local-hub.json: %v", err)
+		t.Fatal("拒绝时不该建 hub 数据目录、设密码")
 	}
-	if f.hostedHub() {
-		t.Fatal("第 1 步就停，不该托管")
+
+	// 443 上 Funnel 已经开着（别的挂载点本来就公开）：不拒绝，只替换 /
+	ts = fakeTailscale(t, tsStatusOK, `{"TCP":{"443":{"HTTPS":true}},"Web":{"`+tsDNS+`:443":{`+mounts+`}},"AllowFunnel":{"`+tsDNS+`:443":true}}`, "", 0)
+	ts.setOn(t, tsServeOn(f.port))
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	out.Reset()
+	if _, _, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut)); err != nil {
+		t.Fatalf("Funnel 已开时不该拒绝: %v\n%s", err, out.String())
+	}
+	if ts.funnelCalls() != 1 || !strings.Contains(out.String(), "将替换") {
+		t.Fatalf("应替换 / 并开 Funnel（%d）:\n%s", ts.funnelCalls(), out.String())
+	}
+}
+
+// 托管之后应答的不是托管的 hub（托管作业没在跑，端口在问密码的那几分钟里被别的程序抢了）：不开 Funnel，否则公网入口就指向了它。
+func TestSetupLocalHubAnswerNotManagedNoFunnel(t *testing.T) {
+	f := localHubEnv(t)
+	ts := fakeTailscale(t, tsStatusOK, "No serve config\n", "", 0)
+	ts.setOn(t, tsServeOn(f.port))
+	stubHubJobRunning(t, false)
+	// 托管的那一刻端口上冒出一个不归服务管理器管的 hub
+	started := false
+	f.rec.respond = func(call []string) (string, error) {
+		if !started && (slices.Contains(call, "bootstrap") || slices.Contains(call, "restart")) {
+			started = true
+			startLocalTestHub(t, filepath.Join(f.home, "other-hub"), f.port)
+		}
+		return "", nil
+	}
+	var out, errOut bytes.Buffer
+	_, tok, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
+	if err == nil || !strings.Contains(err.Error(), "不是托管的 hub") || !strings.Contains(err.Error(), "没开 Funnel") {
+		t.Fatalf("err = %v\n%s", err, out.String())
+	}
+	if !started || tok != "" || ts.funnelCalls() != 0 {
+		t.Fatalf("应答的不是托管的 hub 时不该开 Funnel（%d）、不该有接入码", ts.funnelCalls())
 	}
 }
 
@@ -609,7 +745,8 @@ func TestSetupLocalHubReinstallsWhenPortChanged(t *testing.T) {
 
 func TestSetupLocalHubNoPasswordNotTerminal(t *testing.T) {
 	f := localHubEnv(t)
-	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	ts := fakeTailscale(t, tsStatusOK, "No serve config\n", "", 0)
+	ts.setOn(t, tsServeOn(f.port))
 	stubHubJobRunning(t, false)
 	var out, errOut bytes.Buffer
 	o := f.opts("", &out, &errOut)
@@ -627,11 +764,15 @@ func TestSetupLocalHubNoPasswordNotTerminal(t *testing.T) {
 	if f.hostedHub() {
 		t.Fatal("没设上密码不该托管")
 	}
+	if n := ts.funnelCalls(); n != 0 {
+		t.Fatalf("没设上密码不该开 Funnel，开了 %d 次", n)
+	}
 }
 
 func TestSetupLocalHubInstallsWhenNotRunning(t *testing.T) {
 	f := localHubEnv(t)
-	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	ts := fakeTailscale(t, tsStatusOK, "No serve config\n", "", 0)
+	ts.setOn(t, tsServeOn(f.port))
 	stubHubJobRunning(t, false)
 	var out, errOut bytes.Buffer
 	_, tok, notes, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
@@ -661,12 +802,16 @@ func TestSetupLocalHubInstallsWhenNotRunning(t *testing.T) {
 	if lh, ok, _ := loadLocalHub(f.hubDir); !ok || lh.PublicURL != tsPublicURL {
 		t.Fatalf("托管成功后（等应答之前）应已写 local-hub.json: %+v %v", lh, ok)
 	}
+	if n := ts.funnelCalls(); n != 0 {
+		t.Fatalf("hub 没应答不该开 Funnel，开了 %d 次", n)
+	}
 	assertNoSecrets(t, "", err, notes, out.String(), errOut.String())
 }
 
 func TestSetupLocalHubHostFailureKeepsOldFile(t *testing.T) {
 	f := localHubEnv(t)
-	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	ts := fakeTailscale(t, tsStatusOK, "No serve config\n", "", 0)
+	ts.setOn(t, tsServeOn(f.port))
 	startLocalTestHub(t, f.hubDir, f.port)
 	stubHubJobRunning(t, true)
 	old := localHub{Port: f.port, PublicURL: "https://old-mac.tail2613ae.ts.net", Provider: "tailscale"}
@@ -691,6 +836,9 @@ func TestSetupLocalHubHostFailureKeepsOldFile(t *testing.T) {
 	// 文件留着旧值：重跑时才会判成“变了”、再托管，而不是“没变、已在跑”跳过
 	if got, ok, lerr := loadLocalHub(f.hubDir); lerr != nil || !ok || got != old {
 		t.Fatalf("托管失败不该把 local-hub.json 改成新值: %+v %v %v", got, ok, lerr)
+	}
+	if n := ts.funnelCalls(); n != 0 {
+		t.Fatalf("托管失败不该开 Funnel，开了 %d 次", n)
 	}
 	assertNoSecrets(t, "", err, notes, out.String(), errOut.String())
 }
@@ -754,7 +902,7 @@ func TestSetupLocalHubWarnsBeforeReplacingServe(t *testing.T) {
 	if _, _, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut)); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
-	i, j := strings.Index(out.String(), "将替换"), strings.Index(out.String(), "开 Tailscale Funnel")
+	i, j := strings.Index(out.String(), "将替换"), strings.Index(out.String(), "开 Tailscale Funnel：")
 	if i < 0 || j < 0 || i > j || !strings.Contains(out.String(), "http://127.0.0.1:3000") || ts.funnelCalls() != 1 {
 		t.Fatalf("开 Funnel 之前应说要替换原来指向 127.0.0.1:3000 的配置:\n%s", out.String())
 	}

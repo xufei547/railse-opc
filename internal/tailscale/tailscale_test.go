@@ -13,7 +13,8 @@ import (
 )
 
 // fakeCLI 写一个假 tailscale：`status --self --json` 打印 status.json，`serve status --json` 打印 serve.json，
-// `funnel --bg N` 打印 funnel.out 并按 funnel.code 退出（没有则 0），别的参数退出 9。参数记进 args.log。
+// `funnel --bg N` 打印 funnel.out，目录里有 funnel.sleep 时接着睡那么多秒（模拟真 tailscale 打出开通链接后等人去开通），
+// 否则按 funnelCode 退出；别的参数退出 9。参数记进 args.log。
 func fakeCLI(t *testing.T, status, serve, funnelOut string, funnelCode int) (CLI, string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -33,7 +34,7 @@ printf '%s\n' "$*" >> "` + filepath.Join(dir, "args.log") + `"
 case "$*" in
   "status --self --json") cat "` + filepath.Join(dir, "status.json") + `" ;;
   "serve status --json") cat "` + filepath.Join(dir, "serve.json") + `" ;;
-  "funnel --bg "*) cat "` + filepath.Join(dir, "funnel.out") + `"; exit ` + strconv.Itoa(funnelCode) + ` ;;
+  "funnel --bg "*) cat "` + filepath.Join(dir, "funnel.out") + `"; [ -f "` + filepath.Join(dir, "funnel.sleep") + `" ] && exec sleep "$(cat "` + filepath.Join(dir, "funnel.sleep") + `")"; exit ` + strconv.Itoa(funnelCode) + ` ;;
   *) echo "unexpected: $*" >&2; exit 9 ;;
 esac
 `
@@ -100,6 +101,47 @@ func TestEnableFunnelNotEnabledReturnsURL(t *testing.T) {
 	var nf ErrFunnelNotEnabled
 	if !errors.As(err, &nf) || nf.EnableURL != "https://login.tailscale.com/f/funnel?node=abc" {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// 真 tailscale 在 tailnet 没开通 Funnel 时先打出说明与开通链接，再要么直接退出 0（非管理员），要么等人在浏览器里开通（管理员；
+// 我们 Timeout 到了就杀掉）。两种都要把链接交出来：退出 0 的不能当成开好了。
+const notEnabledOut = "Funnel is not enabled on your tailnet.\nTo enable, visit:\n\n         https://login.tailscale.com/f/funnel?node=abc\n"
+
+func TestEnableFunnelLinkThenExitZeroReturnsURL(t *testing.T) {
+	c, _ := fakeCLI(t, statusRunning, "", notEnabledOut, 0)
+	err := c.EnableFunnel(context.Background(), 8787)
+	var nf ErrFunnelNotEnabled
+	if !errors.As(err, &nf) || nf.EnableURL != "https://login.tailscale.com/f/funnel?node=abc" {
+		t.Fatalf("打出开通链接后退出 0 也应是 ErrFunnelNotEnabled: %v", err)
+	}
+}
+
+func TestEnableFunnelLinkThenWaitTimesOutReturnsURL(t *testing.T) {
+	c, dir := fakeCLI(t, statusRunning, "", notEnabledOut, 0)
+	if err := os.WriteFile(filepath.Join(dir, "funnel.sleep"), []byte("30"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 不能太短：新写的脚本第一次起来可能要几百毫秒（macOS 上会先被扫一遍），还没打出链接就被杀掉
+	old := Timeout
+	Timeout = 2 * time.Second
+	t.Cleanup(func() { Timeout = old })
+	start := time.Now()
+	err := c.EnableFunnel(context.Background(), 8787)
+	var nf ErrFunnelNotEnabled
+	if !errors.As(err, &nf) || nf.EnableURL != "https://login.tailscale.com/f/funnel?node=abc" {
+		t.Fatalf("打出开通链接后一直等、被超时杀掉，也应是 ErrFunnelNotEnabled: %v", err)
+	}
+	if d := time.Since(start); d > 6*time.Second {
+		t.Fatalf("应在 Timeout 后不久返回，用了 %s", d)
+	}
+}
+
+func TestEnableFunnelSuccessOutputIsNotAnError(t *testing.T) {
+	out := "Available on the internet:\n\nhttps://macbook-air.tail2613ae.ts.net/\n|-- proxy http://127.0.0.1:8787\n\nFunnel started and running in the background.\n"
+	c, _ := fakeCLI(t, statusRunning, "", out, 0)
+	if err := c.EnableFunnel(context.Background(), 8787); err != nil {
+		t.Fatalf("开好了不该报错: %v", err)
 	}
 }
 

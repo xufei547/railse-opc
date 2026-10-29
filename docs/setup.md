@@ -44,12 +44,12 @@ hub 和守护进程都在这台机器上，手机经 Tailscale Funnel 连进来�
 
 - 本机装好 [Tailscale](https://tailscale.com/download) 并登录（setup 要调 `tailscale` 命令，找不到时会说）。
 - tailnet 有 MagicDNS 域名，开了 HTTPS 证书（管理台 DNS 页）。
-- tailnet 开通了 Funnel。没开通时 `tailscale` 会给一个开通链接，setup 原样打印它并退出 1；在管理台点开通后重跑同一条命令。
+- tailnet 开通了 Funnel。没开通时 `tailscale funnel` 会给一个开通链接，有时还会一直等你去开通：setup 最多等 15 秒，然后原样打印开通链接并退出 1（这时 hub 已托管，只监听本机，手机还连不上）；在浏览器里开通后重跑同一条命令。
 - 用平时的用户身份跑，不要 sudo。
 
 **做了什么。** 比 `setup all` 的四步多一步，放在最前面：
 
-1. **本机 hub。** 先看端口：`127.0.0.1:<端口>` 被别的程序或手动起的 hub 占着就停下，这时还没碰 Tailscale、不会开 Funnel。再看 Tailscale 的状态（没装、没登录、没有 MagicDNS 域名、没开 HTTPS 证书各有提示）。然后开 Funnel：443 上原来指向别处的配置会被替换，开之前先打一行提示。没设过网页密码时在终端里问一次（不在终端里就停下，提示先 `railse hub password --dir <目录>`）。接着托管 hub（`setup autostart --hub`，只监听 `127.0.0.1:<端口>`，带 `--trusted-proxy 127.0.0.1,::1`）并等它应答。托管成功后写 `local-hub.json`。最后用 hub 数据库生成一次性接入码，直接交给接入，不显示。
+1. **本机 hub。** 先看端口：`127.0.0.1:<端口>` 被别的程序或手动起的 hub 占着就停下。再只读地看 Tailscale，定下对外地址：状态（没装、没登录、没有 MagicDNS 域名、没开 HTTPS 证书各有提示）与 serve 配置；443 上除了 `/` 还有别的 serve 配置、Funnel 又没开时停下，因为 Funnel 按整个 443 开，它们会一起公开到公网（先用 `tailscale serve` 撤掉它们，或改用自己的隧道）。到这里什么都没改。没设过网页密码时在终端里问一次（不在终端里就停下，提示先 `railse hub password --dir <目录>`）。接着托管 hub（`setup autostart --hub`，只监听 `127.0.0.1:<端口>`，带 `--trusted-proxy 127.0.0.1,::1`），托管成功就写 `local-hub.json`，再等它应答，并确认应答的是托管的那个 hub。最后才开 Funnel：已经转到这个端口就不动；443 上 `/` 原来指向别处的会被替换，开之前先打一行提示。前面任何一步停下都不会开 Funnel，不会把端口上别的程序开到公网。最后用 hub 数据库生成一次性接入码，直接交给接入，不显示。
 2. 接入、装钩子、开机自启、体检，同下面“工作机”的四步；接入的地址是 `http://127.0.0.1:<端口>`。
 
 做完后框线里打印的是对外地址 `https://<机器名>.<tailnet>.ts.net`。本机开着系统代理时，“注意”里会提醒：手机也挂着同一个代理而打不开地址，就关掉代理，或在代理规则里把 `ts.net` 设为直连。
