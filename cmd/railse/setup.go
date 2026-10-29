@@ -704,11 +704,13 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	var prev localHub // 上次装的本机 hub（hub 数据目录里合法的 local-hub.json；坏文件当没有，第 1 步会警告并重写）
 	hadPrev := false
 	if localMode || (!given["hub"] && !given["token"] && lerr == nil) {
-		if hubDir, err = localHubDirFor(*hubDirFlag); err != nil && localMode {
-			fmt.Fprintln(stderr, err)
+		d, derr := localHubDirFor(*hubDirFlag)
+		if derr != nil && localMode {
+			fmt.Fprintln(stderr, derr)
 			return 1
 		}
-		if err == nil {
+		if derr == nil {
+			hubDir = d
 			prev, hadPrev, _ = loadLocalHub(hubDir)
 		}
 	}
@@ -798,7 +800,8 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	if *bin != "" {
 		dirBin += " --bin " + hooksconf.ShellQuote(b)
 	}
-	// 本机模式下重跑的命令：--local-hub 加上用户给的 --hub-port、--hub-dir、--public-url（没给的重跑时也沿用上次装的）
+	// 本机模式下重跑的命令：--local-hub 加上用户给的 --hub-port、--hub-dir、--public-url（没给的重跑时也沿用上次装的），
+	// 再带上用户给的 --project、--dir、--bin
 	rerun := "railse setup all"
 	if localMode {
 		rerun += " --local-hub"
@@ -813,9 +816,9 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		}
 	}
 	// 重新接入写成完整的 setup all 命令：从不带子命令的 railse setup 进来的，加 --force 是用法错误
-	reenroll := "railse setup all --force" + projArg + dirBin
+	reenroll := rerun + " --force" + projArg + dirBin
 	if localMode {
-		reenroll = rerun + " --force" + projArg + dirBin
+		rerun += projArg + dirBin
 	}
 
 	// 已接入的机器在终端里重跑：重做之前先问一次（confirmRerun），shown 是问句里说的已接入的 hub。返回 false 时已说明原因，调用方退出 1。
@@ -878,9 +881,17 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		steps = append([]string{"本机 hub"}, steps...)
 	}
 	var done []string
-	step := func(name string) { fmt.Fprintf(stdout, "\n== %d. %s ==\n", slices.Index(steps, name)+1, name) }
+	// stepNo 是名字叫 name 的那一步是第几步；没有这一步是写错了名字（编程错误），直接 panic，不打印“第 0 步”
+	stepNo := func(name string) int {
+		i := slices.Index(steps, name)
+		if i < 0 {
+			panic("setup all 没有叫 " + name + " 的步骤")
+		}
+		return i + 1
+	}
+	step := func(name string) { fmt.Fprintf(stdout, "\n== %d. %s ==\n", stepNo(name), name) }
 	fail := func(name, extra string) int {
-		n := slices.Index(steps, name) + 1
+		n := stepNo(name)
 		fmt.Fprintf(stderr, "railse setup all 停在第 %d 步（%s）", n, name)
 		if len(done) > 0 {
 			fmt.Fprintf(stderr, "；已完成：%s", strings.Join(done, "、"))
@@ -928,6 +939,18 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		}
 		fmt.Fprintf(stdout, "已接入过（%s），跳过；要换 hub 或重新接入：%s\n", cfg.MachinePath, reenroll)
 		phoneURL = m.HubURL
+		if p, ok := loopbackHubPort(m.HubURL); ok {
+			// 接的是 127.0.0.1 上的 hub 却没认出本机模式：多半是 setup all --local-hub 装的，但 hub 数据目录不在默认位置，
+			// 或那里的 local-hub.json 坏了、没有。手机打不开 127.0.0.1，框里不画它；告诉用户怎样按本机 hub 复查
+			where := "默认的 hub 数据目录"
+			if hubDir != "" {
+				where = hubDir
+			}
+			fmt.Fprintf(stdout, "注意：本机接的是本机上的 hub（127.0.0.1:%d），但 %s 里没有对得上的 local-hub.json，这次没按本机 hub 复查（Funnel、托管）；"+
+				"是 railse setup all --local-hub 装的，用 railse setup all --local-hub --hub-dir <它的数据目录>%s%s 复查\n", p, where, projArg, dirBin)
+			notes = append(notes, "本机接的 "+m.HubURL+" 只在这台机器上打得开：手机要打开的是本机 hub 的对外地址（hub 数据目录里 local-hub.json 的 public_url）")
+			phoneURL = ""
+		}
 		if hubBase != "" && hubBase != m.HubURL {
 			fmt.Fprintf(stdout, "注意：本机接的是 %s，不是 --hub 给的 %s；要改接那个 hub，加 --force 重新接入\n", m.HubURL, hubBase)
 		}
@@ -950,9 +973,9 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		// --dir 也交给钩子：目录不是 ~/.railse 时钩子命令带 --socket，才连得上下面托管的、带 RAILSE_HOME=<目录> 的守护进程。
 		// --bin 只在用户给了时才传（setup hooks 默认就是当前程序）
 		hookArgs := []string{"--dir", cfg.Dir}
-		given := "" // 用户给的 --bin（取了绝对路径），没给为空
+		givenBin := "" // 用户给的 --bin（取了绝对路径），没给为空
 		if *bin != "" {
-			given = b
+			givenBin = b
 			hookArgs = append(hookArgs, "--bin", b)
 		}
 		notifyArgs := slices.Clone(hookArgs)
@@ -968,7 +991,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		if code := runSetupCodexNotify(notifyArgs, stdout, stderr); code != 0 {
 			socket, _, _ := hookSocket(cfg.Dir) // 上面装钩子时已算过一次，不会出错
 			notes = append(notes, fmt.Sprintf("Codex 的 notify 没有接上（原因见第 %d 步），完成与提问事件进不了收件箱；处理好后运行 %s（会保留已有的 notify）",
-				slices.Index(steps, "安装钩子")+1, codexNotifyCmd(socket, given)))
+				stepNo("安装钩子"), codexNotifyCmd(socket, givenBin)))
 		}
 	}
 
@@ -990,7 +1013,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	case occupied && !agentJobRunning():
 		fmt.Fprintf(stdout, "守护进程已在运行，但不是托管的那个（launchd/systemd 里的托管作业没在跑；应是手动 railse agent run 起的），跳过托管："+
 			"再托管一个会抢不到 socket、被反复拉起；在跑的这个也只在启动时读 machine.json。\n先停掉它（在它的终端里 Ctrl-C），再运行：railse setup autostart%s\n", dirBin)
-		notes = append(notes, fmt.Sprintf("没有托管开机自启（守护进程在手动运行），见第 %d 步", slices.Index(steps, "开机自启")+1))
+		notes = append(notes, fmt.Sprintf("没有托管开机自启（守护进程在手动运行），见第 %d 步", stepNo("开机自启")))
 	default:
 		if code := runAutostart([]string{"--dir", cfg.Dir, "--bin", b}, stdout, stderr); code != 0 {
 			return fail("开机自启", "可以先手动 railse agent run"+dirArg+" 跑起守护进程。")

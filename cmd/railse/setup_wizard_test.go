@@ -265,8 +265,9 @@ func TestSetupWizardSkipsQuestionsWhenEnrolled(t *testing.T) {
 	f := setupAllEnv(t)
 	t.Setenv("RAILSE_HOME", f.dir)
 	t.Chdir(f.proj)
+	hub := h.localhostURL() // 不是 127.0.0.1：那是没认出来的本机 hub，框里不画
 	var out, errOut bytes.Buffer
-	if code := run([]string{"agent", "enroll", "--hub", h.http.URL, "--token", newEnrollToken(t, h)}, &out, &errOut); code != 0 {
+	if code := run([]string{"agent", "enroll", "--hub", hub, "--token", newEnrollToken(t, h)}, &out, &errOut); code != 0 {
 		t.Fatalf("enroll: %d %q", code, errOut.String())
 	}
 	f.rec.respond = jobState(false) // 托管的作业没在跑：问句说托管并启动
@@ -279,10 +280,10 @@ func TestSetupWizardSkipsQuestionsWhenEnrolled(t *testing.T) {
 	if strings.Contains(s, askHubPrompt) || strings.Contains(s, askTokenPrompt) || strings.Contains(s, askNamePrompt) {
 		t.Fatalf("已接入时不该问接入的问题:\n%s", s)
 	}
-	if strings.Count(s, askRerunPrompt) != 1 || !strings.Contains(s, rerunPrompt(h.http.URL, "重装钩子（连同 Codex 的 notify）、托管并启动守护进程")) {
+	if strings.Count(s, askRerunPrompt) != 1 || !strings.Contains(s, rerunPrompt(hub, "重装钩子（连同 Codex 的 notify）、托管并启动守护进程")) {
 		t.Fatalf("重装钩子、托管守护进程之前应确认一次:\n%s", s)
 	}
-	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "已托管") || !strings.Contains(s, "║  "+h.http.URL+"  ║") {
+	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "已托管") || !strings.Contains(s, "║  "+hub+"  ║") {
 		t.Fatalf("应跳过接入、照常跑完，框里是 machine.json 的地址:\n%s", s)
 	}
 	// 从 railse setup 进来的人照抄得了：railse setup --force 是用法错误，要写成完整的 setup all 命令
@@ -589,7 +590,7 @@ func TestSetupWizardFirstQuestionLocal(t *testing.T) {
 	f := localSetupEnv(t)
 	t.Setenv("RAILSE_HUB_HOME", f.hubDir)
 	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
-	startLocalTestHub(t, f.hubDir, f.port)
+	spy := startLocalTestHub(t, f.hubDir, f.port)
 	stubHubJobRunning(t, true)
 	fakeStdin(t, true, "1\n"+localHubTestPassword+"\n")
 	var out, errOut bytes.Buffer
@@ -611,7 +612,7 @@ func TestSetupWizardFirstQuestionLocal(t *testing.T) {
 	if m, err := agent.LoadMachine(f.machinePath()); err != nil || m.HubURL != f.localHubURL() {
 		t.Fatalf("应接入本机 hub: %+v %v", m, err)
 	}
-	assertNoEnrollSecrets(t, s, errOut.String())
+	assertNoEnrollSecrets(t, oneEnrollToken(t, spy), s, errOut.String())
 }
 
 // 找得到 tailscale 时默认是 [1]，答 2 照样走已有 hub 的问答，结果同 TestSetupWizardAsksThenRunsSetupAll。

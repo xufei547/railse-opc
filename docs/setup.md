@@ -79,11 +79,11 @@ railse hub token --dir /var/lib/railse-hub
 在终端里跑一次（钩子默认装用户级，在哪个目录里跑都行）：
 
 ```sh
-railse setup                                                     # 问答式：逐个问 hub 地址、接入码、本机名字
+railse setup                                                     # 问答式：先问 hub 在哪里，已有 hub 的再问地址、接入码、名字
 railse setup all --hub https://hub.example.com --token <接入码>   # 或者一次给全
 ```
 
-**问答式向导。** 不带子命令的 `railse setup`，或 `railse setup all` 要接入却没给 `--hub`、`--token` 时，stdin 是终端就逐个问缺的：hub 地址（与 `--hub` 同样校验；非本机的 `http://` 也不收，确在可信内网的用 `--hub` 给出）、接入码（在 hub 机器上运行 `railse hub token` 生成；输入会回显）、本机名字（直接回车用主机名；给了 `--name` 不问）。答得不合格就说明原因再问；Ctrl-D 取消，什么都不做（退出 1）。答完照 `setup all` 做下面四步。已接入过（有 `machine.json`、没加 `--force`）时不问这些，跳过接入，只在重装之前确认一次（见下面的“重跑”）。stdin 不是终端（如管道、`< /dev/null`）时不问：`railse setup` 打印用法，`setup all` 缺 `--hub`、`--token` 是用法错误，都退出 2，与原来一样排在其余检查之前。拒绝 root、检查 `--bin`、`--project` 与 `--name` 都在提问之前，不会答完才被拒。
+**问答式向导。** 不带子命令的 `railse setup` 在没接入过（没有 `machine.json`）时先问 hub 在哪里：`1` 本机（照 `railse setup all --local-hub` 做，不问地址与接入码），`2` 已有 hub；找得到 `tailscale` 时直接回车选 `1`，否则选 `2`，答别的说明后再问。答 `2` 的，或 `railse setup all` 要接入却没给 `--hub`、`--token` 时，stdin 是终端就逐个问缺的：hub 地址（与 `--hub` 同样校验；非本机的 `http://` 也不收，确在可信内网的用 `--hub` 给出）、接入码（在 hub 机器上运行 `railse hub token` 生成；输入会回显）、本机名字（直接回车用主机名；给了 `--name` 不问）。答得不合格就说明原因再问；Ctrl-D 取消，什么都不做（退出 1）。答完照 `setup all` 做下面四步。已接入过（有 `machine.json`、没加 `--force`）时不问这些，跳过接入，只在重装之前确认一次（见下面的“重跑”）。stdin 不是终端（如管道、`< /dev/null`）时不问：`railse setup` 打印用法，`setup all` 缺 `--hub`、`--token` 是用法错误，都退出 2，与原来一样排在其余检查之前。拒绝 root、检查 `--bin`、`--project` 与 `--name` 都在提问之前，不会答完才被拒。
 
 依次做四步，任一步失败就停下，说明停在哪一步、哪些已做完，修好后重跑（已接入的会跳过接入）：
 
@@ -94,7 +94,7 @@ railse setup all --hub https://hub.example.com --token <接入码>   # 或者一
 
 做完后把手机要打开的 hub 地址（守护进程实际接的那个）用框线围起来打印，并提示：手机 Safari 打开后分享→添加到主屏幕，再从图标打开；登录后在设置里开启通知（见 [web.md](web.md)）。
 
-其余标志：`--name 名字`（在 hub 里的名字，默认主机名）、`--project 目录`（给了才把 Claude、Gemini 的钩子装成那个项目的项目级，默认装用户级；目录要已存在）、`--dir 目录`（守护进程数据目录，默认 `$RAILSE_HOME` 或 `~/.railse`）、`--bin 路径`、`--no-hooks`（不装钩子，也不接 Codex 的 `notify`）、`--no-autostart`。`setup all` 要用平时的用户身份跑，以 root 运行直接拒绝（否则会用掉接入码，`machine.json` 与钩子配置也成了 root 的文件）。
+其余标志：`--name 名字`（在 hub 里的名字，默认主机名）、`--project 目录`（给了才把 Claude、Gemini 的钩子装成那个项目的项目级，默认装用户级；目录要已存在）、`--dir 目录`（守护进程数据目录，默认 `$RAILSE_HOME` 或 `~/.railse`）、`--bin 路径`、`--no-hooks`（不装钩子，也不接 Codex 的 `notify`）、`--no-autostart`（只管守护进程的开机自启；`--local-hub` 的本机 hub 总是托管，不然没人起它）。`setup all` 要用平时的用户身份跑，以 root 运行直接拒绝（否则会用掉接入码，`machine.json` 与钩子配置也成了 root 的文件）。
 
 **重跑。** 已接入过的机器（有 `machine.json`、没加 `--force`）在终端里重跑 `railse setup` 或 `railse setup all`，第 1 步说完「已接入过…跳过」后先问一次：
 
@@ -103,6 +103,14 @@ railse setup all --hub https://hub.example.com --token <接入码>   # 或者一
 ```
 
 直接回车或 `y`、`yes` 继续；`n`、`no` 或 Ctrl-D 打印「已取消，钩子与守护进程都没动」，退出 1；别的答案说明怎么答再问。问句只提这次真要做的：托管的守护进程没在跑时是「托管并启动守护进程」；`--no-hooks` 时只提守护进程，`--no-autostart` 时只提钩子，取消时的说明也一样；手动 `railse agent run` 起的守护进程占着 socket 时第 3 步不碰它，只提钩子。没有要重做的（如 `--no-hooks` 加 `--no-autostart`）时不问。首次接入、`--force` 重新接入、stdin 不是终端（脚本、管道、`< /dev/null`）时都不问，直接做。
+
+接的是 `setup all --local-hub` 装的本机 hub 时（不带 `--local-hub` 重跑也认得出），第 1 步“本机 hub”会复查 Funnel、可能重新托管 hub，所以这一问挪到第 1 步之前，问句里是手机打开的对外地址（不是 `127.0.0.1`），要做的事前面多一项：
+
+```text
+本机已接入 https://<机器名>.<tailnet>.ts.net。接下来检查本机 hub（必要时重新托管）、重装钩子（连同 Codex 的 notify）、重启守护进程，继续吗？[Y/n]
+```
+
+答 `n` 什么都不动（不碰 Tailscale、不托管、不装钩子），打印「已取消，本机 hub、钩子与守护进程都没动」，退出 1。
 
 **数据目录不是 `~/.railse` 时。** 托管的守护进程带着 `RAILSE_HOME=<目录>` 跑，CLI 起钩子时的环境里却不一定有它（只在跑 setup 的那条命令上设的 `RAILSE_HOME` 也进不去），不带 `--socket` 的钩子就会去连 `~/.railse/agent.sock`，请求全都交回终端、进不了 hub。所以守护进程的数据目录（`--dir`，没给时取 `$RAILSE_HOME`）不是 `~/.railse` 时，`setup all` 与 `setup hooks` 在钩子命令里写上 `--socket <目录>/agent.sock`（`setup codex-notify` 生成的脚本里 railse 那一行也带上）；是 `~/.railse` 时命令不变。以前换过数据目录、钩子却是按 `~/.railse` 装的，`railse doctor --dir <目录>` 的 `hooks.*` 会报 warn（doctor 把不带 `--socket` 的钩子一律当作连 `~/.railse/agent.sock`），照提示重跑 `railse setup hooks --dir <目录>`，Codex 的 `notify` 用 `railse setup codex-notify --dir <目录>` 重新生成。
 

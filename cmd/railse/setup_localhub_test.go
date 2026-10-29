@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/xufei547/railse-opc/internal/hub"
@@ -99,8 +101,23 @@ func noTailscale(t *testing.T) {
 	t.Cleanup(func() { tailscaleFind, tailscaleRun = oldFind, oldRun })
 }
 
-// startLocalTestHub 在 127.0.0.1:<port> 起一个真 hub（数据目录 dir），模拟“托管的 hub 已在跑”。
-func startLocalTestHub(t *testing.T, dir string, port int) {
+// enrollSpy 记下测试 hub 收到的 /api/enroll 请求体里的接入码：setup all --local-hub 在进程里生成、直接交给接入的那个，
+// 测试拿它断言接入码没出现在任何输出里。
+type enrollSpy struct {
+	mu     sync.Mutex
+	tokens []string
+}
+
+// seen 是到现在为止收到的接入码。
+func (s *enrollSpy) seen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.tokens)
+}
+
+// startLocalTestHub 在 127.0.0.1:<port> 起一个真 hub（数据目录 dir），模拟“托管的 hub 已在跑”。返回的 enrollSpy 记下
+// 接入请求里的接入码（请求体原样交给 hub）。
+func startLocalTestHub(t *testing.T, dir string, port int) *enrollSpy {
 	t.Helper()
 	if err := ensureHubDir(dir); err != nil {
 		t.Fatal(err)
@@ -120,9 +137,29 @@ func startLocalTestHub(t *testing.T, dir string, port int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hs := &http.Server{Handler: srv.Handler()}
+	spy := &enrollSpy{}
+	h := srv.Handler()
+	hs := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/enroll" {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+			if err != nil {
+				t.Errorf("读接入请求: %v", err)
+			}
+			var req struct {
+				Token string `json:"token"`
+			}
+			if json.Unmarshal(body, &req) == nil && req.Token != "" {
+				spy.mu.Lock()
+				spy.tokens = append(spy.tokens, req.Token)
+				spy.mu.Unlock()
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		h.ServeHTTP(w, r)
+	})}
 	go hs.Serve(l)
 	t.Cleanup(func() { hs.Close(); st.Close() })
+	return spy
 }
 
 // stubHubJobRunning 让 hubJobRunning 恒为 running（不问真实的 launchctl、systemctl），测试结束还原。
