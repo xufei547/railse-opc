@@ -756,7 +756,8 @@ func TestSetupLocalHubNotesFunnelLeftOnWhenSwitchingToCustom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
-	want := "之前用的 Tailscale Funnel 还开着：" + tsPublicURL + " 仍是公网入口（转到本机 127.0.0.1:" + strconv.Itoa(f.port) + "）；不用了就运行 tailscale funnel --https=443 off"
+	want := "之前用的 Tailscale Funnel 可能还开着（tailscale funnel status 看），" + tsPublicURL + " 可能仍是公网入口（转到本机 127.0.0.1:" +
+		strconv.Itoa(f.port) + "）；不用就 tailscale funnel --https=443 off"
 	if !slices.Contains(notes, want) {
 		t.Fatalf("notes 应有 %q: %q", want, notes)
 	}

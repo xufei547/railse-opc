@@ -190,7 +190,7 @@ func TestEnsureHubPassword(t *testing.T) {
 		t.Fatal("没读到密码应报错")
 	}
 	if all := out.String() + errOut.String(); strings.Contains(all, "通过管道传入") || !strings.Contains(out.String(), "屏幕会回显") ||
-		!strings.Contains(out.String(), "read -s PW") || !strings.Contains(out.String(), "railse hub password --dir "+dir3) {
+		!strings.Contains(out.String(), "read -rs PW") || !strings.Contains(out.String(), "railse hub password --dir "+dir3) {
 		t.Fatalf("setup 应打自己的说明: stdout=%q stderr=%q", out.String(), errOut.String())
 	}
 	// 太短：报错（同 railse hub password 的规则，至少 8 个字符）

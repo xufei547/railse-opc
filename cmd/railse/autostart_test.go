@@ -636,7 +636,8 @@ func TestAutostartHubUninstallRemindsFunnel(t *testing.T) {
 			if got := strings.Contains(s, remind); got != tc.want {
 				t.Fatalf("%s %v %+v: 提醒关 Funnel = %v，想要 %v:\n%s", goos, tc.args, tc.lh, got, tc.want, s)
 			}
-			if tc.want && (!strings.Contains(s, "Funnel 还开着") || !strings.Contains(s, "https://mac.tail2613ae.ts.net")) {
+			if tc.want && (!strings.Contains(s, "Funnel 可能还开着（tailscale funnel status 看）") || !strings.Contains(s, "https://mac.tail2613ae.ts.net") ||
+				!strings.Contains(s, "不用就 "+remind)) {
 				t.Fatalf("%s: 应说哪个地址的 Funnel 还开着:\n%s", goos, s)
 			}
 		}

@@ -166,7 +166,7 @@ func ensureHubPassword(cfg hub.Config, st *store.Store, stdin io.Reader, termina
 		return false, fmt.Errorf("hub 还没设网页密码：先运行 railse hub password（--dir %s），或在终端里跑 setup", cfg.Dir)
 	}
 	fmt.Fprintf(stdout, "本机 hub 还没设网页密码，在这里输入一个后回车（至少 8 个字符，手机登录用）。屏幕会回显；不想回显就 Ctrl-C，先这样设好再重跑：\n"+
-		"  read -s PW; printf '%%s\\n' \"$PW\" | railse hub password --dir %s; unset PW\n", hooksconf.ShellQuote(cfg.Dir))
+		"  read -rs PW; printf '%%s\\n' \"$PW\" | railse hub password --dir %s; unset PW\n", hooksconf.ShellQuote(cfg.Dir))
 	pw, err := readPasswordLine(stdin)
 	if err != nil {
 		return false, err

@@ -149,10 +149,11 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 		fmt.Fprintln(o.Stdout, note)
 		notes = append(notes, note)
 	}
-	// 从 Tailscale Funnel 换成自己的隧道：Funnel 不会自己关，旧的 ts.net 地址仍是公网入口。只提醒，不替用户关（443 上可能还有别的配置）
+	// 从 Tailscale Funnel 换成自己的隧道：Funnel 不会自己关，旧的 ts.net 地址可能仍是公网入口（也可能从没开成：首次停在“Funnel 未开通”
+	// 时 local-hub.json 已写下 tailscale）。只提醒，不替用户关（443 上可能还有别的配置）
 	if had && old.Provider == "tailscale" && lh.Provider == "custom" {
-		notes = append(notes, fmt.Sprintf("之前用的 Tailscale Funnel 还开着：%s 仍是公网入口（转到本机 127.0.0.1:%d）；不用了就运行 tailscale funnel --https=443 off",
-			old.PublicURL, old.Port))
+		notes = append(notes, fmt.Sprintf("之前用的 Tailscale Funnel 可能还开着（tailscale funnel status 看），%s 可能仍是公网入口（转到本机 127.0.0.1:%d）；"+
+			"不用就 tailscale funnel --https=443 off", old.PublicURL, old.Port))
 	}
 
 	// 4. 托管并启动（用最前面看好的端口情况）。用现有的 setup autostart --hub，-- 之后是本机 hub 的 hub run 参数；

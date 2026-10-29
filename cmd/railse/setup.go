@@ -31,8 +31,8 @@ const setupAllUsage = `  railse setup all --hub URL --token 接入码 [--name �
     已接入过的在终端里重跑，重装钩子、重启守护进程之前先问一次（回车继续）；不在终端里不问。
     要接入却缺 --hub 或 --token 时，在终端里逐个问缺的（--name 没给时也问名字）；不在终端里是用法错误。
     --local-hub：一台机器就够：本机起 hub，Tailscale Funnel 给手机地址，守护进程接本机 hub；--public-url 换成自己的隧道。
-    接入之前多一步“本机 hub”：开 Funnel（tailnet 没开通时打印开通链接）、没设过网页密码时在终端里问、托管 hub（只监听
-    127.0.0.1:<--hub-port>）并等它应答，再用它生成的一次性接入码接入（不显示；不问 hub 地址、接入码与名字，名字默认主机名）。
+    接入之前多一步“本机 hub”：没设过网页密码时在终端里问、托管 hub（只监听 127.0.0.1:<--hub-port>）并等它应答，
+    最后开 Funnel（tailnet 没开通时打印开通链接），再用它生成的一次性接入码接入（不显示；不问 hub 地址、接入码与名字，名字默认主机名）。
     --hub-dir 默认 $RAILSE_HUB_HOME 或 ~/.railse-hub；--hub-port、--public-url 没给时沿用上次装的（hub 数据目录里的 local-hub.json），
     从自己的隧道换回 Tailscale 给空的 --public-url=。
     --no-autostart 只管守护进程，本机 hub 总是托管。本机已接入别的 hub 时停下，加 --force 改接本机 hub；
@@ -936,7 +936,12 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 			var nf tailscale.ErrFunnelNotEnabled
 			if errors.As(err, &nf) { // 开通链接原样打出来：要用户在浏览器里开通，不自动绕过。Funnel 是这一步最后一件事，hub 已托管
 				fmt.Fprintln(stderr, nf.Error())
-				return fail("本机 hub", "本机 hub 已托管、只监听 127.0.0.1，开好 Funnel 之前手机连不上；在浏览器里开通 Funnel 后重跑同一条命令。")
+				uninstall := "railse setup autostart --hub --uninstall" // 数据目录不在默认位置（给了 --hub-dir）时带上它
+				if given["hub-dir"] {
+					uninstall += " --dir " + hooksconf.ShellQuote(hubDir)
+				}
+				return fail("本机 hub", "本机 hub 已托管、只监听 127.0.0.1，开好 Funnel 之前手机连不上；在浏览器里开通 Funnel 后重跑同一条命令；"+
+					"不打算用本机 hub 了，用 "+uninstall+" 撤掉托管。")
 			}
 			fmt.Fprintln(stderr, err)
 			return fail("本机 hub", "")

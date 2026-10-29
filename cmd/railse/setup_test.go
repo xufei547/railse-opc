@@ -2308,6 +2308,12 @@ func TestSetupAllLocalHubRejectsHubFlags(t *testing.T) {
 		if !strings.Contains(errOut.String(), "railse setup all --local-hub [--hub-port 8787]") {
 			t.Fatalf("%v: 应打印含 --local-hub 的用法: %q", tc.args, errOut.String())
 		}
+		// 用法里第 1 步的顺序同实际：问密码 → 托管并等应答 → 最后开 Funnel
+		pw, host, funnel := strings.Index(errOut.String(), "没设过网页密码时在终端里问"), strings.Index(errOut.String(), "并等它应答"),
+			strings.Index(errOut.String(), "最后开 Funnel（tailnet 没开通时打印开通链接）")
+		if pw < 0 || host < pw || funnel < host {
+			t.Fatalf("%v: 用法里第 1 步应是问密码、托管并等应答、最后开 Funnel: %q", tc.args, errOut.String())
+		}
 		if strings.Contains(errOut.String(), "u:pw") {
 			t.Fatalf("%v: 不该回显地址里的密码: %q", tc.args, errOut.String())
 		}
@@ -2554,8 +2560,9 @@ func TestSetupAllLocalHubFunnelNotEnabledStopsAtStep1(t *testing.T) {
 			e := errOut.String()
 			rerun := "修好后重跑 railse setup all --local-hub --hub-port " + strconv.Itoa(f.port) + " --hub-dir " + hooksconf.ShellQuote(f.hubDir) +
 				" --bin " + hooksconf.ShellQuote(f.bin) + "（"
+			uninstall := "不打算用本机 hub 了，用 railse setup autostart --hub --uninstall --dir " + hooksconf.ShellQuote(f.hubDir) + " 撤掉托管。"
 			for _, want := range []string{link, "停在第 1 步（本机 hub）", "没做：接入 hub、安装钩子、开机自启、体检", "只监听 127.0.0.1",
-				"在浏览器里开通 Funnel 后重跑同一条命令。", rerun} {
+				"在浏览器里开通 Funnel 后重跑同一条命令；", uninstall, rerun} {
 				if !strings.Contains(e, want) {
 					t.Fatalf("stderr 缺 %q:\n%s", want, e)
 				}
@@ -2712,8 +2719,8 @@ func TestSetupAllLocalHubSwitchTunnelAndBack(t *testing.T) {
 		t.Fatalf("换成自己的隧道: %d\n%s\n%s", code, out.String(), errOut.String())
 	}
 	s := out.String()
-	at := strings.Index(s, "\n注意：之前用的 Tailscale Funnel 还开着")
-	if at < 0 || !strings.Contains(s[at:], tsPublicURL+" 仍是公网入口") || !strings.Contains(s[at:], "tailscale funnel --https=443 off") {
+	at := strings.Index(s, "\n注意：之前用的 Tailscale Funnel 可能还开着（tailscale funnel status 看）")
+	if at < 0 || !strings.Contains(s[at:], tsPublicURL+" 可能仍是公网入口") || !strings.Contains(s[at:], "不用就 tailscale funnel --https=443 off") {
 		t.Fatalf("应在“注意：”里说 Funnel 还开着、怎么关:\n%s", s)
 	}
 	if lh, _, _ := loadLocalHub(f.hubDir); lh.Provider != "custom" {
@@ -2729,7 +2736,7 @@ func TestSetupAllLocalHubSwitchTunnelAndBack(t *testing.T) {
 	if lh, _, _ := loadLocalHub(f.hubDir); lh != (localHub{Port: f.port, PublicURL: tsPublicURL, Provider: "tailscale"}) {
 		t.Fatalf("--public-url= 应换回 Tailscale: %+v\n%s", lh, out.String())
 	}
-	if strings.Contains(out.String(), "Funnel 还开着") {
+	if strings.Contains(out.String(), "Funnel 可能还开着") {
 		t.Fatalf("换回 Tailscale 不该再说 Funnel 还开着:\n%s", out.String())
 	}
 }
