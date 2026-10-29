@@ -2,7 +2,7 @@
 // 在 hub 机器上还检查数据库、密码、推送密钥与本机 hub（setup all --local-hub 装的）的对外地址。doctor 自己不改配置、
 // 不建文件、不改权限（数据库按只读打开，连 -wal、-shm 也不建），网络只访问 hub 的 /api/version（machine.json 里的地址，
 // 与本机 hub 的对外地址）。会起的进程只有带超时的 `<cli> --version` 与本机 hub 由 Tailscale 提供时的
-// `tailscale serve status --json`，可能的副作用只有它们自己写下的东西（如缓存、更新检查记录）；所以 sudo 下
+// `tailscale serve status --json`（经 tailscale.Exec，15 秒超时），可能的副作用只有它们自己写下的东西（如缓存、更新检查记录）；所以 sudo 下
 // （euid 是 root，或家目录不归当前用户）都不跑，免得在用户目录留下 root 属主的文件。
 package doctor
 
@@ -80,11 +80,13 @@ type Options struct {
 	DefaultSocket string
 
 	LookPath func(file string) (string, error)
-	RunCmd   func(name string, args ...string) (string, error) // 只用来跑 `<cli> --version` 与 `tailscale serve status --json`
+	RunCmd   func(name string, args ...string) (string, error) // 只用来跑 `<cli> --version`
 	// HTTP 只用来 GET hub 的 /api/version：machine.json 里的地址，与本机 hub（local-hub.json）的对外地址
 	HTTP *http.Client
-	// TailscalePath 找 tailscale 可执行文件（本机 hub 的对外地址由 Tailscale Funnel 提供时才用）
+	// TailscalePath 找 tailscale 可执行文件，TailscaleRun 跑它（只跑 `tailscale serve status --json`，默认 tailscale.Exec：
+	// 15 秒超时、stdin 为 /dev/null）。都只在本机 hub 的对外地址由 Tailscale Funnel 提供时才用。
 	TailscalePath func() (string, error)
+	TailscaleRun  tailscale.Runner
 	AgentStatus   func(socket string) (proto.Status, error)
 	Now           time.Time
 
@@ -97,14 +99,13 @@ type Options struct {
 // noHome 是取不到家目录时，用到家目录的检查（开机自启、Codex 的钩子与 notify）的 skip 说明。
 const noHome = "取不到家目录（$HOME 没设），跳过"
 
-// cliTimeout 是 `<cli> --version`（与 `tailscale serve status --json`）的时限：首次运行的自更新、登录提示、tailscaled 没应答之类
-// 卡住时不让 doctor 跟着挂住。是变量只为测试能调短。
+// cliTimeout 是 `<cli> --version` 的时限：首次运行的自更新、登录提示之类卡住时不让 doctor 跟着挂住。是变量只为测试能调短。
 var cliTimeout = 10 * time.Second
 
 // commandContext 起子进程；是变量只为测试能换成假的慢 CLI。
 var commandContext = exec.CommandContext
 
-// runCmd 是默认的 RunCmd：合并 stdout 与 stderr，超过 cliTimeout 就杀掉。stdin 是 /dev/null，CLI 与 tailscale 等输入时直接读到 EOF。
+// runCmd 是默认的 RunCmd：合并 stdout 与 stderr，超过 cliTimeout 就杀掉。stdin 是 /dev/null，CLI 等输入时直接读到 EOF。
 func runCmd(name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
@@ -133,6 +134,9 @@ func (o *Options) defaults() {
 	}
 	if o.TailscalePath == nil {
 		o.TailscalePath = func() (string, error) { return tailscale.Find(exec.LookPath, os.Stat, runtime.GOOS) }
+	}
+	if o.TailscaleRun == nil {
+		o.TailscaleRun = tailscale.Exec
 	}
 	if o.HTTP == nil {
 		o.HTTP = &http.Client{

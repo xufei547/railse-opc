@@ -20,7 +20,7 @@ const doctorUsage = `用法:
     （只在它归当前用户或以 root 运行时）；默认目录都不在就跳过 hub 侧，显式给的 --hub-dir 不在则报失败。
     有任一项失败退出码 1。`
 
-// doctorOptions 在 doctor.Run 之前最后改一次检查的输入。是变量只为测试能把 LookPath、RunCmd、TailscalePath、HTTP 换成假的，
+// doctorOptions 在 doctor.Run 之前最后改一次检查的输入。是变量只为测试能把 LookPath、RunCmd、TailscalePath、TailscaleRun、HTTP 换成假的，
 // 不在开发机上真的跑 claude、codex、gemini 的 --version 与 tailscale，也不出网（经 runDoctor 体检的 setup all 也走这里）。
 var doctorOptions = func(*doctor.Options) {}
 
@@ -99,9 +99,9 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	projExplicit := false
 	fs.Visit(func(f *flag.Flag) { projExplicit = projExplicit || f.Name == "project" })
 	home, _ := os.UserHomeDir()
-	// 找 tailscale 与 setup all --local-hub 用同一个（测试里换成假脚本）
+	// 找 tailscale、跑 tailscale 与 setup all --local-hub 用同一套（测试里换成假脚本）
 	o := doctor.Options{AgentDir: agentDir, Project: proj, ProjectExplicit: projExplicit, HubDir: hd, HubDirRequired: hubRequired, HubSkip: hubSkip,
-		Bin: b, Version: version, Home: home, TailscalePath: tailscaleFind}
+		Bin: b, Version: version, Home: home, TailscalePath: tailscaleFind, TailscaleRun: tailscaleRun}
 	doctorOptions(&o)
 	rep := doctor.Run(o)
 	if *asJSON {

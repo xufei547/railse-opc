@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -70,13 +71,33 @@ func fakeOpts(t *testing.T) (Options, string) {
 		DefaultSocket: sock, // 不看测试进程的 $RAILSE_HOME 与真实家目录：默认目录就是这个守护进程目录
 		LookPath:      func(string) (string, error) { return "", errors.New("not found") },
 		RunCmd:        func(string, ...string) (string, error) { return "", errors.New("不该跑") },
-		// 不找本机真的 tailscale：要用它的测试自己换上假路径
+		// 不找、不跑本机真的 tailscale：要用它的测试自己换上假的
 		TailscalePath: func() (string, error) { return "", errors.New("测试里不找 tailscale") },
-		AgentStatus:   func(string) (proto.Status, error) { return proto.Status{Rules: 2, Hub: "none"}, nil },
+		TailscaleRun: func(context.Context, string, ...string) (string, error) {
+			return "", errors.New("测试里不跑 tailscale")
+		},
+		HTTP:        loopbackOnlyClient(t), // 测试忘了换 HTTP 也不出网
+		AgentStatus: func(string) (proto.Status, error) { return proto.Status{Rules: 2, Hub: "none"}, nil },
 		// 固定成普通用户、家目录归自己：测试在 root 下跑也照常跑 --version 的分支
 		Geteuid:   func() int { return 1000 },
 		FileOwner: func(string) (int, bool) { return 1000, true },
 	}, home
+}
+
+// loopbackOnlyClient 只连回环 IP 的字面地址（测试里的 httptest 服务），别的主机直接报错，不做 DNS、不拨号；不跟重定向，同 doctor 的默认。
+func loopbackOnlyClient(t *testing.T) *http.Client {
+	tr := &http.Transport{} // 不走环境里的代理
+	t.Cleanup(tr.CloseIdleConnections)
+	return &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			if a, err := netip.ParseAddr(r.URL.Hostname()); err != nil || !a.Unmap().IsLoopback() {
+				return nil, errors.New("测试里不出网：" + r.URL.Hostname())
+			}
+			return tr.RoundTrip(r)
+		}),
+	}
 }
 
 func TestAgentChecksHappyAndPermissions(t *testing.T) {
@@ -1820,15 +1841,19 @@ func publicHub(t *testing.T, h http.HandlerFunc) (c *http.Client, hits func() []
 	}
 }
 
-// fakeServe 让 TailscalePath 给出假路径，RunCmd 只认 `<假路径> serve status --json` 并答 out（err 非空时连同输出一起报错）；
-// 别的调用判测试失败。返回调用次数。
+// fakeServe 让 TailscalePath 给出假路径，TailscaleRun 只认 `<假路径> serve status --json` 并答 out（err 非空时连同输出一起报错），
+// 别的调用判测试失败；tailscale 不经 RunCmd 跑（RunCmd 被调到也判失败）。返回 TailscaleRun 的调用次数。
 func fakeServe(t *testing.T, o *Options, out string, err error) *int {
 	t.Helper()
 	const ts = "/fake/bin/tailscale"
 	n := new(int)
 	o.TailscalePath = func() (string, error) { return ts, nil }
 	o.RunCmd = func(name string, args ...string) (string, error) {
-		if name != ts || strings.Join(args, " ") != "serve status --json" {
+		t.Errorf("tailscale 不该经 RunCmd 跑: %s %q", name, args)
+		return "", errors.New("不该跑")
+	}
+	o.TailscaleRun = func(ctx context.Context, name string, args ...string) (string, error) {
+		if ctx == nil || name != ts || strings.Join(args, " ") != "serve status --json" {
 			t.Errorf("不该跑 %s %q", name, args)
 			return "", errors.New("不该跑")
 		}
@@ -1842,7 +1867,7 @@ func fakeServe(t *testing.T, o *Options, out string, err error) *int {
 func TestLocalHubNoFileSkips(t *testing.T) {
 	o := localHubOpts(t, "")
 	o.TailscalePath = func() (string, error) { t.Fatal("不该找 tailscale"); return "", nil }
-	o.RunCmd = func(name string, args ...string) (string, error) {
+	o.TailscaleRun = func(_ context.Context, name string, args ...string) (string, error) {
 		t.Fatalf("不该跑 %s %q", name, args)
 		return "", nil
 	}
@@ -1910,9 +1935,10 @@ func TestLocalHubTailscaleErrors(t *testing.T) {
 	if c := find(t, Run(o), "hubsrv.local"); c.Status != Fail || !strings.Contains(c.Detail, "找不到 tailscale") || c.Hint == "" {
 		t.Fatalf("找不到 tailscale: %+v", c)
 	}
-	fakeServe(t, &o, "\nfailed to connect to local tailscaled; it doesn't appear to be running\n", errors.New("exit status 1"))
+	// 摘要跳过 Warning: 开头的行（版本不一致之类），取真正的报错
+	fakeServe(t, &o, "Warning: client version \"1.80.0\" != tailscaled server version \"1.78.1\"\n\nfailed to connect to local tailscaled; it doesn't appear to be running\n", errors.New("exit status 1"))
 	if c := find(t, Run(o), "hubsrv.local"); c.Status != Fail || !strings.Contains(c.Detail, "serve status --json 失败：exit status 1") ||
-		!strings.Contains(c.Detail, "输出：failed to connect to local tailscaled") || !strings.Contains(c.Hint, "tailscale status") {
+		!strings.Contains(c.Detail, "输出：failed to connect to local tailscaled") || strings.Contains(c.Detail, "Warning") || !strings.Contains(c.Hint, "tailscale status") {
 		t.Fatalf("serve status 出错: %+v", c)
 	}
 	fakeServe(t, &o, `{"Web": oops}`, nil)
@@ -1954,7 +1980,7 @@ func TestLocalHubCustomSkipsTailscale(t *testing.T) {
 	for _, provider := range []string{`,"provider":"custom"`, ""} {
 		o := localHubOpts(t, `{"port":8787,"public_url":"https://hub.example.com:8443"`+provider+`}`)
 		o.TailscalePath = func() (string, error) { t.Fatal("不该找 tailscale"); return "", nil }
-		o.RunCmd = func(name string, args ...string) (string, error) {
+		o.TailscaleRun = func(_ context.Context, name string, args ...string) (string, error) {
 			t.Fatalf("不该跑 %s %q", name, args)
 			return "", nil
 		}
@@ -1978,7 +2004,7 @@ func TestLocalHubCustomSkipsTailscale(t *testing.T) {
 func TestLocalHubUnderSudoSkips(t *testing.T) {
 	o := localHubOpts(t, `{"port":8787,"public_url":"`+lhOrigin+`","provider":"tailscale"}`)
 	o.TailscalePath = func() (string, error) { t.Fatal("不该找 tailscale"); return "", nil }
-	o.RunCmd = func(name string, args ...string) (string, error) {
+	o.TailscaleRun = func(_ context.Context, name string, args ...string) (string, error) {
 		t.Fatalf("不该跑 %s %q", name, args)
 		return "", nil
 	}
@@ -2005,22 +2031,27 @@ func TestLocalHubUnderSudoSkips(t *testing.T) {
 // 细节只说哪一项不合规，不带文件内容与地址原文（里面可能有密码）；不碰 tailscale、不发请求。
 func TestLocalHubBrokenFileFails(t *testing.T) {
 	const secret = "hunter2-secret"
-	for _, tc := range []struct{ content, want string }{
-		{`{"port":8787,"public_url":"https://u:` + secret + `@x.example.com"`, "不是合法 JSON"},
-		{`{"port":"8787","public_url":"` + lhOrigin + `"}`, "不是合法 JSON"},
-		{`{"port":0,"public_url":"` + lhOrigin + `"}`, "port 0 不在 1..65535"},
-		{`{"port":70000,"public_url":"` + lhOrigin + `"}`, "port 70000 不在 1..65535"},
-		{`{"port":8787,"public_url":"https://u:` + secret + `@x.example.com","provider":"tailscale"}`, "public_url 不合规"},
-		{`{"port":8787,"public_url":"http://x.example.com/` + secret + `"}`, "public_url 不合规"},
-		{`{"port":8787,"public_url":"https://x.example.com/` + secret + `"}`, "public_url 不合规"},
-		{`{"port":8787,"public_url":"https://x.example.com/?` + secret + `"}`, "public_url 不合规"},
-		{`{"port":8787,"public_url":"https://x.example.com#` + secret + `"}`, "public_url 不合规"},
-		{`{"port":8787,"public_url":"` + secret + `"}`, "public_url 不合规"},
-		{`{"port":8787}`, "public_url 不合规"},
+	// custom：文件解得开且不是 Tailscale 提供的（provider 空当 custom），提示里要说再带上 --public-url
+	for _, tc := range []struct {
+		content, want string
+		custom        bool
+	}{
+		{`{"port":8787,"public_url":"https://u:` + secret + `@x.example.com"`, "不是合法 JSON", false},
+		{`{"port":"8787","public_url":"` + lhOrigin + `","provider":"custom"}`, "不是合法 JSON", false},
+		{`{"port":0,"public_url":"` + lhOrigin + `"}`, "port 0 不在 1..65535", true},
+		{`{"port":70000,"public_url":"` + lhOrigin + `","provider":"custom"}`, "port 70000 不在 1..65535", true},
+		{`{"port":70000,"public_url":"` + lhOrigin + `","provider":"tailscale"}`, "port 70000 不在 1..65535", false},
+		{`{"port":8787,"public_url":"https://u:` + secret + `@x.example.com","provider":"tailscale"}`, "public_url 不合规", false},
+		{`{"port":8787,"public_url":"http://x.example.com/` + secret + `"}`, "public_url 不合规", true},
+		{`{"port":8787,"public_url":"https://x.example.com/` + secret + `"}`, "public_url 不合规", true},
+		{`{"port":8787,"public_url":"https://x.example.com/?` + secret + `"}`, "public_url 不合规", true},
+		{`{"port":8787,"public_url":"https://x.example.com#` + secret + `"}`, "public_url 不合规", true},
+		{`{"port":8787,"public_url":"` + secret + `"}`, "public_url 不合规", true},
+		{`{"port":8787}`, "public_url 不合规", true},
 	} {
 		o := localHubOpts(t, tc.content)
 		o.TailscalePath = func() (string, error) { t.Fatal("不该找 tailscale"); return "", nil }
-		o.RunCmd = func(name string, args ...string) (string, error) {
+		o.TailscaleRun = func(_ context.Context, name string, args ...string) (string, error) {
 			t.Fatalf("不该跑 %s %q", name, args)
 			return "", nil
 		}
@@ -2031,12 +2062,30 @@ func TestLocalHubBrokenFileFails(t *testing.T) {
 		r := Run(o)
 		c := find(t, r, "hubsrv.local")
 		if c.Status != Fail || !strings.Contains(c.Detail, tc.want) || !strings.Contains(c.Detail, "local-hub.json") ||
-			!strings.Contains(c.Hint, "railse setup all --local-hub --hub-dir "+o.HubDir) {
+			!strings.Contains(c.Hint, "railse setup all --local-hub --hub-dir "+o.HubDir+" 重写它") ||
+			strings.Contains(c.Hint, "--public-url") != tc.custom {
 			t.Fatalf("%s: %+v", tc.content, c)
 		}
 		if j, _ := r.JSON(); strings.Contains(string(j), secret) {
 			t.Fatalf("%s: 报告带出了文件内容: %+v", tc.content, c)
 		}
+	}
+}
+
+// 守护进程不在 ~/.railse（--dir 的不是默认目录）时，重跑 setup 的命令带上 --dir。
+func TestLocalHubRerunHintCarriesDir(t *testing.T) {
+	o := localHubOpts(t, `{"port":0,"public_url":"`+lhOrigin+`","provider":"tailscale"}`)
+	if c := find(t, Run(o), "hubsrv.local"); strings.Contains(c.Hint, "--dir") {
+		t.Fatalf("默认目录不该带 --dir: %+v", c)
+	}
+	o.DefaultSocket = "/elsewhere/.railse/agent.sock"
+	if c := find(t, Run(o), "hubsrv.local"); !strings.Contains(c.Hint, "railse setup all --local-hub --hub-dir "+o.HubDir+" --dir "+o.AgentDir+" 重写它") {
+		t.Fatalf("坏文件: %+v", c)
+	}
+	writeFile(t, filepath.Join(o.HubDir, "local-hub.json"), []byte(`{"port":8787,"public_url":"`+lhOrigin+`","provider":"tailscale"}`))
+	fakeServe(t, &o, "No serve config\n", nil)
+	if c := find(t, Run(o), "hubsrv.local"); c.Status != Fail || !strings.Contains(c.Hint, "或重跑 railse setup all --local-hub --hub-dir "+o.HubDir+" --dir "+o.AgentDir) {
+		t.Fatalf("Funnel 没开: %+v", c)
 	}
 }
 

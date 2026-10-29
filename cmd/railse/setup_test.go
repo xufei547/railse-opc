@@ -2245,7 +2245,7 @@ func TestSetupAllLocalHubEndToEnd(t *testing.T) {
 // （不做 DNS、不拨号）→ warn，提示可能是本机代理；被拦的只有这个域名，连本机测试 hub 的 hub.reachable 照常 ok。
 func TestSetupAllLocalHubDoctorChecksPublicURLOffline(t *testing.T) {
 	f := localSetupEnv(t)
-	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	ts := fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
 	spy := startLocalTestHub(t, f.hubDir, f.port)
 	stubHubJobRunning(t, true)
 	fakeStdin(t, true, localHubTestPassword+"\n")
@@ -2269,8 +2269,8 @@ func TestSetupAllLocalHubDoctorChecksPublicURLOffline(t *testing.T) {
 	if b := f.doctor.blockedHosts(); len(b) != 1 || b[0] != tsDNS {
 		t.Fatalf("doctor 只该想连 %s（且被拦下）: %q", tsDNS, b)
 	}
-	if r := f.doctor.tailscaleRuns(); len(r) != 1 || !strings.HasSuffix(r[0], "/tailscale serve status --json") || !strings.HasPrefix(r[0], os.TempDir()) {
-		t.Fatalf("doctor 只该跑一次临时目录里的假 tailscale 的 serve status --json: %q", r)
+	if r := f.doctor.tailscaleRuns(); len(r) != 1 || r[0] != filepath.Join(ts.dir, "tailscale")+" serve status --json" {
+		t.Fatalf("doctor 只该跑一次假 tailscale（%s）的 serve status --json: %q", filepath.Join(ts.dir, "tailscale"), r)
 	}
 	assertNoEnrollSecrets(t, oneEnrollToken(t, spy), s, errOut.String())
 }

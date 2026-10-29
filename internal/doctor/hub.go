@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -61,10 +62,14 @@ func hubClientChecks(o Options) []Check {
 // hubServerChecks 在 hub 机器上看数据目录、数据库、密码、推送密钥、ACME 目录、本机 hub 的对外地址与开机自启。
 // 只读打开数据库，不跑迁移。
 func hubServerChecks(o Options) []Check {
-	items := []struct{ id, name string }{
-		{"hubsrv.dir", "hub 数据目录"}, {"hubsrv.db", "hub 数据库"}, {"hubsrv.password", "网页密码"},
-		{"hubsrv.vapid", "推送密钥"}, {"hubsrv.acme", "ACME 证书目录"}, {"hubsrv.local", "本机 hub 对外地址"},
-		{"hubsrv.autostart", "hub 开机自启"},
+	// inDir：这一项看的是数据目录里的东西（目录用不了时按同一个原因跳过）；数据目录本身与开机自启不算
+	items := []struct {
+		id, name string
+		inDir    bool
+	}{
+		{"hubsrv.dir", "hub 数据目录", false}, {"hubsrv.db", "hub 数据库", true}, {"hubsrv.password", "网页密码", true},
+		{"hubsrv.vapid", "推送密钥", true}, {"hubsrv.acme", "ACME 证书目录", true}, {"hubsrv.local", "本机 hub 对外地址", true},
+		{"hubsrv.autostart", "hub 开机自启", false},
 	}
 	skipAll := func(detail string) []Check {
 		var out []Check
@@ -89,8 +94,10 @@ func hubServerChecks(o Options) []Check {
 		// 目录用不了：只在 hubsrv.dir 报原因，依赖数据目录的几项按同一个原因跳过；开机自启不依赖它，照常看
 		dir, cause := hubDirUnusable(o.HubDir, err)
 		out = append(out, dir)
-		for _, it := range items[1:6] {
-			out = append(out, Check{ID: it.id, Name: it.name, Status: Skip, Detail: "hub 数据目录 " + o.HubDir + " " + cause})
+		for _, it := range items {
+			if it.inDir {
+				out = append(out, Check{ID: it.id, Name: it.name, Status: Skip, Detail: "hub 数据目录 " + o.HubDir + " " + cause})
+			}
 		}
 	} else {
 		out = append(out, permCheck("hubsrv.dir", "hub 数据目录", o.HubDir, 0o700, true, "railse hub run 会建好"))
@@ -350,9 +357,15 @@ func publicOrigin(raw string) (origin, host string, err error) {
 func localHubCheck(o Options) Check {
 	const id, name = "hubsrv.local", "本机 hub 对外地址"
 	path := filepath.Join(o.HubDir, "local-hub.json")
-	rerun := "railse setup all --local-hub --hub-dir " + hooksconf.ShellQuote(o.HubDir)
+	// 重跑 setup 的命令带上这个 hub 数据目录（不在默认位置时不带就会另起一个 hub），守护进程不在 ~/.railse 时带 --dir
+	rerun := "railse setup all --local-hub --hub-dir " + hooksconf.ShellQuote(o.HubDir) + dirFlag(o)
+	custom := false // 文件解得开、对外地址不是 Tailscale 提供的（provider 空当 custom）：重跑时不带 --public-url 会改用 Tailscale
 	bad := func(detail string) Check {
-		return Check{ID: id, Name: name, Status: Fail, Detail: detail, Hint: "重跑 " + rerun + " 重写它"}
+		hint := "重跑 " + rerun + " 重写它"
+		if custom {
+			hint += "（用的是自己的隧道，再带上 --public-url <对外地址>）"
+		}
+		return Check{ID: id, Name: name, Status: Fail, Detail: detail, Hint: hint}
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -370,6 +383,7 @@ func localHubCheck(o Options) Check {
 	if json.Unmarshal(data, &lh) != nil { // 解析错误里会带文件内容的片段，不写进细节
 		return bad(path + " 不是合法 JSON")
 	}
+	custom = lh.Provider != "tailscale"
 	if lh.Port < 1 || lh.Port > 65535 {
 		return bad(fmt.Sprintf("%s 里 port %d 不在 1..65535", path, lh.Port))
 	}
@@ -387,10 +401,10 @@ func localHubCheck(o Options) Check {
 			return Check{ID: id, Name: name, Status: Fail, Detail: "找不到 tailscale（" + origin + " 由 Tailscale Funnel 提供）",
 				Hint: "装好并登录 Tailscale（https://tailscale.com/download）后重跑 railse doctor；不再用 Tailscale 就带 --public-url 重跑 " + rerun}
 		}
-		out, err := o.RunCmd(ts, "serve", "status", "--json")
+		out, err := o.TailscaleRun(context.Background(), ts, "serve", "status", "--json")
 		if err != nil {
 			detail := fmt.Sprintf("%s serve status --json 失败：%v", ts, err)
-			if first := firstLine(out, 200); first != "" {
+			if first := firstLine(dropWarnings(out), 200); first != "" {
 				detail += "；输出：" + first
 			}
 			return Check{ID: id, Name: name, Status: Fail, Detail: detail, Hint: "确认 Tailscale 在运行且已登录（tailscale status），再重跑 railse doctor"}
@@ -428,4 +442,15 @@ func localHubCheck(o Options) Check {
 		return Check{ID: id, Name: name, Status: Warn, Detail: endpoint + " 回的不是 hub 的版本信息", Hint: notHub}
 	}
 	return Check{ID: id, Name: name, Status: OK, Detail: fmt.Sprintf("%s，hub 版本 %s", origin, v.Version)}
+}
+
+// dropWarnings 去掉 tailscale 输出里以 Warning: 开头的行（如客户端与 tailscaled 版本不一致），摘要取真正的报错。
+func dropWarnings(out string) string {
+	var keep []string
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "Warning:") {
+			keep = append(keep, line)
+		}
+	}
+	return strings.Join(keep, "\n")
 }

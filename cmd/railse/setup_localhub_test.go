@@ -82,12 +82,17 @@ func fakeTailscale(t *testing.T, status, serve string, funnelOut string, funnelC
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	oldFind, oldRun := tailscaleFind, tailscaleRun
+	oldFind, oldRun, oldBin := tailscaleFind, tailscaleRun, fakeTailscaleBin
 	tailscaleFind = func() (string, error) { return p, nil }
 	tailscaleRun = tailscale.Exec
-	t.Cleanup(func() { tailscaleFind, tailscaleRun = oldFind, oldRun })
+	fakeTailscaleBin = p
+	t.Cleanup(func() { tailscaleFind, tailscaleRun, fakeTailscaleBin = oldFind, oldRun, oldBin })
 	return f
 }
+
+// fakeTailscaleBin 是 fakeTailscale 写的假 tailscale 脚本的路径（测试结束清掉，没换上时为空）：测试里的 doctor 只认、只跑它
+// （见 fakeDoctorCLIs）。
+var fakeTailscaleBin string
 
 // noTailscale 让任何找 tailscale、跑 tailscale 的调用都判测试失败（用户给了 --public-url、参数不合规时不该碰它）。
 func noTailscale(t *testing.T) {

@@ -152,7 +152,7 @@ railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]
 railse doctor [--project 目录] [--dir 目录] [--hub-dir 目录] [--bin 路径] [--json]
 ```
 
-只读：不改配置、不建文件，数据库按只读打开；网络只访问 hub 的 `GET /api/version`（不带凭据；`machine.json` 里的地址，本机 hub 还有它的对外地址）；会起的进程只有 `claude`、`codex`、`gemini` 的 `--version` 与本机 hub 由 Tailscale 提供时的 `tailscale serve status --json`（各 10 秒超时），sudo 下（euid 是 root，或家目录不归当前用户）都不跑，`cli.*` 与 `hubsrv.local` 报 skip。每项结果是 `ok`、`warn`、`fail`、`skip` 之一，warn 与 fail 下一行给“修复：”；有任一项 fail 退出码 1；`--json` 输出机器可读的结果（ID 固定不变）。
+只读：不改配置、不建文件，数据库按只读打开；网络只访问 hub 的 `GET /api/version`（不带凭据；`machine.json` 里的地址，本机 hub 还有它的对外地址）；会起的进程只有 `claude`、`codex`、`gemini` 的 `--version`（各 10 秒超时）与本机 hub 由 Tailscale 提供时的 `tailscale serve status --json`（15 秒超时），sudo 下（euid 是 root，或家目录不归当前用户）都不跑，`cli.*` 与 `hubsrv.local` 报 skip。每项结果是 `ok`、`warn`、`fail`、`skip` 之一，warn 与 fail 下一行给“修复：”；有任一项 fail 退出码 1；`--json` 输出机器可读的结果（ID 固定不变）。
 
 hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux 上两者都没有时再看 `/var/lib/railse-hub`（系统单元的），但只在它归当前用户（即服务用户）或以 root 跑 doctor 时才看，属于别的用户时 hub 侧整段 skip 并说明（换那个用户跑，或给 `--hub-dir`）。默认目录都不在就跳过 hub 侧（Linux 上 skip 的说明列出查过的两个位置）；显式给的 `--hub-dir` 不存在时报 fail。系统单元的 hub 要以服务用户身份检查（`railse doctor`，或 `sudo -u 名字 /usr/local/bin/railse doctor --hub-dir /var/lib/railse-hub`），别的用户读不到 `hub.db`；服务用户的家目录里另有 `~/.railse-hub` 时，doctor 默认看的是它，这时显式给 `--hub-dir`。
 
@@ -178,7 +178,7 @@ hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux
 | `hubsrv.password` | 网页密码 | 设过网页密码 | `railse hub password`（warn） |
 | `hubsrv.vapid` | 推送密钥 | 推送密钥在、解得开 | 还没有（warn）：首次 `railse hub run` 会生成；损坏（fail）：`railse hub vapid --rotate`，所有手机重新开启通知 |
 | `hubsrv.acme` | ACME 证书目录 | `acme/` 是 0700、里面的文件 0600；没有这个目录（没用 ACME）时 skip | 按提示 `chmod` |
-| `hubsrv.local` | 本机 hub 对外地址 | 读 hub 数据目录里 `setup all --local-hub` 写的 `local-hub.json`（没有时 skip）：Tailscale 提供的先看 `tailscale serve status --json` 里 Funnel 是否把 `<机器名>:443` 转到 `127.0.0.1:<端口>`（sudo 下整项 skip）；不论哪种都从本机 GET 一次 `<对外地址>/api/version`，答得上是 hub 为 ok。端口上的 hub 本身由 `hub.reachable` 看 | `local-hub.json` 坏了（只说哪一项不合规，不回显内容）：重跑 `railse setup all --local-hub --hub-dir <目录>`；找不到 tailscale、Funnel 没转到这个端口（fail）：装好并登录 Tailscale，`tailscale funnel --bg <端口>` 或重跑同一条 setup；从本机访问不到（warn）：常是本机代理拦着 `*.ts.net`，用手机 4G 打开验证，Funnel 入口 TLS 握手失败时先关掉代理再试 |
+| `hubsrv.local` | 本机 hub 对外地址 | 读 hub 数据目录里 `setup all --local-hub` 写的 `local-hub.json`（没有时 skip）：Tailscale 提供的先看 `tailscale serve status --json` 里 Funnel 是否把 `<机器名>:443` 转到 `127.0.0.1:<端口>`（sudo 下整项 skip）；不论哪种都从本机 GET 一次 `<对外地址>/api/version`，答得上是 hub 为 ok。端口上的 hub 本身由 `hub.reachable` 看 | `local-hub.json` 坏了（只说哪一项不合规，不回显内容）：重跑 `railse setup all --local-hub --hub-dir <目录>`（守护进程不在 `~/.railse` 时带 `--dir`，用自己隧道的再带 `--public-url`）；找不到 tailscale、Funnel 没转到这个端口（fail）：装好并登录 Tailscale，`tailscale funnel --bg <端口>` 或重跑同一条 setup；从本机访问不到（warn）：常是本机代理拦着 `*.ts.net`，用手机 4G 打开验证，Funnel 入口 TLS 握手失败时先关掉代理再试 |
 | `hubsrv.autostart` | hub 开机自启 | 有没有 hub 的托管文件（plist、用户单元或系统单元） | `railse setup autostart --hub`（warn） |
 
 ## 升级
