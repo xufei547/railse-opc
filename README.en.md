@@ -72,6 +72,16 @@ Supported: macOS on Apple Silicon, Linux on amd64 and arm64. The script download
 
 ## Getting started
 
+**One machine is enough.** Install [Tailscale](https://tailscale.com/download) on your work machine and log in, then:
+
+```sh
+railse setup all --local-hub
+```
+
+It starts a hub on this machine, uses Tailscale Funnel to give your phone a fixed https address (no server, domain or certificate), enrolls the local daemon, installs the hooks, sets up autostart, runs the health check, and prints the address to open on your phone. The first run asks you to set the password you'll log in with on the phone. If your tailnet hasn't enabled Funnel yet, it prints the link to enable it; run the command again afterwards. When the machine sleeps the hub is down too, but the agents are stopped then as well, so a single-machine user loses nothing. With several machines, put the hub on the one that stays on. If your phone goes through a proxy and can't open the address, turn the proxy off or make `ts.net` go direct in its rules. Details: the "一台机器就够：本机 hub" section of [docs/setup.md](docs/setup.md).
+
+**Have a server?** Three steps: the hub machine, each work machine, the phone.
+
 1. **Hub machine.** Point a domain at it and open ports 443 and 80 to the internet. On macOS:
    ```sh
    railse hub password    # reads the web login password from stdin, at least 8 characters
@@ -102,7 +112,7 @@ After that, just use the three CLIs as usual. `railse doctor --project <dir>` te
 
 The docs under `docs/` are in Chinese.
 
-- [docs/setup.md](docs/setup.md): install, hub deployment (Linux service, reverse proxy), enrolling machines, autostart, `railse doctor` checks, upgrades
+- [docs/setup.md](docs/setup.md): install, the local hub (one machine is enough), hub deployment (Linux service, reverse proxy), enrolling machines, autostart, `railse doctor` checks, upgrades
 - [docs/hub.md](docs/hub.md): hub API, push notifications, security, Fly.io, troubleshooting
 - [docs/web.md](docs/web.md): the phone web app
 - [docs/agent-local-loop.md](docs/agent-local-loop.md): daemon, hooks, rules, audit log
@@ -120,6 +130,7 @@ The docs under `docs/` are in Chinese.
 - On iPhone (iOS 16.4 or later), push notifications only work after you add the page to the Home Screen and open it from there.
 - Push on a real iPhone hasn't been fully tested yet: after the app is swiped away, with the screen locked, or hours later.
 - Pick the hub's domain on day one. Push subscriptions and the Home Screen app are tied to it, so changing it means deleting the icon, adding it again and re-enabling notifications on every phone.
+- A local hub's address is tied to the Tailscale machine name, so renaming the machine changes the domain: every phone has to add the app to the Home Screen again and re-enable notifications.
 
 ## Development
 

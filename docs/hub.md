@@ -151,7 +151,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 
 ## 部署与反向代理
 
-公网部署有两种方式：A. hub 内置 ACME 直出 TLS（推荐自用，一台机器只跑 hub 时最省事）；B. hub 只监听本机，由反向代理终止 TLS。
+公网部署有三种方式：A. hub 内置 ACME 直出 TLS（推荐自用，一台机器只跑 hub 时最省事）；B. hub 只监听本机，由反向代理终止 TLS；C. 本机 hub 加 Tailscale Funnel（没有服务器、域名时用）。
 
 ### A. 内置 ACME 直出 TLS（推荐自用）
 
@@ -193,6 +193,20 @@ server {
 ```
 
 配套：`railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com --trusted-proxy 127.0.0.1`（`--public-url` 是手机打开网页的源，不加推送就是停用的；nginx 经 IPv6 回环连 hub 时再加 `::1`）。用 Caddy 时 `reverse_proxy 127.0.0.1:8787` 即可（按 Caddy v2 文档：默认透传 Host、覆盖 X-Forwarded-For、自动代理 WebSocket）。
+
+### C. 本机 hub + Tailscale Funnel
+
+没有服务器和域名、hub 就跑在工作机上时用。一条命令 `railse setup all --local-hub` 全做了（见 [setup.md](setup.md) 的“一台机器就够：本机 hub”）；等价的手动做法：
+
+```sh
+tailscale funnel --bg 8787
+railse hub run --listen 127.0.0.1:8787 --public-url https://<机器名>.<tailnet>.ts.net --trusted-proxy 127.0.0.1,::1
+```
+
+- **Funnel 的事实。** 只开 443（Funnel 还能开 8443、10000，railse 只用 443）。证书由 Tailscale 签发。入口在 Tailscale 的服务器上，公网流量先到那里再转进本机，所以本机不用开端口、不用公网 IP。机器名就是域名：`https://<机器名>.<tailnet>.ts.net`，改机器名等于换域名，推送订阅与主屏幕图标要重来。tailnet 要先在管理台开通 HTTPS 证书与 Funnel。
+- **同 B。** Funnel 就是一个把 HTTPS 转到 `127.0.0.1:8787` 的反向代理：hub 只监听本机，所以 `--trusted-proxy 127.0.0.1,::1` 让 hub 认它送来的 `X-Forwarded-For`；`--public-url` 写 Funnel 的地址，推送随之启用，cookie 自动加 Secure。
+- **自己的隧道。** `railse setup all --local-hub --public-url https://…` 不开 Funnel，只托管 hub、接入守护进程。隧道要自己转到 `127.0.0.1:<端口>`，保留原 Host、转发 WebSocket、追加 `X-Forwarded-For`（同 B）。
+- **卸载。** `railse setup autostart --hub --uninstall`，`tailscale funnel --https=443 off`，数据目录 `~/.railse-hub` 不要了再删（含网页密码与推送密钥）。
 
 ## 部署到 Fly.io
 
@@ -240,6 +254,10 @@ fly ssh console -a <应用名> -C "railse hub token"             # 接入码，�
 日志：`hub.log` 里有“hub 监听 …”、“直出 TLS（ACME，Let's Encrypt）：域名 …，证书目录 …”、“ACME 挑战（HTTP-01）与 http→https 跳转监听 …”、“Web Push 已启用，对外源 …”（或“没有配置 --public-url，Web Push 停用”）、“推送到 https://… 失败（连续第 N 次）: …”、“推送订阅 … 已失效，删除”、“VAPID 密钥已换新”、“可信代理: …”、“机器 … 超过 … 没有 pong，断开”、“webhook 请求 … 回调 … 失败 3 次，放弃”、“hub 已停止”。守护进程的 `agent.log` 里有“接入 hub …”、“已连接 hub …，规则版本 N”、“与 hub … 的连接结束: …，N 后重连”、“hub … 回 HTTP 401（第 N/3 次），稍后重试…”、“规则更新到版本 N”、“与 hub 断线超过 30s，请求 … 交回终端”。`GET /api/status` 的 `machines[].online` 看各机器是否连着；`GET /api/requests/{id}` 的 `audit` 看一条请求经历了什么。
 
 ## 已知限制（后续计划，不算未完成）
+
+- 本机 hub（`setup all --local-hub`）跟着机器走：睡眠、关机、断网时手机连不上 hub，也收不到推送；几台工作机共用一个 hub 的，放在常开的那台。
+- 本机 hub 的地址绑在 Tailscale 机器名上，改名等于换域名，手机上的主屏幕图标与推送订阅要重新添加。
+- 手机挂着代理时 `*.ts.net` 可能打不开：关掉代理，或在代理规则里把 `ts.net` 设为直连。本机的代理还可能让 `railse doctor` 的 `hubsrv.local` 报 warn（从本机访问不到对外地址），用手机 4G 验证。
 
 - 本机 pause 反向同步到 hub。
 - 复合命令不能“拒绝并记住”（422），需要手写规则。
