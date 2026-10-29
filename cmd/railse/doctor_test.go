@@ -2,31 +2,113 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/xufei547/railse-opc/internal/doctor"
+	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
-// fakeDoctorCLIs 让测试里的 doctor 不碰本机环境：看不到任何 CLI（LookPath 一律找不到，RunCmd 被调到就算测试失败），
-// 也不回退到本机的系统 hub 目录。免得在开发机上真的跑 claude、codex、gemini 的 --version（慢，还可能往临时 HOME
-// 里建目录），CI 上又是另一种结果。经 runDoctor 体检的测试（如 setup all）都先调它。
-func fakeDoctorCLIs(t *testing.T) {
+// fakeDoctorCLIs 让测试里的 doctor 不碰本机环境，经 runDoctor 体检的测试（如 setup all）都先调它：
+//   - 看不到任何 CLI（LookPath 一律找不到），免得在开发机上真的跑 claude、codex、gemini 的 --version（慢，还可能往临时 HOME
+//     里建目录），CI 上又是另一种结果；
+//   - tailscale 只认测试临时目录里的假脚本（fakeTailscale 换上的 tailscaleFind）：TailscalePath 找到的是本机真的 tailscale 时
+//     当作找不到（结果不随开发机变），RunCmd 只放行这个假脚本的 serve status --json（交给 tailscaleRun 跑），别的调用都算测试失败；
+//   - HTTP 只放行回环地址（hub.reachable 要连测试里的 hub），别的主机直接报错，不做 DNS、不拨号，记进返回的 doctorGuard：
+//     本机 hub 的对外地址（如假 tailscale 给的 ts.net 域名，可能真有其机）绝不真的去连；
+//   - 不回退到本机的系统 hub 目录。
+func fakeDoctorCLIs(t *testing.T) *doctorGuard {
 	t.Helper()
+	g := &doctorGuard{}
+	// 不用 http.DefaultTransport：有的测试会把它换成别的；也不走环境里的代理
+	tr := &http.Transport{DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, TLSHandshakeTimeout: 5 * time.Second}
+	t.Cleanup(tr.CloseIdleConnections)
 	setDoctorHubFallback(t, runtime.GOOS, "")
 	setDoctorOptions(t, func(o *doctor.Options) {
 		o.LookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+		o.TailscalePath = testTailscalePath
 		o.RunCmd = func(name string, args ...string) (string, error) {
+			if p, err := testTailscalePath(); err == nil && name == p && slices.Equal(args, []string{"serve", "status", "--json"}) {
+				g.add(&g.tailscale, name+" "+strings.Join(args, " "))
+				return tailscaleRun(context.Background(), name, args...)
+			}
 			t.Errorf("测试里的 doctor 不该跑 %s %v", name, args)
 			return "", errors.New("测试里不跑 CLI")
 		}
+		o.HTTP = &http.Client{
+			Timeout:       10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, // 同 doctor 的默认
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if h := r.URL.Hostname(); !loopbackLiteral(h) {
+					g.add(&g.blocked, h)
+					return nil, errors.New("测试里不出网")
+				}
+				return tr.RoundTrip(r)
+			}),
+		}
 	})
+	return g
+}
+
+// doctorGuard 记下测试里 doctor 想连而被拦下的主机，与放行了的假 tailscale 命令。
+type doctorGuard struct {
+	mu                 sync.Mutex
+	blocked, tailscale []string
+}
+
+func (g *doctorGuard) add(list *[]string, s string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	*list = append(*list, s)
+}
+
+// blockedHosts 是到现在为止被拦下的主机（按请求的先后）。
+func (g *doctorGuard) blockedHosts() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.blocked)
+}
+
+// tailscaleRuns 是到现在为止放行了的假 tailscale 命令。
+func (g *doctorGuard) tailscaleRuns() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.tailscale)
+}
+
+// loopbackLiteral 报告主机是不是本机回环：localhost，或回环 IP 的字面量（127.0.0.0/8、::1）。只看字面，不做 DNS。
+func loopbackLiteral(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Unmap().IsLoopback()
+}
+
+// testTailscalePath 是测试里 doctor 用的 tailscale：tailscaleFind 给出的路径在测试临时目录（os.TempDir() 下，fakeTailscale
+// 的假脚本在那里）才算；不在（没换掉 tailscaleFind，找到的是本机真的 tailscale）就当作找不到。
+func testTailscalePath() (string, error) {
+	p, err := tailscaleFind()
+	if err != nil {
+		return "", err
+	}
+	if rel, err := filepath.Rel(os.TempDir(), p); err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", tailscale.ErrNotFound
+	}
+	return p, nil
 }
 
 // setDoctorOptions 在本测试期间换掉 doctorOptions，结束时换回。

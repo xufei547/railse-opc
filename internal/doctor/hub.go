@@ -18,9 +18,11 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hooksconf"
 	"github.com/xufei547/railse-opc/internal/hub/push"
 	"github.com/xufei547/railse-opc/internal/hub/store"
 	"github.com/xufei547/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
 // hubClientChecks 在机器侧看 hub 是否可达、协议是否一致：GET machine.json 里 hub_url 的 /api/version，不带凭据。
@@ -56,11 +58,13 @@ func hubClientChecks(o Options) []Check {
 	return []Check{{ID: id, Name: name, Status: OK, Detail: fmt.Sprintf("%s，hub 版本 %s", m.HubURL, v.Version)}}
 }
 
-// hubServerChecks 在 hub 机器上看数据目录、数据库、密码、推送密钥、ACME 目录与开机自启。只读打开数据库，不跑迁移。
+// hubServerChecks 在 hub 机器上看数据目录、数据库、密码、推送密钥、ACME 目录、本机 hub 的对外地址与开机自启。
+// 只读打开数据库，不跑迁移。
 func hubServerChecks(o Options) []Check {
 	items := []struct{ id, name string }{
 		{"hubsrv.dir", "hub 数据目录"}, {"hubsrv.db", "hub 数据库"}, {"hubsrv.password", "网页密码"},
-		{"hubsrv.vapid", "推送密钥"}, {"hubsrv.acme", "ACME 证书目录"}, {"hubsrv.autostart", "hub 开机自启"},
+		{"hubsrv.vapid", "推送密钥"}, {"hubsrv.acme", "ACME 证书目录"}, {"hubsrv.local", "本机 hub 对外地址"},
+		{"hubsrv.autostart", "hub 开机自启"},
 	}
 	skipAll := func(detail string) []Check {
 		var out []Check
@@ -85,13 +89,13 @@ func hubServerChecks(o Options) []Check {
 		// 目录用不了：只在 hubsrv.dir 报原因，依赖数据目录的几项按同一个原因跳过；开机自启不依赖它，照常看
 		dir, cause := hubDirUnusable(o.HubDir, err)
 		out = append(out, dir)
-		for _, it := range items[1:5] {
+		for _, it := range items[1:6] {
 			out = append(out, Check{ID: it.id, Name: it.name, Status: Skip, Detail: "hub 数据目录 " + o.HubDir + " " + cause})
 		}
 	} else {
 		out = append(out, permCheck("hubsrv.dir", "hub 数据目录", o.HubDir, 0o700, true, "railse hub run 会建好"))
 		out = append(out, hubDBChecks(o)...)
-		out = append(out, acmeCheck(o))
+		out = append(out, acmeCheck(o), localHubCheck(o))
 	}
 	out = append(out, autostartCheck("hubsrv.autostart", "hub 开机自启", o, "hub"))
 	return out
@@ -310,4 +314,118 @@ func acmeCheck(o Options) Check {
 		return Check{ID: id, Name: name, Status: Fail, Detail: "里面有私钥文件不是 0600：" + strings.Join(bad, "、"), Hint: "chmod 600 " + quoteAll(badPaths)}
 	}
 	return Check{ID: id, Name: name, Status: OK, Detail: dir}
+}
+
+// localHubConf 是 setup all --local-hub 写在 hub 数据目录里的 local-hub.json（cmd/railse 的 localHub）：doctor 按同样的字段
+// 只读一遍，校验口径同 cmd/railse 的 normalizeLocalHub。
+type localHubConf struct {
+	Port      int    `json:"port"`       // hub 监听 127.0.0.1:<Port>
+	PublicURL string `json:"public_url"` // 手机打开的 https 源
+	Provider  string `json:"provider"`   // "tailscale"（Funnel）或 "custom"（自己的隧道）；空当 custom
+}
+
+// publicOrigin 按 setup 的口径（cmd/railse 的 parsePublicOrigin）校验对外地址：https、带主机名、不带用户名密码、路径、
+// 查询与片段（尾斜杠可有）。返回规范化的源 https://主机[:端口] 与主机名。错误信息只说哪里不合规，不带原文（里面可能有密码）。
+func publicOrigin(raw string) (origin, host string, err error) {
+	u, perr := url.Parse(strings.TrimSpace(raw))
+	switch {
+	case perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" || u.Hostname() == "":
+		return "", "", errors.New("不是带主机名的 https:// 地址")
+	case u.User != nil:
+		return "", "", errors.New("带了用户名或密码")
+	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "":
+		return "", "", errors.New("带了 ? 查询或 # 片段")
+	case u.Scheme != "https":
+		return "", "", errors.New("不是 https:// 地址")
+	case strings.TrimRight(u.EscapedPath(), "/") != "":
+		return "", "", errors.New("带了路径，只能是 https://主机[:端口]")
+	}
+	return "https://" + u.Host, u.Hostname(), nil
+}
+
+// localHubCheck 看 setup all --local-hub 装的本机 hub 的对外地址（hubsrv.local）：读 <hub 数据目录>/local-hub.json；
+// 由 Tailscale 提供的先看 `tailscale serve status --json` 里 Funnel 是否把 <主机>:443 转到 127.0.0.1:<端口>（sudo 下整项跳过），
+// 再（不论哪种）从本机 GET 一次 <对外地址>/api/version。从本机访问不到只 warn：本机代理常拦着 *.ts.net，手机上未必打不开。
+// 端口上的 hub 本身由 hub.reachable（按 machine.json 的地址）看，这里不重复。细节里不带文件内容与不合规的地址原文（可能有密码）。
+func localHubCheck(o Options) Check {
+	const id, name = "hubsrv.local", "本机 hub 对外地址"
+	path := filepath.Join(o.HubDir, "local-hub.json")
+	rerun := "railse setup all --local-hub --hub-dir " + hooksconf.ShellQuote(o.HubDir)
+	bad := func(detail string) Check {
+		return Check{ID: id, Name: name, Status: Fail, Detail: detail, Hint: "重跑 " + rerun + " 重写它"}
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Check{ID: id, Name: name, Status: Skip, Detail: "没有 local-hub.json（没用 setup all --local-hub 装过本机 hub，或还没装完）"}
+	}
+	if err != nil {
+		why := err
+		var pe *fs.PathError
+		if errors.As(err, &pe) { // 细节里不重复路径
+			why = pe.Err
+		}
+		return Check{ID: id, Name: name, Status: Fail, Detail: path + " 读不到：" + why.Error(), Hint: "确认用跑 hub 的同一个用户运行 doctor"}
+	}
+	var lh localHubConf
+	if json.Unmarshal(data, &lh) != nil { // 解析错误里会带文件内容的片段，不写进细节
+		return bad(path + " 不是合法 JSON")
+	}
+	if lh.Port < 1 || lh.Port > 65535 {
+		return bad(fmt.Sprintf("%s 里 port %d 不在 1..65535", path, lh.Port))
+	}
+	origin, host, err := publicOrigin(lh.PublicURL)
+	if err != nil {
+		return bad(path + " 里 public_url 不合规：" + err.Error())
+	}
+
+	if lh.Provider == "tailscale" {
+		if underSudo(o) {
+			return Check{ID: id, Name: name, Status: Skip, Detail: "sudo 下不跑 tailscale", Hint: "用平时的用户身份重跑 railse doctor"}
+		}
+		ts, err := o.TailscalePath()
+		if err != nil {
+			return Check{ID: id, Name: name, Status: Fail, Detail: "找不到 tailscale（" + origin + " 由 Tailscale Funnel 提供）",
+				Hint: "装好并登录 Tailscale（https://tailscale.com/download）后重跑 railse doctor；不再用 Tailscale 就带 --public-url 重跑 " + rerun}
+		}
+		out, err := o.RunCmd(ts, "serve", "status", "--json")
+		if err != nil {
+			detail := fmt.Sprintf("%s serve status --json 失败：%v", ts, err)
+			if first := firstLine(out, 200); first != "" {
+				detail += "；输出：" + first
+			}
+			return Check{ID: id, Name: name, Status: Fail, Detail: detail, Hint: "确认 Tailscale 在运行且已登录（tailscale status），再重跑 railse doctor"}
+		}
+		sc, err := tailscale.ParseServeConfig(out)
+		if err != nil {
+			return Check{ID: id, Name: name, Status: Fail, Detail: err.Error(), Hint: "在终端里跑一次 tailscale serve status --json 看看输出"}
+		}
+		if !sc.FunnelFor(host, lh.Port) {
+			return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf("Funnel 没把 %s 转到 127.0.0.1:%d", host, lh.Port),
+				Hint: fmt.Sprintf("tailscale funnel --bg %d，或重跑 %s", lh.Port, rerun)}
+		}
+	}
+
+	endpoint := origin + "/api/version"
+	const proxyHint = "从本机访问不到对外地址：可能是本机代理拦截了（见 setup 结尾的提醒），用手机 4G 打开验证；Funnel 入口 TLS 握手失败时先关掉代理再试"
+	resp, err := o.HTTP.Get(endpoint)
+	if err != nil {
+		why := err
+		var ue *url.Error
+		if errors.As(err, &ue) { // 细节里不重复地址
+			why = ue.Err
+		}
+		return Check{ID: id, Name: name, Status: Warn, Detail: "从本机访问 " + endpoint + " 失败：" + why.Error(), Hint: proxyHint}
+	}
+	defer resp.Body.Close()
+	notHub := fmt.Sprintf("对外地址没转到本机 hub：确认它转到 127.0.0.1:%d（那里的 hub 看 hub.reachable）；也可能是本机代理拦截了，用手机 4G 打开验证", lh.Port)
+	if resp.StatusCode != 200 {
+		return Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf("%s 回 %d", endpoint, resp.StatusCode), Hint: notHub}
+	}
+	var v struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&v); err != nil || v.Version == "" {
+		return Check{ID: id, Name: name, Status: Warn, Detail: endpoint + " 回的不是 hub 的版本信息", Hint: notHub}
+	}
+	return Check{ID: id, Name: name, Status: OK, Detail: fmt.Sprintf("%s，hub 版本 %s", origin, v.Version)}
 }

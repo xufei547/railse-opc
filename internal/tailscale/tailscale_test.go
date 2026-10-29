@@ -166,6 +166,28 @@ func TestWarningBeforeJSONStillParses(t *testing.T) {
 	}
 }
 
+// ParseServeConfig 是 CLI.ServeConfig 用的解析（doctor 拿 RunCmd 的输出直接调它）：JSON 前面的警告行跳过，
+// 没有 JSON（No serve config、空输出）是零值，有 { 但坏了报错。
+func TestParseServeConfig(t *testing.T) {
+	for _, out := range []string{serveFunnelOn, warnLine + serveFunnelOn} {
+		sc, err := ParseServeConfig(out)
+		if err != nil || !sc.FunnelFor("macbook-air.tail2613ae.ts.net", 8787) {
+			t.Fatalf("%q: %+v %v", out, sc, err)
+		}
+	}
+	for _, out := range []string{"", "No serve config\n", warnLine} {
+		sc, err := ParseServeConfig(out)
+		if err != nil || len(sc.Web) != 0 || len(sc.AllowFunnel) != 0 {
+			t.Fatalf("%q 应是零值: %+v %v", out, sc, err)
+		}
+	}
+	for _, out := range []string{`{"Web": oops}`, warnLine + `{"Web":`} {
+		if _, err := ParseServeConfig(out); err == nil {
+			t.Fatalf("%q: 坏 JSON 应报错", out)
+		}
+	}
+}
+
 func TestServeConfigBrokenJSONIsError(t *testing.T) {
 	c, _ := fakeCLI(t, statusRunning, `{"Web": oops}`, "", 0)
 	if _, err := c.ServeConfig(context.Background()); err == nil {

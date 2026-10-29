@@ -1,8 +1,9 @@
 // Package doctor 只读地检查一台机器上 Railse 的安装：守护进程、hub 连接、三个 CLI 的钩子与版本、项目根、权限；
-// 在 hub 机器上还检查数据库、密码与推送密钥。doctor 自己不改配置、不建文件、不改权限（数据库按只读打开，
-// 连 -wal、-shm 也不建），网络只访问 hub 的 /api/version。唯一会起的进程是带超时的 `<cli> --version`，
-// 可能的副作用只有这些 CLI 自己在 --version 时写下的东西（如缓存、更新检查记录）；所以 sudo 下
-// （euid 是 root，或家目录不归当前用户）不跑它们，免得在用户目录留下 root 属主的文件。
+// 在 hub 机器上还检查数据库、密码、推送密钥与本机 hub（setup all --local-hub 装的）的对外地址。doctor 自己不改配置、
+// 不建文件、不改权限（数据库按只读打开，连 -wal、-shm 也不建），网络只访问 hub 的 /api/version（machine.json 里的地址，
+// 与本机 hub 的对外地址）。会起的进程只有带超时的 `<cli> --version` 与本机 hub 由 Tailscale 提供时的
+// `tailscale serve status --json`，可能的副作用只有它们自己写下的东西（如缓存、更新检查记录）；所以 sudo 下
+// （euid 是 root，或家目录不归当前用户）都不跑，免得在用户目录留下 root 属主的文件。
 package doctor
 
 import (
@@ -17,6 +18,7 @@ import (
 
 	"github.com/xufei547/railse-opc/internal/hookclient"
 	"github.com/xufei547/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
 // Status 是一项检查的结果。
@@ -77,13 +79,16 @@ type Options struct {
 	// 取不到家目录就不比对不带 --socket 的钩子。
 	DefaultSocket string
 
-	LookPath    func(file string) (string, error)
-	RunCmd      func(name string, args ...string) (string, error) // 只用来跑 `<cli> --version`
-	HTTP        *http.Client                                      // 只用来 GET hub 的 /api/version
-	AgentStatus func(socket string) (proto.Status, error)
-	Now         time.Time
+	LookPath func(file string) (string, error)
+	RunCmd   func(name string, args ...string) (string, error) // 只用来跑 `<cli> --version` 与 `tailscale serve status --json`
+	// HTTP 只用来 GET hub 的 /api/version：machine.json 里的地址，与本机 hub（local-hub.json）的对外地址
+	HTTP *http.Client
+	// TailscalePath 找 tailscale 可执行文件（本机 hub 的对外地址由 Tailscale Funnel 提供时才用）
+	TailscalePath func() (string, error)
+	AgentStatus   func(socket string) (proto.Status, error)
+	Now           time.Time
 
-	// Geteuid 与 FileOwner 用来认出 sudo 下运行（euid 是 root，或 Home 的属主不是当前 euid），那时不跑 CLI 的 --version。
+	// Geteuid 与 FileOwner 用来认出 sudo 下运行（euid 是 root，或 Home 的属主不是当前 euid），那时不跑 CLI 的 --version 与 tailscale。
 	// FileOwner 查不到（路径不存在、不支持的系统）时 ok 为 false。
 	Geteuid   func() int
 	FileOwner func(path string) (uid int, ok bool)
@@ -92,13 +97,14 @@ type Options struct {
 // noHome 是取不到家目录时，用到家目录的检查（开机自启、Codex 的钩子与 notify）的 skip 说明。
 const noHome = "取不到家目录（$HOME 没设），跳过"
 
-// cliTimeout 是 `<cli> --version` 的时限：首次运行的自更新、登录提示之类卡住时不让 doctor 跟着挂住。是变量只为测试能调短。
+// cliTimeout 是 `<cli> --version`（与 `tailscale serve status --json`）的时限：首次运行的自更新、登录提示、tailscaled 没应答之类
+// 卡住时不让 doctor 跟着挂住。是变量只为测试能调短。
 var cliTimeout = 10 * time.Second
 
 // commandContext 起子进程；是变量只为测试能换成假的慢 CLI。
 var commandContext = exec.CommandContext
 
-// runCmd 是默认的 RunCmd：合并 stdout 与 stderr，超过 cliTimeout 就杀掉。stdin 是 /dev/null，CLI 等输入时直接读到 EOF。
+// runCmd 是默认的 RunCmd：合并 stdout 与 stderr，超过 cliTimeout 就杀掉。stdin 是 /dev/null，CLI 与 tailscale 等输入时直接读到 EOF。
 func runCmd(name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
@@ -125,10 +131,13 @@ func (o *Options) defaults() {
 	if o.RunCmd == nil {
 		o.RunCmd = runCmd
 	}
+	if o.TailscalePath == nil {
+		o.TailscalePath = func() (string, error) { return tailscale.Find(exec.LookPath, os.Stat, runtime.GOOS) }
+	}
 	if o.HTTP == nil {
 		o.HTTP = &http.Client{
 			Timeout: 10 * time.Second,
-			// 不跟重定向：只访问 machine.json 里那个地址的 /api/version；被重定向时如实报出状态码
+			// 不跟重定向：只访问 machine.json 里那个地址与本机 hub 对外地址的 /api/version；被重定向时如实报出状态码
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		}
 	}

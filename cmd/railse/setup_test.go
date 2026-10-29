@@ -1283,13 +1283,14 @@ func needUserAutostart(t *testing.T) {
 type setupAllFixture struct {
 	home, proj, dir, bin string
 	rec                  *cmdRec
+	doctor               *doctorGuard // 体检时 doctor 被拦下的请求、放行了的假 tailscale 命令
 }
 
 // setupAllEnv 先换掉 doctor 看到的 CLI（不真跑 claude、codex、gemini 的 --version），再用 autostartEnv 给假家目录与
 // 记录命令的 runCommand（不跑真实的 launchctl、systemctl），托管后不等守护进程应答。绝不碰真实的家目录。
 func setupAllEnv(t *testing.T) setupAllFixture {
 	t.Helper()
-	fakeDoctorCLIs(t)
+	guard := fakeDoctorCLIs(t)
 	home, rec := autostartEnv(t)
 	t.Setenv("RAILSE_HUB_HOME", filepath.Join(home, "nohub"))
 	proj := filepath.Join(home, "proj")
@@ -1299,7 +1300,7 @@ func setupAllEnv(t *testing.T) setupAllFixture {
 	old := setupDaemonWait
 	setupDaemonWait = 0
 	t.Cleanup(func() { setupDaemonWait = old })
-	return setupAllFixture{home: home, proj: proj, dir: filepath.Join(home, "h"), bin: filepath.Join(home, "railse"), rec: rec}
+	return setupAllFixture{home: home, proj: proj, dir: filepath.Join(home, "h"), bin: filepath.Join(home, "railse"), rec: rec, doctor: guard}
 }
 
 // args 是带上本环境 --project、--dir、--bin 的 railse setup all 命令行。
@@ -2235,6 +2236,41 @@ func TestSetupAllLocalHubEndToEnd(t *testing.T) {
 	}
 	if strings.Contains(s, "本机开着代理") {
 		t.Fatalf("代理环境变量已清空，不该有代理提醒:\n%s", s)
+	}
+	assertNoEnrollSecrets(t, oneEnrollToken(t, spy), s, errOut.String())
+}
+
+// 第 5 步体检看本机 hub 的对外地址（hubsrv.local），测试里绝不出网、不跑真 tailscale：Funnel 配置由假 tailscale 的
+// serve status --json 给（已开，判对），GET 对外地址 https://<ts.net 域名>/api/version 被 fakeDoctorCLIs 的 HTTP 拦下
+// （不做 DNS、不拨号）→ warn，提示可能是本机代理；被拦的只有这个域名，连本机测试 hub 的 hub.reachable 照常 ok。
+func TestSetupAllLocalHubDoctorChecksPublicURLOffline(t *testing.T) {
+	f := localSetupEnv(t)
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	spy := startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	fakeStdin(t, true, localHubTestPassword+"\n")
+	var out, errOut bytes.Buffer
+	if code := run(f.localArgs("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("setup all --local-hub: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	at := strings.Index(s, "== 5. 体检 ==")
+	if at < 0 {
+		t.Fatalf("没有体检那一步:\n%s", s)
+	}
+	doc := s[at:]
+	want := "[warn]  本机 hub 对外地址：从本机访问 " + tsPublicURL + "/api/version 失败：测试里不出网\n        修复：从本机访问不到对外地址：可能是本机代理拦截了"
+	if !strings.Contains(doc, want) {
+		t.Fatalf("体检里 hubsrv.local 应因对外地址被拦而 warn（Funnel 配置是对的）:\n%s", doc)
+	}
+	if !strings.Contains(doc, "[ok]    hub 可达：http://127.0.0.1:"+strconv.Itoa(f.port)) {
+		t.Fatalf("回环地址应放行，hub.reachable 照常 ok:\n%s", doc)
+	}
+	if b := f.doctor.blockedHosts(); len(b) != 1 || b[0] != tsDNS {
+		t.Fatalf("doctor 只该想连 %s（且被拦下）: %q", tsDNS, b)
+	}
+	if r := f.doctor.tailscaleRuns(); len(r) != 1 || !strings.HasSuffix(r[0], "/tailscale serve status --json") || !strings.HasPrefix(r[0], os.TempDir()) {
+		t.Fatalf("doctor 只该跑一次临时目录里的假 tailscale 的 serve status --json: %q", r)
 	}
 	assertNoEnrollSecrets(t, oneEnrollToken(t, spy), s, errOut.String())
 }

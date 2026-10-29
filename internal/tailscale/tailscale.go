@@ -137,6 +137,12 @@ func (c CLI) ServeConfig(ctx context.Context) (ServeConfig, error) {
 	if err != nil {
 		return ServeConfig{}, fmt.Errorf("tailscale serve status: %w（%s）", err, strings.TrimSpace(out))
 	}
+	return ParseServeConfig(out)
+}
+
+// ParseServeConfig 解析 `tailscale serve status --json` 的合并输出（JSON 前面可能混着警告行）。
+// 没有 JSON（"No serve config"、空输出）时是零值；有 { 但 JSON 坏了报错。doctor 拿自己跑出的输出直接调它。
+func ParseServeConfig(out string) (ServeConfig, error) {
 	body, ok := jsonBody(out)
 	if !ok { // "No serve config"、空输出
 		return ServeConfig{}, nil

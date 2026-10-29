@@ -13,14 +13,15 @@ import (
 
 const doctorUsage = `用法:
   railse doctor [--project 目录] [--dir 目录] [--hub-dir 目录] [--bin 路径] [--json]
-    检查守护进程、hub 连接、三个 CLI 的钩子与版本、项目根、文件权限；这台机器有 hub 数据目录时还检查数据库、密码与推送密钥。
-    只读：不改配置、不建文件；唯一会起的进程是 claude、codex、gemini 的 --version（带超时，sudo 下不跑）。
+    检查守护进程、hub 连接、三个 CLI 的钩子与版本、项目根、文件权限；这台机器有 hub 数据目录时还检查数据库、密码与推送密钥，
+    有 local-hub.json（setup all --local-hub 装的本机 hub）时再看对外地址：Funnel 配置，并从本机访问一次。
+    只读：不改配置、不建文件；会起的进程只有 claude、codex、gemini 的 --version 与 tailscale serve status --json（带超时，sudo 下不跑）。
     hub 数据目录默认 $RAILSE_HUB_HOME，否则 ~/.railse-hub，Linux 上两者都没有时再看系统单元的 ` + systemHubDir + `
     （只在它归当前用户或以 root 运行时）；默认目录都不在就跳过 hub 侧，显式给的 --hub-dir 不在则报失败。
     有任一项失败退出码 1。`
 
-// doctorOptions 在 doctor.Run 之前最后改一次检查的输入。是变量只为测试能把 LookPath、RunCmd 换成假的，
-// 不在开发机上真的跑 claude、codex、gemini 的 --version（经 runDoctor 体检的 setup all 也走这里）。
+// doctorOptions 在 doctor.Run 之前最后改一次检查的输入。是变量只为测试能把 LookPath、RunCmd、TailscalePath、HTTP 换成假的，
+// 不在开发机上真的跑 claude、codex、gemini 的 --version 与 tailscale，也不出网（经 runDoctor 体检的 setup all 也走这里）。
 var doctorOptions = func(*doctor.Options) {}
 
 // doctorGOOS 与 doctorSystemHubDir 决定不给 --hub-dir 时要不要回退到系统单元的 hub 数据目录（空目录表示不回退）；
@@ -39,7 +40,8 @@ var (
 	}
 )
 
-// runDoctor 是 railse doctor：只读检查（不改配置、不建文件），会跑三个 CLI 的 --version（sudo 下不跑）。
+// runDoctor 是 railse doctor：只读检查（不改配置、不建文件），会跑三个 CLI 的 --version 与本机 hub 由 Tailscale 提供时的
+// tailscale serve status --json（sudo 下都不跑）。
 func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -97,8 +99,9 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	projExplicit := false
 	fs.Visit(func(f *flag.Flag) { projExplicit = projExplicit || f.Name == "project" })
 	home, _ := os.UserHomeDir()
+	// 找 tailscale 与 setup all --local-hub 用同一个（测试里换成假脚本）
 	o := doctor.Options{AgentDir: agentDir, Project: proj, ProjectExplicit: projExplicit, HubDir: hd, HubDirRequired: hubRequired, HubSkip: hubSkip,
-		Bin: b, Version: version, Home: home}
+		Bin: b, Version: version, Home: home, TailscalePath: tailscaleFind}
 	doctorOptions(&o)
 	rep := doctor.Run(o)
 	if *asJSON {
