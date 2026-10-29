@@ -267,17 +267,7 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	defer st.Close()
 	switch a.sub {
 	case "password":
-		pw, err := readPassword(stdin, stderr)
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		srv, err := hub.New(cfg, st, log.New(io.Discard, "", 0))
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		ch, err := srv.SetPassword(pw)
+		ch, err := setHubPassword(cfg, st, stdin, stderr)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
