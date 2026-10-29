@@ -54,6 +54,7 @@ func TestLoadLocalHubValidation(t *testing.T) {
 		"带路径":          `{"port":8787,"public_url":"https://x.ts.net/a"}`,
 		"带查询串":         `{"port":8787,"public_url":"https://x.ts.net?a=1"}`,
 		"public_url 空": `{"port":8787}`,
+		"带用户名密码":       `{"port":8787,"public_url":"https://u:p@x.ts.net"}`,
 	}
 	for name, body := range bad {
 		dir := tempDir(t)
@@ -63,6 +64,8 @@ func TestLoadLocalHubValidation(t *testing.T) {
 			t.Errorf("%s: 应报错: %v %v", name, ok, err)
 		} else if !strings.Contains(err.Error(), localHubFile) {
 			t.Errorf("%s: 错误应带文件路径: %v", name, err)
+		} else if strings.Contains(err.Error(), "u:p") {
+			t.Errorf("%s: 错误不该回显地址原文（里面可能有密码）: %v", name, err)
 		}
 	}
 	// Provider 空读出 custom；尾斜杠被规范化

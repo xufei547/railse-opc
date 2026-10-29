@@ -49,10 +49,11 @@ var hubJobRunning = func(hubDir, bin string) bool {
 	return autostartStatus(runtime.GOOS, autostartSpec{Kind: "hub", Home: home, UID: os.Getuid(), Dir: hubDir, Bin: bin}, false, io.Discard) == 0
 }
 
-// setupLocalHub 做第 0 步：定对外地址（Funnel 或 --public-url）→ 数据目录与密码 → 写 local-hub.json → 托管并启动 hub →
-// 等它应答 → 生成接入码。返回描述、接入码（只交给 agentEnroll，不打印）与要在结尾“注意”里说的话（如对外地址变了）。
+// setupLocalHub 做第 0 步：看端口上是谁 → 定对外地址（Funnel 或 --public-url）→ 数据目录与密码 → 托管并启动 hub →
+// 写 local-hub.json → 等它应答 → 生成接入码。返回描述、接入码（只交给 agentEnroll，不打印）与要在结尾“注意”里说的话（如对外地址变了）。
 // 任何一步失败返回错误，调用方按 fail(步骤名) 处理；Funnel 没在管理台开通时返回 tailscale.ErrFunnelNotEnabled（含开通链接）。
 // hub 只监听 127.0.0.1:<端口>，对外只经 Funnel（或用户自己的隧道）。输出里不带接入码与密码。
+// 托管用 runAutostart、查作业用 hubJobRunning，都按 runtime.GOOS；goos 只用于下面的前置拒绝与没应答时日志在哪儿的提示。
 func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, notes []string, err error) {
 	// 一看就不对的输入在动手之前挡住：不白开 Funnel、不白设密码
 	if o.Port < 1 || o.Port > 65535 {
@@ -63,15 +64,32 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 	}
 	listen := "127.0.0.1:" + strconv.Itoa(o.Port)
 	lh = localHub{Port: o.Port}
-
-	// 1. 对外地址。用户给的地址按 parseHubAddr 规范化（去尾斜杠），之后写文件、托管参数、比较“地址变了”都用它，重跑不会误报
+	// 用户给的地址按 parsePublicOrigin 规范化（去尾斜杠），之后写文件、托管参数、比较“地址变了”都用它，重跑不会误报
 	if o.PublicURL != "" {
-		u, base, perr := parseHubAddr(o.PublicURL)
-		if perr != nil || u.Scheme != "https" || base != "https://"+u.Host {
-			return localHub{}, "", nil, fmt.Errorf("对外地址 %q 要是不带路径、查询的 https:// 地址，如 https://hub.example.com", o.PublicURL)
+		base, perr := parsePublicOrigin(o.PublicURL)
+		if perr != nil {
+			return localHub{}, "", nil, fmt.Errorf("对外地址%w", perr)
 		}
 		lh.PublicURL, lh.Provider = base, "custom"
-		fmt.Fprintf(o.Stdout, "对外地址用你给的 %s（自己的隧道要把它转到 %s）\n", base, listen)
+	}
+
+	// 先看端口上是谁（只读），在碰 tailscale 之前：别的程序或手动起的 hub 占着端口时就停下。否则 Funnel 一开，那个本来只绑
+	// 本机的服务就经 https://<机器>.ts.net 持久地开到公网上了（Funnel 不随失败回滚）
+	v, answers := hubAnswers(o.Port)
+	managed := answers && hubJobRunning(o.HubDir, o.Bin)
+	switch {
+	case answers && !managed:
+		return localHub{}, "", nil, fmt.Errorf("%s 已有一个不是托管的 hub 在跑（手动起的？）：先停掉它，或用 --hub-port 换端口", listen)
+	case !answers:
+		if c, derr := net.DialTimeout("tcp", listen, 500*time.Millisecond); derr == nil {
+			c.Close()
+			return localHub{}, "", nil, fmt.Errorf("%s 被别的程序占用：用 --hub-port 换一个", listen)
+		}
+	}
+
+	// 1. 对外地址
+	if lh.Provider == "custom" {
+		fmt.Fprintf(o.Stdout, "对外地址用你给的 %s（自己的隧道要把它转到 %s）\n", lh.PublicURL, listen)
 	} else {
 		if lh.PublicURL, err = tailscaleFunnel(o.Port, o.Stdout); err != nil {
 			return localHub{}, "", nil, err
@@ -106,7 +124,7 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 		fmt.Fprintf(o.Stdout, "网页密码已设过，沿用（hub 数据目录 %s）\n", o.HubDir)
 	}
 
-	// 3. local-hub.json。“变了”：之前没有这个文件，或对外地址、端口与这次不同；变了的到第 4 步要重新托管。
+	// 3. 与上次的 local-hub.json 比。“变了”：之前没有这个文件，或对外地址、端口与这次不同；变了的要重新托管。
 	// 只有对外地址从 A 变成 B 才提醒手机（之前没有文件时手机上还没有图标）
 	old, had, lerr := loadLocalHub(o.HubDir)
 	if lerr != nil { // 坏文件：这次照新的设置重写，当作变了
@@ -118,43 +136,30 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 		fmt.Fprintln(o.Stdout, note)
 		notes = append(notes, note)
 	}
-	if err := saveLocalHub(o.HubDir, lh); err != nil {
-		return localHub{}, "", nil, err
-	}
-	fmt.Fprintf(o.Stdout, "已写入 %s\n", localHubPath(o.HubDir))
 
-	// 4. 托管并启动。用现有的 setup autostart --hub，-- 之后是本机 hub 的 hub run 参数；已托管的会先停掉旧的再拉起
-	host := func(what string) error {
+	// 4. 托管并启动（用最前面看好的端口情况）。用现有的 setup autostart --hub，-- 之后是本机 hub 的 hub run 参数；
+	// 已托管的会先停掉旧的再拉起
+	hosted := false
+	if managed && !changed {
+		fmt.Fprintf(o.Stdout, "本机 hub 已在跑（版本 %s），跳过托管\n", v)
+	} else {
+		what := fmt.Sprintf("托管并启动 hub（只监听 %s）", listen)
+		if managed { // 托管的 hub 在跑，但不是按这次的对外地址、端口装的（或之前不是本机 hub 的装法）
+			what = "托管的 hub 不是按这次的对外地址与端口装的，重新托管"
+		}
 		fmt.Fprintln(o.Stdout, what)
 		args := append([]string{"--hub", "--dir", o.HubDir, "--bin", o.Bin, "--"}, localHubRunArgs(lh)...)
 		if runAutostart(args, o.Stdout, o.Stderr) != 0 {
-			return errors.New("托管 hub 失败，见上面")
+			return localHub{}, "", notes, errors.New("托管 hub 失败，见上面")
 		}
-		return nil
+		hosted = true
 	}
-	hosted := true
-	v, answers := hubAnswers(o.Port)
-	managed := answers && hubJobRunning(o.HubDir, o.Bin)
-	switch {
-	case managed && !changed:
-		fmt.Fprintf(o.Stdout, "本机 hub 已在跑（版本 %s），跳过托管\n", v)
-		hosted = false
-	case managed:
-		// 托管的 hub 在跑，但不是按这次的对外地址、端口装的（或之前不是本机 hub 的装法）
-		if err := host("托管的 hub 不是按这次的对外地址与端口装的，重新托管"); err != nil {
-			return localHub{}, "", notes, err
-		}
-	case answers:
-		return localHub{}, "", notes, fmt.Errorf("%s 已有一个不是托管的 hub 在跑（手动起的？）：先停掉它，或用 --hub-port 换端口", listen)
-	default:
-		if c, derr := net.DialTimeout("tcp", listen, 500*time.Millisecond); derr == nil {
-			c.Close()
-			return localHub{}, "", notes, fmt.Errorf("%s 被别的程序占用：用 --hub-port 换一个", listen)
-		}
-		if err := host(fmt.Sprintf("托管并启动 hub（只监听 %s）", listen)); err != nil {
-			return localHub{}, "", notes, err
-		}
+	// 托管成功（或在跑且没变）之后才写 local-hub.json：托管若在动旧作业之前就失败，旧作业还带着旧参数在跑，
+	// 文件留着旧值，重跑才知道要重新托管
+	if err := saveLocalHub(o.HubDir, lh); err != nil {
+		return localHub{}, "", notes, err
 	}
+	fmt.Fprintf(o.Stdout, "已写入 %s\n", localHubPath(o.HubDir))
 
 	// 5. 等应答：launchd、systemd 拉起 hub 要一会儿
 	v, ok := waitHub(o.Port, localHubWait)
@@ -201,6 +206,15 @@ func tailscaleFunnel(port int, stdout io.Writer) (string, error) {
 		return "", err
 	}
 	if !sc.FunnelFor(st.DNSName, port) {
+		// funnel --bg 会替换 443 上原有的 / 配置：原来指向别处的先说一声
+		target := "http://127.0.0.1:" + strconv.Itoa(port)
+		if h, ok := sc.Web[st.DNSName+":443"].Handlers["/"]; ok && h.Proxy != target {
+			prev := h.Proxy
+			if prev == "" {
+				prev = "别的内容（不是反向代理）"
+			}
+			fmt.Fprintf(stdout, "将替换 https://%s 原来指向 %s 的 Funnel/serve 配置\n", st.DNSName, prev)
+		}
 		fmt.Fprintf(stdout, "开 Tailscale Funnel：https://%s 转到 127.0.0.1:%d\n", st.DNSName, port)
 		if err := cli.EnableFunnel(ctx, port); err != nil {
 			return "", err

@@ -32,17 +32,31 @@ var localHubWait = 10 * time.Second
 
 func localHubPath(hubDir string) string { return filepath.Join(hubDir, localHubFile) }
 
+// parsePublicOrigin 校验本机 hub 的对外地址并返回规范化的源（按 parseHubAddr，去掉尾斜杠）：还要是 https、不带路径。
+// 同 parseHubAddr，错误信息不带原文（里面可能有密码），也不带标志名，调用方在前面加“对外地址”之类。
+func parsePublicOrigin(raw string) (string, error) {
+	u, base, err := parseHubAddr(raw)
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != "https" {
+		return "", errors.New("必须是 https:// 地址（手机加到主屏幕、开通知都要 https）")
+	}
+	if base != "https://"+u.Host {
+		return "", errors.New("不能带路径，只要 https://主机[:端口]")
+	}
+	return base, nil
+}
+
 // normalizeLocalHub 校验字段并规范化：端口在 1..65535，PublicURL 是不带路径与查询的 https 源（去掉尾斜杠），Provider 空当 custom。
+// 错误信息不带 public_url 原文（坏文件的警告会打到 stderr）。
 func normalizeLocalHub(lh localHub) (localHub, error) {
 	if lh.Port < 1 || lh.Port > 65535 {
 		return localHub{}, fmt.Errorf("port %d 不在 1..65535", lh.Port)
 	}
-	u, norm, err := parseHubAddr(lh.PublicURL)
+	norm, err := parsePublicOrigin(lh.PublicURL)
 	if err != nil {
-		return localHub{}, fmt.Errorf("public_url %q 不合规: %w", lh.PublicURL, err)
-	}
-	if u.Scheme != "https" || norm != "https://"+u.Host {
-		return localHub{}, fmt.Errorf("public_url %q 必须是不带路径的 https:// 源", lh.PublicURL)
+		return localHub{}, fmt.Errorf("public_url 不合规：%w", err)
 	}
 	lh.PublicURL = norm
 	if lh.Provider == "" {

@@ -195,10 +195,14 @@ func jobHasArgs(content, name, value string) bool {
 	return strings.Contains(content, systemdExecArg(name)+" "+systemdExecArg(value))
 }
 
-// assertNoSecrets：输出里不能有接入码原文，也不能有网页密码原文。
-func assertNoSecrets(t *testing.T, token string, outs ...string) {
+// assertNoSecrets：输出、返回的错误与提醒里都不能有接入码原文，也不能有网页密码原文。
+func assertNoSecrets(t *testing.T, token string, err error, notes []string, outs ...string) {
 	t.Helper()
-	for _, o := range outs {
+	all := append([]string{strings.Join(notes, "\n")}, outs...)
+	if err != nil {
+		all = append(all, err.Error())
+	}
+	for _, o := range all {
 		if token != "" && strings.Contains(o, token) {
 			t.Fatalf("输出泄露了接入码: %q", o)
 		}
@@ -254,7 +258,7 @@ func TestSetupLocalHubHappyPathExistingHub(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(ts.dir, "calls")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Funnel 已开，不该再调 funnel: %v", err)
 	}
-	assertNoSecrets(t, tok, out.String(), errOut.String())
+	assertNoSecrets(t, tok, err, notes, out.String(), errOut.String())
 }
 
 func TestSetupLocalHubEnablesFunnelWhenOff(t *testing.T) {
@@ -264,9 +268,12 @@ func TestSetupLocalHubEnablesFunnelWhenOff(t *testing.T) {
 	startLocalTestHub(t, f.hubDir, f.port)
 	stubHubJobRunning(t, true)
 	var out, errOut bytes.Buffer
-	lh, tok, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
+	lh, tok, notes, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
 	if err != nil {
 		t.Fatalf("%v\nstdout=%s\nstderr=%s", err, out.String(), errOut.String())
+	}
+	if strings.Contains(out.String(), "将替换") {
+		t.Fatalf("原来没有 serve 配置，不该说替换: %s", out.String())
 	}
 	if n := ts.funnelCalls(); n != 1 {
 		t.Fatalf("应调一次 funnel，调了 %d 次", n)
@@ -277,7 +284,7 @@ func TestSetupLocalHubEnablesFunnelWhenOff(t *testing.T) {
 	if !strings.Contains(out.String(), tsPublicURL) || !strings.Contains(out.String(), "Funnel") {
 		t.Fatalf("stdout 应说对外地址与 Funnel: %s", out.String())
 	}
-	assertNoSecrets(t, tok, out.String(), errOut.String())
+	assertNoSecrets(t, tok, err, notes, out.String(), errOut.String())
 }
 
 func TestSetupLocalHubFunnelStillOffAfterEnable(t *testing.T) {
@@ -312,8 +319,8 @@ func TestSetupLocalHubFunnelNotEnabledShowsLink(t *testing.T) {
 	if tok != "" {
 		t.Fatal("失败时不该有接入码")
 	}
-	if _, err := os.Stat(localHubPath(f.hubDir)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("第 1 步就停，不该写 local-hub.json: %v", err)
+	if _, err := os.Stat(f.hubDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("第 1 步就停，不该建 hub 数据目录、设密码、写 local-hub.json: %v", err)
 	}
 	if f.hostedHub() {
 		t.Fatal("第 1 步就停，不该托管")
@@ -391,7 +398,7 @@ func TestSetupLocalHubCustomPublicURLSkipsTailscale(t *testing.T) {
 	if err != nil || !jobHasArgs(string(job), "--public-url", "https://hub.example.com") {
 		t.Fatalf("托管文件应带规范化的 --public-url: %v\n%s", err, job)
 	}
-	assertNoSecrets(t, tok, out.String(), errOut.String())
+	assertNoSecrets(t, tok, err, notes, out.String(), errOut.String())
 
 	// 用同一个地址（同样带尾斜杠）重跑：不算地址变了，hub 在跑就不动它
 	f.rec.calls = nil
@@ -407,6 +414,7 @@ func TestSetupLocalHubCustomPublicURLSkipsTailscale(t *testing.T) {
 	if !strings.Contains(out.String(), "已在跑") || tok2 == "" || tok2 == tok {
 		t.Fatalf("重跑应跳过托管并生成新接入码: %q\n%s", tok2, out.String())
 	}
+	assertNoSecrets(t, tok2, err, notes, out.String(), errOut.String())
 }
 
 func TestSetupLocalHubRejectsBadPortAndPublicURL(t *testing.T) {
@@ -419,11 +427,21 @@ func TestSetupLocalHubRejectsBadPortAndPublicURL(t *testing.T) {
 			t.Fatalf("端口 %d: err = %v", port, err)
 		}
 	}
-	for _, u := range []string{"http://hub.example.com", "https://hub.example.com/hub", "https://hub.example.com?a=1", "hub.example.com", "https://u:p@hub.example.com"} {
+	for u, why := range map[string]string{
+		"http://hub.example.com":      "https://",
+		"https://hub.example.com/hub": "路径",
+		"https://hub.example.com?a=1": "查询",
+		"hub.example.com":             "开头",
+		"https://u:p@hub.example.com": "用户名或密码",
+	} {
 		o := f.opts(localHubTestPassword+"\n", io.Discard, io.Discard)
 		o.PublicURL = u
-		if _, _, _, err := setupLocalHub(runtime.GOOS, o); err == nil || !strings.Contains(err.Error(), "https://") {
-			t.Fatalf("对外地址 %q: err = %v", u, err)
+		_, _, _, err := setupLocalHub(runtime.GOOS, o)
+		if err == nil || !strings.HasPrefix(err.Error(), "对外地址") || !strings.Contains(err.Error(), why) {
+			t.Fatalf("对外地址 %q: err = %v，应以“对外地址”开头、含原因 %q", u, err, why)
+		}
+		if strings.Contains(err.Error(), u) || strings.Contains(err.Error(), "u:p") {
+			t.Fatalf("错误不该回显原文（里面可能有密码）: %v", err)
 		}
 	}
 	if _, err := os.Stat(f.hubDir); !errors.Is(err, os.ErrNotExist) {
@@ -433,7 +451,9 @@ func TestSetupLocalHubRejectsBadPortAndPublicURL(t *testing.T) {
 
 func TestSetupLocalHubPortTakenByOther(t *testing.T) {
 	f := localHubEnv(t)
-	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	// Funnel 一开始没开：端口被别的程序占着时开了，就把那个只绑本机的服务开到公网上了
+	ts := fakeTailscale(t, tsStatusOK, "No serve config\n", "", 0)
+	ts.setOn(t, tsServeOn(f.port))
 	stubHubJobRunning(t, false)
 	// 占住端口的不是 hub：连上就关
 	l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(f.port))
@@ -458,11 +478,18 @@ func TestSetupLocalHubPortTakenByOther(t *testing.T) {
 	if tok != "" || f.hostedHub() {
 		t.Fatalf("端口被占不该托管、不该有接入码: %q %v", tok, f.rec.calls)
 	}
+	if n := ts.funnelCalls(); n != 0 {
+		t.Fatalf("端口被占时不该开 Funnel，开了 %d 次", n)
+	}
+	if _, err := os.Stat(f.hubDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("端口被占时不该建 hub 数据目录、设密码")
+	}
 }
 
 func TestSetupLocalHubManualHubRefused(t *testing.T) {
 	f := localHubEnv(t)
-	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	ts := fakeTailscale(t, tsStatusOK, "No serve config\n", "", 0)
+	ts.setOn(t, tsServeOn(f.port))
 	startLocalTestHub(t, f.hubDir, f.port)
 	stubHubJobRunning(t, false)
 	var out, errOut bytes.Buffer
@@ -472,6 +499,15 @@ func TestSetupLocalHubManualHubRefused(t *testing.T) {
 	}
 	if tok != "" || f.hostedHub() {
 		t.Fatalf("手动起的 hub 占着端口时不该托管: %q %v", tok, f.rec.calls)
+	}
+	if n := ts.funnelCalls(); n != 0 {
+		t.Fatalf("手动起的 hub 占着端口时不该开 Funnel，开了 %d 次", n)
+	}
+	if _, ok, _ := f.openHubStore(t).GetSetting("password_hash"); ok {
+		t.Fatal("手动起的 hub 占着端口时不该设密码")
+	}
+	if _, err := os.Stat(localHubPath(f.hubDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("手动起的 hub 占着端口时不该写 local-hub.json")
 	}
 }
 
@@ -505,7 +541,7 @@ func TestSetupLocalHubReinstallsWhenURLChanged(t *testing.T) {
 	if !jobHasArgs(string(job), "--public-url", tsPublicURL) {
 		t.Fatalf("托管文件应带新地址:\n%s", job)
 	}
-	assertNoSecrets(t, tok, out.String(), errOut.String())
+	assertNoSecrets(t, tok, err, notes, out.String(), errOut.String())
 }
 
 func TestSetupLocalHubReinstallsWhenPortChanged(t *testing.T) {
@@ -556,7 +592,7 @@ func TestSetupLocalHubInstallsWhenNotRunning(t *testing.T) {
 	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
 	stubHubJobRunning(t, false)
 	var out, errOut bytes.Buffer
-	_, tok, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
+	_, tok, notes, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
 	if !f.hostedHub() {
 		t.Fatalf("应托管并启动 hub: %v", f.rec.calls)
 	}
@@ -581,7 +617,114 @@ func TestSetupLocalHubInstallsWhenNotRunning(t *testing.T) {
 		t.Fatal("hub 没应答不该有接入码")
 	}
 	if lh, ok, _ := loadLocalHub(f.hubDir); !ok || lh.PublicURL != tsPublicURL {
-		t.Fatalf("托管前应已写 local-hub.json: %+v %v", lh, ok)
+		t.Fatalf("托管成功后（等应答之前）应已写 local-hub.json: %+v %v", lh, ok)
 	}
-	assertNoSecrets(t, "", out.String(), errOut.String())
+	assertNoSecrets(t, "", err, notes, out.String(), errOut.String())
+}
+
+func TestSetupLocalHubHostFailureKeepsOldFile(t *testing.T) {
+	f := localHubEnv(t)
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	old := localHub{Port: f.port, PublicURL: "https://old-mac.tail2613ae.ts.net", Provider: "tailscale"}
+	if err := saveLocalHub(f.hubDir, old); err != nil {
+		t.Fatal(err)
+	}
+	// 托管失败：launchctl bootstrap、systemctl restart 报错
+	f.rec.respond = func(call []string) (string, error) {
+		if slices.Contains(call, "bootstrap") || slices.Contains(call, "restart") {
+			return "boom\n", exitErr(5)
+		}
+		return "", nil
+	}
+	var out, errOut bytes.Buffer
+	_, tok, notes, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
+	if err == nil || !strings.Contains(err.Error(), "托管 hub 失败") {
+		t.Fatalf("err = %v", err)
+	}
+	if tok != "" {
+		t.Fatal("托管失败不该有接入码")
+	}
+	// 文件留着旧值：重跑时才会判成“变了”、再托管，而不是“没变、已在跑”跳过
+	if got, ok, lerr := loadLocalHub(f.hubDir); lerr != nil || !ok || got != old {
+		t.Fatalf("托管失败不该把 local-hub.json 改成新值: %+v %v %v", got, ok, lerr)
+	}
+	assertNoSecrets(t, "", err, notes, out.String(), errOut.String())
+}
+
+func TestSetupLocalHubRewritesBadLocalHubFile(t *testing.T) {
+	f := localHubEnv(t)
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	want := localHub{Port: f.port, PublicURL: tsPublicURL, Provider: "tailscale"}
+	for _, body := range []string{
+		`{"port":` + strconv.Itoa(f.port) + `,"public_url":"https://u:p@old-mac.tail2613ae.ts.net"}`, // 字段不合规，地址里还带着密码
+		`{not json`,
+	} {
+		if err := os.WriteFile(localHubPath(f.hubDir), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f.rec.calls = nil
+		var out, errOut bytes.Buffer
+		lh, tok, notes, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut))
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", body, err, errOut.String())
+		}
+		if !strings.Contains(errOut.String(), "警告") || !strings.Contains(errOut.String(), localHubFile) || !strings.Contains(errOut.String(), "重写") {
+			t.Fatalf("%s: 应警告坏文件并说要重写: %s", body, errOut.String())
+		}
+		if strings.Contains(errOut.String(), "u:p") {
+			t.Fatalf("警告不该回显文件里的地址原文: %s", errOut.String())
+		}
+		if !f.hostedHub() || len(notes) != 0 {
+			t.Fatalf("%s: 坏文件当作变了、重新托管，但不提醒手机: %v %q", body, f.rec.calls, notes)
+		}
+		if got, ok, lerr := loadLocalHub(f.hubDir); lerr != nil || !ok || got != want || lh != want {
+			t.Fatalf("%s: 应按这次的设置重写: %+v %v %v", body, got, ok, lerr)
+		}
+		assertNoSecrets(t, tok, err, notes, out.String(), errOut.String())
+	}
+}
+
+func TestSetupLocalHubRefusesUnsupportedOS(t *testing.T) {
+	f := localHubEnv(t)
+	noTailscale(t)
+	_, _, _, err := setupLocalHub("windows", f.opts(localHubTestPassword+"\n", io.Discard, io.Discard))
+	if err == nil || !strings.Contains(err.Error(), "macOS") || !strings.Contains(err.Error(), "Linux") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(f.hubDir); !errors.Is(err, os.ErrNotExist) || f.hostedHub() {
+		t.Fatal("不支持的系统上什么都不该做")
+	}
+}
+
+func TestSetupLocalHubWarnsBeforeReplacingServe(t *testing.T) {
+	f := localHubEnv(t)
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	// 443 的 / 原来指向本机别的服务：开 Funnel 之前说要替换它
+	other := `{"TCP":{"443":{"HTTPS":true}},"Web":{"` + tsDNS + `:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}`
+	ts := fakeTailscale(t, tsStatusOK, other, "", 0)
+	ts.setOn(t, tsServeOn(f.port))
+	var out, errOut bytes.Buffer
+	if _, _, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut)); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	i, j := strings.Index(out.String(), "将替换"), strings.Index(out.String(), "开 Tailscale Funnel")
+	if i < 0 || j < 0 || i > j || !strings.Contains(out.String(), "http://127.0.0.1:3000") || ts.funnelCalls() != 1 {
+		t.Fatalf("开 Funnel 之前应说要替换原来指向 127.0.0.1:3000 的配置:\n%s", out.String())
+	}
+	// 已经指向本机 hub、只是没开 Funnel（tailscale serve）：开 Funnel 不算替换
+	serveOnly := `{"TCP":{"443":{"HTTPS":true}},"Web":{"` + tsDNS + `:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:` + strconv.Itoa(f.port) + `"}}}}}`
+	ts = fakeTailscale(t, tsStatusOK, serveOnly, "", 0)
+	ts.setOn(t, tsServeOn(f.port))
+	out.Reset()
+	if _, _, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &out, &errOut)); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	if strings.Contains(out.String(), "将替换") || ts.funnelCalls() != 1 {
+		t.Fatalf("指向的就是本机 hub，不该说替换:\n%s", out.String())
+	}
 }
