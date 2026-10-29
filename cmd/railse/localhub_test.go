@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xufei547/railse-opc/internal/hub"
 	"github.com/xufei547/railse-opc/internal/hub/store"
@@ -40,9 +42,51 @@ func TestLocalHubFileRoundTripAndMode(t *testing.T) {
 	if err != nil || !ok || got != want {
 		t.Fatalf("%+v %v %v", got, ok, err)
 	}
-	os.WriteFile(localHubPath(dir), []byte(`{"port":0,"public_url":"http://x"}`), 0o600)
-	if _, _, err := loadLocalHub(dir); err == nil {
-		t.Fatal("端口 0 与 http 源应报错")
+}
+
+func TestLoadLocalHubValidation(t *testing.T) {
+	bad := map[string]string{
+		"坏 JSON":       `{not json`,
+		"端口 0":         `{"port":0,"public_url":"https://x.ts.net"}`,
+		"端口 65536":     `{"port":65536,"public_url":"https://x.ts.net"}`,
+		"端口负数":         `{"port":-1,"public_url":"https://x.ts.net"}`,
+		"http 源":       `{"port":8787,"public_url":"http://x.ts.net"}`,
+		"带路径":          `{"port":8787,"public_url":"https://x.ts.net/a"}`,
+		"带查询串":         `{"port":8787,"public_url":"https://x.ts.net?a=1"}`,
+		"public_url 空": `{"port":8787}`,
+	}
+	for name, body := range bad {
+		dir := tempDir(t)
+		os.WriteFile(localHubPath(dir), []byte(body), 0o600)
+		_, ok, err := loadLocalHub(dir)
+		if err == nil || ok {
+			t.Errorf("%s: 应报错: %v %v", name, ok, err)
+		} else if !strings.Contains(err.Error(), localHubFile) {
+			t.Errorf("%s: 错误应带文件路径: %v", name, err)
+		}
+	}
+	// Provider 空读出 custom；尾斜杠被规范化
+	dir := tempDir(t)
+	os.WriteFile(localHubPath(dir), []byte(`{"port":8787,"public_url":"https://x.ts.net/"}`), 0o600)
+	got, ok, err := loadLocalHub(dir)
+	want := localHub{Port: 8787, PublicURL: "https://x.ts.net", Provider: "custom"}
+	if err != nil || !ok || got != want {
+		t.Fatalf("%+v %v %v", got, ok, err)
+	}
+	// 保存前也规范化，不合规的不写
+	dir2 := tempDir(t)
+	if err := saveLocalHub(dir2, localHub{Port: 8787, PublicURL: "https://x.ts.net/", Provider: "tailscale"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := loadLocalHub(dir2); got.PublicURL != "https://x.ts.net" {
+		t.Fatalf("%+v", got)
+	}
+	raw, _ := os.ReadFile(localHubPath(dir2))
+	if strings.Contains(string(raw), "ts.net/\"") {
+		t.Fatalf("文件里不该有尾斜杠: %s", raw)
+	}
+	if err := saveLocalHub(tempDir(t), localHub{Port: 0, PublicURL: "https://x.ts.net"}); err == nil {
+		t.Fatal("不合规不该保存")
 	}
 }
 
@@ -70,6 +114,15 @@ func TestHubAnswersOnlyForRailseHub(t *testing.T) {
 	if _, ok := hubAnswers(freePort(t)); ok {
 		t.Fatal("没人监听不算")
 	}
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, h.http.URL+"/api/version", http.StatusFound)
+	}))
+	defer redir.Close()
+	_, p3, _ := net.SplitHostPort(strings.TrimPrefix(redir.URL, "http://"))
+	port3, _ := strconv.Atoi(p3)
+	if _, ok := hubAnswers(port3); ok {
+		t.Fatal("302 到真 hub 也不算应答")
+	}
 }
 
 func TestEnsureHubPassword(t *testing.T) {
@@ -85,6 +138,9 @@ func TestEnsureHubPassword(t *testing.T) {
 	if _, err := ensureHubPassword(cfg, st, strings.NewReader(""), false, &out, &errOut); err == nil || !strings.Contains(err.Error(), "railse hub password") {
 		t.Fatalf("err = %v", err)
 	}
+	if _, ok, _ := st.GetSetting("password_hash"); ok {
+		t.Fatal("非终端不该写密码")
+	}
 	// 终端里读一行设上
 	set, err := ensureHubPassword(cfg, st, strings.NewReader("correct horse battery\n"), true, &out, &errOut)
 	if err != nil || !set {
@@ -97,6 +153,11 @@ func TestEnsureHubPassword(t *testing.T) {
 	set, err = ensureHubPassword(cfg, st, strings.NewReader("should not be read\n"), true, &out, &errOut)
 	if err != nil || set {
 		t.Fatalf("已有密码不该再设: %v %v", set, err)
+	}
+	for _, o := range []string{out.String(), errOut.String()} {
+		if strings.Contains(o, "correct horse battery") || strings.Contains(o, "should not be read") {
+			t.Fatalf("输出泄露了密码: %q", o)
+		}
 	}
 	// 太短：报错（同 railse hub password 的规则，至少 8 个字符）
 	dir2 := tempDir(t)
@@ -128,6 +189,18 @@ func TestProxyNote(t *testing.T) {
 	if n := proxyNote("linux", env(nil), scutil, "https://x.ts.net"); n != "" {
 		t.Fatal("linux 不跑 scutil")
 	}
+	fake := func(out string, err error) func(string, ...string) (string, error) {
+		return func(string, ...string) (string, error) { return out, err }
+	}
+	if n := proxyNote("darwin", env(nil), fake("HTTPSEnable : 0\n", nil), "https://x.ts.net"); n != "" {
+		t.Fatalf("HTTPSEnable 为 0 不该提醒: %q", n)
+	}
+	if n := proxyNote("darwin", env(nil), fake("HTTPEnable : 1\n", errors.New("boom")), "https://x.ts.net"); n != "" {
+		t.Fatalf("scutil 报错当没开: %q", n)
+	}
+	if n := proxyNote("darwin", env(nil), fake("SOCKSEnable : 1\n", nil), "https://x.ts.net"); n == "" {
+		t.Fatal("只有 SOCKS 也该提醒")
+	}
 }
 
 func TestWaitHub(t *testing.T) {
@@ -142,5 +215,25 @@ func TestWaitHub(t *testing.T) {
 	port, _ := strconv.Atoi(portStr)
 	if v, ok := waitHub(port, localHubWait); !ok || v == "" {
 		t.Fatalf("真 hub 应应答: %q %v", v, ok)
+	}
+}
+
+func TestWaitHubRetriesUntilHubStarts(t *testing.T) {
+	port := freePort(t)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+		if err != nil {
+			return
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"version":"x","agent_proto":1}`))
+		})}
+		go srv.Serve(l)
+		time.Sleep(5 * time.Second)
+		srv.Close()
+	}()
+	if v, ok := waitHub(port, 3*time.Second); !ok || v != "x" {
+		t.Fatalf("应在 hub 起来后应答: %q %v", v, ok)
 	}
 }

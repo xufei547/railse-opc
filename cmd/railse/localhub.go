@@ -32,33 +32,51 @@ var localHubWait = 10 * time.Second
 
 func localHubPath(hubDir string) string { return filepath.Join(hubDir, localHubFile) }
 
-// loadLocalHub 读本机 hub 描述；没有文件时 ok=false、err=nil；坏 JSON 或字段不合规是 err。
+// normalizeLocalHub 校验字段并规范化：端口在 1..65535，PublicURL 是不带路径与查询的 https 源（去掉尾斜杠），Provider 空当 custom。
+func normalizeLocalHub(lh localHub) (localHub, error) {
+	if lh.Port < 1 || lh.Port > 65535 {
+		return localHub{}, fmt.Errorf("port %d 不在 1..65535", lh.Port)
+	}
+	u, norm, err := parseHubAddr(lh.PublicURL)
+	if err != nil {
+		return localHub{}, fmt.Errorf("public_url %q 不合规: %w", lh.PublicURL, err)
+	}
+	if u.Scheme != "https" || norm != "https://"+u.Host {
+		return localHub{}, fmt.Errorf("public_url %q 必须是不带路径的 https:// 源", lh.PublicURL)
+	}
+	lh.PublicURL = norm
+	if lh.Provider == "" {
+		lh.Provider = "custom"
+	}
+	return lh, nil
+}
+
+// loadLocalHub 读本机 hub 描述（返回规范化后的值）；没有文件时 ok=false、err=nil；坏 JSON 或字段不合规是 err。
 func loadLocalHub(hubDir string) (lh localHub, ok bool, err error) {
-	data, err := os.ReadFile(localHubPath(hubDir))
+	path := localHubPath(hubDir)
+	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return localHub{}, false, nil
 	}
 	if err != nil {
-		return localHub{}, false, err
+		return localHub{}, false, fmt.Errorf("读 %s: %w", path, err)
 	}
 	if err := json.Unmarshal(data, &lh); err != nil {
-		return localHub{}, false, fmt.Errorf("%s 不是合法 JSON: %w", localHubFile, err)
+		return localHub{}, false, fmt.Errorf("%s 不是合法 JSON: %w", path, err)
 	}
-	if lh.Port < 1 || lh.Port > 65535 {
-		return localHub{}, false, fmt.Errorf("%s: port %d 不在 1..65535", localHubFile, lh.Port)
-	}
-	u, norm, err := parseHubAddr(lh.PublicURL)
-	if err != nil || u.Scheme != "https" || norm != "https://"+u.Host {
-		return localHub{}, false, fmt.Errorf("%s: public_url 必须是不带路径的 https:// 源", localHubFile)
-	}
-	if lh.Provider == "" {
-		lh.Provider = "custom"
+	lh, err = normalizeLocalHub(lh)
+	if err != nil {
+		return localHub{}, false, fmt.Errorf("%s: %w", path, err)
 	}
 	return lh, true, nil
 }
 
-// saveLocalHub 原子写本机 hub 描述（0600）。
+// saveLocalHub 校验并规范化后原子写本机 hub 描述（0600）；字段不合规返回错误。
 func saveLocalHub(hubDir string, lh localHub) error {
+	lh, err := normalizeLocalHub(lh)
+	if err != nil {
+		return fmt.Errorf("本机 hub 描述不合规: %w", err)
+	}
 	data, err := json.MarshalIndent(lh, "", "  ")
 	if err != nil {
 		return err
@@ -85,9 +103,9 @@ func hubAnswers(port int) (version string, ok bool) {
 	if resp.StatusCode != http.StatusOK {
 		return "", false
 	}
+	// 只认 version；协议是否一致由 doctor 的 hub.reachable 管，这里不比较 agent_proto。
 	var v struct {
-		Version    string `json:"version"`
-		AgentProto int    `json:"agent_proto"`
+		Version string `json:"version"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&v); err != nil || v.Version == "" {
 		return "", false
