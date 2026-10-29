@@ -151,3 +151,60 @@ func TestExecTimesOut(t *testing.T) {
 		t.Fatalf("应超时: %v", err)
 	}
 }
+
+const warnLine = "Warning: client version \"1.80.0\" != tailscaled server version \"1.78.1\"\n"
+
+func TestWarningBeforeJSONStillParses(t *testing.T) {
+	c, _ := fakeCLI(t, warnLine+statusRunning, warnLine+serveFunnelOn, "", 0)
+	st, err := c.Status(context.Background())
+	if err != nil || st.DNSName != "macbook-air.tail2613ae.ts.net" {
+		t.Fatalf("status = %+v %v", st, err)
+	}
+	sc, err := c.ServeConfig(context.Background())
+	if err != nil || !sc.FunnelFor("macbook-air.tail2613ae.ts.net", 8787) {
+		t.Fatalf("serve = %+v %v", sc, err)
+	}
+}
+
+func TestServeConfigBrokenJSONIsError(t *testing.T) {
+	c, _ := fakeCLI(t, statusRunning, `{"Web": oops}`, "", 0)
+	if _, err := c.ServeConfig(context.Background()); err == nil {
+		t.Fatal("坏 JSON 应报错")
+	}
+}
+
+func TestStatusErrors(t *testing.T) {
+	c, _ := fakeCLI(t, "not json at all\n", "", "", 0)
+	if _, err := c.Status(context.Background()); err == nil {
+		t.Fatal("非 JSON 应报错")
+	}
+	c.Path = filepath.Join(t.TempDir(), "missing")
+	if _, err := c.Status(context.Background()); err == nil {
+		t.Fatal("执行失败应报错")
+	}
+}
+
+func TestEnableURLTrimsTrailingPunctuation(t *testing.T) {
+	out := "To enable, visit https://login.tailscale.com/f/funnel?node=abc.\n"
+	c, _ := fakeCLI(t, statusRunning, "", out, 1)
+	var nf ErrFunnelNotEnabled
+	if err := c.EnableFunnel(context.Background(), 8787); !errors.As(err, &nf) || nf.EnableURL != "https://login.tailscale.com/f/funnel?node=abc" {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestExecCallerCancelNotTimeoutMessage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	p := filepath.Join(t.TempDir(), "slow")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nsleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := Exec(ctx, p)
+	if err == nil || strings.Contains(err.Error(), "超过") || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+}

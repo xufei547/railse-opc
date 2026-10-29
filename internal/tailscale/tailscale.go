@@ -22,6 +22,7 @@ var Timeout = 15 * time.Second
 
 // Exec 是默认的 Runner：stdin 为空（/dev/null），超过 Timeout 就杀掉并报错。
 func Exec(ctx context.Context, path string, args ...string) (string, error) {
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, args...)
@@ -29,8 +30,13 @@ func Exec(ctx context.Context, path string, args ...string) (string, error) {
 	// 杀掉之后最多再等这么久：子进程还占着输出管道时也不一直等下去
 	cmd.WaitDelay = time.Second
 	out, err := cmd.CombinedOutput()
-	if err != nil && ctx.Err() == context.DeadlineExceeded {
-		return string(out), fmt.Errorf("%s %s 超过 %s 没有结束，已终止", path, strings.Join(args, " "), Timeout)
+	if err != nil {
+		if perr := parent.Err(); perr != nil { // 调用方自己的 ctx 到期或取消，不算我们的超时
+			return string(out), fmt.Errorf("%s %s 被中止: %w", path, strings.Join(args, " "), perr)
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			return string(out), fmt.Errorf("%s %s 超过 %s 没有结束，已终止: %w", path, strings.Join(args, " "), Timeout, context.DeadlineExceeded)
+		}
 	}
 	return string(out), err
 }
@@ -73,6 +79,18 @@ func (c CLI) run(ctx context.Context, args ...string) (string, error) {
 	return r(ctx, c.Path, args...)
 }
 
+// jsonBody 取第一个 { 到最后一个 } 之间的文本：stdout 与 stderr 合并后，JSON 前面可能混着版本不一致之类的警告行。
+func jsonBody(out string) (string, bool) {
+	i, j := strings.Index(out, "{"), strings.LastIndex(out, "}")
+	if i < 0 || j < i {
+		if i >= 0 { // 有 { 却没有收尾，当坏 JSON 交给 Unmarshal 报错
+			return out[i:], true
+		}
+		return "", false
+	}
+	return out[i : j+1], true
+}
+
 // Status 是 `tailscale status --self --json` 里用到的几项。DNSName 已去掉末尾的点。
 type Status struct {
 	BackendState string
@@ -87,6 +105,10 @@ func (c CLI) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, fmt.Errorf("tailscale status: %w（%s）", err, strings.TrimSpace(out))
 	}
+	body, ok := jsonBody(out)
+	if !ok {
+		return Status{}, fmt.Errorf("tailscale status 的输出不是 JSON: %s", strings.TrimSpace(out))
+	}
 	var raw struct {
 		BackendState string
 		Self         struct {
@@ -95,7 +117,7 @@ func (c CLI) Status(ctx context.Context) (Status, error) {
 		}
 		CertDomains []string
 	}
-	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
 		return Status{}, fmt.Errorf("tailscale status 的输出不是 JSON: %w", err)
 	}
 	return Status{BackendState: raw.BackendState, DNSName: strings.TrimSuffix(raw.Self.DNSName, "."), Online: raw.Self.Online, CertDomains: raw.CertDomains}, nil
@@ -115,12 +137,12 @@ func (c CLI) ServeConfig(ctx context.Context) (ServeConfig, error) {
 	if err != nil {
 		return ServeConfig{}, fmt.Errorf("tailscale serve status: %w（%s）", err, strings.TrimSpace(out))
 	}
-	s := strings.TrimSpace(out)
-	if !strings.HasPrefix(s, "{") { // "No serve config" 之类
+	body, ok := jsonBody(out)
+	if !ok { // "No serve config"、空输出
 		return ServeConfig{}, nil
 	}
 	var sc ServeConfig
-	if err := json.Unmarshal([]byte(s), &sc); err != nil {
+	if err := json.Unmarshal([]byte(body), &sc); err != nil {
 		return ServeConfig{}, fmt.Errorf("tailscale serve status 的输出不是 JSON: %w", err)
 	}
 	return sc, nil
@@ -153,7 +175,7 @@ func (c CLI) EnableFunnel(ctx context.Context, port int) error {
 		return nil
 	}
 	if u := enableURLRe.FindString(out); u != "" {
-		return ErrFunnelNotEnabled{EnableURL: u}
+		return ErrFunnelNotEnabled{EnableURL: strings.TrimRight(u, ".,;:)]}>\"'。，；）")}
 	}
 	return fmt.Errorf("tailscale funnel --bg %d: %w（%s）", port, err, strings.TrimSpace(out))
 }
