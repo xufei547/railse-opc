@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2072,4 +2073,390 @@ func TestSetupAllWaitsForDaemonThenReports(t *testing.T) {
 	if !strings.Contains(out.String(), "还没有应答") || !strings.Contains(out.String(), "过几秒再跑 railse doctor --project "+f.proj+" --dir "+f.dir+" --bin "+f.bin) {
 		t.Fatalf("应说明守护进程还没起来: %q", out.String())
 	}
+}
+
+// clearProxyEnv 把代理环境变量清空：这台机器的 shell 可能开着代理，本机模式结尾的代理提醒只该在测它的测试里出现。
+func clearProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY"} {
+		t.Setenv(k, "")
+	}
+}
+
+// askedForEnrollment 是向导问接入信息时一定会打印的几段（askSetupAll 的开场与 hub 地址、名字的提示）：本机模式一段都不该有。
+// 不用接入码的提示：本机 hub 那一步说“已生成一次性接入码（…）”。
+var askedForEnrollment = []string{"接入 hub 还缺几项", askHubPrompt, askNamePrompt}
+
+// localSetupEnv 是 setup all --local-hub 测试的环境：localHubEnv（假家目录、临时的 hub 数据目录、空闲端口、不等 hub 应答），
+// 清掉代理环境变量，当前目录换成临时项目，--hub-port 的默认值也换成那个空闲端口：哪个测试都不碰本机的 8787。
+func localSetupEnv(t *testing.T) localHubFixture {
+	t.Helper()
+	f := localHubEnv(t)
+	clearProxyEnv(t)
+	t.Chdir(f.proj) // 体检与用户级钩子的提醒看当前目录：用临时项目，不看仓库
+	old := localHubDefaultPort
+	localHubDefaultPort = f.port
+	t.Cleanup(func() { localHubDefaultPort = old })
+	return f
+}
+
+// localArgs 是带上本环境 --hub-port、--hub-dir、--bin 的 railse setup all --local-hub 命令行（守护进程用默认的 ~/.railse）。
+func (f localHubFixture) localArgs(extra ...string) []string {
+	return append([]string{"setup", "all", "--local-hub", "--hub-port", strconv.Itoa(f.port), "--hub-dir", f.hubDir, "--bin", f.bin}, extra...)
+}
+
+// machinePath 是假家目录下默认守护进程数据目录 ~/.railse 里的 machine.json。
+func (f localHubFixture) machinePath() string {
+	return filepath.Join(f.home, ".railse", "machine.json")
+}
+
+// localHubURL 是本机 hub 的接入地址 http://127.0.0.1:<端口>。
+func (f localHubFixture) localHubURL() string { return "http://127.0.0.1:" + strconv.Itoa(f.port) }
+
+// writeMachine 写一个接的是 hubURL 的 machine.json（模拟之前接入过）。
+func writeMachine(t *testing.T, path, hubURL string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.SaveMachine(path, agent.MachineConfig{HubURL: hubURL, MachineID: "m-old", Secret: "s-old", Name: "mac"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertNoEnrollSecrets：本机 hub 的接入码在进程里生成、已被接入消耗，拿不到原文，至少输出里不能有“接入码:”这样的一行；
+// 网页密码原文不能出现。
+func assertNoEnrollSecrets(t *testing.T, outs ...string) {
+	t.Helper()
+	for _, o := range outs {
+		if strings.Contains(o, "接入码:") || strings.Contains(o, "接入码：") {
+			t.Fatalf("输出里不该有接入码: %q", o)
+		}
+	}
+	assertNoSecrets(t, "", nil, nil, outs...)
+}
+
+// stepsInOrder 报告 s 里是否依次有 == 1. <names[0]> ==、== 2. <names[1]> == …
+func stepsInOrder(s string, names ...string) bool {
+	last := -1
+	for i, name := range names {
+		at := strings.Index(s, fmt.Sprintf("== %d. %s ==", i+1, name))
+		if at <= last {
+			return false
+		}
+		last = at
+	}
+	return true
+}
+
+// 一台机器就够：setup all --local-hub 在本机起 hub（Funnel 已开、托管的 hub 在跑），用它生成的接入码接入本机守护进程（不问 hub 地址、
+// 接入码、名字），照常装钩子、体检（看的是这个 hub 数据目录），最后框里是 Tailscale 给的地址。--no-autostart 只管守护进程，
+// 本机 hub 照样托管。接 http://127.0.0.1 不打明文警告；接入码与网页密码不出现在任何输出里。
+func TestSetupAllLocalHubEndToEnd(t *testing.T) {
+	f := localSetupEnv(t)
+	ts := fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	fakeStdin(t, true, localHubTestPassword+"\n")
+	var out, errOut bytes.Buffer
+	if code := run(f.localArgs("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("setup all --local-hub: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	m, err := agent.LoadMachine(f.machinePath())
+	if err != nil || m.HubURL != f.localHubURL() {
+		t.Fatalf("应接入本机 hub %s: %+v %v", f.localHubURL(), m, err)
+	}
+	for _, p := range []string{hooksconf.ClaudeUserPath(f.home), hooksconf.GeminiUserPath(f.home), hooksconf.CodexPath(f.home)} {
+		if ins, _ := hooksconf.Inspect(readFile(t, p), f.bin); len(ins.Events) == 0 {
+			t.Fatalf("应装用户级的钩子 %s", p)
+		}
+	}
+	s := out.String()
+	for _, want := range []string{"[ok]    Claude Code 钩子：", "[ok]    Codex 钩子：", "[ok]    Gemini 钩子：", "已接入 hub http://127.0.0.1:" + strconv.Itoa(f.port),
+		"Tailscale", "║  " + tsPublicURL + "  ║"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("输出缺 %q:\n%s", want, s)
+		}
+	}
+	if !stepsInOrder(s, "本机 hub", "接入 hub", "安装钩子", "开机自启", "体检") {
+		t.Fatalf("应依次是本机 hub、接入 hub、安装钩子、开机自启、体检五步:\n%s", s)
+	}
+	for _, p := range askedForEnrollment {
+		if strings.Contains(s, p) {
+			t.Fatalf("本机模式不该问 %q:\n%s", p, s)
+		}
+	}
+	if strings.Index(s, "下一步：在手机上打开") < strings.Index(s, "== 5. 体检 ==") {
+		t.Fatalf("下一步应在体检之后:\n%s", s)
+	}
+	// 体检看的是这个 hub 数据目录（传了 --hub-dir；默认的 $RAILSE_HUB_HOME 指向别处）
+	if doc := s[strings.Index(s, "== 5. 体检 =="):]; !strings.Contains(doc, f.hubDir) {
+		t.Fatalf("体检应看本机 hub 的数据目录 %s:\n%s", f.hubDir, doc)
+	}
+	// --no-autostart 只管守护进程：之前没有 local-hub.json，本机 hub 照样（重新）托管；守护进程不托管
+	if !f.hostedHub() {
+		t.Fatalf("本机 hub 应托管: %v", f.rec.calls)
+	}
+	if _, err := os.Stat(f.agentJobPath()); !os.IsNotExist(err) {
+		t.Fatalf("--no-autostart 不该托管守护进程: %v", err)
+	}
+	if n := ts.funnelCalls(); n != 0 {
+		t.Fatalf("Funnel 已开，不该再开，开了 %d 次", n)
+	}
+	if strings.Contains(errOut.String(), plaintextHubNote) {
+		t.Fatalf("接本机的 http://127.0.0.1 不该打明文警告: %s", errOut.String())
+	}
+	if strings.Contains(s, "本机开着代理") {
+		t.Fatalf("代理环境变量已清空，不该有代理提醒:\n%s", s)
+	}
+	assertNoEnrollSecrets(t, s, errOut.String())
+}
+
+// 本机模式的标志用错是用法错误（退出 2），在动手之前挡住：--local-hub 不和 --hub、--token 一起用；--hub-port、--hub-dir、
+// --public-url 只配合 --local-hub；端口在 1..65535；对外地址要是不带路径的 https 源，错误里不回显原文（里面可能有密码）。
+func TestSetupAllLocalHubRejectsHubFlags(t *testing.T) {
+	f := localSetupEnv(t)
+	noTailscale(t)
+	in := fakeStdin(t, true, localHubTestPassword+"\n")
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{f.localArgs("--hub", "https://x.example.com"), "--local-hub 不和 --hub、--token 一起用"},
+		{f.localArgs("--token", "t"), "--local-hub 不和 --hub、--token 一起用"},
+		{[]string{"setup", "all", "--hub-port", "1", "--bin", f.bin}, "只配合 --local-hub"},
+		{[]string{"setup", "all", "--hub-dir", f.hubDir, "--bin", f.bin}, "只配合 --local-hub"},
+		{[]string{"setup", "all", "--public-url", "https://hub.example.com", "--hub", "https://hub.example.com", "--token", "t"}, "只配合 --local-hub"},
+		{f.localArgs("--public-url", "http://x"), "--public-url 必须是 https://"},
+		{f.localArgs("--public-url", "https://u:pw@hub.example.com"), "用户名或密码"},
+		{f.localArgs("--public-url", "https://hub.example.com/hub"), "路径"},
+		{[]string{"setup", "all", "--local-hub", "--hub-port", "70000", "--bin", f.bin}, "1..65535"},
+		{[]string{"setup", "all", "--local-hub", "--hub-port", "0", "--bin", f.bin}, "1..65535"},
+	} {
+		var out, errOut bytes.Buffer
+		if code := run(tc.args, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), tc.want) {
+			t.Fatalf("%v: 应是用法错误、含 %q: %d %q", tc.args, tc.want, code, errOut.String())
+		}
+		if !strings.Contains(errOut.String(), "railse setup all --local-hub [--hub-port 8787]") {
+			t.Fatalf("%v: 应打印含 --local-hub 的用法: %q", tc.args, errOut.String())
+		}
+		if strings.Contains(errOut.String(), "u:pw") {
+			t.Fatalf("%v: 不该回显地址里的密码: %q", tc.args, errOut.String())
+		}
+		if out.Len() != 0 {
+			t.Fatalf("%v: 用法错误时一步都不该做: %q", tc.args, out.String())
+		}
+	}
+	if in.n != 0 {
+		t.Fatalf("用法错误时不该读 stdin，读了 %d 字节", in.n)
+	}
+	for _, p := range []string{f.hubDir, filepath.Join(f.home, ".railse")} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("用法错误时不该有 %s", p)
+		}
+	}
+	if len(f.rec.calls) != 0 {
+		t.Fatalf("用法错误时不该跑命令: %v", f.rec.calls)
+	}
+}
+
+// 本机接的是别的 hub（如 Fly 上的）时 --local-hub 在第 1 步之前停下：不碰 tailscale、不问密码、不托管、不写 local-hub.json，
+// 说加 --force 改接；接的是 127.0.0.1 的另一个端口时说清是端口不一致。带 --force 就改接本机 hub。
+func TestSetupAllLocalHubRefusesWhenEnrolledElsewhere(t *testing.T) {
+	f := localSetupEnv(t)
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	other := strconv.Itoa(freePort(t))
+	noTailscale(t)
+	for _, tc := range []struct{ hub, want, notWant string }{
+		{"https://railse-hub.fly.dev", "本机已接入 https://railse-hub.fly.dev，不是本机 hub；要改接本机 hub，加 --force 重新接入", ""},
+		{"http://127.0.0.1:" + other, "本机接的是 127.0.0.1:" + other + " 的 hub，这次的本机 hub 在 127.0.0.1:" + strconv.Itoa(f.port) + "；要改接，加 --force 重新接入", "不是本机 hub"},
+	} {
+		writeMachine(t, f.machinePath(), tc.hub)
+		in := fakeStdin(t, true, localHubTestPassword+"\n")
+		var out, errOut bytes.Buffer
+		if code := run(f.localArgs("--no-autostart"), &out, &errOut); code != 1 || !strings.Contains(errOut.String(), tc.want) {
+			t.Fatalf("%s: 应停下、退出 1、说 %q: %d\n%s\n%s", tc.hub, tc.want, code, out.String(), errOut.String())
+		}
+		if tc.notWant != "" && strings.Contains(errOut.String(), tc.notWant) {
+			t.Fatalf("%s: 不该说 %q: %s", tc.hub, tc.notWant, errOut.String())
+		}
+		if strings.Contains(out.String(), "== 1.") || in.n != 0 || f.hostedHub() {
+			t.Fatalf("%s: 第 1 步之前就该停（读了 %d 字节）: %v\n%s", tc.hub, in.n, f.rec.calls, out.String())
+		}
+		if _, err := os.Stat(localHubPath(f.hubDir)); !os.IsNotExist(err) {
+			t.Fatalf("%s: 不该写 local-hub.json", tc.hub)
+		}
+		if m, err := agent.LoadMachine(f.machinePath()); err != nil || m.HubURL != tc.hub {
+			t.Fatalf("%s: 不该动 machine.json: %+v %v", tc.hub, m, err)
+		}
+	}
+	// 带 --force：改接本机 hub
+	ts := fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	fakeStdin(t, true, localHubTestPassword+"\n")
+	var out, errOut bytes.Buffer
+	if code := run(f.localArgs("--force", "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("--force: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if m, err := agent.LoadMachine(f.machinePath()); err != nil || m.HubURL != f.localHubURL() {
+		t.Fatalf("--force 应改接本机 hub: %+v %v", m, err)
+	}
+	if ts.funnelCalls() != 0 || !strings.Contains(out.String(), "== 1. 本机 hub ==") {
+		t.Fatalf("--force 应照常走本机 hub 那一步:\n%s", out.String())
+	}
+	assertNoEnrollSecrets(t, out.String(), errOut.String())
+}
+
+// tailnet 没开通 Funnel：原样打印开通链接，停在第 1 步（本机 hub），说开通后重跑同一条命令（带上用户给的 --hub-port、--hub-dir），
+// 没接入、没装钩子。
+func TestSetupAllLocalHubFunnelNotEnabledStopsAtStep1(t *testing.T) {
+	f := localSetupEnv(t)
+	link := "https://login.tailscale.com/f/funnel?node=nodeABC"
+	fakeTailscale(t, tsStatusOK, "No serve config\n", "Funnel is not enabled on your tailnet.\nTo enable, visit:\n\n         "+link+"\n", 1)
+	fakeStdin(t, true, localHubTestPassword+"\n")
+	var out, errOut bytes.Buffer
+	if code := run(f.localArgs(), &out, &errOut); code != 1 {
+		t.Fatalf("Funnel 没开通应退出 1: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	e := errOut.String()
+	rerun := "修好后重跑 railse setup all --local-hub --hub-port " + strconv.Itoa(f.port) + " --hub-dir " + hooksconf.ShellQuote(f.hubDir) + "（"
+	for _, want := range []string{link, "停在第 1 步（本机 hub）", "没做：接入 hub、安装钩子、开机自启、体检", "在浏览器里开通 Funnel 后重跑同一条命令。", rerun} {
+		if !strings.Contains(e, want) {
+			t.Fatalf("stderr 缺 %q:\n%s", want, e)
+		}
+	}
+	if strings.Contains(out.String(), "== 2.") {
+		t.Fatalf("停在第 1 步，不该开始第 2 步:\n%s", out.String())
+	}
+	if _, err := os.Stat(f.machinePath()); !os.IsNotExist(err) {
+		t.Fatal("停在第 1 步，不该有 machine.json")
+	}
+	if _, err := os.Stat(hooksconf.ClaudeUserPath(f.home)); !os.IsNotExist(err) {
+		t.Fatal("停在第 1 步，不该装钩子")
+	}
+	assertNoEnrollSecrets(t, out.String(), e)
+}
+
+// 已接本机 hub 的机器在终端里重跑：第 1 步会复查 Funnel、可能重新托管 hub，所以在第 1 步之前问一次，问句里是手机认得的
+// Tailscale 地址，不是 127.0.0.1。答 n 什么都不做（不碰 tailscale、不托管）；回车照常做完。不带 --local-hub 也认得出（machine.json
+// 接的是 127.0.0.1:<端口>，默认 hub 数据目录里的 local-hub.json 也说是这个端口）。
+func TestSetupAllLocalHubRerunConfirmShowsPublicURL(t *testing.T) {
+	f := localSetupEnv(t)
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	fakeStdin(t, true, localHubTestPassword+"\n")
+	var out, errOut bytes.Buffer
+	if code := run(f.localArgs("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("首次: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	t.Setenv("RAILSE_HUB_HOME", f.hubDir)
+	f.rec.respond = jobState(false) // 托管的守护进程没在跑：问句说托管并启动
+	prompt := rerunPrompt(tsPublicURL, "检查本机 hub（必要时重新托管）、重装钩子（连同 Codex 的 notify）、托管并启动守护进程")
+	for _, args := range [][]string{f.localArgs(), {"setup", "all", "--bin", f.bin}} {
+		noTailscale(t)
+		f.rec.calls = nil
+		fakeStdin(t, true, "n\n")
+		out.Reset()
+		errOut.Reset()
+		if code := run(args, &out, &errOut); code != 1 || errOut.String() != "已取消，本机 hub、钩子与守护进程都没动\n" {
+			t.Fatalf("%v: 答 n 应取消、退出 1: %d\n%s\n%s", args, code, out.String(), errOut.String())
+		}
+		if s := out.String(); !strings.HasSuffix(s, prompt) || strings.Contains(s, "127.0.0.1") || strings.Contains(s, "== 1.") {
+			t.Fatalf("%v: 应在第 1 步之前问、问句里是 %s:\n%s", args, tsPublicURL, s)
+		}
+		if c := installCalls(f.rec.calls); len(c) != 0 {
+			t.Fatalf("%v: 取消后不该托管: %v", args, c)
+		}
+	}
+	// 回车：照常做完，第 1 步看到 hub 在跑、设置没变就不重新托管
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	fakeStdin(t, true, "\n")
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"setup", "all", "--bin", f.bin}, &out, &errOut); code != 0 {
+		t.Fatalf("回车继续: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	if !strings.HasPrefix(s, prompt) || !stepsInOrder(s, "本机 hub", "接入 hub", "安装钩子", "开机自启", "体检") ||
+		!strings.Contains(s, "已在跑") || !strings.Contains(s, "已接入过") || !strings.Contains(s, "║  "+tsPublicURL+"  ║") {
+		t.Fatalf("回车应先问、再照本机模式做完:\n%s", s)
+	}
+	if strings.Count(s, askRerunPrompt) != 1 {
+		t.Fatalf("只该问一次:\n%s", s)
+	}
+}
+
+// --hub-port、--public-url 没给时沿用 hub 数据目录里上次的 local-hub.json（端口、自己的隧道），重跑不会把它们换掉；
+// 用自己的隧道时不碰 tailscale，框下面也不说地址由 Tailscale 提供、不提醒 ts.net 的代理规则。
+func TestSetupAllLocalHubReusesLocalHubFile(t *testing.T) {
+	f := localSetupEnv(t)
+	localHubDefaultPort = freePort(t) // 默认端口与这次用的不同：没沿用上次的端口就会对不上
+	t.Setenv("https_proxy", "http://127.0.0.1:7897")
+	noTailscale(t)
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	fakeStdin(t, true, localHubTestPassword+"\n")
+	var out, errOut bytes.Buffer
+	if code := run(f.localArgs("--public-url", "https://hub.example.com/", "--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("首次: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	if !strings.Contains(s, "║  https://hub.example.com  ║") || strings.Contains(s, "Tailscale 提供") || strings.Contains(s, "ts.net") {
+		t.Fatalf("自己的隧道：框里是它，不提 Tailscale、ts.net:\n%s", s)
+	}
+	// 不在终端里重跑（不问）：只给 --local-hub、--hub-dir，或什么都不给（从 machine.json 与默认 hub 数据目录里的 local-hub.json
+	// 认出本机模式），端口与对外地址都沿用上次的
+	fakeStdin(t, false, "")
+	for _, args := range [][]string{
+		{"setup", "all", "--local-hub", "--hub-dir", f.hubDir, "--bin", f.bin, "--no-autostart"},
+		{"setup", "all", "--bin", f.bin, "--no-autostart"},
+	} {
+		if !slices.Contains(args, "--local-hub") {
+			t.Setenv("RAILSE_HUB_HOME", f.hubDir)
+		}
+		f.rec.calls = nil
+		out.Reset()
+		errOut.Reset()
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatalf("%v: %d\n%s\n%s", args, code, out.String(), errOut.String())
+		}
+		s := out.String()
+		if !strings.Contains(s, "== 1. 本机 hub ==") || !strings.Contains(s, "对外地址用你给的 https://hub.example.com") || !strings.Contains(s, "已在跑") ||
+			!strings.Contains(s, "已接入过") || !strings.Contains(s, "║  https://hub.example.com  ║") {
+			t.Fatalf("%v: 应沿用上次的端口与对外地址、跳过接入与托管:\n%s", args, s)
+		}
+		if f.hostedHub() {
+			t.Fatalf("%v: 设置没变不该重新托管: %v", args, f.rec.calls)
+		}
+		if lh, ok, err := loadLocalHub(f.hubDir); err != nil || !ok || lh != (localHub{Port: f.port, PublicURL: "https://hub.example.com", Provider: "custom"}) {
+			t.Fatalf("%v: local-hub.json 不该变: %+v %v %v", args, lh, ok, err)
+		}
+	}
+	if m, err := agent.LoadMachine(f.machinePath()); err != nil || m.HubURL != f.localHubURL() {
+		t.Fatalf("machine.json 应还是本机 hub: %+v %v", m, err)
+	}
+}
+
+// 本机开着代理（这里用环境变量）：结尾的“注意：”提醒手机经同一代理打不开 Tailscale 地址时怎么办。
+func TestSetupAllLocalHubProxyNote(t *testing.T) {
+	f := localSetupEnv(t)
+	t.Setenv("https_proxy", "http://127.0.0.1:7897")
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	fakeStdin(t, true, localHubTestPassword+"\n")
+	var out, errOut bytes.Buffer
+	if code := run(f.localArgs("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("setup all --local-hub: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	at, next := strings.Index(s, "\n注意：本机开着代理"), strings.Index(s, "下一步：在手机上打开")
+	if at < 0 || at < strings.Index(s, "== 5. 体检 ==") || at > next {
+		t.Fatalf("体检之后、下一步之前应有代理提醒:\n%s", s)
+	}
+	if note := s[at:next]; !strings.Contains(note, "ts.net") || !strings.Contains(note, tsPublicURL) {
+		t.Fatalf("代理提醒应提到 ts.net 与对外地址: %q", note)
+	}
+	assertNoEnrollSecrets(t, s, errOut.String())
 }

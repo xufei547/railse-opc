@@ -11,25 +11,35 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hookclient"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
 const setupAllUsage = `  railse setup all --hub URL --token 接入码 [--name 名字] [--project 目录] [--dir 目录] [--bin 路径] [--no-autostart] [--no-hooks] [--force]
+  railse setup all --local-hub [--hub-port 8787] [--hub-dir 目录] [--public-url https://…] [--name 名字] [--project 目录] [--dir 目录] [--bin 路径] [--no-autostart] [--no-hooks] [--force]
     一键：接入 hub → 装三个 CLI 的钩子 → 开机自启 → 体检（railse doctor）。钩子默认装用户级（对所有项目生效），
     给了 --project 才把 Claude、Gemini 的装成那个项目的项目级（同 setup hooks）；装完钩子接着接 Codex 的 notify
     （同 setup codex-notify，没接上不算 setup all 失败，最后的“注意”里给命令）。--no-hooks 两样都不做。
     已接入过（有 machine.json）时跳过接入，这时可以不给 --hub 与 --token；--force 重新接入。体检的失败只展示，不算 setup all 失败。
     已接入过的在终端里重跑，重装钩子、重启守护进程之前先问一次（回车继续）；不在终端里不问。
-    要接入却缺 --hub 或 --token 时，在终端里逐个问缺的（--name 没给时也问名字）；不在终端里是用法错误。`
+    要接入却缺 --hub 或 --token 时，在终端里逐个问缺的（--name 没给时也问名字）；不在终端里是用法错误。
+    --local-hub：一台机器就够：本机起 hub，Tailscale Funnel 给手机地址，守护进程接本机 hub；--public-url 换成自己的隧道。
+    接入之前多一步“本机 hub”：开 Funnel（tailnet 没开通时打印开通链接）、没设过网页密码时在终端里问、托管 hub（只监听
+    127.0.0.1:<--hub-port>）并等它应答，再用它生成的一次性接入码接入（不显示；不问 hub 地址、接入码与名字，名字默认主机名）。
+    --hub-dir 默认 $RAILSE_HUB_HOME 或 ~/.railse-hub；--hub-port、--public-url 没给时沿用上次装的（hub 数据目录里的 local-hub.json）。
+    --no-autostart 只管守护进程，本机 hub 总是托管。本机已接入别的 hub 时停下，加 --force 改接本机 hub；
+    接的就是本机 hub 时不带 --local-hub 重跑也按本机 hub 走（在终端里先问一次再复查 Funnel、托管）。`
 
 const setupUsage = `用法:
   railse setup
-    不带子命令、在终端里运行：逐个问 hub 地址、接入码、本机名字，再照 setup all 做完（已接入过的不问这些，只确认一次再重装）。
+    不带子命令、在终端里运行：先问 hub 在哪里（本机，或已有 hub）。本机的照 setup all --local-hub 做完；已有 hub 的逐个问 hub 地址、
+    接入码、本机名字，再照 setup all 做完。已接入过的不问这些，照 setup all 重跑（只确认一次再重装）。
 ` + setupAllUsage + `
   railse setup hooks [--project 目录] [--claude] [--codex] [--gemini] [--codex-file 路径] [--dir 目录] [--bin 路径] [--dry-run]
     默认三个都装，都是用户级（对所有项目生效）：Claude 写 ~/.claude/settings.json，Gemini 写 ~/.gemini/settings.json
@@ -216,7 +226,24 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 
 func runSetup(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 && stdinIsTerminal() {
-		return runSetupAll(nil, stdout, stderr) // 不带子命令、在终端里：同 setup all 不带标志，缺的接入信息逐个问
+		// 不带子命令、在终端里：没接入过的先问 hub 在哪里。本机的同 setup all --local-hub；已有 hub 的同 setup all 不带标志，缺的接入
+		// 信息逐个问。已接入过的不问这一问，同 setup all 不带标志：它按 machine.json 跳过接入，接的是本机 hub 时自己认出本机模式
+		if setupAsksHubWhere() {
+			_, ferr := tailscaleFind() // 只看找不找得到，定默认项；找不到的原因不打印
+			local, err := askHubWhere(setupStdin, stdout, ferr == nil)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					fmt.Fprintln(stderr, "已取消，什么都没做")
+				} else {
+					fmt.Fprintf(stderr, "读输入失败，什么都没做：%v\n", err)
+				}
+				return 1
+			}
+			if local {
+				return runSetupAll([]string{"--local-hub"}, stdout, stderr)
+			}
+		}
+		return runSetupAll(nil, stdout, stderr)
 	}
 	if len(args) > 0 && args[0] == "all" {
 		return runSetupAll(args[1:], stdout, stderr)
@@ -232,6 +259,20 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	return runSetupHooks(args[1:], true, stdout, stderr)
+}
+
+// setupAsksHubWhere 报告不带子命令的 railse setup 要不要先问 hub 在哪里：本机还没接入过（默认数据目录里没有 machine.json）才问。
+// root 不问（setup all 会先拒绝它，不让人白答）；取不到数据目录、看不了 machine.json 的也不问，交给 setup all 去报。
+func setupAsksHubWhere() bool {
+	if os.Geteuid() == 0 {
+		return false
+	}
+	cfg, err := agentConfigFor("")
+	if err != nil {
+		return false
+	}
+	_, err = os.Lstat(cfg.MachinePath)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // runSetupHooks 是 railse setup hooks（args 是 hooks 之后的参数）。装了 Codex 时末尾的提醒里，notifyHint 为真才叫用户
@@ -530,9 +571,39 @@ func agentJobRunning() bool {
 	return autostartStatus(runtime.GOOS, autostartSpec{Kind: "agent", Home: home, UID: os.Getuid()}, false, io.Discard) == 0
 }
 
+// localHubDefaultPort 是本机 hub 默认监听的端口（--hub-port 的默认值）。是变量只为测试能换成空闲端口，不碰本机的 8787。
+var localHubDefaultPort = 8787
+
+// loopbackHubPort 认出本机 hub 的接入地址 http://127.0.0.1:<端口>（setup all --local-hub 接入时 machine.json 里存的就是这个样子），
+// 返回端口；别的地址返回 false。
+func loopbackHubPort(hubURL string) (int, bool) {
+	rest, ok := strings.CutPrefix(hubURL, "http://127.0.0.1:")
+	if !ok {
+		return 0, false
+	}
+	p, err := strconv.Atoi(rest)
+	if err != nil || p < 1 || p > 65535 || strconv.Itoa(p) != rest {
+		return 0, false
+	}
+	return p, true
+}
+
+// localHubDirFor 是本机 hub 的数据目录（绝对路径）：给了 --hub-dir 用它，否则同 hub 子命令（$RAILSE_HUB_HOME 或 ~/.railse-hub）。
+func localHubDirFor(flagDir string) (string, error) {
+	d := flagDir
+	if d == "" {
+		var err error
+		if d, err = defaultHubDir(); err != nil {
+			return "", err
+		}
+	}
+	return filepath.Abs(d)
+}
+
 // runSetupAll 是 railse setup all：依次接入 hub、装三个 CLI 的钩子（连同 Codex 的 notify）、托管开机自启、体检。要接入却缺
 // --hub 或 --token 时，stdin 是终端就先逐个问（askSetupAll），再走同样的四步；已接入过的在终端里重跑，第 2 步之前确认一次（confirmRerun）。
-// 任一步失败立即退出 1 并说明停在哪一步、哪些已做完；体检只展示（刚托管的守护进程可能还没起来），不影响退出码。
+// 本机模式（--local-hub，或已接入的就是之前装的本机 hub）在接入之前多一步“本机 hub”（setupLocalHub），用它生成的接入码接本机的 hub，
+// 已接入的重跑在这一步之前确认。任一步失败立即退出 1 并说明停在哪一步、哪些已做完；体检只展示（刚托管的守护进程可能还没起来），不影响退出码。
 func runSetupAll(args []string, stdout, stderr io.Writer) int {
 	return runSetupAllAs(runtime.GOOS, os.Geteuid(), args, stdout, stderr)
 }
@@ -547,11 +618,15 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	}
 	hubURL := fs.String("hub", "", "hub 地址，如 https://hub.example.com")
 	token := fs.String("token", "", "railse hub token 生成的接入码")
+	localFlag := fs.Bool("local-hub", false, "在本机起 hub（Tailscale Funnel 给手机地址）并接入它，不用 --hub、--token")
+	hubPort := fs.Int("hub-port", localHubDefaultPort, "本机 hub 监听 127.0.0.1 的端口（只配合 --local-hub；不给时沿用上次装的）")
+	hubDirFlag := fs.String("hub-dir", "", "本机 hub 的数据目录（只配合 --local-hub），默认 $RAILSE_HUB_HOME 或 ~/.railse-hub")
+	publicURL := fs.String("public-url", "", "本机 hub 的对外 https 地址（只配合 --local-hub）：用自己的隧道，不开 Tailscale Funnel；不给时沿用上次装的")
 	name := fs.String("name", "", "本机在 hub 里的名字，默认主机名")
 	project := fs.String("project", "", "项目目录：给了才把 Claude、Gemini 的钩子装成这个项目的项目级，默认装用户级")
 	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse")
 	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
-	noAutostart := fs.Bool("no-autostart", false, "不托管开机自启")
+	noAutostart := fs.Bool("no-autostart", false, "不托管守护进程的开机自启（--local-hub 的本机 hub 照样托管）")
 	noHooks := fs.Bool("no-hooks", false, "不装钩子，也不接 Codex 的 notify")
 	force := fs.Bool("force", false, "已接入过也重新接入，覆盖 machine.json")
 	if err := fs.Parse(args); err != nil {
@@ -565,7 +640,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		return usageErr("多余的参数 %q", fs.Args())
 	}
 	// 在动手之前拒绝 root：否则一次性接入码先被用掉，machine.json 与项目里、家目录下的钩子配置都成了 root 的文件，
-	// 到第 3 步才被 setup autostart 拒绝（加 --no-autostart 时更是以 root 一路跑完）
+	// 到托管那一步才被 setup autostart 拒绝（加 --no-autostart 时更是以 root 一路跑完）
 	if euid == 0 {
 		// hub 的提示按系统分：只有 Linux 的系统单元要 sudo；macOS 上 hub 也用平时的用户托管（launchd 用户代理）
 		hubHint := "hub 机器（Linux）用 " + sudoSystemHubCmd + " 装成系统服务"
@@ -574,6 +649,24 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		}
 		fmt.Fprintln(stderr, "setup all 要用平时的用户身份运行，不要 sudo：以 root 跑会用掉一次性接入码，machine.json 与钩子配置也会成为 root 的文件；"+hubHint)
 		return 1
+	}
+	// 本机模式的标志用错是用法错误，也在动手之前（与下面提问之前）挡住。--public-url 的错误不带原文（里面可能有密码）
+	given := map[string]bool{}
+	fs.Visit(func(fl *flag.Flag) { given[fl.Name] = true })
+	switch {
+	case *localFlag && (given["hub"] || given["token"]):
+		return usageErr("--local-hub 不和 --hub、--token 一起用：本机 hub 的接入码由 setup all 自己生成")
+	case !*localFlag && (given["hub-port"] || given["hub-dir"] || given["public-url"]):
+		return usageErr("--hub-port、--hub-dir、--public-url 只配合 --local-hub 用")
+	case *hubPort < 1 || *hubPort > 65535:
+		return usageErr("--hub-port %d 不在 1..65535", *hubPort)
+	}
+	if *publicURL != "" {
+		base, err := parsePublicOrigin(*publicURL)
+		if err != nil {
+			return usageErr("--public-url %v", err)
+		}
+		*publicURL = base
 	}
 	var hubBase string
 	if *hubURL != "" {
@@ -603,8 +696,43 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		return 1
 	}
 	enroll := *force || lerr != nil
-	// 要接入却缺 --hub 或 --token：不是终端就是用法错误（与原来一样排在下面的检查之前）；是终端的到下面再问
-	missing := enroll && (*hubURL == "" || *token == "")
+
+	// 本机模式：给了 --local-hub；或没给 --hub、--token，machine.json 接的是 http://127.0.0.1:<端口>，hub 数据目录里的
+	// local-hub.json 也说本机 hub 在这个端口（之前 setup all --local-hub 装的，不带参数的 railse setup 重跑就是这样）
+	localMode := *localFlag
+	var hubDir string // 本机 hub 的数据目录（绝对路径）
+	var prev localHub // 上次装的本机 hub（hub 数据目录里合法的 local-hub.json；坏文件当没有，第 1 步会警告并重写）
+	hadPrev := false
+	if localMode || (!given["hub"] && !given["token"] && lerr == nil) {
+		if hubDir, err = localHubDirFor(*hubDirFlag); err != nil && localMode {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if err == nil {
+			prev, hadPrev, _ = loadLocalHub(hubDir)
+		}
+	}
+	if !localMode && hadPrev {
+		if m, err := agent.LoadMachine(cfg.MachinePath); err == nil {
+			if p, ok := loopbackHubPort(m.HubURL); ok && p == prev.Port {
+				localMode = true
+			}
+		}
+	}
+	// 本机 hub 的端口与对外地址：给了的以给的为准；没给的沿用上次装的（端口；自己的隧道），都没有才是默认的端口、Tailscale Funnel
+	port, pub := *hubPort, *publicURL
+	if localMode && hadPrev {
+		if !given["hub-port"] {
+			port = prev.Port
+		}
+		if !given["public-url"] && prev.Provider == "custom" {
+			pub = prev.PublicURL
+		}
+	}
+	localAddr := "http://127.0.0.1:" + strconv.Itoa(port) // 守护进程接本机 hub 的地址
+
+	// 要接入却缺 --hub 或 --token：不是终端就是用法错误（与原来一样排在下面的检查之前）；是终端的到下面再问。本机模式不缺：接入码自己生成
+	missing := !localMode && enroll && (*hubURL == "" || *token == "")
 	if missing && !stdinIsTerminal() {
 		return usageErr("需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）")
 	}
@@ -620,8 +748,8 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	if !*noHooks || !*noAutostart {
-		if err := checkExecutable(b); err != nil { // 钩子与托管文件都指向它
+	if localMode || !*noHooks || !*noAutostart {
+		if err := checkExecutable(b); err != nil { // 钩子与托管文件（本机 hub 的也是）都指向它
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -670,70 +798,152 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	if *bin != "" {
 		dirBin += " --bin " + hooksconf.ShellQuote(b)
 	}
+	// 本机模式下重跑的命令：--local-hub 加上用户给的 --hub-port、--hub-dir、--public-url（没给的重跑时也沿用上次装的）
+	rerun := "railse setup all"
+	if localMode {
+		rerun += " --local-hub"
+		if given["hub-port"] {
+			rerun += " --hub-port " + strconv.Itoa(port)
+		}
+		if given["hub-dir"] {
+			rerun += " --hub-dir " + hooksconf.ShellQuote(hubDir)
+		}
+		if given["public-url"] && pub != "" {
+			rerun += " --public-url " + hooksconf.ShellQuote(pub)
+		}
+	}
 	// 重新接入写成完整的 setup all 命令：从不带子命令的 railse setup 进来的，加 --force 是用法错误
 	reenroll := "railse setup all --force" + projArg + dirBin
+	if localMode {
+		reenroll = rerun + " --force" + projArg + dirBin
+	}
+
+	// 已接入的机器在终端里重跑：重做之前先问一次（confirmRerun），shown 是问句里说的已接入的 hub。返回 false 时已说明原因，调用方退出 1。
+	// 首次接入、--force 不走这里；不是终端（脚本、管道）时不问
+	confirmRedo := func(shown string) bool {
+		// “开机自启”那一步对守护进程要做的事（与那一步同一判定）：托管的作业在跑（哪怕它用的是别的数据目录、还没开始监听），重装会
+		// 把它停掉再拉起；没在跑、socket 也没人监听就托管并启动；手动起的占着 socket 时那一步跳过托管，不碰它
+		daemon := ""
+		if !*noAutostart {
+			switch {
+			case agentJobRunning():
+				daemon = "重启守护进程"
+			case !socketOccupied(cfg.SocketPath):
+				daemon = "托管并启动守护进程"
+			}
+		}
+		what, untouched := rerunWork(localMode, !*noHooks, daemon)
+		if what == "" { // 没有要重做的不问
+			return true
+		}
+		ok, err := confirmRerun(setupStdin, stdout, shown, what)
+		switch {
+		case err != nil && !errors.Is(err, io.EOF):
+			fmt.Fprintf(stderr, "读输入失败，%s：%v\n", untouched, err)
+			return false
+		case !ok: // n、no 或 EOF（Ctrl-D）
+			fmt.Fprintf(stderr, "已取消，%s\n", untouched)
+			return false
+		}
+		return true
+	}
+
+	// 本机模式、已接入（没 --force）：接的就是这个本机 hub 才跳过接入；接的是别的 hub 时在第 1 步之前停下（不白开 Funnel、
+	// 不白托管、不白生成接入码）。在终端里重跑的，第 1 步会复查 Funnel、可能重新托管 hub，所以在它之前确认
+	if localMode && !enroll {
+		m, err := agent.LoadMachine(cfg.MachinePath)
+		if err != nil {
+			fmt.Fprintf(stderr, "%v\nmachine.json 坏了：用 %s 重新接入本机 hub\n", err, reenroll)
+			return 1
+		}
+		if m.HubURL != localAddr {
+			if p, ok := loopbackHubPort(m.HubURL); ok {
+				fmt.Fprintf(stderr, "本机接的是 127.0.0.1:%d 的 hub，这次的本机 hub 在 127.0.0.1:%d；要改接，加 --force 重新接入\n", p, port)
+			} else {
+				fmt.Fprintf(stderr, "本机已接入 %s，不是本机 hub；要改接本机 hub，加 --force 重新接入（手机上旧 hub 的图标可以删掉）\n", m.HubURL)
+			}
+			return 1
+		}
+		shown := m.HubURL // 问句里用手机认得的对外地址；还没有 local-hub.json 时只能说 machine.json 里的
+		if hadPrev {
+			shown = prev.PublicURL
+		}
+		if stdinIsTerminal() && !confirmRedo(shown) {
+			return 1
+		}
+	}
 
 	steps := []string{"接入 hub", "安装钩子", "开机自启", "体检"}
+	if localMode {
+		steps = append([]string{"本机 hub"}, steps...)
+	}
 	var done []string
-	step := func(n int) { fmt.Fprintf(stdout, "\n== %d. %s ==\n", n, steps[n-1]) }
-	fail := func(n int, extra string) int {
-		fmt.Fprintf(stderr, "railse setup all 停在第 %d 步（%s）", n, steps[n-1])
+	step := func(name string) { fmt.Fprintf(stdout, "\n== %d. %s ==\n", slices.Index(steps, name)+1, name) }
+	fail := func(name, extra string) int {
+		n := slices.Index(steps, name) + 1
+		fmt.Fprintf(stderr, "railse setup all 停在第 %d 步（%s）", n, name)
 		if len(done) > 0 {
 			fmt.Fprintf(stderr, "；已完成：%s", strings.Join(done, "、"))
 		}
 		if n < len(steps) {
 			fmt.Fprintf(stderr, "；没做：%s", strings.Join(steps[n:], "、"))
 		}
-		fmt.Fprintf(stderr, "。%s修好后重跑 railse setup all（已接入的会跳过接入）\n", extra)
+		fmt.Fprintf(stderr, "。%s修好后重跑 %s（已接入的会跳过接入）\n", extra, rerun)
 		return 1
 	}
 	var notes []string
-	phoneURL := hubBase // 下一步里让手机打开的地址：守护进程实际接的 hub
+	phoneURL := hubBase // 下一步里让手机打开的地址：守护进程实际接的 hub（本机模式是本机 hub 的对外地址）
+	var lh localHub     // 本机模式第 1 步装好的本机 hub
 
-	step(1)
-	if !enroll {
+	if localMode {
+		step("本机 hub")
+		var tok string
+		var lnotes []string
+		lh, tok, lnotes, err = setupLocalHub(runtime.GOOS, localHubOpts{HubDir: hubDir, Bin: b, Port: port, PublicURL: pub,
+			Terminal: stdinIsTerminal(), Stdin: setupStdin, Stdout: stdout, Stderr: stderr})
+		notes = append(notes, lnotes...)
+		if err != nil {
+			var nf tailscale.ErrFunnelNotEnabled
+			if errors.As(err, &nf) { // 开通链接原样打出来：要用户在浏览器里开通，不自动绕过
+				fmt.Fprintln(stderr, nf.Error())
+				return fail("本机 hub", "在浏览器里开通 Funnel 后重跑同一条命令。")
+			}
+			fmt.Fprintln(stderr, err)
+			return fail("本机 hub", "")
+		}
+		done = append(done, "本机 hub")
+		// 接入码只在进程里交给下一步接入本机守护进程，不打印
+		*hubURL, *token, phoneURL = localAddr, tok, lh.PublicURL
+	}
+
+	step("接入 hub")
+	switch {
+	case !enroll && localMode: // 已在第 1 步之前确认过接的就是这个本机 hub
+		fmt.Fprintf(stdout, "已接入过（%s，接的就是本机 hub），跳过；要重新接入：%s\n", cfg.MachinePath, reenroll)
+	case !enroll:
 		m, err := agent.LoadMachine(cfg.MachinePath)
 		if err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
-			return fail(1, "machine.json 坏了：用 "+reenroll+" 重新接入（不在终端里时连同 --hub、--token）。")
+			return fail("接入 hub", "machine.json 坏了：用 "+reenroll+" 重新接入（不在终端里时连同 --hub、--token）。")
 		}
 		fmt.Fprintf(stdout, "已接入过（%s），跳过；要换 hub 或重新接入：%s\n", cfg.MachinePath, reenroll)
 		phoneURL = m.HubURL
 		if hubBase != "" && hubBase != m.HubURL {
 			fmt.Fprintf(stdout, "注意：本机接的是 %s，不是 --hub 给的 %s；要改接那个 hub，加 --force 重新接入\n", m.HubURL, hubBase)
 		}
-		// 已接入的机器在终端里重跑：重装钩子、重启守护进程之前先问一次。首次接入、--force 不走这里；不是终端（脚本、管道）时不问
-		if stdinIsTerminal() {
-			// 第 3 步对守护进程要做的事（与下面第 3 步同一判定）：托管的作业在跑（哪怕它用的是别的数据目录、还没开始监听），重装会
-			// 把它停掉再拉起；没在跑、socket 也没人监听就托管并启动；手动起的占着 socket 时第 3 步跳过托管，不碰它
-			daemon := ""
-			if !*noAutostart {
-				switch {
-				case agentJobRunning():
-					daemon = "重启守护进程"
-				case !socketOccupied(cfg.SocketPath):
-					daemon = "托管并启动守护进程"
-				}
-			}
-			if what, untouched := rerunWork(!*noHooks, daemon); what != "" { // 没有要重做的不问
-				ok, err := confirmRerun(setupStdin, stdout, m.HubURL, what)
-				switch {
-				case err != nil && !errors.Is(err, io.EOF):
-					fmt.Fprintf(stderr, "读输入失败，%s：%v\n", untouched, err)
-					return 1
-				case !ok: // n、no 或 EOF（Ctrl-D）
-					fmt.Fprintf(stderr, "已取消，%s\n", untouched)
-					return 1
-				}
-			}
+		// 已接入的机器在终端里重跑：重装钩子、重启守护进程之前先问一次
+		if stdinIsTerminal() && !confirmRedo(m.HubURL) {
+			return 1
 		}
-	} else if err := agentEnroll(cfg, *hubURL, *token, *name, *force, stdout, stderr); err != nil {
-		fmt.Fprintf(stderr, "接入失败：%v\n", err)
-		return fail(1, "")
+	default:
+		if err := agentEnroll(cfg, *hubURL, *token, *name, *force, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "接入失败：%v\n", err)
+			return fail("接入 hub", "")
+		}
 	}
-	done = append(done, steps[0])
+	done = append(done, "接入 hub")
 
-	step(2)
+	step("安装钩子")
 	if *noHooks {
 		fmt.Fprintln(stdout, "已跳过（--no-hooks）")
 	} else {
@@ -750,19 +960,19 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 			hookArgs = append(hookArgs, "--project", proj)
 		}
 		if code := runSetupHooks(hookArgs, false, stdout, stderr); code != 0 {
-			return fail(2, "钩子文件的问题见上面（已写入的会列出来）。")
+			return fail("安装钩子", "钩子文件的问题见上面（已写入的会列出来）。")
 		}
-		done = append(done, steps[1])
+		done = append(done, "安装钩子")
 		// Codex 只认一条 notify：钩子装完接着做 setup codex-notify 的事，--dir、--bin 与钩子同一口径，已有的 notify 由它保留为前一跳，
 		// 重跑不重复串接。它失败（如 config.toml 看不懂）不算 setup all 失败：原因它已打印，最后的“注意”里给处理好后要跑的命令
 		if code := runSetupCodexNotify(notifyArgs, stdout, stderr); code != 0 {
 			socket, _, _ := hookSocket(cfg.Dir) // 上面装钩子时已算过一次，不会出错
-			notes = append(notes, "Codex 的 notify 没有接上（原因见第 2 步），完成与提问事件进不了收件箱；处理好后运行 "+
-				codexNotifyCmd(socket, given)+"（会保留已有的 notify）")
+			notes = append(notes, fmt.Sprintf("Codex 的 notify 没有接上（原因见第 %d 步），完成与提问事件进不了收件箱；处理好后运行 %s（会保留已有的 notify）",
+				slices.Index(steps, "安装钩子")+1, codexNotifyCmd(socket, given)))
 		}
 	}
 
-	step(3)
+	step("开机自启")
 	slow := false // 托管了、守护进程却还没应答
 	// socket 被占时问服务管理器作业在不在跑：在跑就是托管的那个占着，重装会换掉它；不在跑就是手动起的（或别的进程）占着，
 	// 再托管一个，新实例 Listen 失败、被 launchd/systemd 反复拉起
@@ -780,12 +990,12 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	case occupied && !agentJobRunning():
 		fmt.Fprintf(stdout, "守护进程已在运行，但不是托管的那个（launchd/systemd 里的托管作业没在跑；应是手动 railse agent run 起的），跳过托管："+
 			"再托管一个会抢不到 socket、被反复拉起；在跑的这个也只在启动时读 machine.json。\n先停掉它（在它的终端里 Ctrl-C），再运行：railse setup autostart%s\n", dirBin)
-		notes = append(notes, "没有托管开机自启（守护进程在手动运行），见第 3 步")
+		notes = append(notes, fmt.Sprintf("没有托管开机自启（守护进程在手动运行），见第 %d 步", slices.Index(steps, "开机自启")+1))
 	default:
 		if code := runAutostart([]string{"--dir", cfg.Dir, "--bin", b}, stdout, stderr); code != 0 {
-			return fail(3, "可以先手动 railse agent run"+dirArg+" 跑起守护进程。")
+			return fail("开机自启", "可以先手动 railse agent run"+dirArg+" 跑起守护进程。")
 		}
-		done = append(done, steps[2])
+		done = append(done, "开机自启")
 		if waitDaemon(cfg.SocketPath, setupDaemonWait) {
 			fmt.Fprintln(stdout, "守护进程已应答")
 		} else {
@@ -794,11 +1004,18 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		}
 	}
 
-	step(4)
-	// 给了 --project 才交给 doctor（不给时 doctor 看当前目录，它不是 git 仓库或在系统目录里时项目根只告知），复查命令同理
+	step("体检")
+	// 给了 --project 才交给 doctor（不给时 doctor 看当前目录，它不是 git 仓库或在系统目录里时项目根只告知），复查命令同理。
+	// 本机模式把本机 hub 的数据目录交给 doctor（它默认看 $RAILSE_HUB_HOME 或 ~/.railse-hub），复查命令只在用户给了 --hub-dir 时带上
 	doctorArgs, recheck := []string{"--dir", cfg.Dir, "--bin", b}, "railse doctor"+projArg+dirBin
 	if proj != "" {
 		doctorArgs = append([]string{"--project", proj}, doctorArgs...)
+	}
+	if localMode {
+		doctorArgs = append(doctorArgs, "--hub-dir", hubDir)
+		if given["hub-dir"] {
+			recheck += " --hub-dir " + hooksconf.ShellQuote(hubDir)
+		}
 	}
 	if code := runDoctor(doctorArgs, stdout, stderr); code != 0 {
 		if slow {
@@ -807,10 +1024,17 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 			fmt.Fprintf(stdout, "体检有失败项；setup all 不因体检失败而失败：按上面的“修复：”处理后再跑 %s 复查。\n", recheck)
 		}
 	}
+	// 本机 hub 的地址由 Tailscale 给：本机开着代理时提醒（手机经同一代理常打不开 *.ts.net）。自己的隧道不提 ts.net
+	viaTailscale := localMode && lh.Provider == "tailscale"
+	if viaTailscale {
+		if n := proxyNote(runtime.GOOS, os.Getenv, runCommand, lh.PublicURL); n != "" {
+			notes = append(notes, n)
+		}
+	}
 	for _, n := range notes {
 		fmt.Fprintf(stdout, "\n注意：%s。", n)
 	}
-	printPhoneStep(stdout, phoneURL)
+	printPhoneStep(stdout, phoneURL, viaTailscale)
 	return 0
 }
 
