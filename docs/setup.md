@@ -104,7 +104,7 @@ railse setup all --hub https://hub.example.com --token <接入码>   # 或者一
 
 直接回车或 `y`、`yes` 继续；`n`、`no` 或 Ctrl-D 打印「已取消，钩子与守护进程都没动」，退出 1；别的答案说明怎么答再问。问句只提这次真要做的：托管的守护进程没在跑时是「托管并启动守护进程」；`--no-hooks` 时只提守护进程，`--no-autostart` 时只提钩子，取消时的说明也一样；手动 `railse agent run` 起的守护进程占着 socket 时第 3 步不碰它，只提钩子。没有要重做的（如 `--no-hooks` 加 `--no-autostart`）时不问。首次接入、`--force` 重新接入、stdin 不是终端（脚本、管道、`< /dev/null`）时都不问，直接做。
 
-接的是 `setup all --local-hub` 装的本机 hub 时（不带 `--local-hub` 重跑也认得出），第 1 步“本机 hub”会复查 Funnel、可能重新托管 hub，所以这一问挪到第 1 步之前，问句里是手机打开的对外地址（不是 `127.0.0.1`），要做的事前面多一项：
+接的是 `setup all --local-hub` 装的本机 hub 时（hub 数据目录在默认位置，即 `$RAILSE_HUB_HOME` 或 `~/.railse-hub` 时，不带 `--local-hub` 重跑也认得出），第 1 步“本机 hub”会复查 Funnel、可能重新托管 hub，所以这一问挪到第 1 步之前，问句里是手机打开的对外地址（不是 `127.0.0.1`），要做的事前面多一项：
 
 ```text
 本机已接入 https://<机器名>.<tailnet>.ts.net。接下来检查本机 hub（必要时重新托管）、重装钩子（连同 Codex 的 notify）、重启守护进程，继续吗？[Y/n]

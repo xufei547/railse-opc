@@ -265,7 +265,7 @@ func TestSetupWizardSkipsQuestionsWhenEnrolled(t *testing.T) {
 	f := setupAllEnv(t)
 	t.Setenv("RAILSE_HOME", f.dir)
 	t.Chdir(f.proj)
-	hub := h.localhostURL() // 不是 127.0.0.1：那是没认出来的本机 hub，框里不画
+	hub := h.http.URL
 	var out, errOut bytes.Buffer
 	if code := run([]string{"agent", "enroll", "--hub", hub, "--token", newEnrollToken(t, h)}, &out, &errOut); code != 0 {
 		t.Fatalf("enroll: %d %q", code, errOut.String())
@@ -283,8 +283,10 @@ func TestSetupWizardSkipsQuestionsWhenEnrolled(t *testing.T) {
 	if strings.Count(s, askRerunPrompt) != 1 || !strings.Contains(s, rerunPrompt(hub, "重装钩子（连同 Codex 的 notify）、托管并启动守护进程")) {
 		t.Fatalf("重装钩子、托管守护进程之前应确认一次:\n%s", s)
 	}
-	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "已托管") || !strings.Contains(s, "║  "+hub+"  ║") {
-		t.Fatalf("应跳过接入、照常跑完，框里是 machine.json 的地址:\n%s", s)
+	// 测试 hub 在 127.0.0.1：手机打不开，框里不画，说手机要打开对外地址；默认 hub 数据目录里没有 local-hub.json，本机 hub 的事只说成条件句
+	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "已托管") || strings.ContainsAny(s[strings.Index(s, "下一步"):], "╔║╚") ||
+		!strings.Contains(s, "注意：手机要打开 hub 的对外地址（不是本机接的 "+hub) || !strings.Contains(s, "如果是 railse setup all --local-hub 装的") {
+		t.Fatalf("应跳过接入、照常跑完，不画回环地址:\n%s", s)
 	}
 	// 从 railse setup 进来的人照抄得了：railse setup --force 是用法错误，要写成完整的 setup all 命令
 	if !strings.Contains(s, "要换 hub 或重新接入：railse setup all --force\n") {

@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/doctor"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
 )
 
@@ -1345,8 +1348,7 @@ func installCalls(calls [][]string) [][]string {
 	return out
 }
 
-// localhostURL 是测试 hub 写成 http://localhost:<端口> 的地址：同一个 hub，但不是本机 hub 接入时存的 http://127.0.0.1:<端口>
-// 那种样子（setup all 对后者另有说法，见 loopbackHubPort）。
+// localhostURL 是测试 hub 写成 http://localhost:<端口> 的地址：同一个 hub，不是本机 hub 接入时存的 http://127.0.0.1:<端口> 那种样子。
 func (h *testHub) localhostURL() string {
 	return strings.Replace(h.http.URL, "://127.0.0.1:", "://localhost:", 1)
 }
@@ -1821,22 +1823,25 @@ func TestSetupAllNoHooksAndNoAutostart(t *testing.T) {
 func TestSetupAllSkipsEnrollWhenMachineExists(t *testing.T) {
 	h := startTestHub(t)
 	f := setupAllEnv(t)
-	// 先接入一次（hub 地址写成 localhost：接 127.0.0.1:<端口> 的另有说法，见 TestSetupAllLoopbackHubNotRecognizedAsLocal）
-	hub := h.localhostURL()
+	// 先接入一次
 	var out, errOut bytes.Buffer
-	if code := run(f.args("--hub", hub, "--token", newEnrollToken(t, h), "--no-autostart"), &out, &errOut); code != 0 {
+	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"), &out, &errOut); code != 0 {
 		t.Fatalf("首次: %d %q", code, errOut.String())
 	}
 	mpath := filepath.Join(f.dir, "machine.json")
 	before := readFile(t, mpath)
-	// 已接入、--hub 换了地址：跳过接入、不动 machine.json，提醒地址不一样；下一步用 machine.json 里的地址
+	// 已接入、--hub 换了地址：跳过接入、不动 machine.json，提醒地址不一样。machine.json 里是测试 hub 的 127.0.0.1：手机打不开，
+	// 框里不画，说手机要打开对外地址；给了 --hub 就没去看 hub 数据目录，不提 local-hub.json（框里画 machine.json 的地址见
+	// TestSetupAllRerunBoxShowsEnrolledHub）
 	out.Reset()
 	if code := run(f.args("--hub", "https://other.example.com", "--token", "x", "--no-autostart"), &out, &errOut); code != 0 {
 		t.Fatalf("已接入: %d %q", code, errOut.String())
 	}
 	s := out.String()
-	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "https://other.example.com") || !strings.Contains(s, "--force") || !strings.Contains(s[strings.Index(s, "下一步"):], "║  "+hub+"  ║") {
-		t.Fatalf("已接入时应跳过并提醒地址不同: %q", s)
+	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "https://other.example.com") || !strings.Contains(s, "--force") ||
+		!strings.Contains(s, "注意：手机要打开 hub 的对外地址（不是本机接的 "+h.http.URL) || strings.ContainsAny(s[strings.Index(s, "下一步"):], "╔║╚") ||
+		strings.Contains(s, "local-hub") {
+		t.Fatalf("已接入时应跳过并提醒地址不同，不画回环地址、不提本机 hub: %q", s)
 	}
 	if !bytes.Equal(readFile(t, mpath), before) {
 		t.Fatal("跳过接入不该改 machine.json")
@@ -2442,6 +2447,7 @@ func TestSetupAllLocalHubRerunConfirmShowsPublicURL(t *testing.T) {
 	if strings.Count(s, askRerunPrompt) != 1 {
 		t.Fatalf("只该问一次:\n%s", s)
 	}
+	assertNoEnrollSecrets(t, spy.seen(), s, errOut.String())
 }
 
 // --hub-port、--public-url 没给时沿用 hub 数据目录里上次的 local-hub.json（端口、自己的隧道），重跑不会把它们换掉；
@@ -2520,9 +2526,10 @@ func TestSetupAllLocalHubProxyNote(t *testing.T) {
 	assertNoEnrollSecrets(t, oneEnrollToken(t, spy), s, errOut.String())
 }
 
-// 接的是 http://127.0.0.1:<端口> 的 hub、却认不出本机模式（默认 hub 数据目录里没有 local-hub.json，或它坏了、端口对不上，
-// 多半是 --hub-dir 给过别的目录）：照非本机模式重跑，但说清怎样按本机 hub 复查（带上 --project、--dir、--bin），
-// 框里不画手机打不开的 127.0.0.1，“注意”里说手机要打开的是对外地址。
+// 已接入的 hub 在本机回环地址上（127.0.0.1、localhost、::1）而没认出本机模式：照非本机模式重跑，框里不画手机打不开的回环地址，
+// “注意”里说手机要打开对外地址。只有 http://127.0.0.1:<端口>、且看过 hub 数据目录时才说本机 hub 的事：那里的 local-hub.json 坏了
+// 或说的是别的端口，说“看起来是” --local-hub 装的；没有这个文件只说成条件句（也可能是自己 railse hub run 起的）；
+// localhost、::1 不是本机 hub 存的样子，不提。复查命令带上 --project、--dir、--bin。
 func TestSetupAllLoopbackHubNotRecognizedAsLocal(t *testing.T) {
 	h := startTestHub(t)
 	f := setupAllEnv(t)
@@ -2530,30 +2537,106 @@ func TestSetupAllLoopbackHubNotRecognizedAsLocal(t *testing.T) {
 	if code := run(f.args("--hub", h.http.URL, "--token", newEnrollToken(t, h), "--no-autostart"), &out, &errOut); code != 0 {
 		t.Fatalf("首次: %d\n%s\n%s", code, out.String(), errOut.String())
 	}
-	defHub := filepath.Join(f.home, "nohub") // setupAllEnv 的 $RAILSE_HUB_HOME
+	mpath := filepath.Join(f.dir, "machine.json")
+	m, err := agent.LoadMachine(mpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defHub := filepath.Join(f.home, "nohub") // setupAllEnv 的 $RAILSE_HUB_HOME：这次看的 hub 数据目录
 	_, p, _ := net.SplitHostPort(strings.TrimPrefix(h.http.URL, "http://"))
-	for _, local := range []string{"", "{", `{"port":1,"public_url":"https://x.example.com","provider":"custom"}`} {
-		if local != "" {
-			writeTestFile(t, localHubPath(defHub), local)
+	tail := " --project " + hooksconf.ShellQuote(f.proj) + " --dir " + hooksconf.ShellQuote(f.dir) + " --bin " + hooksconf.ShellQuote(f.bin) + " 复查"
+	maybe := "注意：本机接的是 127.0.0.1:" + p + " 上的 hub，" + defHub + " 里没有 local-hub.json，这次没按本机 hub 复查（Funnel、托管）。" +
+		"如果是 railse setup all --local-hub 装的、数据目录不在默认位置，用 railse setup all --local-hub --hub-dir <它的数据目录>" + tail +
+		"；自己用 railse hub run 起的 hub 不用管\n"
+	looks := func(why string) string {
+		return "注意：本机接的是 127.0.0.1:" + p + " 上的 hub，" + localHubPath(defHub) + why + "，这次没按本机 hub 复查（Funnel、托管）；" +
+			"看起来是 railse setup all --local-hub 装的，用 railse setup all --local-hub" + tail + "\n"
+	}
+	for _, tc := range []struct {
+		name, hub, localHub string
+		extra               []string
+		want                string // 关于本机 hub 的那句；空：不该提 local-hub
+	}{
+		{"127.0.0.1、没有 local-hub.json", h.http.URL, "", nil, maybe},
+		{"127.0.0.1、local-hub.json 坏了", h.http.URL, "{", nil, looks(" 坏了")},
+		{"127.0.0.1、local-hub.json 端口对不上", h.http.URL, `{"port":1,"public_url":"https://x.example.com","provider":"custom"}`, nil, looks(" 说本机 hub 在 127.0.0.1:1")},
+		{"127.0.0.1、给了 --hub（没看 hub 数据目录）", h.http.URL, "", []string{"--hub", h.http.URL, "--token", "x"}, ""},
+		{"localhost", h.localhostURL(), "", nil, ""},
+		{"[::1]", "http://[::1]:" + p, "", nil, ""},
+	} {
+		os.RemoveAll(defHub)
+		if tc.localHub != "" {
+			writeTestFile(t, localHubPath(defHub), tc.localHub)
+		}
+		m.HubURL = tc.hub
+		if err := agent.SaveMachine(mpath, m); err != nil {
+			t.Fatal(err)
 		}
 		out.Reset()
 		errOut.Reset()
-		if code := run(f.args("--no-autostart"), &out, &errOut); code != 0 {
-			t.Fatalf("%q: %d\n%s\n%s", local, code, out.String(), errOut.String())
+		if code := run(f.args(append([]string{"--no-autostart"}, tc.extra...)...), &out, &errOut); code != 0 {
+			t.Fatalf("%s: %d\n%s\n%s", tc.name, code, out.String(), errOut.String())
 		}
 		s := out.String()
-		hint := "注意：本机接的是本机上的 hub（127.0.0.1:" + p + "），但 " + defHub + " 里没有对得上的 local-hub.json"
-		cmd := "用 railse setup all --local-hub --hub-dir <它的数据目录> --project " + hooksconf.ShellQuote(f.proj) + " --dir " + hooksconf.ShellQuote(f.dir) +
-			" --bin " + hooksconf.ShellQuote(f.bin) + " 复查"
-		if !strings.Contains(s, hint) || !strings.Contains(s, cmd) || strings.Contains(s, "== 1. 本机 hub ==") {
-			t.Fatalf("%q: 应照非本机模式走，并说怎样按本机 hub 复查:\n%s", local, s)
+		if strings.Contains(s, "== 1. 本机 hub ==") || !strings.Contains(s, "已接入过") {
+			t.Fatalf("%s: 应照非本机模式走、跳过接入:\n%s", tc.name, s)
 		}
-		next := s[strings.Index(s, "下一步"):]
-		if strings.ContainsAny(next, "╔║╚") || strings.Contains(next, h.http.URL) {
-			t.Fatalf("%q: 框里不该画手机打不开的 127.0.0.1:\n%s", local, next)
+		if next := s[strings.Index(s, "下一步"):]; strings.ContainsAny(next, "╔║╚") || strings.Contains(next, tc.hub) {
+			t.Fatalf("%s: 框里不该画手机打不开的回环地址:\n%s", tc.name, next)
 		}
-		if !strings.Contains(s, "注意：本机接的 "+h.http.URL+" 只在这台机器上打得开") {
-			t.Fatalf("%q: “注意”里应说手机要打开对外地址:\n%s", local, s)
+		if !strings.Contains(s, "\n注意：手机要打开 hub 的对外地址（不是本机接的 "+tc.hub+"：它只在这台机器上打得开）。") {
+			t.Fatalf("%s: “注意”里应说手机要打开对外地址:\n%s", tc.name, s)
+		}
+		if tc.want == "" {
+			if strings.Contains(s, "local-hub") {
+				t.Fatalf("%s: 不该提本机 hub、local-hub.json:\n%s", tc.name, s)
+			}
+		} else if !strings.Contains(s, tc.want) {
+			t.Fatalf("%s: 想要 %q:\n%s", tc.name, tc.want, s)
 		}
 	}
 }
+
+// 已接入的 hub 不在本机（如 https://hub.example.com）：重跑时框里画 machine.json 的地址。体检那一步 doctor 会 GET <hub>/api/version：
+// 换成直接报错的客户端，http.DefaultTransport 也换成报错并记下请求的，绝不发真实的网络请求；整个过程只有 doctor 想连它。
+func TestSetupAllRerunBoxShowsEnrolledHub(t *testing.T) {
+	f := setupAllEnv(t)
+	const hub = "https://hub.example.com"
+	writeMachine(t, filepath.Join(f.dir, "machine.json"), hub)
+	var doctorHosts, otherHosts []string
+	prev := doctorOptions
+	setDoctorOptions(t, func(o *doctor.Options) {
+		prev(o)
+		o.HTTP = &http.Client{Transport: failingTransport(&doctorHosts)}
+	})
+	oldDefault := http.DefaultTransport
+	http.DefaultTransport = failingTransport(&otherHosts)
+	t.Cleanup(func() { http.DefaultTransport = oldDefault })
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("%d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	bar := strings.Repeat("═", len(hub)+4)
+	if box := "下一步：在手机上打开\n╔" + bar + "╗\n║  " + hub + "  ║\n╚" + bar + "╝\n手机 Safari"; !strings.Contains(s, box) {
+		t.Fatalf("框里应画 machine.json 的地址:\n%s", s)
+	}
+	if strings.Contains(s, "手机要打开 hub 的对外地址") || strings.Contains(s, "local-hub") {
+		t.Fatalf("不在本机的 hub 不该有回环地址的说法:\n%s", s)
+	}
+	if len(otherHosts) != 0 || len(doctorHosts) == 0 || slices.ContainsFunc(doctorHosts, func(h string) bool { return h != "hub.example.com" }) {
+		t.Fatalf("只该有 doctor 想连 hub.example.com（且被挡下）: doctor=%q 其它=%q", doctorHosts, otherHosts)
+	}
+}
+
+// failingTransport 是不出网的 RoundTripper：记下请求的主机，一律报错。
+func failingTransport(hosts *[]string) http.RoundTripper {
+	return roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		*hosts = append(*hosts, r.URL.Hostname())
+		return nil, errors.New("测试里不出网")
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

@@ -703,6 +703,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	var hubDir string // 本机 hub 的数据目录（绝对路径）
 	var prev localHub // 上次装的本机 hub（hub 数据目录里合法的 local-hub.json；坏文件当没有，第 1 步会警告并重写）
 	hadPrev := false
+	var prevErr error // local-hub.json 坏了（读不了、不是合法 JSON、字段不合规）；没有文件时为空
 	if localMode || (!given["hub"] && !given["token"] && lerr == nil) {
 		d, derr := localHubDirFor(*hubDirFlag)
 		if derr != nil && localMode {
@@ -711,7 +712,7 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		}
 		if derr == nil {
 			hubDir = d
-			prev, hadPrev, _ = loadLocalHub(hubDir)
+			prev, hadPrev, prevErr = loadLocalHub(hubDir)
 		}
 	}
 	if !localMode && hadPrev {
@@ -939,17 +940,28 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		}
 		fmt.Fprintf(stdout, "已接入过（%s），跳过；要换 hub 或重新接入：%s\n", cfg.MachinePath, reenroll)
 		phoneURL = m.HubURL
-		if p, ok := loopbackHubPort(m.HubURL); ok {
-			// 接的是 127.0.0.1 上的 hub 却没认出本机模式：多半是 setup all --local-hub 装的，但 hub 数据目录不在默认位置，
-			// 或那里的 local-hub.json 坏了、没有。手机打不开 127.0.0.1，框里不画它；告诉用户怎样按本机 hub 复查
-			where := "默认的 hub 数据目录"
-			if hubDir != "" {
-				where = hubDir
-			}
-			fmt.Fprintf(stdout, "注意：本机接的是本机上的 hub（127.0.0.1:%d），但 %s 里没有对得上的 local-hub.json，这次没按本机 hub 复查（Funnel、托管）；"+
-				"是 railse setup all --local-hub 装的，用 railse setup all --local-hub --hub-dir <它的数据目录>%s%s 复查\n", p, where, projArg, dirBin)
-			notes = append(notes, "本机接的 "+m.HubURL+" 只在这台机器上打得开：手机要打开的是本机 hub 的对外地址（hub 数据目录里 local-hub.json 的 public_url）")
+		if u, _, err := parseHubAddr(m.HubURL); err == nil && isLoopbackHost(u.Hostname()) {
+			// 接的是本机回环地址上的 hub（127.0.0.1、localhost、::1）：手机打不开它，框里不画。它可能是 setup all --local-hub 装的、
+			// 这次没认出来，也可能是自己在本机跑的 hub（railse hub run，或托管的 hub 前面套反向代理，见 docs/hub.md），所以不断定
 			phoneURL = ""
+			notes = append(notes, "手机要打开 hub 的对外地址（不是本机接的 "+m.HubURL+"：它只在这台机器上打得开）")
+			// 本机 hub 接入时存的是 http://127.0.0.1:<端口>：只对这种样子、且这次看过 hub 数据目录（没给 --hub、--token）时说本机 hub 的事。
+			// 那里的 local-hub.json 坏了、或说的是别的端口，看起来是 --local-hub 装的；根本没有这个文件就只说成条件句
+			if p, ok := loopbackHubPort(m.HubURL); ok && hubDir != "" {
+				const skipped = "，这次没按本机 hub 复查（Funnel、托管）"
+				switch {
+				case prevErr != nil || hadPrev:
+					why := localHubPath(hubDir) + " 坏了"
+					if prevErr == nil {
+						why = fmt.Sprintf("%s 说本机 hub 在 127.0.0.1:%d", localHubPath(hubDir), prev.Port)
+					}
+					fmt.Fprintf(stdout, "注意：本机接的是 127.0.0.1:%d 上的 hub，%s%s；看起来是 railse setup all --local-hub 装的，用 railse setup all --local-hub%s%s 复查\n",
+						p, why, skipped, projArg, dirBin)
+				default:
+					fmt.Fprintf(stdout, "注意：本机接的是 127.0.0.1:%d 上的 hub，%s 里没有 local-hub.json%s。如果是 railse setup all --local-hub 装的、数据目录不在默认位置，"+
+						"用 railse setup all --local-hub --hub-dir <它的数据目录>%s%s 复查；自己用 railse hub run 起的 hub 不用管\n", p, hubDir, skipped, projArg, dirBin)
+				}
+			}
 		}
 		if hubBase != "" && hubBase != m.HubURL {
 			fmt.Fprintf(stdout, "注意：本机接的是 %s，不是 --hub 给的 %s；要改接那个 hub，加 --force 重新接入\n", m.HubURL, hubBase)
