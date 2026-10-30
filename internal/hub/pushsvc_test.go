@@ -572,15 +572,22 @@ func TestPushMessagePermissionWhereAndBody(t *testing.T) {
 	}
 	for _, c := range []struct {
 		pl   policy.Payload
+		tool string
 		want string
 	}{
-		{policy.Payload{Type: policy.PayloadFileWrite, Path: "/p/a.go"}, "/p/a.go\n点开批准或拒绝"},
-		{policy.Payload{Type: policy.PayloadNetwork, URL: "https://x.example/a"}, "https://x.example/a\n点开批准或拒绝"},
-		{policy.Payload{Type: policy.PayloadMCP, Server: "gh", Tool: "create_issue"}, "gh/create_issue\n点开批准或拒绝"},
+		{policy.Payload{Type: policy.PayloadFileWrite, Path: "/p/a.go"}, "Edit", "/p/a.go\n点开批准或拒绝"},
+		{policy.Payload{Type: policy.PayloadNetwork, URL: "https://x.example/a"}, "Edit", "https://x.example/a\n点开批准或拒绝"},
+		{policy.Payload{Type: policy.PayloadMCP, Server: "gh", Tool: "create_issue"}, "Edit", "gh/create_issue\n点开批准或拒绝"},
+		// 认不出的工具：适配器把工具名放在 Payload.Tool；没有就退回请求的工具名；不带网址的搜索同理
+		{policy.Payload{Type: "other", Tool: "read_file"}, "read_file", "read_file\n点开批准或拒绝"},
+		{policy.Payload{Type: "other"}, "ExitPlanMode", "ExitPlanMode\n点开批准或拒绝"},
+		{policy.Payload{Type: policy.PayloadNetwork}, "WebSearch", "WebSearch\n点开批准或拒绝"},
+		{policy.Payload{Type: "other"}, "", "点开批准或拒绝"},
 	} {
 		r := perm
-		r.ToolName, r.Payload = "Edit", c.pl
-		if m := decode(pushMessage(r, pushWho{Tool: "claude"})); m.Body != c.want {
+		r.ToolName, r.Payload = c.tool, c.pl
+		m := decode(pushMessage(r, pushWho{Tool: "claude"}))
+		if m.Body != c.want || strings.Contains(m.Body, "other") {
 			t.Errorf("%s：正文 %q，要 %q", c.pl.Type, m.Body, c.want)
 		}
 	}
@@ -666,6 +673,13 @@ func TestPushMessageLooksUpToolAndMachines(t *testing.T) {
 	}
 	if got := title(); got != "Codex 要联网 · blog" {
 		t.Fatalf("单机: %q", got)
+	}
+	// 同名重新接入（enroll --force）留下旧行、不吊销：仍是一个名字，不算多台
+	if _, err := h.st.CreateMachine("xufeideMacBook-Air.local", store.RandomToken(), "/home/u"); err != nil {
+		t.Fatal(err)
+	}
+	if got := title(); got != "Codex 要联网 · blog" {
+		t.Fatalf("同名重接: %q", got)
 	}
 	m2, err := h.st.CreateMachine("linux-box", store.RandomToken(), "/home/u")
 	if err != nil {

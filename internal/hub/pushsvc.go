@@ -499,7 +499,7 @@ func machineLabel(name string) string {
 }
 
 // pushWho 是推送文案里的“谁、在哪”：Tool 是请求所属会话的 sessions.tool（没有会话或查不到为空），Project 是项目名，
-// Machine 是机器名，Many 为真表示接入且未吊销的机器多于一台（这时标题才带机器名）。
+// Machine 是机器名，Many 为真表示接入且未吊销的机器不止一个名字（同名的重新接入不算，这时标题才带机器名）。
 type pushWho struct {
 	Tool, Project, Machine string
 	Many                   bool
@@ -526,24 +526,24 @@ func (p *pushService) sessionTool(r store.Request) string {
 	return tool
 }
 
-// manyMachines 判断接入且未吊销的机器是否多于一台；读库出错时记日志、当作多台（宁可标题多带机器名）。
+// manyMachines 判断接入且未吊销的机器是否有不止一个名字（同名的重新接入不算，去掉 .local 后比）；读库出错时记日志、当作多台（宁可标题多带机器名）。
 func (p *pushService) manyMachines() bool {
 	ms, err := p.s.store.ListMachines()
 	if err != nil {
 		p.s.log.Printf("列机器: %v", err)
 		return true
 	}
-	n := 0
+	names := map[string]bool{}
 	for _, m := range ms {
 		if !m.Revoked {
-			n++
+			names[machineLabel(m.Name)] = true
 		}
 	}
-	return n > 1
+	return len(names) > 1
 }
 
 // pushMessage 组推送载荷 {"id","kind","title","body","url":"/r/<id>"}，文案说人话（谁要做什么、在哪、该干嘛）：
-//   - permission：标题“<CLI> 要<动词>”（动词按风险，见 riskVerbs），正文两行：载荷摘要、“点开批准或拒绝”；
+//   - permission：标题“<CLI> 要<动词>”（动词按风险，见 riskVerbs），正文两行：载荷摘要、“点开批准或拒绝”（摘要为空，如不带网址的搜索时，第一行写工具名）；
 //   - question：标题“<CLI> 在终端等你回答”，正文是问题；
 //   - webhook：标题“工作流等你批准”，正文是来源给的标题。
 //
@@ -559,7 +559,11 @@ func pushMessage(r store.Request, w pushWho) ([]byte, error) {
 	switch r.Kind {
 	case "permission":
 		title = pushTitle(cliName(w.Tool)+" 要"+riskVerb(r.Risk), w.Project, machine)
-		body = joinNonEmpty("\n", clean(payloadSummary(r.Payload), pushSummaryLen), "点开批准或拒绝")
+		summary := clean(payloadSummary(r.Payload), pushSummaryLen)
+		if summary == "" {
+			summary = clean(r.ToolName, pushSummaryLen)
+		}
+		body = joinNonEmpty("\n", summary, "点开批准或拒绝")
 	case "question":
 		title = pushTitle(cliName(w.Tool)+" 在终端等你回答", w.Project, machine)
 		body = clean(r.Title, pushBodyLen)
@@ -590,7 +594,7 @@ func pushTitle(head, project, machine string) string {
 	return truncate(joinNonEmpty(sep, parts...), pushTitleLen)
 }
 
-// payloadSummary 取载荷里最能说明这次操作的一段：shell 取命令、file_write 取路径、network 取 URL、mcp 取“服务/工具”。
+// payloadSummary 取载荷里最能说明这次操作的一段：shell 取命令、file_write 取路径、network 取 URL、mcp 取“服务/工具”，认不出的工具取工具名。
 func payloadSummary(pl policy.Payload) string {
 	switch pl.Type {
 	case policy.PayloadShell:
@@ -602,7 +606,7 @@ func payloadSummary(pl policy.Payload) string {
 	case policy.PayloadMCP:
 		return strings.Trim(pl.Server+"/"+pl.Tool, "/")
 	}
-	return string(pl.Type)
+	return pl.Tool
 }
 
 // clean 把 s 并成一行并截到至多 n 个字符：控制字符与各种空白（含换行、U+2028）当空白，连续的并成一个空格，去掉首尾空白；
