@@ -1,6 +1,6 @@
 # 安装、接入与开机自启
 
-一台有公网域名的机器跑 hub，每台写代码的机器跑守护进程并装钩子，手机打开 hub 的网页。下面的命令都是完整形式，`hub.example.com`、`me@example.com` 换成你自己的。hub 的接口与行为见 [hub.md](hub.md)，本机闭环（规则、审计）见 [agent-local-loop.md](agent-local-loop.md)，手机网页见 [web.md](web.md)。
+一台有公网域名的机器跑 hub，每台写代码的机器跑守护进程并装钩子，手机打开 hub 的网页。只有一台机器的，看“一台机器就够：本机 hub”，一条命令就够；有服务器的，看后面的“hub 机器”与“工作机”。下面的命令都是完整形式，`hub.example.com`、`me@example.com` 换成你自己的。hub 的接口与行为见 [hub.md](hub.md)，本机闭环（规则、审计）见 [agent-local-loop.md](agent-local-loop.md)，手机网页见 [web.md](web.md)。
 
 ## 安装
 
@@ -28,8 +28,64 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
   railse setup autostart --uninstall                 # 守护进程
   railse setup autostart --hub --uninstall           # 用户级托管的 hub
   sudo /usr/local/bin/railse setup autostart --hub --system --uninstall   # Linux 系统单元的 hub
+  tailscale funnel --https=443 off                   # 用过 setup all --local-hub 的：关掉对外的 Funnel
   ```
   没有卸载钩子的命令：删二进制之前，手动删掉各 CLI 配置里 Railse 的条目（命令是 `<railse 路径> hook claude|codex|gemini` 的那几条，数据目录不是 `~/.railse` 的后面还带 `--socket …`，在用户级的 `~/.claude/settings.json`、`~/.gemini/settings.json`、`~/.codex/hooks.json` 里，用 `--project` 装过的还在那些项目的 `.claude/settings.local.json`、`.gemini/settings.json` 里），否则 CLI 每次调用钩子都会报错。跑过 `railse setup`、`setup all`（没加 `--no-hooks`）或 `setup codex-notify` 的，删掉数据目录里的 `codex-notify.sh`，再把 `~/.codex/config.toml` 顶层的 `notify` 换回原来的（原来的写在脚本的标记行 `# railse-prev-notify: [...]` 里，最早的备份 `~/.codex/config.toml.railse-bak-<时间>` 里也有；原来没有就把那一行删掉）；直接写过 `notify = [".../railse", "hook", "codex-notify"]` 的也删掉那一行。`setup hooks`（`railse setup`、`setup all` 的第 2 步同样）第一次改 `~/.claude/settings.json`、`~/.gemini/settings.json` 之前留下的备份 `~/.claude/settings.json.railse-bak-<时间>`、`~/.gemini/settings.json.railse-bak-<时间>` 是装钩子之前的原样（`setup codex-notify` 与 `railse setup`、`setup all` 的第 2 步每次改 `config.toml` 之前留下的 `~/.codex/config.toml.railse-bak-<时间>` 是那一次之前的样子）：不要了就删掉（拿它覆盖回去也能回到装之前，但之后对那个文件的改动会一起丢掉）。这些备份是原样副本，可能带着 API key、MCP 的 token，策略引擎按敏感文件处理（任何目录下的 `*.railse-bak-*`）：agent 读写它们都按 destructive 交给你审批。最后删掉二进制：`rm "$(command -v railse)"`，以 root 装进去的用 `sudo rm /usr/local/bin/railse`；不要的数据目录（`~/.railse`、`~/.railse-hub`，系统单元的 `/var/lib/railse-hub` 要 sudo）自己删。
+
+## 一台机器就够：本机 hub
+
+```sh
+railse setup all --local-hub
+```
+
+hub 和守护进程都在这台机器上，手机经 Tailscale Funnel 连进来。不用服务器、域名、证书；代价是机器睡眠或关机时手机连不上 hub（见后面的“代价”）。
+
+**前提。**
+
+- 本机装好 [Tailscale](https://tailscale.com/download) 并登录（setup 要调 `tailscale` 命令，找不到时会说；用 `--public-url` 自己的隧道时不需要 Tailscale）。Linux 上以普通用户跑 `tailscale funnel` 可能要先 `sudo tailscale set --operator=$USER`。
+- tailnet 有 MagicDNS 域名，开了 HTTPS 证书（管理台 DNS 页）。
+- tailnet 开通了 Funnel。没开通时 `tailscale funnel` 会给一个开通链接，有时还会一直等你去开通：setup 最多等 15 秒，然后原样打印开通链接并退出 1（这时 hub 已托管，只监听本机，手机还连不上）；在浏览器里开通后重跑同一条命令。
+- 用平时的用户身份跑，不要 sudo。
+
+**做了什么。** 比 `setup all` 的四步多一步，放在最前面：
+
+1. **本机 hub。** 先看端口：`127.0.0.1:<端口>` 被别的程序或手动起的 hub 占着就停下。再只读地看 Tailscale，定下对外地址：状态（没装、没登录、没有 MagicDNS 域名、没开 HTTPS 证书各有提示）与 serve 配置；443 上除了 `/` 还有别的 serve 配置、Funnel 又没开时停下，因为 Funnel 按整个 443 开，它们会一起公开到公网（先用 `tailscale serve` 撤掉它们，或改用自己的隧道）。到这里什么都没改。没设过网页密码时在终端里问一次（屏幕会回显，不想回显就照提示先用 `read -s` 配 `railse hub password --dir <目录>` 设好再跑；不在终端里就停下，提示先 `railse hub password --dir <目录>`）。接着托管 hub（`setup autostart --hub`，只监听 `127.0.0.1:<端口>`，带 `--trusted-proxy 127.0.0.1,::1`），托管成功就写 `local-hub.json`，再等它应答，并确认应答的是托管的那个 hub。最后才开 Funnel：已经转到这个端口就不动；443 上 `/` 原来指向别处的会被替换，开之前先打一行提示。前面任何一步停下都不会开 Funnel，不会把端口上别的程序开到公网。要接入时（第一次，或加了 `--force`）最后用 hub 数据库生成一次性接入码，直接交给接入，不显示；已接入的重跑不生成。
+2. 接入、装钩子、开机自启、体检，同下面“工作机”的四步；接入的地址是 `http://127.0.0.1:<端口>`。
+
+做完后框线里打印的是对外地址 `https://<机器名>.<tailnet>.ts.net`。本机开着代理（环境变量或 macOS 系统代理），且地址来自 Tailscale 时，“注意”里会提醒：手机也挂着同一个代理而打不开地址，就关掉代理，或在代理规则里把 `ts.net` 设为直连。
+
+**落下的东西。**
+
+- `~/.railse-hub/local-hub.json`（0600）：端口、对外地址、来源（`tailscale` 或 `custom`）。重跑与 `railse doctor` 都读它。
+- `~/.railse-hub` 里还有 hub 的库、网页密码、推送密钥，与自己部署 hub 时一样。
+- hub 由 launchd（`dev.railse.hub`）或 systemd 用户单元（`railse-hub`）托管，开机自启、退出后拉起。
+- `~/.railse/machine.json` 指向 `http://127.0.0.1:<端口>`。
+- Tailscale 里 443 上的 Funnel 配置，转到 `127.0.0.1:<端口>`（`tailscale funnel status` 能看到）。
+
+**换端口与数据目录。** `--hub-port <端口>`（默认 8787）、`--hub-dir <目录>`（默认 `$RAILSE_HUB_HOME` 或 `~/.railse-hub`）。两个都没给时沿用该数据目录里上次的 `local-hub.json`，所以重跑不用再写一遍。数据目录不是默认位置时，`railse hub password`、`railse hub token`、`railse doctor` 也要带 `--dir`、`--hub-dir`。
+
+**用自己的隧道。** `--public-url https://…` 不开 Tailscale Funnel，对外地址用你给的（Cloudflare Tunnel、frp 之类）。隧道要自己配，把它转到 `127.0.0.1:<端口>`，并且：保留原 Host，转发 WebSocket，追加（不是透传）`X-Forwarded-For`。理由与 nginx 的例子见 [hub.md](hub.md) 的“B. 反向代理”。对外地址定下后不要再换（推送订阅与主屏幕图标绑在它上面）。`--public-url` 没给时沿用上次的；从 Tailscale 换成自己的隧道时，Funnel 不会自己关，`ts.net` 地址仍是公网入口，“注意”里会提醒，不用了就 `tailscale funnel --https=443 off`；从自己的隧道换回 Tailscale 要显式给空的 `--public-url ""`（或 `--public-url=`）。
+
+**重跑与改机器名。** 重跑同一条命令是安全的：已设的密码不再问，Funnel 已经转到这个端口就不动，hub 已在跑且对外地址、端口都没变就不重新托管，已接入的跳过接入（下面“工作机”的“重跑”一节有确认问句）。本机已接入别的 hub（比如自己部署的）时停下，加 `--force` 才改接本机 hub。跳过接入之前还只读地核对这台机器在不在 hub 数据目录的库里：数据目录删过或换过（比如第一次给了 `--hub-dir`、重跑忘了带），或这台机器被吊销了，就在第 1 步之前停下，不碰 Tailscale、不托管；要接到这个数据目录的 hub 就加 `--force` 重新接入，库是新的时手机上也要重新添加、重新开启通知。对外地址取自 Tailscale 机器名：在 Tailscale 里改了机器名，域名就变了，旧地址作废。重跑一遍会改成新地址并重新托管 hub，同时提醒手机上的主屏幕图标与推送订阅都要删掉重新添加、重新开启通知。
+
+**代价。**
+
+- 机器睡眠、关机或断网时 hub 不在，手机连不上，也收不到推送。那时这台机器上的 agent 也停了，单机用户没损失。几台工作机共用一个 hub 的，把 hub 放在常开的那台。
+- Funnel 的入口在 Tailscale 的服务器上：公网流量先到那里，再转进本机；证书由 Tailscale 签，机器名就是域名。这个地址对整个公网开放，任何人都连得到登录页，靠网页密码与登录限速挡。不接受这一点就用自己的服务器（后面的“hub 机器”）。
+- railse 只用 443：`/` 原来指向别处的会被替换；443 上还有别的路径、Funnel 又没开时 setup 停下（见第 1 步）。
+- 手机挂着代理时，`*.ts.net` 可能打不开：关掉代理，或让 `ts.net` 直连。
+
+**卸载。**
+
+```sh
+railse setup autostart --hub --uninstall     # 停掉并移除 hub 的托管（数据目录保留）
+tailscale funnel --https=443 off             # 关掉对外的 Funnel
+rm -r ~/.railse-hub                          # 删数据：含网页密码与推送密钥，删了手机要重新开启通知
+```
+
+hub 数据目录不在默认位置（装时给了 `--hub-dir`）的，第一条写 `railse setup autostart --hub --uninstall --dir <目录>`，`rm` 的也换成那个目录。卸载 hub 的托管不会关 Funnel：数据目录里的 `local-hub.json` 说地址来自 Tailscale 时，它会多打一行提醒。`tailscale funnel --https=443 off` 关的是 443 上的整个 Funnel，那里有你自己的别的配置的，先用 `tailscale funnel status` 核对。
+
+守护进程与钩子的卸载见前面“安装”里的“卸载”。
 
 ## hub 机器
 
@@ -79,11 +135,11 @@ railse hub token --dir /var/lib/railse-hub
 在终端里跑一次（钩子默认装用户级，在哪个目录里跑都行）：
 
 ```sh
-railse setup                                                     # 问答式：逐个问 hub 地址、接入码、本机名字
+railse setup                                                     # 问答式：先问 hub 在哪里，已有 hub 的再问地址、接入码、名字
 railse setup all --hub https://hub.example.com --token <接入码>   # 或者一次给全
 ```
 
-**问答式向导。** 不带子命令的 `railse setup`，或 `railse setup all` 要接入却没给 `--hub`、`--token` 时，stdin 是终端就逐个问缺的：hub 地址（与 `--hub` 同样校验；非本机的 `http://` 也不收，确在可信内网的用 `--hub` 给出）、接入码（在 hub 机器上运行 `railse hub token` 生成；输入会回显）、本机名字（直接回车用主机名；给了 `--name` 不问）。答得不合格就说明原因再问；Ctrl-D 取消，什么都不做（退出 1）。答完照 `setup all` 做下面四步。已接入过（有 `machine.json`、没加 `--force`）时不问这些，跳过接入，只在重装之前确认一次（见下面的“重跑”）。stdin 不是终端（如管道、`< /dev/null`）时不问：`railse setup` 打印用法，`setup all` 缺 `--hub`、`--token` 是用法错误，都退出 2，与原来一样排在其余检查之前。拒绝 root、检查 `--bin`、`--project` 与 `--name` 都在提问之前，不会答完才被拒。
+**问答式向导。** 不带子命令的 `railse setup` 在没接入过（没有 `machine.json`）时先问 hub 在哪里：`1` 本机（照 `railse setup all --local-hub` 做，不问地址与接入码），`2` 已有 hub；找得到 `tailscale` 时直接回车选 `1`，否则选 `2`，答别的说明后再问。答 `2` 的，或 `railse setup all` 要接入却没给 `--hub`、`--token` 时，stdin 是终端就逐个问缺的：hub 地址（与 `--hub` 同样校验；非本机的 `http://` 也不收，确在可信内网的用 `--hub` 给出）、接入码（在 hub 机器上运行 `railse hub token` 生成；输入会回显）、本机名字（直接回车用主机名；给了 `--name` 不问）。答得不合格就说明原因再问；Ctrl-D 取消，什么都不做（退出 1）。答完照 `setup all` 做下面四步。已接入过（有 `machine.json`、没加 `--force`）时不问这些，跳过接入，只在重装之前确认一次（见下面的“重跑”）。stdin 不是终端（如管道、`< /dev/null`）时不问：`railse setup` 打印用法，`setup all` 缺 `--hub`、`--token` 是用法错误，都退出 2，与原来一样排在其余检查之前。拒绝 root、检查 `--bin`、`--project` 与 `--name` 都在提问之前，不会答完才被拒。
 
 依次做四步，任一步失败就停下，说明停在哪一步、哪些已做完，修好后重跑（已接入的会跳过接入）：
 
@@ -94,7 +150,7 @@ railse setup all --hub https://hub.example.com --token <接入码>   # 或者一
 
 做完后把手机要打开的 hub 地址（守护进程实际接的那个）用框线围起来打印，并提示：手机 Safari 打开后分享→添加到主屏幕，再从图标打开；登录后在设置里开启通知（见 [web.md](web.md)）。
 
-其余标志：`--name 名字`（在 hub 里的名字，默认主机名）、`--project 目录`（给了才把 Claude、Gemini 的钩子装成那个项目的项目级，默认装用户级；目录要已存在）、`--dir 目录`（守护进程数据目录，默认 `$RAILSE_HOME` 或 `~/.railse`）、`--bin 路径`、`--no-hooks`（不装钩子，也不接 Codex 的 `notify`）、`--no-autostart`。`setup all` 要用平时的用户身份跑，以 root 运行直接拒绝（否则会用掉接入码，`machine.json` 与钩子配置也成了 root 的文件）。
+其余标志：`--name 名字`（在 hub 里的名字，默认主机名）、`--project 目录`（给了才把 Claude、Gemini 的钩子装成那个项目的项目级，默认装用户级；目录要已存在）、`--dir 目录`（守护进程数据目录，默认 `$RAILSE_HOME` 或 `~/.railse`）、`--bin 路径`、`--no-hooks`（不装钩子，也不接 Codex 的 `notify`）、`--local-hub`（一台机器就够，见前面的“一台机器就够：本机 hub”）、`--hub-port 端口`、`--hub-dir 目录`、`--public-url https://…`（这三个只配合 `--local-hub`）、`--no-autostart`（只管守护进程的开机自启；`--local-hub` 的本机 hub 总是托管，不然没人起它）。`setup all` 要用平时的用户身份跑，以 root 运行直接拒绝（否则会用掉接入码，`machine.json` 与钩子配置也成了 root 的文件）。
 
 **重跑。** 已接入过的机器（有 `machine.json`、没加 `--force`）在终端里重跑 `railse setup` 或 `railse setup all`，第 1 步说完「已接入过…跳过」后先问一次：
 
@@ -103,6 +159,14 @@ railse setup all --hub https://hub.example.com --token <接入码>   # 或者一
 ```
 
 直接回车或 `y`、`yes` 继续；`n`、`no` 或 Ctrl-D 打印「已取消，钩子与守护进程都没动」，退出 1；别的答案说明怎么答再问。问句只提这次真要做的：托管的守护进程没在跑时是「托管并启动守护进程」；`--no-hooks` 时只提守护进程，`--no-autostart` 时只提钩子，取消时的说明也一样；手动 `railse agent run` 起的守护进程占着 socket 时第 3 步不碰它，只提钩子。没有要重做的（如 `--no-hooks` 加 `--no-autostart`）时不问。首次接入、`--force` 重新接入、stdin 不是终端（脚本、管道、`< /dev/null`）时都不问，直接做。
+
+接的是 `setup all --local-hub` 装的本机 hub 时（hub 数据目录在默认位置，即 `$RAILSE_HUB_HOME` 或 `~/.railse-hub` 时，不带 `--local-hub` 重跑也认得出），第 1 步“本机 hub”会复查 Funnel、可能重新托管 hub，所以这一问挪到第 1 步之前，问句里是手机打开的对外地址（不是 `127.0.0.1`），要做的事前面多一项：
+
+```text
+本机已接入 https://<机器名>.<tailnet>.ts.net。接下来检查本机 hub（必要时重新托管）、重装钩子（连同 Codex 的 notify）、重启守护进程，继续吗？[Y/n]
+```
+
+答 `n` 什么都不动（不碰 Tailscale、不托管、不装钩子），打印「已取消，本机 hub、钩子与守护进程都没动」，退出 1。
 
 **数据目录不是 `~/.railse` 时。** 托管的守护进程带着 `RAILSE_HOME=<目录>` 跑，CLI 起钩子时的环境里却不一定有它（只在跑 setup 的那条命令上设的 `RAILSE_HOME` 也进不去），不带 `--socket` 的钩子就会去连 `~/.railse/agent.sock`，请求全都交回终端、进不了 hub。所以守护进程的数据目录（`--dir`，没给时取 `$RAILSE_HOME`）不是 `~/.railse` 时，`setup all` 与 `setup hooks` 在钩子命令里写上 `--socket <目录>/agent.sock`（`setup codex-notify` 生成的脚本里 railse 那一行也带上）；是 `~/.railse` 时命令不变。以前换过数据目录、钩子却是按 `~/.railse` 装的，`railse doctor --dir <目录>` 的 `hooks.*` 会报 warn（doctor 把不带 `--socket` 的钩子一律当作连 `~/.railse/agent.sock`），照提示重跑 `railse setup hooks --dir <目录>`，Codex 的 `notify` 用 `railse setup codex-notify --dir <目录>` 重新生成。
 
@@ -144,7 +208,7 @@ railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]
 railse doctor [--project 目录] [--dir 目录] [--hub-dir 目录] [--bin 路径] [--json]
 ```
 
-只读：不改配置、不建文件，数据库按只读打开；网络只访问 hub 的 `GET /api/version`（不带凭据）；唯一会起的进程是 `claude`、`codex`、`gemini` 的 `--version`（各 10 秒超时），sudo 下（euid 是 root，或家目录不归当前用户）不跑，`cli.*` 报 skip。每项结果是 `ok`、`warn`、`fail`、`skip` 之一，warn 与 fail 下一行给“修复：”；有任一项 fail 退出码 1；`--json` 输出机器可读的结果（ID 固定不变）。
+只读：不改配置、不建文件，数据库按只读打开；网络只访问 hub 的 `GET /api/version`（不带凭据；`machine.json` 里的地址，本机 hub 还有它的对外地址）；会起的进程只有 `claude`、`codex`、`gemini` 的 `--version`（各 10 秒超时）与本机 hub 由 Tailscale 提供时的 `tailscale serve status --json`（15 秒超时），sudo 下（euid 是 root，或家目录不归当前用户）都不跑，`cli.*` 与 `hubsrv.local` 报 skip。每项结果是 `ok`、`warn`、`fail`、`skip` 之一，warn 与 fail 下一行给“修复：”；有任一项 fail 退出码 1；`--json` 输出机器可读的结果（ID 固定不变）。
 
 hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux 上两者都没有时再看 `/var/lib/railse-hub`（系统单元的），但只在它归当前用户（即服务用户）或以 root 跑 doctor 时才看，属于别的用户时 hub 侧整段 skip 并说明（换那个用户跑，或给 `--hub-dir`）。默认目录都不在就跳过 hub 侧（Linux 上 skip 的说明列出查过的两个位置）；显式给的 `--hub-dir` 不存在时报 fail。系统单元的 hub 要以服务用户身份检查（`railse doctor`，或 `sudo -u 名字 /usr/local/bin/railse doctor --hub-dir /var/lib/railse-hub`），别的用户读不到 `hub.db`；服务用户的家目录里另有 `~/.railse-hub` 时，doctor 默认看的是它，这时显式给 `--hub-dir`。
 
@@ -170,6 +234,7 @@ hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux
 | `hubsrv.password` | 网页密码 | 设过网页密码 | `railse hub password`（warn） |
 | `hubsrv.vapid` | 推送密钥 | 推送密钥在、解得开 | 还没有（warn）：首次 `railse hub run` 会生成；损坏（fail）：`railse hub vapid --rotate`，所有手机重新开启通知 |
 | `hubsrv.acme` | ACME 证书目录 | `acme/` 是 0700、里面的文件 0600；没有这个目录（没用 ACME）时 skip | 按提示 `chmod` |
+| `hubsrv.local` | 本机 hub 对外地址 | 读 hub 数据目录里 `setup all --local-hub` 写的 `local-hub.json`（没有时 skip）：Tailscale 提供的先看 `tailscale serve status --json` 里 Funnel 是否把 `<机器名>:443` 转到 `127.0.0.1:<端口>`（sudo 下整项 skip）；不论哪种都从本机 GET 一次 `<对外地址>/api/version`，答得上是 hub 为 ok（Tailscale 提供的，本机经 MagicDNS 走 tailnet 访问到，没经过 Funnel 的公网入口，细节里注明，公网上打不打得开用手机 4G 验证）。端口上的 hub 本身由 `hub.reachable` 看 | `local-hub.json` 坏了（只说哪一项不合规，不回显内容）：重跑 `railse setup all --local-hub --hub-dir <目录>`（守护进程不在 `~/.railse` 时带 `--dir`，用自己隧道的再带 `--public-url`）；找不到 tailscale、Funnel 没转到这个端口（fail）：装好并登录 Tailscale，`tailscale funnel --bg <端口>` 或重跑同一条 setup；从本机访问不到（warn）：常是本机代理拦着 `*.ts.net`，用手机 4G 打开验证，Funnel 入口 TLS 握手失败时先关掉代理再试 |
 | `hubsrv.autostart` | hub 开机自启 | 有没有 hub 的托管文件（plist、用户单元或系统单元） | `railse setup autostart --hub`（warn） |
 
 ## 升级

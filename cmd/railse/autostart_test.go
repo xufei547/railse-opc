@@ -602,6 +602,48 @@ func TestAutostartUninstallWhenMissing(t *testing.T) {
 	}
 }
 
+// 卸载 hub 的托管时，数据目录里的 local-hub.json 说对外地址由 Tailscale Funnel 提供（setup all --local-hub 装的）：Funnel 不随托管
+// 一起撤，多打一行说它还开着、怎么关；不替用户关，也不碰 tailscale。自己的隧道、没有这个文件、卸载守护进程时都不说。
+func TestAutostartHubUninstallRemindsFunnel(t *testing.T) {
+	home, _ := autostartEnv(t)
+	hubDir := filepath.Join(home, "hub")
+	if err := ensureHubDir(hubDir); err != nil {
+		t.Fatal(err)
+	}
+	const remind = "tailscale funnel --https=443 off"
+	for _, goos := range []string{"darwin", "linux"} {
+		for _, tc := range []struct {
+			lh   *localHub
+			args []string
+			want bool
+		}{
+			{&localHub{Port: 8787, PublicURL: "https://mac.tail2613ae.ts.net", Provider: "tailscale"}, []string{"--hub", "--uninstall", "--dir", hubDir}, true},
+			{&localHub{Port: 8787, PublicURL: "https://hub.example.com", Provider: "custom"}, []string{"--hub", "--uninstall", "--dir", hubDir}, false},
+			{nil, []string{"--hub", "--uninstall", "--dir", hubDir}, false},
+			{&localHub{Port: 8787, PublicURL: "https://mac.tail2613ae.ts.net", Provider: "tailscale"}, []string{"--uninstall", "--dir", hubDir}, false},
+		} {
+			os.Remove(localHubPath(hubDir))
+			if tc.lh != nil {
+				if err := saveLocalHub(hubDir, *tc.lh); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out, errOut bytes.Buffer
+			if code := runAutostartOS(goos, 1000, tc.args, &out, &errOut); code != 0 {
+				t.Fatalf("%s %v: %d %s", goos, tc.args, code, errOut.String())
+			}
+			s := out.String()
+			if got := strings.Contains(s, remind); got != tc.want {
+				t.Fatalf("%s %v %+v: 提醒关 Funnel = %v，想要 %v:\n%s", goos, tc.args, tc.lh, got, tc.want, s)
+			}
+			if tc.want && (!strings.Contains(s, "Funnel 可能还开着（tailscale funnel status 看）") || !strings.Contains(s, "https://mac.tail2613ae.ts.net") ||
+				!strings.Contains(s, "不用就 "+remind)) {
+				t.Fatalf("%s: 应说哪个地址的 Funnel 还开着:\n%s", goos, s)
+			}
+		}
+	}
+}
+
 func TestAutostartUninstallStopFailure(t *testing.T) {
 	home, rec := autostartEnv(t)
 	plist := filepath.Join(home, "Library", "LaunchAgents", "dev.railse.agent.plist")

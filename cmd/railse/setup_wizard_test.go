@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
 // countingReader 记下被读走了多少字节：用来断言某条路径根本没碰 stdin。
@@ -37,12 +39,30 @@ func fakeStdin(t *testing.T, terminal bool, input string) *countingReader {
 	return r
 }
 
-// 向导问到的三个问题的提示（各取开头一段）
+// 向导问到的问题的提示（各取开头一段）：第一问 hub 在哪里，答“已有 hub”后的三问
 const (
+	askWherePrompt = "hub 在哪里？"
 	askHubPrompt   = "hub 地址（"
 	askTokenPrompt = "接入码（"
 	askNamePrompt  = "本机在 hub 里的名字（"
 )
+
+// tailscaleFound 让向导第一问看到的 tailscale 找得到或找不到（不找真实的）；找得到时也不该真跑它。
+func tailscaleFound(t *testing.T, found bool) {
+	t.Helper()
+	oldFind, oldRun := tailscaleFind, tailscaleRun
+	tailscaleFind = func() (string, error) {
+		if found {
+			return filepath.Join(t.TempDir(), "tailscale"), nil
+		}
+		return "", tailscale.ErrNotFound
+	}
+	tailscaleRun = func(ctx context.Context, path string, args ...string) (string, error) {
+		t.Fatalf("不该跑 tailscale %v", args)
+		return "", nil
+	}
+	t.Cleanup(func() { tailscaleFind, tailscaleRun = oldFind, oldRun })
+}
 
 // testExe 是测试程序本身的绝对路径：不给 --bin 时 setup all 把钩子与托管文件指向它。
 func testExe(t *testing.T) string {
@@ -57,15 +77,16 @@ func testExe(t *testing.T) string {
 	return exe
 }
 
-// 终端里不带子命令跑 railse setup：依次问 hub 地址、接入码、名字（直接回车取主机名），再照 setup all 做完；
-// 最后把 hub 地址框起来，并提示用 Safari 加到主屏幕。
+// 终端里不带子命令跑 railse setup：先问 hub 在哪里（没找到 tailscale，默认 [2]，这里答 2），再依次问 hub 地址、接入码、
+// 名字（直接回车取主机名），再照 setup all 做完；最后把 hub 地址框起来，并提示用 Safari 加到主屏幕。
 func TestSetupWizardAsksThenRunsSetupAll(t *testing.T) {
 	needUserAutostart(t)
 	h := startTestHub(t)
 	f := setupAllEnv(t)
 	t.Setenv("RAILSE_HOME", f.dir)
 	t.Chdir(f.proj)
-	fakeStdin(t, true, h.http.URL+"\n"+newEnrollToken(t, h)+"\n\n")
+	tailscaleFound(t, false)
+	fakeStdin(t, true, "2\n"+h.http.URL+"\n"+newEnrollToken(t, h)+"\n\n")
 	var out, errOut bytes.Buffer
 	if code := run([]string{"setup"}, &out, &errOut); code != 0 {
 		t.Fatalf("railse setup: %d\n%s\n%s", code, out.String(), errOut.String())
@@ -92,6 +113,12 @@ func TestSetupWizardAsksThenRunsSetupAll(t *testing.T) {
 	}
 	if strings.Index(s, askNamePrompt) > strings.Index(s, "== 1. ") {
 		t.Fatalf("应先问完再开始第 1 步:\n%s", s)
+	}
+	if at := strings.Index(s, askWherePrompt+"\n"); at != 0 || !strings.Contains(s, "选 [2]：") || strings.Index(s, "选 [2]：") > strings.Index(s, askHubPrompt) {
+		t.Fatalf("应先问 hub 在哪里（默认 [2]），再问 hub 地址:\n%s", s)
+	}
+	if strings.Contains(s, "本机 hub ==") {
+		t.Fatalf("答 2 不该走本机 hub:\n%s", s)
 	}
 	bar := strings.Repeat("═", len(h.http.URL)+4)
 	box := "下一步：在手机上打开\n╔" + bar + "╗\n║  " + h.http.URL + "  ║\n╚" + bar + "╝\n手机 Safari 打开后分享→添加到主屏幕，再从图标打开；登录后在设置里开启通知（见 docs/web.md）。\n"
@@ -238,8 +265,9 @@ func TestSetupWizardSkipsQuestionsWhenEnrolled(t *testing.T) {
 	f := setupAllEnv(t)
 	t.Setenv("RAILSE_HOME", f.dir)
 	t.Chdir(f.proj)
+	hub := h.http.URL
 	var out, errOut bytes.Buffer
-	if code := run([]string{"agent", "enroll", "--hub", h.http.URL, "--token", newEnrollToken(t, h)}, &out, &errOut); code != 0 {
+	if code := run([]string{"agent", "enroll", "--hub", hub, "--token", newEnrollToken(t, h)}, &out, &errOut); code != 0 {
 		t.Fatalf("enroll: %d %q", code, errOut.String())
 	}
 	f.rec.respond = jobState(false) // 托管的作业没在跑：问句说托管并启动
@@ -252,11 +280,13 @@ func TestSetupWizardSkipsQuestionsWhenEnrolled(t *testing.T) {
 	if strings.Contains(s, askHubPrompt) || strings.Contains(s, askTokenPrompt) || strings.Contains(s, askNamePrompt) {
 		t.Fatalf("已接入时不该问接入的问题:\n%s", s)
 	}
-	if strings.Count(s, askRerunPrompt) != 1 || !strings.Contains(s, rerunPrompt(h.http.URL, "重装钩子（连同 Codex 的 notify）、托管并启动守护进程")) {
+	if strings.Count(s, askRerunPrompt) != 1 || !strings.Contains(s, rerunPrompt(hub, "重装钩子（连同 Codex 的 notify）、托管并启动守护进程")) {
 		t.Fatalf("重装钩子、托管守护进程之前应确认一次:\n%s", s)
 	}
-	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "已托管") || !strings.Contains(s, "║  "+h.http.URL+"  ║") {
-		t.Fatalf("应跳过接入、照常跑完，框里是 machine.json 的地址:\n%s", s)
+	// 测试 hub 在 127.0.0.1：手机打不开，框里不画，说手机要打开对外地址；默认 hub 数据目录里没有 local-hub.json，本机 hub 的事只说成条件句
+	if !strings.Contains(s, "已接入过") || !strings.Contains(s, "已托管") || strings.ContainsAny(s[strings.Index(s, "下一步"):], "╔║╚") ||
+		!strings.Contains(s, "注意：手机要打开 hub 的对外地址（不是本机接的 "+hub) || !strings.Contains(s, "如果是 railse setup all --local-hub 装的") {
+		t.Fatalf("应跳过接入、照常跑完，不画回环地址:\n%s", s)
 	}
 	// 从 railse setup 进来的人照抄得了：railse setup --force 是用法错误，要写成完整的 setup all 命令
 	if !strings.Contains(s, "要换 hub 或重新接入：railse setup all --force\n") {
@@ -523,7 +553,7 @@ func TestIsTerminalRejectsNullPipeAndFile(t *testing.T) {
 // 框宽按地址的字符数（不是字节数）算，框里只放地址；地址为空时不画框。
 func TestPrintPhoneStep(t *testing.T) {
 	var b bytes.Buffer
-	printPhoneStep(&b, "https://railse-hub.fly.dev")
+	printPhoneStep(&b, "https://railse-hub.fly.dev", false)
 	want := "\n下一步：在手机上打开\n" +
 		"╔══════════════════════════════╗\n" +
 		"║  https://railse-hub.fly.dev  ║\n" +
@@ -533,13 +563,165 @@ func TestPrintPhoneStep(t *testing.T) {
 		t.Fatalf("想要:\n%s\n得到:\n%s", want, b.String())
 	}
 	b.Reset()
-	printPhoneStep(&b, "https://例子.cn")
+	printPhoneStep(&b, "https://例子.cn", false)
 	if !strings.Contains(b.String(), "\n╔"+strings.Repeat("═", 17)+"╗\n║  https://例子.cn  ║\n╚"+strings.Repeat("═", 17)+"╝\n") {
 		t.Fatalf("框宽应按字符数算:\n%s", b.String())
 	}
 	b.Reset()
-	printPhoneStep(&b, "")
+	printPhoneStep(&b, "", false)
 	if s := b.String(); strings.ContainsAny(s, "╔║╚") || !strings.Contains(s, "下一步") || !strings.Contains(s, "添加到主屏幕") {
 		t.Fatalf("地址为空时不画框:\n%s", s)
+	}
+	// 本机 hub（地址由 Tailscale 给）：框下面多一行，说地址由 Tailscale 提供、手机挂着代理打不开时关掉代理，其余不变
+	b.Reset()
+	printPhoneStep(&b, tsPublicURL, false)
+	remote := b.String()
+	b.Reset()
+	printPhoneStep(&b, tsPublicURL, true)
+	local := b.String()
+	box := "║  " + tsPublicURL + "  ║\n╚" + strings.Repeat("═", len(tsPublicURL)+4) + "╝\n"
+	extra := "这个地址由 Tailscale 提供；手机挂着代理打不开时关掉代理再试。\n"
+	if local != strings.Replace(remote, box, box+extra, 1) || !strings.Contains(local, "代理") {
+		t.Fatalf("本机模式应在框下面多一行代理的提醒:\n%s", local)
+	}
+}
+
+// 向导第一问答 1：照 setup all --local-hub 做完（不问 hub 地址、接入码、名字；没设过网页密码的接着问密码），框里是 Tailscale 给的地址。
+// 默认端口换成了空闲端口（不碰本机的 8787），默认 hub 数据目录是临时目录。
+func TestSetupWizardFirstQuestionLocal(t *testing.T) {
+	f := localSetupEnv(t)
+	t.Setenv("RAILSE_HUB_HOME", f.hubDir)
+	fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+	spy := startLocalTestHub(t, f.hubDir, f.port)
+	stubHubJobRunning(t, true)
+	fakeStdin(t, true, "1\n"+localHubTestPassword+"\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup"}, &out, &errOut); code != 0 {
+		t.Fatalf("railse setup 答 1: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	for _, want := range []string{askWherePrompt, "1) 本机：用 Tailscale 给手机一个地址", "2) 已有 hub：填它的地址和接入码", "选 [1]：", "网页密码已设好",
+		"== 1. 本机 hub ==", "== 5. 体检 ==", "║  " + tsPublicURL + "  ║"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("输出缺 %q:\n%s", want, s)
+		}
+	}
+	for _, p := range askedForEnrollment {
+		if strings.Contains(s, p) {
+			t.Fatalf("答 1 不该问 %q:\n%s", p, s)
+		}
+	}
+	if m, err := agent.LoadMachine(f.machinePath()); err != nil || m.HubURL != f.localHubURL() {
+		t.Fatalf("应接入本机 hub: %+v %v", m, err)
+	}
+	assertNoEnrollSecrets(t, oneEnrollToken(t, spy), s, errOut.String())
+}
+
+// 找得到 tailscale 时默认是 [1]，答 2 照样走已有 hub 的问答，结果同 TestSetupWizardAsksThenRunsSetupAll。
+func TestSetupWizardFirstQuestionRemote(t *testing.T) {
+	needUserAutostart(t)
+	h := startTestHub(t)
+	f := setupAllEnv(t)
+	t.Setenv("RAILSE_HOME", f.dir)
+	t.Chdir(f.proj)
+	tailscaleFound(t, true)
+	fakeStdin(t, true, "2\n"+h.http.URL+"\n"+newEnrollToken(t, h)+"\n\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup"}, &out, &errOut); code != 0 {
+		t.Fatalf("railse setup 答 2: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	host := agent.ConfigIn(f.dir).MachineID
+	if m, err := agent.LoadMachine(filepath.Join(f.dir, "machine.json")); err != nil || m.Name != host || m.HubURL != h.http.URL {
+		t.Fatalf("应已用答的地址接入、名字取主机名 %q: %+v %v", host, m, err)
+	}
+	s := out.String()
+	for _, want := range []string{"选 [1]：", askHubPrompt, askTokenPrompt, askNamePrompt, "已接入 hub", "已托管", "║  " + h.http.URL + "  ║"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("输出缺 %q:\n%s", want, s)
+		}
+	}
+	if strings.Index(s, askWherePrompt) > strings.Index(s, askHubPrompt) || strings.Contains(s, "本机 hub ==") || strings.Contains(s, "Tailscale 提供") {
+		t.Fatalf("答 2 应先问 hub 在哪里、再走已有 hub 的问答，不走本机 hub:\n%s", s)
+	}
+}
+
+// 直接回车取默认：找不到 tailscale 时是 [2]（已有 hub 的问答），找得到时是 [1]（本机 hub）。
+func TestSetupWizardFirstQuestionDefaults(t *testing.T) {
+	f := localSetupEnv(t)
+	tailscaleFound(t, false)
+	fakeStdin(t, true, "\n") // 回车选 2，接着问 hub 地址时 Ctrl-D 取消
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "已取消，什么都没做") {
+		t.Fatalf("找不到 tailscale、回车: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if s := out.String(); !strings.Contains(s, "选 [2]：") || !strings.Contains(s, askHubPrompt) || strings.Contains(s, "== 1.") {
+		t.Fatalf("找不到 tailscale 时默认应是 [2]，回车走已有 hub 的问答:\n%s", s)
+	}
+	// 找得到：回车选 1，走本机 hub（假 tailscale 说没登录，停在第 1 步）
+	fakeTailscale(t, `{"BackendState":"NeedsLogin","Self":{"DNSName":"","Online":false}}`, "", "", 0)
+	fakeStdin(t, true, "\n")
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"setup"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "停在第 1 步（本机 hub）") || !strings.Contains(errOut.String(), "登录") {
+		t.Fatalf("找得到 tailscale、回车: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if s := out.String(); !strings.Contains(s, "选 [1]：") || !strings.Contains(s, "== 1. 本机 hub ==") || strings.Contains(s, askHubPrompt) {
+		t.Fatalf("找得到 tailscale 时默认应是 [1]，回车走本机 hub:\n%s", s)
+	}
+	if _, err := os.Stat(f.machinePath()); !os.IsNotExist(err) {
+		t.Fatal("停在第 1 步不该接入")
+	}
+}
+
+// 第一问答 1、2 以外的：说明怎么答再问；Ctrl-D 取消（先换一行），读输入出错同样什么都不做。只读到答案那一行，后面的行留给接着的问题。
+func TestSetupWizardFirstQuestionReasks(t *testing.T) {
+	f := setupAllEnv(t)
+	tailscaleFound(t, false)
+	fakeStdin(t, true, "3\n 2 \n") // 第二个答案前后有空白；接着问 hub 地址时 Ctrl-D 取消
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "已取消，什么都没做") {
+		t.Fatalf("%d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	if strings.Count(s, "请答 1 或 2") != 1 || strings.Count(s, "选 [2]：") != 2 || !strings.Contains(s, askHubPrompt) {
+		t.Fatalf("答 3 应说明后重问一次，答 2 后问 hub 地址:\n%s", s)
+	}
+	for _, input := range []string{"", "1"} { // 没答、答了一半就 Ctrl-D
+		fakeStdin(t, true, input)
+		out.Reset()
+		errOut.Reset()
+		if code := run([]string{"setup"}, &out, &errOut); code != 1 || errOut.String() != "已取消，什么都没做\n" || !strings.HasSuffix(out.String(), "选 [2]：\n") {
+			t.Fatalf("%q: Ctrl-D 应取消、提示后换行: %d %q %q", input, code, out.String(), errOut.String())
+		}
+	}
+	fakeStdin(t, true, "")
+	setupStdin = iotest.ErrReader(errors.New("坏了"))
+	errOut.Reset()
+	if code := run([]string{"setup"}, &out, &errOut); code != 1 || errOut.String() != "读输入失败，什么都没做：坏了\n" {
+		t.Fatalf("读输入出错: %d %q", code, errOut.String())
+	}
+	for _, p := range []string{filepath.Join(f.home, ".railse"), filepath.Join(f.home, ".claude"), filepath.Join(f.home, ".codex")} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("取消后不该有 %s", p)
+		}
+	}
+	if len(f.rec.calls) != 0 {
+		t.Fatalf("取消后不该跑命令: %v", f.rec.calls)
+	}
+}
+
+// 已接入过（有 machine.json）：railse setup 不问 hub 在哪里，也不找 tailscale，直接照 setup all 不带参数走（这里在重装确认时答 n）。
+func TestSetupWizardSkipsFirstQuestionWhenEnrolled(t *testing.T) {
+	f := setupAllEnv(t)
+	writeMachine(t, filepath.Join(f.home, ".railse", "machine.json"), "https://hub.example.com")
+	noTailscale(t)
+	f.rec.respond = jobState(false)
+	fakeStdin(t, true, "n\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "已取消") {
+		t.Fatalf("%d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if s := out.String(); strings.Contains(s, askWherePrompt) || !strings.Contains(s, "已接入过") || !strings.Contains(s, rerunPrompt("https://hub.example.com", "重装钩子（连同 Codex 的 notify）、托管并启动守护进程")) {
+		t.Fatalf("已接入时不该问 hub 在哪里，应照 setup all 走到重装确认:\n%s", s)
 	}
 }

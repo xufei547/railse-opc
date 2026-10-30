@@ -272,12 +272,7 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		srv, err := hub.New(cfg, st, log.New(io.Discard, "", 0))
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		ch, err := srv.SetPassword(pw)
+		ch, err := setHubPassword(cfg, st, pw)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -328,16 +323,21 @@ func runHubVapid(st *store.Store, rotate bool, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// readPassword 从 stdin 读一行密码，去掉行尾的 \r\n。stdin 是终端时先在 stderr 提示。
-// 长度下限由 SetPassword 检查；这里只挡超过 maxPasswordBytes 的（登录时请求体放不下）。错误信息不含密码。
+// readPassword 是 railse hub password 读密码：stdin 是终端时先在 stderr 提示，再按 readPasswordLine 读一行。
 func readPassword(stdin io.Reader, stderr io.Writer) (string, error) {
-	if stdin == nil {
-		return "", errors.New("没有读到密码")
-	}
 	if f, ok := stdin.(*os.File); ok {
 		if fi, err := f.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
 			fmt.Fprint(stderr, "输入新密码后回车（屏幕会回显；要避免回显可用 read -s 读进变量再通过管道传入）: ")
 		}
+	}
+	return readPasswordLine(stdin)
+}
+
+// readPasswordLine 从 stdin 读一行密码，去掉行尾的 \r\n，不提示（提示由调用方打）。
+// 长度下限由 SetPassword 检查；这里只挡超过 maxPasswordBytes 的（登录时请求体放不下）。错误信息不含密码。
+func readPasswordLine(stdin io.Reader) (string, error) {
+	if stdin == nil {
+		return "", errors.New("没有读到密码")
 	}
 	line, err := bufio.NewReader(io.LimitReader(stdin, maxPasswordBytes+2)).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {

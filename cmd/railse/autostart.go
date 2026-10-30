@@ -314,7 +314,17 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 	case *status:
 		return autostartStatus(goos, sp, *dryRun, stdout)
 	case *uninstall:
-		return autostartUninstall(goos, sp, *dryRun, stdout, stderr)
+		code := autostartUninstall(goos, sp, *dryRun, stdout, stderr)
+		// setup all --local-hub 装的本机 hub，对外地址由 Tailscale Funnel 提供：Funnel 不随托管一起撤，说一声可能还开着、怎么关
+		// （也可能从没开成：停在“Funnel 未开通”时 local-hub.json 已写下）。不替用户关：tailscale funnel --https=443 off 会关掉 443 上的
+		// 整个 Funnel，那里可能还有别的配置
+		if code == 0 && sp.Kind == "hub" {
+			if lh, ok, err := loadLocalHub(sp.Dir); err == nil && ok && lh.Provider == "tailscale" {
+				fmt.Fprintf(stdout, "注意：Tailscale Funnel 可能还开着（tailscale funnel status 看），%s 可能仍转到 127.0.0.1:%d；"+
+					"不用就 tailscale funnel --https=443 off（会关掉 443 上的整个 Funnel，有别的配置先核对）\n", lh.PublicURL, lh.Port)
+			}
+		}
+		return code
 	default:
 		return autostartInstall(goos, sp, runAs, *dryRun, stdout, stderr)
 	}

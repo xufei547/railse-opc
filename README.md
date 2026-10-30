@@ -64,7 +64,17 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
 
 支持 macOS（Apple Silicon）和 Linux（amd64、arm64）。不调用 sudo，`/usr/local/bin` 可写就装那里，否则装 `~/.local/bin`；升级就是重跑一遍。也可以 `go install github.com/xufei547/railse-opc/cmd/railse@latest`，但不带手机网页，只适合工作机。
 
-## 三步上手
+## 上手
+
+**一台机器就够。** 工作机上装好 [Tailscale](https://tailscale.com/download) 并登录，然后：
+
+```sh
+railse setup all --local-hub
+```
+
+它在本机起 hub，用 Tailscale Funnel 给手机一个固定的 https 地址（不用服务器、域名、证书），接入本机守护进程，装钩子，设开机自启，跑体检，最后打印手机要打开的地址。第一次会让你设手机登录的密码；tailnet 没开通 Funnel 时它会打印开通链接，开通后重跑。机器睡眠时 hub 也不在，但那时 agent 也停了，单机用户没损失；几台机器的，把 hub 放在常开的那台。手机挂着代理打不开地址时，关掉代理，或在代理规则里把 `ts.net` 设为直连。细节见 [docs/setup.md](docs/setup.md) 的“一台机器就够：本机 hub”。
+
+**有服务器的。** 三步：hub 机器、每台工作机、手机。
 
 1. **hub 机器**：域名已解析到这台机器，443、80 对公网开放。macOS 上：
    ```sh
@@ -94,7 +104,7 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
 
 ## 文档
 
-- [docs/setup.md](docs/setup.md)：安装、hub 部署（Linux 服务、反向代理）、接入、开机自启、`railse doctor` 各检查项、升级
+- [docs/setup.md](docs/setup.md)：安装、本机 hub（一台机器就够）、hub 部署（Linux 服务、反向代理）、接入、开机自启、`railse doctor` 各检查项、升级
 - [docs/hub.md](docs/hub.md)：hub 的接口、推送、安全、Fly.io、故障排查
 - [docs/web.md](docs/web.md)：手机网页
 - [docs/agent-local-loop.md](docs/agent-local-loop.md)：守护进程、钩子、规则、审计
@@ -110,6 +120,7 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
 - 项目在 `/opt`、`/usr`、`/var` 这类系统目录里时没有项目根（`/opt/homebrew` 是 git 仓库也一样），所有写入都要审批；家目录、`/tmp` 和 macOS 的 `$TMPDIR` 下的项目不受影响。
 - iPhone 要 iOS 16.4 以上，先加到主屏幕、从图标打开才能收推送。划掉应用、锁屏、几小时后还能不能收到，还没在真机上完整测过。
 - hub 的域名第一天就定下：推送订阅和主屏幕图标都绑在域名上，换域名要每台手机删掉图标、重新添加、重新开启通知。
+- 本机 hub 的地址绑在 Tailscale 机器名上，改名等于换域名，手机要重新添加、重新开启通知。
 
 ## 开发
 

@@ -10,12 +10,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,11 +71,33 @@ func fakeOpts(t *testing.T) (Options, string) {
 		DefaultSocket: sock, // 不看测试进程的 $RAILSE_HOME 与真实家目录：默认目录就是这个守护进程目录
 		LookPath:      func(string) (string, error) { return "", errors.New("not found") },
 		RunCmd:        func(string, ...string) (string, error) { return "", errors.New("不该跑") },
-		AgentStatus:   func(string) (proto.Status, error) { return proto.Status{Rules: 2, Hub: "none"}, nil },
+		// 不找、不跑本机真的 tailscale：要用它的测试自己换上假的
+		TailscalePath: func() (string, error) { return "", errors.New("测试里不找 tailscale") },
+		TailscaleRun: func(context.Context, string, ...string) (string, error) {
+			return "", errors.New("测试里不跑 tailscale")
+		},
+		HTTP:        loopbackOnlyClient(t), // 测试忘了换 HTTP 也不出网
+		AgentStatus: func(string) (proto.Status, error) { return proto.Status{Rules: 2, Hub: "none"}, nil },
 		// 固定成普通用户、家目录归自己：测试在 root 下跑也照常跑 --version 的分支
 		Geteuid:   func() int { return 1000 },
 		FileOwner: func(string) (int, bool) { return 1000, true },
 	}, home
+}
+
+// loopbackOnlyClient 只连回环 IP 的字面地址（测试里的 httptest 服务），别的主机直接报错，不做 DNS、不拨号；不跟重定向，同 doctor 的默认。
+func loopbackOnlyClient(t *testing.T) *http.Client {
+	tr := &http.Transport{} // 不走环境里的代理
+	t.Cleanup(tr.CloseIdleConnections)
+	return &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			if a, err := netip.ParseAddr(r.URL.Hostname()); err != nil || !a.Unmap().IsLoopback() {
+				return nil, errors.New("测试里不出网：" + r.URL.Hostname())
+			}
+			return tr.RoundTrip(r)
+		}),
+	}
 }
 
 func TestAgentChecksHappyAndPermissions(t *testing.T) {
@@ -1170,6 +1194,60 @@ func TestHubDBReadWhileHubRunning(t *testing.T) {
 	}
 }
 
+// HubMachine 只读地查 hub 库里的机器（setup all 重跑本机 hub 时核对）：没有 hub.db 不算错、找不到；id 与密钥都对上才算找到，
+// 另报是否已吊销。hub 没在跑（没有 -wal）与在跑（库开着）两种都读得到，也都不多建文件、不改库。
+func TestHubMachine(t *testing.T) {
+	hubDir := filepath.Join(t.TempDir(), "hub")
+	if found, revoked, err := HubMachine(hubDir, "m", "s"); found || revoked || err != nil {
+		t.Fatalf("没有 hub 数据目录: %v %v %v", found, revoked, err)
+	}
+	var mine, gone string
+	newHubDB(t, hubDir, func(st *store.Store) {
+		m, err := st.CreateMachine("mac", "s-mine", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mine = m.ID
+		g, err := st.CreateMachine("old", "s-gone", "")
+		if err == nil {
+			err = st.RevokeMachine(g.ID)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		gone = g.ID
+	})
+	check := func(when string) {
+		t.Helper()
+		before := snapshot(t, hubDir)
+		for _, c := range []struct {
+			id, secret     string
+			found, revoked bool
+		}{
+			{mine, "s-mine", true, false},
+			{mine, "s-other", false, false}, // 密钥对不上：守护进程拿它连 hub 也会被拒
+			{"no-such", "s-mine", false, false},
+			{gone, "s-gone", true, true},
+		} {
+			found, revoked, err := HubMachine(hubDir, c.id, c.secret)
+			if err != nil || found != c.found || revoked != c.revoked {
+				t.Fatalf("%s %s/%s: found=%v revoked=%v err=%v，想要 %v %v", when, c.id, c.secret, found, revoked, err, c.found, c.revoked)
+			}
+		}
+		after := snapshot(t, hubDir)
+		if names(after) != names(before) || after["hub.db"] != before["hub.db"] {
+			t.Fatalf("%s：只读地查，不该多建文件、改库：前 %s，后 %s", when, names(before), names(after))
+		}
+	}
+	check("hub 没在跑")
+	st, err := store.Open(filepath.Join(hubDir, "hub.db")) // hub 在跑：库开着，有 -wal、-shm
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	check("hub 在跑")
+}
+
 // 每个 warn 与 fail 都带修复提示，每项都有名称，ID 不重复。
 func TestEveryProblemHasHint(t *testing.T) {
 	o, home := fakeOpts(t)
@@ -1193,6 +1271,7 @@ func TestEveryProblemHasHint(t *testing.T) {
 	setSchemaVersion(t, dbPath, store.SchemaVersion-1)
 	os.Chmod(hubDir, 0o755)
 	os.Mkdir(filepath.Join(hubDir, "acme"), 0o755)
+	os.WriteFile(filepath.Join(hubDir, "local-hub.json"), []byte("{"), 0o600)
 	o.HubDir = hubDir
 	r := Run(o)
 	seen := map[string]bool{}
@@ -1746,5 +1825,343 @@ func TestProjectRootCheck(t *testing.T) {
 	o.Project = "src"
 	if c := find(t, Run(o), "project.root"); c.Status != OK || c.Detail != resolved(repo) {
 		t.Fatalf("相对的 Project: %+v", c)
+	}
+}
+
+// 本机 hub 测试里的对外地址与端口。主机在 example.com 下：httptest 的证书认 *.example.com，publicHub 的客户端把它连到本机的测试服务。
+const (
+	lhHost   = "mac.example.com"
+	lhOrigin = "https://" + lhHost
+)
+
+// lhServeOn 是 Funnel 已把 https://<lhHost> 转到 127.0.0.1:<port> 时 tailscale serve status --json 的输出（前面混着一行警告）。
+func lhServeOn(port int) string {
+	return "Warning: client version \"1.80.0\" != tailscaled server version \"1.78.1\"\n" +
+		`{"TCP":{"443":{"HTTPS":true}},"Web":{"` + lhHost + `:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:` + fmt.Sprint(port) + `"}}}},"AllowFunnel":{"` + lhHost + `:443":true}}`
+}
+
+// localHubOpts 在 fakeOpts 的基础上建 hub 数据目录并写 local-hub.json（content 为空则不写）。
+func localHubOpts(t *testing.T, content string) Options {
+	t.Helper()
+	o, home := fakeOpts(t)
+	o.HubDir = filepath.Join(home, ".railse-hub")
+	if err := os.MkdirAll(o.HubDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if content != "" {
+		if err := os.WriteFile(filepath.Join(o.HubDir, "local-hub.json"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return o
+}
+
+// publicHub 起一个 TLS 的测试服务充当对外地址：返回的客户端不论 URL 里是什么主机都连到它（不做 DNS、不出网），
+// 证书照常校验（httptest 的证书认 *.example.com）。h 为 nil 时在 /api/version 答 hub 的版本信息。hits 给出收到的“主机+路径”。
+func publicHub(t *testing.T, h http.HandlerFunc) (c *http.Client, hits func() []string) {
+	t.Helper()
+	if h == nil {
+		h = func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/version" {
+				http.NotFound(w, r)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"version": "1.2.3", "agent_proto": wire.Proto})
+		}
+	}
+	var mu sync.Mutex
+	var got []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got = append(got, r.Host+r.URL.Path)
+		mu.Unlock()
+		h(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c = srv.Client()
+	tr := c.Transport.(*http.Transport).Clone()
+	addr := srv.Listener.Addr().String()
+	tr.Proxy = nil
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	c.Transport = tr
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return c, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), got...)
+	}
+}
+
+// fakeServe 让 TailscalePath 给出假路径，TailscaleRun 只认 `<假路径> serve status --json` 并答 out（err 非空时连同输出一起报错），
+// 别的调用判测试失败；tailscale 不经 RunCmd 跑（RunCmd 被调到也判失败）。返回 TailscaleRun 的调用次数。
+func fakeServe(t *testing.T, o *Options, out string, err error) *int {
+	t.Helper()
+	const ts = "/fake/bin/tailscale"
+	n := new(int)
+	o.TailscalePath = func() (string, error) { return ts, nil }
+	o.RunCmd = func(name string, args ...string) (string, error) {
+		t.Errorf("tailscale 不该经 RunCmd 跑: %s %q", name, args)
+		return "", errors.New("不该跑")
+	}
+	o.TailscaleRun = func(ctx context.Context, name string, args ...string) (string, error) {
+		if ctx == nil || name != ts || strings.Join(args, " ") != "serve status --json" {
+			t.Errorf("不该跑 %s %q", name, args)
+			return "", errors.New("不该跑")
+		}
+		*n++
+		return out, err
+	}
+	return n
+}
+
+// 没有 local-hub.json：不是 setup all --local-hub 装的（或还没装完），skip，不找、不跑 tailscale，也不发请求。
+func TestLocalHubNoFileSkips(t *testing.T) {
+	o := localHubOpts(t, "")
+	o.TailscalePath = func() (string, error) { t.Fatal("不该找 tailscale"); return "", nil }
+	o.TailscaleRun = func(_ context.Context, name string, args ...string) (string, error) {
+		t.Fatalf("不该跑 %s %q", name, args)
+		return "", nil
+	}
+	o.HTTP = &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+		t.Fatalf("不该请求 %s", r.URL)
+		return nil, nil
+	})}
+	c := find(t, Run(o), "hubsrv.local")
+	if c.Status != Skip || !strings.Contains(c.Detail, "没有 local-hub.json") || !strings.Contains(c.Detail, "setup all --local-hub") {
+		t.Fatalf("%+v", c)
+	}
+	if c.Name != "本机 hub 对外地址" {
+		t.Fatalf("名称: %+v", c)
+	}
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Tailscale 提供的对外地址：serve status 说 Funnel 把 <主机>:443 转到 127.0.0.1:<端口>，从本机 GET <对外地址>/api/version 答得上 → ok。
+func TestLocalHubTailscaleOK(t *testing.T) {
+	o := localHubOpts(t, `{"port":8787,"public_url":"`+lhOrigin+`","provider":"tailscale"}`)
+	ran := fakeServe(t, &o, lhServeOn(8787), nil)
+	var hits func() []string
+	o.HTTP, hits = publicHub(t, nil)
+	c := find(t, Run(o), "hubsrv.local")
+	if c.Status != OK || c.Detail != lhOrigin+"，hub 版本 1.2.3（从本机经 tailnet 访问到，没经过 Funnel 的公网入口；公网上打不打得开用手机 4G 验证）" {
+		t.Fatalf("%+v", c)
+	}
+	if *ran != 1 {
+		t.Fatalf("serve status 应跑一次，跑了 %d 次", *ran)
+	}
+	if h := hits(); len(h) != 1 || h[0] != lhHost+"/api/version" {
+		t.Fatalf("应 GET 一次对外地址的 /api/version: %q", h)
+	}
+}
+
+// Funnel 没把对外地址转到这个端口（没有 serve 配置、转到别的端口、没开 Funnel）：fail，提示 tailscale funnel --bg <端口>
+// 或重跑 setup（带上 hub 数据目录）；不再请求对外地址。
+func TestLocalHubFunnelOffFails(t *testing.T) {
+	o := localHubOpts(t, `{"port":8787,"public_url":"`+lhOrigin+`/","provider":"tailscale"}`)
+	var hits func() []string
+	o.HTTP, hits = publicHub(t, nil)
+	noFunnel := `{"Web":{"` + lhHost + `:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8787"}}}}}`
+	for _, out := range []string{"No serve config\n", "", lhServeOn(8788), noFunnel} {
+		fakeServe(t, &o, out, nil)
+		c := find(t, Run(o), "hubsrv.local")
+		if c.Status != Fail || c.Detail != "Funnel 没把 "+lhHost+" 转到 127.0.0.1:8787" ||
+			!strings.Contains(c.Hint, "tailscale funnel --bg 8787") || !strings.Contains(c.Hint, "railse setup all --local-hub --hub-dir "+o.HubDir) {
+			t.Fatalf("%q: %+v", out, c)
+		}
+	}
+	if h := hits(); len(h) != 0 {
+		t.Fatalf("Funnel 没开时不该再请求对外地址: %q", h)
+	}
+}
+
+// 找不到 tailscale、serve status 出错、输出是坏 JSON：fail，细节带原因与输出摘要。
+func TestLocalHubTailscaleErrors(t *testing.T) {
+	o := localHubOpts(t, `{"port":8787,"public_url":"`+lhOrigin+`","provider":"tailscale"}`)
+	var hits func() []string
+	o.HTTP, hits = publicHub(t, nil)
+	o.TailscalePath = func() (string, error) { return "", errors.New("没有找到 tailscale") }
+	if c := find(t, Run(o), "hubsrv.local"); c.Status != Fail || !strings.Contains(c.Detail, "找不到 tailscale") || c.Hint == "" {
+		t.Fatalf("找不到 tailscale: %+v", c)
+	}
+	// 摘要跳过 Warning: 开头的行（版本不一致之类），取真正的报错
+	fakeServe(t, &o, "Warning: client version \"1.80.0\" != tailscaled server version \"1.78.1\"\n\nfailed to connect to local tailscaled; it doesn't appear to be running\n", errors.New("exit status 1"))
+	if c := find(t, Run(o), "hubsrv.local"); c.Status != Fail || !strings.Contains(c.Detail, "serve status --json 失败：exit status 1") ||
+		!strings.Contains(c.Detail, "输出：failed to connect to local tailscaled") || strings.Contains(c.Detail, "Warning") || !strings.Contains(c.Hint, "tailscale status") {
+		t.Fatalf("serve status 出错: %+v", c)
+	}
+	fakeServe(t, &o, `{"Web": oops}`, nil)
+	if c := find(t, Run(o), "hubsrv.local"); c.Status != Fail || !strings.Contains(c.Detail, "不是 JSON") || c.Hint == "" {
+		t.Fatalf("坏 JSON: %+v", c)
+	}
+	if h := hits(); len(h) != 0 {
+		t.Fatalf("tailscale 那边出错时不该再请求对外地址: %q", h)
+	}
+}
+
+// Funnel 配置对，但从本机访问不到对外地址（连不上、不是 200、不是 hub 的版本信息）：只 warn，提示可能是本机代理拦截了、用手机 4G 验证。
+func TestLocalHubUnreachableWarns(t *testing.T) {
+	o := localHubOpts(t, `{"port":8787,"public_url":"`+lhOrigin+`","provider":"tailscale"}`)
+	fakeServe(t, &o, lhServeOn(8787), nil)
+	// 连不上：TLS 握手失败（本机代理拦截 *.ts.net 时常见）
+	o.HTTP = &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("remote error: tls: handshake failure")
+	})}
+	c := find(t, Run(o), "hubsrv.local")
+	if c.Status != Warn || !strings.Contains(c.Detail, lhOrigin+"/api/version") || !strings.Contains(c.Detail, "handshake failure") ||
+		!strings.Contains(c.Hint, "代理") || !strings.Contains(c.Hint, "4G") {
+		t.Fatalf("连不上: %+v", c)
+	}
+	for name, h := range map[string]http.HandlerFunc{
+		"502":        func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) },
+		"不是 hub":     func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("<html>hello</html>")) },
+		"没有 version": func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{}`)) },
+	} {
+		o.HTTP, _ = publicHub(t, h)
+		if c := find(t, Run(o), "hubsrv.local"); c.Status != Warn || !strings.Contains(c.Detail, lhOrigin+"/api/version") || !strings.Contains(c.Hint, "代理") {
+			t.Fatalf("%s: %+v", name, c)
+		}
+	}
+}
+
+// 自己的隧道（provider custom，或没写 provider）：不找、不跑 tailscale，只从本机 GET 一次对外地址。
+func TestLocalHubCustomSkipsTailscale(t *testing.T) {
+	for _, provider := range []string{`,"provider":"custom"`, ""} {
+		o := localHubOpts(t, `{"port":8787,"public_url":"https://hub.example.com:8443"`+provider+`}`)
+		o.TailscalePath = func() (string, error) { t.Fatal("不该找 tailscale"); return "", nil }
+		o.TailscaleRun = func(_ context.Context, name string, args ...string) (string, error) {
+			t.Fatalf("不该跑 %s %q", name, args)
+			return "", nil
+		}
+		var hits func() []string
+		o.HTTP, hits = publicHub(t, nil)
+		if c := find(t, Run(o), "hubsrv.local"); c.Status != OK || c.Detail != "https://hub.example.com:8443，hub 版本 1.2.3" {
+			t.Fatalf("%q: %+v", provider, c)
+		}
+		if h := hits(); len(h) != 1 || h[0] != "hub.example.com:8443/api/version" {
+			t.Fatalf("%q: 应 GET 一次对外地址: %q", provider, h)
+		}
+		// 自己的隧道访问不到同样只 warn
+		o.HTTP = &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) { return nil, errors.New("connection refused") })}
+		if c := find(t, Run(o), "hubsrv.local"); c.Status != Warn || !strings.Contains(c.Hint, "代理") {
+			t.Fatalf("%q: 访问不到: %+v", provider, c)
+		}
+	}
+}
+
+// sudo 下（euid 是 root，或家目录不归当前用户）Tailscale 提供的整项 skip：不跑 tailscale，也不发请求。
+func TestLocalHubUnderSudoSkips(t *testing.T) {
+	o := localHubOpts(t, `{"port":8787,"public_url":"`+lhOrigin+`","provider":"tailscale"}`)
+	o.TailscalePath = func() (string, error) { t.Fatal("不该找 tailscale"); return "", nil }
+	o.TailscaleRun = func(_ context.Context, name string, args ...string) (string, error) {
+		t.Fatalf("不该跑 %s %q", name, args)
+		return "", nil
+	}
+	var hits func() []string
+	o.HTTP, hits = publicHub(t, nil)
+	for name, set := range map[string]func(){
+		"euid 是 root": func() { o.Geteuid = func() int { return 0 } },
+		"家目录归别的用户": func() {
+			o.Geteuid = func() int { return 1000 }
+			o.FileOwner = func(string) (int, bool) { return 1001, true }
+		},
+	} {
+		set()
+		if c := find(t, Run(o), "hubsrv.local"); c.Status != Skip || c.Detail != "sudo 下不跑 tailscale" {
+			t.Fatalf("%s: %+v", name, c)
+		}
+	}
+	if h := hits(); len(h) != 0 {
+		t.Fatalf("sudo 下不该请求对外地址: %q", h)
+	}
+}
+
+// local-hub.json 坏了（不是 JSON、端口不对、对外地址不合规）：fail，提示重跑 setup all --local-hub（带上 hub 数据目录）；
+// 细节只说哪一项不合规，不带文件内容与地址原文（里面可能有密码）；不碰 tailscale、不发请求。
+func TestLocalHubBrokenFileFails(t *testing.T) {
+	const secret = "hunter2-secret"
+	// custom：文件解得开且不是 Tailscale 提供的（provider 空当 custom），提示里要说再带上 --public-url
+	for _, tc := range []struct {
+		content, want string
+		custom        bool
+	}{
+		{`{"port":8787,"public_url":"https://u:` + secret + `@x.example.com"`, "不是合法 JSON", false},
+		{`{"port":"8787","public_url":"` + lhOrigin + `","provider":"custom"}`, "不是合法 JSON", false},
+		{`{"port":0,"public_url":"` + lhOrigin + `"}`, "port 0 不在 1..65535", true},
+		{`{"port":70000,"public_url":"` + lhOrigin + `","provider":"custom"}`, "port 70000 不在 1..65535", true},
+		{`{"port":70000,"public_url":"` + lhOrigin + `","provider":"tailscale"}`, "port 70000 不在 1..65535", false},
+		{`{"port":8787,"public_url":"https://u:` + secret + `@x.example.com","provider":"tailscale"}`, "public_url 不合规", false},
+		{`{"port":8787,"public_url":"http://x.example.com/` + secret + `"}`, "public_url 不合规", true},
+		{`{"port":8787,"public_url":"https://x.example.com/` + secret + `"}`, "public_url 不合规", true},
+		{`{"port":8787,"public_url":"https://x.example.com/?` + secret + `"}`, "public_url 不合规", true},
+		{`{"port":8787,"public_url":"https://x.example.com#` + secret + `"}`, "public_url 不合规", true},
+		{`{"port":8787,"public_url":"` + secret + `"}`, "public_url 不合规", true},
+		{`{"port":8787}`, "public_url 不合规", true},
+	} {
+		o := localHubOpts(t, tc.content)
+		o.TailscalePath = func() (string, error) { t.Fatal("不该找 tailscale"); return "", nil }
+		o.TailscaleRun = func(_ context.Context, name string, args ...string) (string, error) {
+			t.Fatalf("不该跑 %s %q", name, args)
+			return "", nil
+		}
+		o.HTTP = &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			t.Fatalf("不该请求 %s", r.URL)
+			return nil, nil
+		})}
+		r := Run(o)
+		c := find(t, r, "hubsrv.local")
+		if c.Status != Fail || !strings.Contains(c.Detail, tc.want) || !strings.Contains(c.Detail, "local-hub.json") ||
+			!strings.Contains(c.Hint, "railse setup all --local-hub --hub-dir "+o.HubDir+" 重写它") ||
+			strings.Contains(c.Hint, "--public-url") != tc.custom {
+			t.Fatalf("%s: %+v", tc.content, c)
+		}
+		if j, _ := r.JSON(); strings.Contains(string(j), secret) {
+			t.Fatalf("%s: 报告带出了文件内容: %+v", tc.content, c)
+		}
+	}
+}
+
+// 守护进程不在 ~/.railse（--dir 的不是默认目录）时，重跑 setup 的命令带上 --dir。
+func TestLocalHubRerunHintCarriesDir(t *testing.T) {
+	o := localHubOpts(t, `{"port":0,"public_url":"`+lhOrigin+`","provider":"tailscale"}`)
+	if c := find(t, Run(o), "hubsrv.local"); strings.Contains(c.Hint, "--dir") {
+		t.Fatalf("默认目录不该带 --dir: %+v", c)
+	}
+	o.DefaultSocket = "/elsewhere/.railse/agent.sock"
+	if c := find(t, Run(o), "hubsrv.local"); !strings.Contains(c.Hint, "railse setup all --local-hub --hub-dir "+o.HubDir+" --dir "+o.AgentDir+" 重写它") {
+		t.Fatalf("坏文件: %+v", c)
+	}
+	writeFile(t, filepath.Join(o.HubDir, "local-hub.json"), []byte(`{"port":8787,"public_url":"`+lhOrigin+`","provider":"tailscale"}`))
+	fakeServe(t, &o, "No serve config\n", nil)
+	if c := find(t, Run(o), "hubsrv.local"); c.Status != Fail || !strings.Contains(c.Hint, "或重跑 railse setup all --local-hub --hub-dir "+o.HubDir+" --dir "+o.AgentDir) {
+		t.Fatalf("Funnel 没开: %+v", c)
+	}
+}
+
+// hub 数据目录用不了或没有时，hubsrv.local 与其余依赖数据目录的几项一样按同一个原因 skip。
+func TestLocalHubFollowsHubDir(t *testing.T) {
+	o, home := fakeOpts(t)
+	o.HubDir = ""
+	if c := find(t, Run(o), "hubsrv.local"); c.Status != Skip {
+		t.Fatalf("没有 HubDir: %+v", c)
+	}
+	o.HubDir, o.HubDirRequired = filepath.Join(home, "typo"), true
+	if c := find(t, Run(o), "hubsrv.local"); c.Status != Skip || c.Detail != "hub 数据目录 "+o.HubDir+" 不存在" {
+		t.Fatalf("hub 数据目录不存在: %+v", c)
+	}
+	// 顺序：在 ACME 证书目录之后、hub 开机自启之前
+	var ids []string
+	for _, c := range Run(o).Checks {
+		if strings.HasPrefix(c.ID, "hubsrv.") {
+			ids = append(ids, c.ID)
+		}
+	}
+	if got := strings.Join(ids, " "); got != "hubsrv.dir hubsrv.db hubsrv.password hubsrv.vapid hubsrv.acme hubsrv.local hubsrv.autostart" {
+		t.Fatalf("hub 侧的顺序: %s", got)
 	}
 }

@@ -2,23 +2,43 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/xufei547/railse-opc/internal/doctor"
+	"github.com/xufei547/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
-// fakeDoctorCLIs 让测试里的 doctor 不碰本机环境：看不到任何 CLI（LookPath 一律找不到，RunCmd 被调到就算测试失败），
-// 也不回退到本机的系统 hub 目录。免得在开发机上真的跑 claude、codex、gemini 的 --version（慢，还可能往临时 HOME
-// 里建目录），CI 上又是另一种结果。经 runDoctor 体检的测试（如 setup all）都先调它。
-func fakeDoctorCLIs(t *testing.T) {
+// fakeDoctorCLIs 让测试里的 doctor 不碰本机环境，经 runDoctor 体检的测试（如 setup all）都先调它：
+//   - 看不到任何 CLI（LookPath 一律找不到，RunCmd 被调到就算测试失败），免得在开发机上真的跑 claude、codex、gemini 的
+//     --version（慢，还可能往临时 HOME 里建目录），CI 上又是另一种结果；
+//   - tailscale 只认 fakeTailscale 记下的那一个假脚本（fakeTailscaleBin）：没换上假的时 TailscalePath 直接当作找不到（不去找，
+//     也就不碰 TestMain 的兜底），找到的不是它时同样当作找不到，结果不随开发机变；TailscaleRun 只放行这个假脚本的
+//     serve status --json（交给 runDoctor 接上的 tailscaleRun 跑），别的调用都算测试失败；
+//   - HTTP 只放行回环 IP 的字面地址（hub.reachable 要连 127.0.0.1 上的测试 hub），别的主机（连 localhost 这样要解析的名字）
+//     直接报错，不做 DNS、不拨号，记进返回的 doctorGuard：本机 hub 的对外地址（如假 tailscale 给的 ts.net 域名，可能真有其机）
+//     绝不真的去连；
+//   - 不回退到本机的系统 hub 目录。
+func fakeDoctorCLIs(t *testing.T) *doctorGuard {
 	t.Helper()
+	g := &doctorGuard{}
+	// 不用 http.DefaultTransport：有的测试会把它换成别的；也不走环境里的代理
+	tr := &http.Transport{DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, TLSHandshakeTimeout: 5 * time.Second}
+	t.Cleanup(tr.CloseIdleConnections)
 	setDoctorHubFallback(t, runtime.GOOS, "")
 	setDoctorOptions(t, func(o *doctor.Options) {
 		o.LookPath = func(string) (string, error) { return "", exec.ErrNotFound }
@@ -26,7 +46,77 @@ func fakeDoctorCLIs(t *testing.T) {
 			t.Errorf("测试里的 doctor 不该跑 %s %v", name, args)
 			return "", errors.New("测试里不跑 CLI")
 		}
+		find, run := o.TailscalePath, o.TailscaleRun
+		if find == nil || run == nil {
+			t.Fatal("runDoctor 应接上 tailscaleFind 与 tailscaleRun")
+		}
+		o.TailscalePath = func() (string, error) {
+			if fakeTailscaleBin == "" {
+				return "", tailscale.ErrNotFound
+			}
+			p, err := find()
+			if err != nil {
+				return "", err
+			}
+			if fakeTailscaleBin == "" || p != fakeTailscaleBin {
+				return "", tailscale.ErrNotFound
+			}
+			return p, nil
+		}
+		o.TailscaleRun = func(ctx context.Context, path string, args ...string) (string, error) {
+			if fakeTailscaleBin != "" && path == fakeTailscaleBin && slices.Equal(args, []string{"serve", "status", "--json"}) {
+				g.add(&g.tailscale, path+" "+strings.Join(args, " "))
+				return run(ctx, path, args...)
+			}
+			t.Errorf("测试里的 doctor 不该跑 %s %v", path, args)
+			return "", errors.New("测试里不跑 tailscale")
+		}
+		o.HTTP = &http.Client{
+			Timeout:       10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, // 同 doctor 的默认
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if h := r.URL.Hostname(); !loopbackLiteral(h) {
+					g.add(&g.blocked, h)
+					return nil, errors.New("测试里不出网")
+				}
+				return tr.RoundTrip(r)
+			}),
+		}
 	})
+	return g
+}
+
+// doctorGuard 记下测试里 doctor 想连而被拦下的主机，与放行了的假 tailscale 命令。
+type doctorGuard struct {
+	mu                 sync.Mutex
+	blocked, tailscale []string
+}
+
+func (g *doctorGuard) add(list *[]string, s string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	*list = append(*list, s)
+}
+
+// blockedHosts 是到现在为止被拦下的主机（按请求的先后）。
+func (g *doctorGuard) blockedHosts() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.blocked)
+}
+
+// tailscaleRuns 是到现在为止放行了的假 tailscale 命令（“路径 参数”）。
+func (g *doctorGuard) tailscaleRuns() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.tailscale)
+}
+
+// loopbackLiteral 报告主机是不是回环 IP 的字面地址（127.0.0.0/8、::1、映射的 v4 回环）。只看字面，不做 DNS：
+// localhost 这样的名字也不算。
+func loopbackLiteral(host string) bool {
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Unmap().IsLoopback()
 }
 
 // setDoctorOptions 在本测试期间换掉 doctorOptions，结束时换回。
@@ -519,5 +609,88 @@ func TestDoctorAbsolutePaths(t *testing.T) {
 	}
 	if c := mustCheck(t, checks, "hubsrv.dir"); c.Status != "skip" || !strings.Contains(c.Detail, filepath.Join(cwd, "d")) {
 		t.Fatalf("$RAILSE_HUB_HOME 应取绝对路径: %+v", c)
+	}
+}
+
+// local-hub.json 的校验口径在两处各写了一份：setup 读写它用 normalizeLocalHub（parseHubAddr + parsePublicOrigin），doctor 的
+// hubsrv.local 不 import cmd/railse、自己再写一遍。这里用同一批端口、对外地址、provider 钉住两边：setup 收的，doctor 不报不合规；
+// setup 不收的，doctor 报不合规（fail）。免得以后改了一边，doctor 对 setup 刚写的文件报“坏了，重跑 setup”，重跑也绕不出去。
+// doctor 的输入全部注入：不找、不跑真的 tailscale，不出网。
+func TestLocalHubFileRulesMatchDoctor(t *testing.T) {
+	base := t.TempDir()
+	hubDir := filepath.Join(base, "hub")
+	if err := os.MkdirAll(hubDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	o := doctor.Options{
+		AgentDir: filepath.Join(base, "agent"), Home: base, HubDir: hubDir, HubDirRequired: true, Version: version, GOOS: runtime.GOOS,
+		DefaultSocket: filepath.Join(base, "agent", "agent.sock"),
+		LookPath:      func(string) (string, error) { return "", exec.ErrNotFound },
+		RunCmd: func(name string, args ...string) (string, error) {
+			t.Errorf("不该跑 %s %v", name, args)
+			return "", errors.New("测试里不跑 CLI")
+		},
+		TailscalePath: func() (string, error) { return "/fake/bin/tailscale", nil },
+		TailscaleRun: func(_ context.Context, path string, args ...string) (string, error) {
+			if path != "/fake/bin/tailscale" || !slices.Equal(args, []string{"serve", "status", "--json"}) {
+				t.Errorf("不该跑 %s %v", path, args)
+			}
+			return "No serve config\n", nil
+		},
+		HTTP:        &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("测试里不出网") })},
+		AgentStatus: func(string) (proto.Status, error) { return proto.Status{}, errors.New("测试里没有守护进程") },
+		Geteuid:     func() int { return 1000 },
+		FileOwner:   func(string) (int, bool) { return 1000, true },
+	}
+	urls := []string{
+		// setup 收的
+		"https://mac.example.com", "https://mac.example.com/", "https://mac.example.com//", "https://mac.example.com:8443",
+		"https://mac.example.com:8443/", "HTTPS://mac.example.com", " https://mac.example.com ", "https://[::1]:8443", "https://127.0.0.1",
+		"https://mac.example.com#",
+		// 不收的
+		"https://u:pw@mac.example.com", "https://u@mac.example.com", "https://mac.example.com?a=1", "https://mac.example.com?",
+		"https://mac.example.com#f", "https://mac.example.com/hub", "https://mac.example.com/hub/", "https://mac.example.com/%2F",
+		"http://mac.example.com", "ftp://mac.example.com", "mac.example.com", "//mac.example.com", "", "https:mac.example.com",
+		"https://", "https://:8443", "https://mac.example.com:abc", "https://mac example.com",
+	}
+	ports := []int{-1, 0, 1, 8787, 65535, 65536}
+	providers := []string{"", "custom", "tailscale", "other"}
+	var accepted, rejected int
+	for _, u := range urls {
+		for _, port := range ports {
+			for _, provider := range providers {
+				lh := localHub{Port: port, PublicURL: u, Provider: provider}
+				_, err := normalizeLocalHub(lh)
+				setupOK := err == nil
+				data, merr := json.Marshal(lh)
+				if merr != nil {
+					t.Fatal(merr)
+				}
+				if err := os.WriteFile(localHubPath(hubDir), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var c doctor.Check
+				for _, x := range doctor.Run(o).Checks {
+					if x.ID == "hubsrv.local" {
+						c = x
+					}
+				}
+				if c.ID == "" {
+					t.Fatalf("没有检查项 hubsrv.local")
+				}
+				doctorBad := strings.Contains(c.Detail, "local-hub.json 里 ") || strings.Contains(c.Detail, "不是合法 JSON")
+				if setupOK == doctorBad || doctorBad && c.Status != doctor.Fail {
+					t.Errorf("%s：setup 收=%v（%v），doctor 报 %s：%s", data, setupOK, err, c.Status, c.Detail)
+				}
+				if setupOK {
+					accepted++
+				} else {
+					rejected++
+				}
+			}
+		}
+	}
+	if accepted == 0 || rejected == 0 {
+		t.Fatalf("样本应有收有不收：收 %d、不收 %d", accepted, rejected)
 	}
 }
