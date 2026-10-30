@@ -29,8 +29,7 @@ const (
 	// pushFailureSpan ……且这一轮的第一次失败已过去这么久：几秒、几小时的推送服务故障或 hub 断网不会删光好订阅。
 	pushFailureSpan = 24 * time.Hour
 	pushTitleLen    = 80             // 通知标题的字符上限
-	pushSummaryLen  = 160            // permission 正文里“工具名: 载荷摘要”的字符上限
-	pushRiskLen     = 32             // permission 正文里风险的字符上限
+	pushSummaryLen  = 160            // permission 正文第一行（载荷摘要）的字符上限
 	pushBodyLen     = 200            // 通知正文的字符上限
 	pushTTL         = 24 * time.Hour // 投递 TTL 的上限；有期限的请求用剩下的期限（pushTTLFor）
 	pushTestTTL     = time.Minute
@@ -460,39 +459,135 @@ type pushPayload struct {
 	URL   string `json:"url"`
 }
 
-// message 组一条请求的推送载荷（机器名、项目名取自请求视图）。
-func (p *pushService) message(r store.Request) ([]byte, error) {
-	v := p.s.view(r)
-	return pushMessage(r, v.MachineName, v.Project)
+// cliNames 是推送文案里 CLI 的显示名，键是 sessions.tool。
+var cliNames = map[string]string{"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI"}
+
+// riskVerbs 是 permission 标题“<CLI> 要<动词>”里按风险等级取的动词。
+var riskVerbs = map[string]string{
+	"network":          "联网",
+	"outward":          "往外发",
+	"destructive":      "做不可逆的操作",
+	"write_outside":    "改项目外的文件",
+	"unknown":          "跑一个没见过的命令",
+	"write_in_project": "改项目里的文件",
+	"read":             "读文件",
 }
 
-// pushMessage 组推送载荷 {"id","kind","title","body","url":"/r/<id>"}：
-//   - permission：标题“机器名 · 项目”（项目空时只有机器名），正文“工具名: 载荷摘要 · 风险 <risk>”；
-//   - question：标题“机器名 · 项目：等你回答”，正文是问题；
-//   - webhook：标题“webhook”，正文是来源给的标题。
+// cliName 是 sessions.tool 的显示名；空（没有会话、查不到）与不认识的都叫“Agent”。
+func cliName(tool string) string {
+	if n, ok := cliNames[tool]; ok {
+		return n
+	}
+	return "Agent"
+}
+
+// riskVerb 是风险等级对应的动词；不认识的是“做一件事”。
+func riskVerb(risk string) string {
+	if v, ok := riskVerbs[risk]; ok {
+		return v
+	}
+	return "做一件事"
+}
+
+// machineLabel 去掉机器名结尾的 .local（macOS 的默认主机名带它，不分大小写）；整个名字就是 .local 时原样返回。
+func machineLabel(name string) string {
+	const suffix = ".local"
+	if len(name) > len(suffix) && strings.EqualFold(name[len(name)-len(suffix):], suffix) {
+		return name[:len(name)-len(suffix)]
+	}
+	return name
+}
+
+// pushWho 是推送文案里的“谁、在哪”：Tool 是请求所属会话的 sessions.tool（没有会话或查不到为空），Project 是项目名，
+// Machine 是机器名，Many 为真表示接入且未吊销的机器多于一台（这时标题才带机器名）。
+type pushWho struct {
+	Tool, Project, Machine string
+	Many                   bool
+}
+
+// message 组一条请求的推送载荷：机器名、项目名取自请求视图，CLI 按 session_id 查 sessions.tool，再数一下接入且未吊销的机器。
+func (p *pushService) message(r store.Request) ([]byte, error) {
+	v := p.s.view(r)
+	return pushMessage(r, pushWho{Tool: p.sessionTool(r), Project: v.Project, Machine: v.MachineName, Many: p.manyMachines()})
+}
+
+// sessionTool 是请求所属会话的 tool；没有会话、查不到时为空，读库出错时记日志、也为空。
+func (p *pushService) sessionTool(r store.Request) string {
+	if r.SessionID == "" {
+		return ""
+	}
+	tool, err := p.s.store.SessionTool(r.SessionID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			p.s.log.Printf("读请求 %s 的会话: %v", clip(r.ID), err)
+		}
+		return ""
+	}
+	return tool
+}
+
+// manyMachines 判断接入且未吊销的机器是否多于一台；读库出错时记日志、当作多台（宁可标题多带机器名）。
+func (p *pushService) manyMachines() bool {
+	ms, err := p.s.store.ListMachines()
+	if err != nil {
+		p.s.log.Printf("列机器: %v", err)
+		return true
+	}
+	n := 0
+	for _, m := range ms {
+		if !m.Revoked {
+			n++
+		}
+	}
+	return n > 1
+}
+
+// pushMessage 组推送载荷 {"id","kind","title","body","url":"/r/<id>"}，文案说人话（谁要做什么、在哪、该干嘛）：
+//   - permission：标题“<CLI> 要<动词>”（动词按风险，见 riskVerbs），正文两行：载荷摘要、“点开批准或拒绝”；
+//   - question：标题“<CLI> 在终端等你回答”，正文是问题；
+//   - webhook：标题“工作流等你批准”，正文是来源给的标题。
 //
-// 标题、正文、摘要与风险都先并成一行（控制字符、换行当空白，去掉不可见的格式字符）再按字符截断；
-// 编码后仍保证不超过 push.MaxPlaintext（见 encodePushPayload）。
-func pushMessage(r store.Request, machine, project string) ([]byte, error) {
-	where := joinNonEmpty(" · ", clean(machine, pushTitleLen), clean(project, pushTitleLen))
-	if where == "" {
-		where = "Railse"
+// permission、question 的标题有项目时追加“ · 项目”，w.Many 时再追加“ · 机器名”（去掉 .local），超长的砍法见 pushTitle。
+// 项目名、机器名、摘要、问题与 webhook 标题都先并成一行（控制字符、换行当空白，去掉不可见的格式字符）再按字符截断；
+// permission 正文的两行在规整之后才用 \n 连接。编码后仍保证不超过 push.MaxPlaintext（见 encodePushPayload）。
+func pushMessage(r store.Request, w pushWho) ([]byte, error) {
+	machine := ""
+	if w.Many {
+		machine = machineLabel(w.Machine)
 	}
 	var title, body string
 	switch r.Kind {
 	case "permission":
-		title = where
-		body = clean(r.ToolName+": "+payloadSummary(r.Payload), pushSummaryLen) + " · 风险 " + clean(r.Risk, pushRiskLen)
+		title = pushTitle(cliName(w.Tool)+" 要"+riskVerb(r.Risk), w.Project, machine)
+		body = joinNonEmpty("\n", clean(payloadSummary(r.Payload), pushSummaryLen), "点开批准或拒绝")
 	case "question":
-		const suffix = "：等你回答"
-		title = truncate(where, pushTitleLen-utf8.RuneCountInString(suffix)) + suffix
+		title = pushTitle(cliName(w.Tool)+" 在终端等你回答", w.Project, machine)
 		body = clean(r.Title, pushBodyLen)
 	default:
-		title = "webhook"
+		title = "工作流等你批准"
 		body = clean(r.Title, pushBodyLen)
 	}
 	m := pushPayload{ID: r.ID, Kind: r.Kind, Title: truncate(title, pushTitleLen), Body: truncate(body, pushBodyLen), URL: "/r/" + url.PathEscape(r.ID)}
 	return encodePushPayload(m, push.MaxPlaintext)
+}
+
+// pushTitle 拼“head · 项目 · 机器名”（空的段连同分隔符省掉），至多 pushTitleLen 个字符：超了先把机器名从尾部截短到放得下
+// （截没了连同分隔符去掉），还超再同样截项目名，最后整体截断。项目名、机器名先经 clean 并成一行，截断处不留尾随空格。
+func pushTitle(head, project, machine string) string {
+	const sep = " · "
+	parts := []string{head, clean(project, pushTitleLen), clean(machine, pushTitleLen)}
+	for i := len(parts) - 1; i > 0; i-- {
+		over := utf8.RuneCountInString(joinNonEmpty(sep, parts...)) - pushTitleLen
+		if over <= 0 {
+			break
+		}
+		if keep := utf8.RuneCountInString(parts[i]) - over; keep > 0 {
+			parts[i] = clean(parts[i], keep)
+		} else {
+			parts[i] = ""
+		}
+	}
+	return truncate(joinNonEmpty(sep, parts...), pushTitleLen)
 }
 
 // payloadSummary 取载荷里最能说明这次操作的一段：shell 取命令、file_write 取路径、network 取 URL、mcp 取“服务/工具”。
