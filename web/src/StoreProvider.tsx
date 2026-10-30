@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 import { ApiError, hub } from './api'
 import { coalesce } from './coalesce'
-import { initialState, reduce, type Action, type State } from './store'
+import { closeStaleNotifications } from './notifications'
+import { initialState, reduce, waitingIDs, type Action, type State } from './store'
 import { closeSessionInvalid, Live } from './ws'
 
 interface Store {
@@ -96,6 +97,13 @@ export function StoreProvider({ children, onUnauthorized }: { children: ReactNod
       window.removeEventListener('online', onOnline)
     }
   }, [reloader])
+
+  // 每次拿到收件箱状态（首次加载、实时帧带来的变化、自己批准或拒绝之后的重拉）都收掉已处理请求的通知，同一秒内至多一次
+  const { loaded, pending, questions } = state
+  useEffect(() => {
+    const ids = waitingIDs({ loaded, pending, questions })
+    if (ids) closeStaleNotifications(ids)
+  }, [loaded, pending, questions])
 
   const value = useMemo<Store>(() => ({ state, dispatch, reload, loadRules, loadMachines }), [state, reload, loadRules, loadMachines])
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

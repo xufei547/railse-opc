@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { groupByProject, initialState, reduce, type State } from './store'
+import { groupByProject, initialState, reduce, waitingIDs, type State } from './store'
 import type { Frame } from './ws'
 import type { RequestView, Status } from './types'
 
@@ -196,5 +196,20 @@ describe('groupByProject', () => {
       ['其他', ['4']],
     ])
     expect(new Set(g.map((x) => x.key)).size).toBe(4)
+  })
+})
+
+describe('waitingIDs', () => {
+  it('还没加载过时为 null（空列表不代表没有待决）', () => {
+    expect(waitingIDs(initialState)).toBeNull()
+  })
+
+  it('加载后是待审批与还在等回答的问题的 id；批掉的、不再等的不在里面', () => {
+    let s = loaded([req({ id: 'q1', kind: 'question', session_id: 's9' })])
+    expect(waitingIDs(s)?.sort()).toEqual(['a', 'b', 'q1'])
+    s = reduce(s, frame({ type: 'request_updated', data: req({ id: 'a', created_at: '2026-10-23T10:00:01Z', state: 'approved' }) }))
+    expect(waitingIDs(s)?.sort()).toEqual(['b', 'q1'])
+    s = reduce(s, frame({ type: 'request_new', data: req({ id: 'd1', kind: 'done', session_id: 's9', state: 'recorded' }) }))
+    expect(waitingIDs(s)).toEqual(['b'])
   })
 })
