@@ -7,6 +7,7 @@ import {
   clip,
   decidedByLabel,
   deliveryLabel,
+  engineReasonLabel,
   isRedacted,
   kindLabel,
   parseTime,
@@ -174,5 +175,16 @@ describe('deliveryLabel', () => {
     expect(deliveryLabel(view({ state: 'approved' }), true)).toBe('决定未送达：agent 已不再等这条（多半已交回终端）')
     expect(deliveryLabel(view({ state: 'pending' }), false)).toBe('')
     expect(deliveryLabel(view({ state: 'auto_allowed' }), false)).toBe('')
+  })
+})
+
+describe('engineReasonLabel', () => {
+  it('只把“按 <风险> 默认询问”里认识的风险词换成中文', () => {
+    expect(engineReasonLabel('无规则命中，按 outward 默认询问')).toBe('无规则命中，按「对外」默认询问')
+    expect(engineReasonLabel('无规则命中，按 write_in_project 默认询问')).toBe('无规则命中，按「项目内改动」默认询问')
+    expect(engineReasonLabel('无规则命中，按 weird 默认询问')).toBe('无规则命中，按 weird 默认询问')
+    expect(engineReasonLabel('命中规则 user-network-ask')).toBe('命中规则 user-network-ask')
+    expect(engineReasonLabel('自动审批已暂停')).toBe('自动审批已暂停')
+    expect(engineReasonLabel('')).toBe('')
   })
 })

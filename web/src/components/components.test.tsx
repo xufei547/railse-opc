@@ -3,8 +3,9 @@ import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import type { AuditEvent, RequestView } from '../types'
 import { DecideSheet } from './DecideSheet'
+import { RequestSummary, StatusLine } from './Explain'
 import { RequestContent } from './Payload'
-import { AuditList, RequestAttrs } from './RequestAttrs'
+import { AuditList, RequestAttrs, RequestDetails } from './RequestAttrs'
 import { RequestCard } from './RequestCard'
 import { ResultToast } from './ResultToast'
 
@@ -27,33 +28,48 @@ const card = (r: RequestView) =>
 
 const webhook = (over: Partial<RequestView> = {}) =>
   req({
-    kind: 'webhook', machine_id: 'webhook', machine_name: '', tool_name: 'webhook', project_root: '', project: '', risk: 'unknown',
+    kind: 'webhook', cli: '', machine_id: 'webhook', machine_name: '', tool_name: 'webhook', project_root: '', project: '', risk: 'unknown',
     title: '部署 v1.2 到生产', payload: { type: 'other', tool: 'webhook', diff_preview: '先灰度 10%，半小时后全量' }, ...over,
   })
 
 const noop = () => {}
 
 describe('RequestCard', () => {
-  it('审批卡片：链接到详情、机器 · 项目、风险标签、命令摘要', () => {
+  it('审批卡片：第一行做什么（不带 CLI 名）、风险标签；第二行命令；第三行 CLI · 机器 · 项目', () => {
     const html = card(req({ id: 'a/b' }))
     expect(html).toContain('href="/r/a%2Fb"')
-    expect(html).toContain('mac · blog')
+    expect(html).toContain('<span class="what">把代码推到远程仓库（origin 的 main）</span>')
     expect(html).toContain('对外')
     expect(html).toMatch(/<pre class="cmd">git push origin main<\/pre>/)
+    expect(html).toContain('<div class="where">Claude Code · mac · blog</div>')
+    expect(html.indexOf('class="what"')).toBeLessThan(html.indexOf('class="cmd"'))
+    expect(html.indexOf('class="cmd"')).toBeLessThan(html.indexOf('class="where"'))
     expect(html).not.toContain('含隐藏部分')
+  })
+
+  it('cli 为空时第三行不写 Agent；机器名去 .local', () => {
+    expect(card(req({ cli: '', machine_name: 'mac.local' }))).toContain('<div class="where">mac · blog</div>')
   })
 
   it('含隐藏部分时有标签', () => {
     expect(card(req({ has_redacted: true }))).toContain('含隐藏部分')
   })
 
-  it('webhook 卡片显示 webhook 与标题；问题卡片显示“等你回答”与问题', () => {
+  it('文件改动的第二行是路径', () => {
+    const html = card(req({ risk: 'write_outside', payload: { type: 'file_write', path: '/etc/hosts' } }))
+    expect(html).toContain('<span class="what">修改项目外的文件 /etc/hosts</span>')
+    expect(html).toContain('<pre class="cmd">/etc/hosts</pre>')
+  })
+
+  it('webhook 卡片：工作流等你批准、标题、第三行 webhook；问题卡片：在终端等你回答、问题、“等你回答”标签', () => {
     const w = card(webhook())
-    expect(w).toContain('webhook')
-    expect(w).toContain('部署 v1.2 到生产')
+    expect(w).toContain('<span class="what">工作流等你批准</span>')
+    expect(w).toContain('<pre class="cmd">部署 v1.2 到生产</pre>')
+    expect(w).toContain('<div class="where">webhook</div>')
     const q = card(req({ kind: 'question', state: 'recorded', title: '要删旧分支吗？', payload: { type: '' } }))
-    expect(q).toContain('等你回答')
-    expect(q).toContain('要删旧分支吗？')
+    expect(q).toContain('<span class="what">在终端等你回答</span>')
+    expect(q).toContain('<span class="tag plain">等你回答</span>')
+    expect(q).toContain('<pre class="cmd">要删旧分支吗？</pre>')
   })
 
   it('命令里的 HTML 原样转义，超长摘要截断', () => {
@@ -71,38 +87,18 @@ describe('RequestCard', () => {
 })
 
 describe('RequestContent', () => {
-  it('shell 命令放在会换行的 pre 里，HTML 转义', () => {
-    const html = renderToStaticMarkup(<RequestContent request={req({ payload: { type: 'shell', command: 'echo "<b>x</b>" && rm -rf /tmp/x', cwd: '/p' } })} />)
+  it('shell 命令放在会换行的 pre 里，HTML 转义；目录不在这里（在详情里）', () => {
+    const html = renderToStaticMarkup(<RequestContent request={req({ payload: { type: 'shell', command: 'echo "<b>x</b>" && rm -rf /tmp/x', cwd: '/p/elsewhere' } })} />)
     expect(html).toMatch(/<pre class="block mono">echo &quot;&lt;b&gt;x&lt;\/b&gt;&quot; &amp;&amp; rm -rf \/tmp\/x<\/pre>/)
-    expect(html).toContain('/p')
+    expect(html).not.toContain('/p/elsewhere')
     expect(html).not.toContain('<b>')
   })
 
-  it('has_redacted：醒目告警在载荷之前，说明不是原文、裸值与引号值的隐藏范围、突出风险与引擎理由', () => {
-    const html = renderToStaticMarkup(
-      <RequestContent request={req({ has_redacted: true, payload: { type: 'shell', command: 'curl -H "Authorization: <redacted>" https://x' } })} />,
-    )
-    const warn = html.indexOf('不是原文')
-    expect(warn).toBeGreaterThan(-1)
-    expect(warn).toBeLessThan(html.indexOf('curl -H'))
-    expect(html).toContain('role="alert"')
-    expect(html).toContain('&lt;redacted&gt;')
-    expect(html).toContain('引号')
-    expect(html).toContain('heredoc')
-    expect(html).toContain('对外')
-    expect(html).toContain('无规则命中')
-  })
-
-  it('webhook：标题与描述都显示；含隐藏部分时同样告警', () => {
+  it('webhook：标题与描述都显示', () => {
     const html = renderToStaticMarkup(<RequestContent request={webhook()} />)
     expect(html).toContain('部署 v1.2 到生产')
     expect(html).toContain('先灰度 10%，半小时后全量')
     expect(html).not.toContain('不是原文')
-    const red = renderToStaticMarkup(<RequestContent request={webhook({ has_redacted: true, payload: { type: 'other', tool: 'webhook', diff_preview: 'token=<redacted>' } })} />)
-    expect(red).toContain('不是原文')
-    expect(red).toContain('role="alert"')
-    // 标题里有占位符（has_redacted 只看载荷）也要告警
-    expect(renderToStaticMarkup(<RequestContent request={webhook({ title: '用 <redacted> 部署' })} />)).toContain('不是原文')
   })
 
   it('文件改动、联网、MCP 各有展示', () => {
@@ -123,6 +119,85 @@ describe('RequestContent', () => {
   })
 })
 
+describe('RequestSummary', () => {
+  const summary = (r: RequestView) => renderToStaticMarkup(<RequestSummary request={r} />)
+
+  it('说明卡在最上面：headline、where、why；命令框在卡片下面；next 三行在命令框下面', () => {
+    const html = summary(req({ machine_name: 'mac.local', engine_reason: '无规则命中，按 outward 默认询问' }))
+    expect(html).toContain('<section class="explain" aria-label="这条请求要做什么">')
+    expect(html).toContain('<p class="headline">Claude Code 想把代码推到远程仓库（origin 的 main）</p>')
+    expect(html).toContain('<p class="where">项目 blog，机器 mac</p>')
+    expect(html).toContain('<p class="why">这会影响仓库之外的人和系统（推送、发布、部署）。规则永远不会自动放行这类操作，要你决定。</p>')
+    const head = html.indexOf('class="headline"')
+    const cmd = html.indexOf('<pre class="block mono">git push origin main</pre>')
+    const next = html.indexOf('<ul class="next">')
+    expect(head).toBeGreaterThan(-1)
+    expect(head).toBeLessThan(cmd)
+    expect(cmd).toBeLessThan(next)
+    for (const s of ['批准：agent 执行这一条，只这一次。', '拒绝：agent 收到拒绝，会换个做法或停下来。', '勾「记住」可以存成规则，下次同类的不再问。']) {
+      expect(html).toContain(`<li>${s}</li>`)
+    }
+    expect(html).not.toMatch(/outward|write_in_project|destructive/)
+    expect(html).not.toContain('style=')
+  })
+
+  it('has_redacted：醒目告警在说明卡之前，说明不是原文、隐藏范围、突出风险与理由（中文）；没有“记住”那行', () => {
+    const html = summary(req({ has_redacted: true, engine_reason: '无规则命中，按 outward 默认询问', payload: { type: 'shell', command: 'curl -H "Authorization: <redacted>" https://x' } }))
+    const warn = html.indexOf('不是原文')
+    expect(warn).toBeGreaterThan(-1)
+    expect(warn).toBeLessThan(html.indexOf('class="headline"'))
+    expect(html.indexOf('class="headline"')).toBeLessThan(html.indexOf('curl -H'))
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('&lt;redacted&gt;')
+    expect(html).toContain('引号')
+    expect(html).toContain('heredoc')
+    expect(html).toContain('对外')
+    expect(html).toContain('无规则命中，按「对外」默认询问')
+    expect(html).not.toContain('勾「记住」')
+  })
+
+  it('webhook：含隐藏部分时同样告警；说明卡、标题与描述、一行 next', () => {
+    const html = summary(webhook({ has_redacted: true }))
+    expect(html.indexOf('不是原文')).toBeLessThan(html.indexOf('class="headline"'))
+    expect(html).toContain('<p class="headline">工作流等你批准：部署 v1.2 到生产</p>')
+    expect(html).toContain('先灰度 10%，半小时后全量')
+    expect(html).toContain('<li>批准或拒绝会回调给发起它的工作流。</li>')
+    expect(html).not.toContain('class="where"')
+    expect(html).not.toContain('class="why"')
+  })
+
+  it('question：去终端回答的提醒；已处理的审批没有 next', () => {
+    const q = summary(req({ kind: 'question', state: 'recorded', title: '要删旧分支吗？', payload: { type: '' } }))
+    expect(q).toContain('<p class="headline">Claude Code 在终端等你回答</p>')
+    expect(q).toContain('要删旧分支吗？')
+    expect(q).toContain('<li>去那台机器的终端回答，这里只是提醒。</li>')
+    expect(summary(req({ state: 'approved', decided_by: 'user' }))).not.toContain('class="next"')
+  })
+})
+
+describe('StatusLine', () => {
+  const line = (r: RequestView, audit: AuditEvent[] = []) => renderToStaticMarkup(<StatusLine request={r} audit={audit} />)
+
+  it('待审批、question 不显示', () => {
+    expect(line(req())).toBe('')
+    expect(line(req({ kind: 'question', state: 'recorded', title: 'q' }))).toBe('')
+  })
+
+  it('已处理：状态标签、依据、决定时间、送达，一行', () => {
+    const html = line(req({ state: 'approved', decided_by: 'user', decided_at: '2026-10-23T10:01:00.000000000Z', delivered_at: '2026-10-23T10:01:01.000000000Z' }))
+    expect(html).toMatch(/^<p class="status-line">/)
+    expect(html).toContain('<span class="tag low">已批准</span>')
+    expect(html).toContain('手机上决定')
+    expect(html).toContain('已送达 agent')
+    expect(html).toContain('<time dateTime="2026-10-23T10:01:00.000000000Z">')
+    const denied = line(req({ state: 'denied', decided_by: 'user' }), [
+      { id: 2, ts: '2026-10-23T10:02:00Z', machine_id: 'm', actor: 'system', request_id: 'r1', action: 'undeliverable', detail: '' },
+    ])
+    expect(denied).toContain('<span class="tag high">已拒绝</span>')
+    expect(denied).toContain('决定未送达')
+  })
+})
+
 describe('RequestAttrs', () => {
   it('依据用 decidedByLabel：手机上决定并记住时不显示成“规则 …”', () => {
     const html = renderToStaticMarkup(
@@ -133,9 +208,12 @@ describe('RequestAttrs', () => {
     expect(html).toContain('还没送达 agent')
   })
 
-  it('属性：机器、项目、工具、风险、引擎理由、状态、备注', () => {
-    const html = renderToStaticMarkup(<RequestAttrs request={req({ decision_note: '不推主分支', state: 'denied', decided_by: 'user' })} audit={[]} />)
-    for (const s of ['mac', '/p/blog', 'Bash', '对外', '无规则命中', '已拒绝', '不推主分支']) expect(html).toContain(s)
+  it('属性：目录、机器、项目、工具、风险、引擎理由（中文）、状态、备注', () => {
+    const html = renderToStaticMarkup(
+      <RequestAttrs request={req({ engine_reason: '无规则命中，按 outward 默认询问', decision_note: '不推主分支', state: 'denied', decided_by: 'user' })} audit={[]} />,
+    )
+    for (const s of ['<dt>目录</dt>', '/p/blog', 'mac', 'Bash', '对外', '无规则命中，按「对外」默认询问', '已拒绝', '不推主分支']) expect(html).toContain(s)
+    expect(html).not.toContain('outward')
     expect(html).not.toContain('style=')
   })
 
@@ -143,6 +221,17 @@ describe('RequestAttrs', () => {
     const audit: AuditEvent[] = [{ id: 2, ts: '2026-10-23T10:02:00Z', machine_id: 'm', actor: 'system', request_id: 'r1', action: 'undeliverable', detail: '{"state":"approved"}' }]
     const html = renderToStaticMarkup(<RequestAttrs request={req({ state: 'approved', decided_by: 'user' })} audit={audit} />)
     expect(html).toContain('决定未送达')
+  })
+})
+
+describe('RequestDetails', () => {
+  it('默认折叠的“详情”，里面是字段表与审计', () => {
+    const audit: AuditEvent[] = [{ id: 1, ts: '2026-10-23T10:00:00Z', machine_id: 'm', actor: 'system', request_id: 'r1', action: 'push_sent', detail: '' }]
+    const html = renderToStaticMarkup(<RequestDetails request={req()} audit={audit} />)
+    expect(html).toMatch(/^<details class="more"><summary>详情<\/summary>/)
+    expect(html).not.toMatch(/<details[^>]* open/)
+    expect(html).toContain('<dl class="kv">')
+    expect(html).toContain('审计')
   })
 })
 

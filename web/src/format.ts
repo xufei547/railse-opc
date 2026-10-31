@@ -34,6 +34,11 @@ export function riskLabel(risk: string): string {
   return risks[risk]?.[0] ?? (risk || '未分级')
 }
 
+/** 引擎理由里只把“按 <风险> 默认询问”里认识的风险词换成中文；规则 id 等其余文字原样。 */
+export function engineReasonLabel(reason: string): string {
+  return reason.replace(/按 (\S+) 默认询问/, (m, risk: string) => (risks[risk] ? `按「${risks[risk][0]}」默认询问` : m))
+}
+
 export function riskTone(risk: string): 'low' | 'mid' | 'high' {
   return risks[risk]?.[1] ?? 'mid'
 }
