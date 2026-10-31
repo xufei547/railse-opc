@@ -124,9 +124,9 @@ const (
 	askMaxHeaderLen   = 60
 )
 
-// ValidateAsk 校验 AskUserQuestion 的题目：1 到 4 题；每题 question 非空且不超过 2000 字符；
-// options 0 到 8 个，label 非空且不超过 200 字符，description 不超过 2000 字符；header 不超过 60 字符。
-// 不合规返回说明原因的错误，调用方当作不认识这条请求，让终端照常问。
+// ValidateAsk 校验 AskUserQuestion 的题目：1 到 4 题；每题 question 非空且不超过 2000 字符，各题 question 互不相同
+// （答案以 question 为键，重复了会互相覆盖）；options 0 到 8 个，label 非空且不超过 200 字符，description 不超过 2000 字符；
+// header 不超过 60 字符。不合规返回说明原因的错误，调用方当作不认识这条请求，让终端照常问。
 func ValidateAsk(a *proto.Ask) error {
 	if a == nil || len(a.Questions) == 0 {
 		return fmt.Errorf("AskUserQuestion 的题目不合规: 没有题目")
@@ -141,6 +141,11 @@ func ValidateAsk(a *proto.Ask) error {
 		}
 		if utf8.RuneCountInString(q.Question) > askMaxQuestionLen {
 			return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题 question 超过 %d 字符", n, askMaxQuestionLen)
+		}
+		for j := range i {
+			if a.Questions[j].Question == q.Question {
+				return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题与第 %d 题的 question 相同", n, j+1)
+			}
 		}
 		if utf8.RuneCountInString(q.Header) > askMaxHeaderLen {
 			return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题 header 超过 %d 字符", n, askMaxHeaderLen)

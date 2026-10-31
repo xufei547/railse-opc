@@ -66,10 +66,10 @@ func TestClaudeParseAskVariants(t *testing.T) {
 
 func TestClaudeParseAskRejected(t *testing.T) {
 	a, _ := Get("claude")
-	q := func(n int) string {
+	q := func(n int) string { // n 道题面互不相同的题
 		items := make([]string, n)
 		for i := range items {
-			items[i] = `{"question":"q","options":[{"label":"a"}]}`
+			items[i] = `{"question":"q` + string(rune('a'+i)) + `","options":[{"label":"a"}]}`
 		}
 		return `{"questions":[` + strings.Join(items, ",") + `]}`
 	}
@@ -90,6 +90,7 @@ func TestClaudeParseAskRejected(t *testing.T) {
 		"header 过长":       `{"questions":[{"question":"q","header":"` + strings.Repeat("h", 61) + `","options":[]}]}`,
 		"tool_input 不是对象": `"oops"`,
 		"questions 类型不对":  `{"questions":"x"}`,
+		"题面重复":            `{"questions":[{"question":"q","options":[]},{"question":"q2","options":[]},{"question":"q","options":[{"label":"a"}]}]}`,
 	}
 	for name, raw := range cases {
 		if _, err := a.Parse(askHook("PreToolUse", "AskUserQuestion", raw)); err == nil {
@@ -145,6 +146,8 @@ func TestClaudeRenderAnswerPassthrough(t *testing.T) {
 		"没有 RawToolInput":      {Action: "answer", Answers: map[string]string{"q": "a"}},
 		"RawToolInput 不是对象":    {Action: "answer", RawToolInput: json.RawMessage(`[1]`), Answers: map[string]string{"q": "a"}},
 		"RawToolInput 不是 JSON": {Action: "answer", RawToolInput: json.RawMessage(`{oops`), Answers: map[string]string{"q": "a"}},
+		"Answers 为 nil":        {Action: "answer", RawToolInput: json.RawMessage(askToolInput)},
+		"Answers 为空":           {Action: "answer", RawToolInput: json.RawMessage(askToolInput), Answers: map[string]string{}},
 	} {
 		if out := a.Render(d); len(out.Stdout) != 0 || out.ExitCode != 0 {
 			t.Errorf("%s 应 passthrough, 得到 %q/%d", name, out.Stdout, out.ExitCode)
@@ -216,5 +219,17 @@ func TestPreToolUseAnswerErrors(t *testing.T) {
 		if _, err := preToolUseAnswer(json.RawMessage(raw), map[string]string{"q": "a"}); err == nil {
 			t.Errorf("%s 应返回错误", name)
 		}
+	}
+}
+
+// 两道题题面相同时答案以题面为键会互相覆盖，ValidateAsk 拒绝，错误里说是哪两道。
+func TestValidateAskRejectsDuplicateQuestions(t *testing.T) {
+	a := &proto.Ask{Questions: []proto.Question{{Question: "q1"}, {Question: "同一题"}, {Question: "同一题"}}}
+	err := ValidateAsk(a)
+	if err == nil || !strings.Contains(err.Error(), "第 3 题") || !strings.Contains(err.Error(), "第 2 题") {
+		t.Fatalf("题面重复应报错并说明是哪两道: %v", err)
+	}
+	if err := ValidateAsk(&proto.Ask{Questions: []proto.Question{{Question: "q"}, {Question: "Q"}}}); err != nil {
+		t.Fatalf("题面只是大小写不同不算重复: %v", err)
 	}
 }

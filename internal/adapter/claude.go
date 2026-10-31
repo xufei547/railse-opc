@@ -81,13 +81,13 @@ func (claude) Parse(stdin []byte) (Input, error) {
 	return in, nil
 }
 
-// Render 把答案渲染成 PreToolUse 输出；合并不了（没有 tool_input 原文、不是 JSON 对象）就不作决定。
+// Render 把答案渲染成 PreToolUse 输出；没有答案、合并不了（没有 tool_input 原文、不是 JSON 对象）就不作决定。
 // 其余动作照旧渲染成 PermissionRequest 输出。
 func (claude) Render(d Decision) Output {
 	if d.Action != "answer" {
 		return renderPermission(d)
 	}
-	if len(d.RawToolInput) == 0 {
+	if len(d.Answers) == 0 || len(d.RawToolInput) == 0 {
 		return passthrough()
 	}
 	b, err := preToolUseAnswer(d.RawToolInput, d.Answers)
