@@ -24,7 +24,7 @@ import type { Draft, RequestView } from './types'
 
 function req(over: Partial<RequestView> = {}): RequestView {
   return {
-    id: 'r1', machine_id: 'm', session_id: 's', kind: 'permission', tool_name: 'Bash',
+    id: 'r1', machine_id: 'm', session_id: 's', cli: 'claude', kind: 'permission', tool_name: 'Bash',
     payload: { type: 'network', url: 'https://api.example.com/v1/x' }, risk: 'network', project_root: '/p/blog', engine_reason: '无规则命中',
     state: 'pending', decided_by: '', decision_note: '', rule_id: '', turn_id: 't', cli_session_id: 's', title: '',
     created_at: '2026-10-23T10:00:00.000000000Z', expires_at: null, decided_at: null, delivered_at: null,

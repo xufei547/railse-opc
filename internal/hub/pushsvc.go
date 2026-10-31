@@ -498,32 +498,17 @@ func machineLabel(name string) string {
 	return name
 }
 
-// pushWho 是推送文案里的“谁、在哪”：Tool 是请求所属会话的 sessions.tool（没有会话或查不到为空），Project 是项目名，
+// pushWho 是推送文案里的“谁、在哪”：Tool 是请求视图的 cli（没有会话或查不到为空），Project 是项目名，
 // Machine 是机器名，Many 为真表示接入且未吊销的机器不止一个名字（同名的重新接入不算，这时标题才带机器名）。
 type pushWho struct {
 	Tool, Project, Machine string
 	Many                   bool
 }
 
-// message 组一条请求的推送载荷：机器名、项目名取自请求视图，CLI 按 session_id 查 sessions.tool，再数一下接入且未吊销的机器。
+// message 组一条请求的推送载荷：CLI、机器名、项目名取自请求视图，再数一下接入且未吊销的机器。
 func (p *pushService) message(r store.Request) ([]byte, error) {
 	v := p.s.view(r)
-	return pushMessage(r, pushWho{Tool: p.sessionTool(r), Project: v.Project, Machine: v.MachineName, Many: p.manyMachines()})
-}
-
-// sessionTool 是请求所属会话的 tool；没有会话、查不到时为空，读库出错时记日志、也为空。
-func (p *pushService) sessionTool(r store.Request) string {
-	if r.SessionID == "" {
-		return ""
-	}
-	tool, err := p.s.store.SessionTool(r.SessionID)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			p.s.log.Printf("读请求 %s 的会话: %v", clip(r.ID), err)
-		}
-		return ""
-	}
-	return tool
+	return pushMessage(r, pushWho{Tool: v.CLI, Project: v.Project, Machine: v.MachineName, Many: p.manyMachines()})
 }
 
 // manyMachines 判断接入且未吊销的机器是否有不止一个名字（同名的重新接入不算，去掉 .local 后比）；读库出错时记日志、当作多台（宁可标题多带机器名）。

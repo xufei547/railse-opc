@@ -4,7 +4,7 @@ import type { RequestView } from './types'
 
 function req(over: Partial<RequestView> = {}): RequestView {
   return {
-    id: 'r1', machine_id: 'm', session_id: 's', kind: 'permission', tool_name: 'Bash',
+    id: 'r1', machine_id: 'm', session_id: 's', cli: 'claude', kind: 'permission', tool_name: 'Bash',
     payload: { type: 'shell', command: 'git push' }, risk: 'outward', project_root: '/p/blog', engine_reason: '',
     state: 'approved', decided_by: 'user', decision_note: '', rule_id: '', turn_id: '', cli_session_id: '', title: '',
     created_at: '2026-10-23T10:00:00.000000000Z', expires_at: null, decided_at: null, delivered_at: null,

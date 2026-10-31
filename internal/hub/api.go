@@ -72,13 +72,15 @@ func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// requestView 是接口与网页看到的请求：请求本身（不含载荷哈希与 webhook 回调）加机器名、项目名与 has_redacted。
+// requestView 是接口与网页看到的请求：请求本身（不含载荷哈希与 webhook 回调）加 CLI、机器名、项目名与 has_redacted。
 // REST（/api/inbox 的 pending 与 questions、/api/requests、/api/requests/{id}、decide 的返回）与 /ws/client 的 request_new、
 // request_updated 都用它。
 // HasRedacted 为 true 表示载荷里有被脱敏抹掉的部分：网页展示的不是原文（命令行语境的脱敏可能连带吞掉紧贴的后半截命令），
 // 必须醒目告警，建议去终端核对。
 type requestView struct {
 	store.Request
+	// CLI 是请求所属会话的 sessions.tool 原值（claude、codex、gemini）；没有会话、查不到为空，读库出错记日志也为空；显示名由网页按它算。
+	CLI         string `json:"cli"`
 	MachineName string `json:"machine_name"`
 	Project     string `json:"project"`
 	HasRedacted bool   `json:"has_redacted"`
@@ -103,9 +105,10 @@ func requestHasRedacted(r store.Request) bool {
 	return strings.Contains(r.Title, redactedMark) || payloadHasRedacted(r.Payload)
 }
 
-// views 给请求配上机器名（每台机器只查一次；查不到时留空，读库出错记日志）、项目名与 has_redacted。
+// views 给请求配上 CLI（每个会话只查一次）、机器名（每台机器只查一次；查不到时留空，读库出错记日志）、项目名与 has_redacted。
 func (s *Server) views(rs []store.Request) []requestView {
 	names := map[string]string{}
+	tools := map[string]string{}
 	out := make([]requestView, 0, len(rs))
 	for _, r := range rs {
 		name, ok := names[r.MachineID]
@@ -117,7 +120,17 @@ func (s *Server) views(rs []store.Request) []requestView {
 			}
 			names[r.MachineID] = name
 		}
-		out = append(out, requestView{Request: r, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: requestHasRedacted(r)})
+		tool, ok := tools[r.SessionID]
+		if !ok && r.SessionID != "" {
+			t, err := s.store.SessionTool(r.SessionID)
+			if err == nil {
+				tool = t
+			} else if !errors.Is(err, store.ErrNotFound) {
+				s.log.Printf("读会话 %s 的 CLI: %v", clip(r.SessionID), err)
+			}
+			tools[r.SessionID] = tool
+		}
+		out = append(out, requestView{Request: r, CLI: tool, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: requestHasRedacted(r)})
 	}
 	return out
 }

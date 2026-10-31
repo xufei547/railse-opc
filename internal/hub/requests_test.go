@@ -80,13 +80,14 @@ func waitDelivered(t *testing.T, sub chan []byte, id string) map[string]any {
 	}
 }
 
-// wantView 要求推送的 data 是请求视图（与 /api/inbox 同形状）：带 machine_name、project、has_redacted。
+// wantView 要求推送的 data 是请求视图（与 /api/inbox 同形状）：带 machine_name、project、cli、has_redacted。
 func wantView(t *testing.T, what string, f map[string]any, machineName string) {
 	t.Helper()
 	_, hasProject := f["project"]
+	_, hasCLI := f["cli"]
 	_, hasRedacted := f["has_redacted"]
-	if f["machine_name"] != machineName || !hasProject || !hasRedacted {
-		t.Fatalf("%s 的推送应是请求视图（machine_name %q、project、has_redacted）: %+v", what, machineName, f)
+	if f["machine_name"] != machineName || !hasProject || !hasCLI || !hasRedacted {
+		t.Fatalf("%s 的推送应是请求视图（machine_name %q、project、cli、has_redacted）: %+v", what, machineName, f)
 	}
 }
 

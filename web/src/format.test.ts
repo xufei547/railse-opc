@@ -149,7 +149,7 @@ describe('审计', () => {
 
 function view(over: Partial<RequestView>): RequestView {
   return {
-    id: 'r', machine_id: 'm', session_id: 's', kind: 'permission', tool_name: 'Bash',
+    id: 'r', machine_id: 'm', session_id: 's', cli: 'claude', kind: 'permission', tool_name: 'Bash',
     payload: { type: 'shell', command: 'git push' }, risk: 'outward', project_root: '/p/blog', engine_reason: '',
     state: 'pending', decided_by: '', decision_note: '', rule_id: '', turn_id: 't', cli_session_id: 's', title: '',
     created_at: '2026-10-23T10:00:00Z', expires_at: null, decided_at: null, delivered_at: null,

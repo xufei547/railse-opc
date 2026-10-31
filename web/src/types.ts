@@ -24,6 +24,8 @@ export interface RequestView {
   id: string
   machine_id: string
   session_id: string
+  /** 请求所属会话的 CLI（sessions.tool 原值：claude、codex、gemini）；没有会话或查不到为空串。 */
+  cli: string
   kind: Kind
   tool_name: string
   payload: Payload
