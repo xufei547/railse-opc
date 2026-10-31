@@ -153,13 +153,13 @@ describe('sw.js：安装与缓存', () => {
 })
 
 describe('sw.js：push 一定弹通知', () => {
-  it('hub 的审批推送：标题、正文、tag 为请求 id、点开去的 URL、图标', async () => {
+  it('hub 的审批推送：标题、两行正文原样、tag 为请求 id、点开去的 URL、图标', async () => {
     const sw = load()
-    await sw.pushText(JSON.stringify({ id: 'abc123', kind: 'permission', title: 'mac · blog', body: 'Bash: git push · 风险 outward', url: '/r/abc123' }))
+    await sw.pushText(JSON.stringify({ id: 'abc123', kind: 'permission', title: 'Claude Code 要往外发 · blog', body: 'git push\n点开批准或拒绝', url: '/r/abc123' }))
     expect(sw.shown).toHaveLength(1)
-    expect(sw.shown[0]?.title).toBe('mac · blog')
+    expect(sw.shown[0]?.title).toBe('Claude Code 要往外发 · blog')
     expect(sw.shown[0]?.options).toMatchObject({
-      body: 'Bash: git push · 风险 outward',
+      body: 'git push\n点开批准或拒绝',
       tag: 'abc123',
       data: { url: '/r/abc123' },
       icon: '/icons/icon-192.png',
@@ -176,8 +176,8 @@ describe('sw.js：push 一定弹通知', () => {
 
   it('正文为空的问题：照样弹', async () => {
     const sw = load()
-    await sw.pushText(JSON.stringify({ id: 'q1', kind: 'question', title: 'mac · blog：等你回答', body: '', url: '/r/q1' }))
-    expect(sw.shown[0]).toMatchObject({ title: 'mac · blog：等你回答', options: { body: '', tag: 'q1', data: { url: '/r/q1' } } })
+    await sw.pushText(JSON.stringify({ id: 'q1', kind: 'question', title: 'Claude Code 在终端等你回答 · blog', body: '', url: '/r/q1' }))
+    expect(sw.shown[0]).toMatchObject({ title: 'Claude Code 在终端等你回答 · blog', options: { body: '', tag: 'q1', data: { url: '/r/q1' } } })
   })
 
   it('读不出的载荷（不是 JSON、不是对象、没有载荷）：用兜底的中文文案照样弹', async () => {
@@ -296,6 +296,14 @@ describe('sw.js：safePath 与 clickTarget', () => {
 })
 
 describe('sw.js：点通知', () => {
+  it('先关掉被点的那条，再找窗口、开页面', async () => {
+    const sw = load()
+    await sw.dispatch('notificationclick', { notification: { data: { url: '/r/abc' }, close: () => void sw.log.push('close') } })
+    expect(sw.log[0]).toBe('close')
+    expect(sw.log.indexOf('close')).toBeLessThan(sw.log.findIndex((l) => l.startsWith('matchAll')))
+    expect(sw.log.at(-1)).toBe(`openWindow ${origin}/r/abc`)
+  })
+
   function click(sw: ReturnType<typeof load>, data: unknown) {
     const closed: boolean[] = []
     return {

@@ -497,59 +497,210 @@ func TestPushBrokenSubscriptionRemoved(t *testing.T) {
 	waitFor(t, "审计", func() bool { return hasAudit(h, "push_subscription_removed", `"reason":"invalid"`) })
 }
 
-func TestPushMessageContent(t *testing.T) {
-	type msg struct{ ID, Kind, Title, Body, URL string }
-	decode := func(b []byte, err error) msg {
+// pushMsg 是解出来的推送载荷。
+type pushMsg struct{ ID, Kind, Title, Body, URL string }
+
+// decodePush 返回把 pushMessage 的结果解成 pushMsg 的函数，便于 decode(pushMessage(...)) 直接套用。
+func decodePush(t *testing.T) func([]byte, error) pushMsg {
+	return func(b []byte, err error) pushMsg {
 		t.Helper()
 		if err != nil {
 			t.Fatal(err)
 		}
-		var m msg
+		var m pushMsg
 		if err := json.Unmarshal(b, &m); err != nil {
 			t.Fatalf("%s: %v", b, err)
 		}
 		return m
 	}
-	perm := store.Request{ID: "r1", Kind: "permission", ToolName: "Bash", Payload: policy.Payload{Type: policy.PayloadShell, Command: "  git push\n\torigin main "}, Risk: "outward"}
-	m := decode(pushMessage(perm, "mac", "proj"))
-	if m.ID != "r1" || m.Kind != "permission" || m.Title != "mac · proj" || m.Body != "Bash: git push origin main · 风险 outward" || m.URL != "/r/r1" {
-		t.Fatalf("permission: %+v", m)
+}
+
+// permission 的标题是“<CLI> 要<动词>”：动词按风险档，CLI 按 sessions.tool，没有会话、查不到或不认识的叫 Agent。
+func TestPushMessagePermissionVerbs(t *testing.T) {
+	decode := decodePush(t)
+	perm := store.Request{ID: "r1", Kind: "permission", ToolName: "Bash", Payload: policy.Payload{Type: policy.PayloadShell, Command: "ls"}}
+	for _, c := range []struct{ risk, want string }{
+		{"network", "Claude Code 要联网"},
+		{"outward", "Claude Code 要往外发"},
+		{"destructive", "Claude Code 要做不可逆的操作"},
+		{"write_outside", "Claude Code 要改项目外的文件"},
+		{"unknown", "Claude Code 要跑一个没见过的命令"},
+		{"write_in_project", "Claude Code 要改项目里的文件"},
+		{"read", "Claude Code 要读文件"},
+		{"", "Claude Code 要做一件事"},
+		{"weird", "Claude Code 要做一件事"},
+	} {
+		r := perm
+		r.Risk = c.risk
+		if m := decode(pushMessage(r, pushWho{Tool: "claude"})); m.Title != c.want {
+			t.Errorf("风险 %q：标题 %q，要 %q", c.risk, m.Title, c.want)
+		}
+	}
+	perm.Risk = "network"
+	for tool, want := range map[string]string{"claude": "Claude Code 要联网", "codex": "Codex 要联网", "gemini": "Gemini CLI 要联网", "": "Agent 要联网", "cursor": "Agent 要联网"} {
+		if m := decode(pushMessage(perm, pushWho{Tool: tool})); m.Title != want {
+			t.Errorf("tool %q：标题 %q，要 %q", tool, m.Title, want)
+		}
+	}
+}
+
+// 有项目时标题追加项目；接入且未吊销的机器不止一个名字时再追加机器名（去掉结尾的 .local，不分大小写）。正文两行：摘要、“点开批准或拒绝”，
+// 不再有“风险 network”与工具名。
+func TestPushMessagePermissionWhereAndBody(t *testing.T) {
+	decode := decodePush(t)
+	perm := store.Request{ID: "r1", Kind: "permission", ToolName: "Bash", Risk: "network",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "  curl\n\thttps://example.com "}}
+	m := decode(pushMessage(perm, pushWho{Tool: "claude", Project: "blog", Machine: "xufeideMacBook-Air.local"}))
+	if m.ID != "r1" || m.Kind != "permission" || m.Title != "Claude Code 要联网 · blog" || m.Body != "curl https://example.com\n点开批准或拒绝" || m.URL != "/r/r1" {
+		t.Fatalf("单机: %+v", m)
+	}
+	for _, c := range []struct {
+		w    pushWho
+		want string
+	}{
+		{pushWho{Tool: "claude"}, "Claude Code 要联网"},
+		{pushWho{Tool: "claude", Machine: "mac.local"}, "Claude Code 要联网"},
+		{pushWho{Tool: "codex", Project: "blog", Machine: "xufeideMacBook-Air.local", Many: true}, "Codex 要联网 · blog · xufeideMacBook-Air"},
+		{pushWho{Tool: "codex", Project: "blog", Machine: "office.LOCAL", Many: true}, "Codex 要联网 · blog · office"},
+		{pushWho{Tool: "codex", Project: "blog", Machine: "linux-box", Many: true}, "Codex 要联网 · blog · linux-box"},
+		{pushWho{Tool: "codex", Machine: "mac.local", Many: true}, "Codex 要联网 · mac"},
+		{pushWho{Tool: "codex", Project: "blog", Many: true}, "Codex 要联网 · blog"},
+	} {
+		if m := decode(pushMessage(perm, c.w)); m.Title != c.want {
+			t.Errorf("%+v：标题 %q，要 %q", c.w, m.Title, c.want)
+		}
 	}
 	for _, c := range []struct {
 		pl   policy.Payload
+		tool string
 		want string
 	}{
-		{policy.Payload{Type: policy.PayloadFileWrite, Path: "/p/a.go"}, "Edit: /p/a.go · 风险 outward"},
-		{policy.Payload{Type: policy.PayloadNetwork, URL: "https://x.example/a"}, "Edit: https://x.example/a · 风险 outward"},
-		{policy.Payload{Type: policy.PayloadMCP, Server: "gh", Tool: "create_issue"}, "Edit: gh/create_issue · 风险 outward"},
+		{policy.Payload{Type: policy.PayloadFileWrite, Path: "/p/a.go"}, "Edit", "/p/a.go\n点开批准或拒绝"},
+		{policy.Payload{Type: policy.PayloadNetwork, URL: "https://x.example/a"}, "Edit", "https://x.example/a\n点开批准或拒绝"},
+		{policy.Payload{Type: policy.PayloadMCP, Server: "gh", Tool: "create_issue"}, "Edit", "gh/create_issue\n点开批准或拒绝"},
+		// 认不出的工具：适配器把工具名放在 Payload.Tool；没有就退回请求的工具名；不带网址的搜索同理
+		{policy.Payload{Type: "other", Tool: "read_file"}, "read_file", "read_file\n点开批准或拒绝"},
+		{policy.Payload{Type: "other"}, "ExitPlanMode", "ExitPlanMode\n点开批准或拒绝"},
+		{policy.Payload{Type: policy.PayloadNetwork}, "WebSearch", "WebSearch\n点开批准或拒绝"},
+		{policy.Payload{Type: "other"}, "", "点开批准或拒绝"},
 	} {
 		r := perm
-		r.ToolName, r.Payload = "Edit", c.pl
-		if m := decode(pushMessage(r, "mac", "")); m.Body != c.want || m.Title != "mac" {
-			t.Fatalf("%s: %+v", c.pl.Type, m)
+		r.ToolName, r.Payload = c.tool, c.pl
+		m := decode(pushMessage(r, pushWho{Tool: "claude"}))
+		if m.Body != c.want || strings.Contains(m.Body, "other") {
+			t.Errorf("%s：正文 %q，要 %q", c.pl.Type, m.Body, c.want)
 		}
 	}
 	long := perm
 	long.Payload.Command = strings.Repeat("x", 500)
-	if m := decode(pushMessage(long, "mac", "")); !strings.HasPrefix(m.Body, "Bash: xxx") || utf8.RuneCountInString(m.Body) > pushSummaryLen+len(" · 风险 outward")+1 {
-		t.Fatalf("摘要应截断: %d %q", utf8.RuneCountInString(m.Body), m.Body)
+	m = decode(pushMessage(long, pushWho{Tool: "claude"}))
+	if first, second, ok := strings.Cut(m.Body, "\n"); !ok || first != strings.Repeat("x", pushSummaryLen) || second != "点开批准或拒绝" {
+		t.Fatalf("摘要应截到 %d 个字符、第二行仍在: %q", pushSummaryLen, m.Body)
 	}
-	q := store.Request{ID: "q1", Kind: "question", Title: "要不要继续？"}
-	if m := decode(pushMessage(q, "mac", "proj")); m.Title != "mac · proj：等你回答" || m.Body != "要不要继续？" || m.URL != "/r/q1" {
+}
+
+// question：“<CLI> 在终端等你回答”，同样追加项目与（多机时）机器名，正文是问题；webhook：“工作流等你批准”，正文是来源给的标题。
+func TestPushMessageQuestionAndWebhook(t *testing.T) {
+	decode := decodePush(t)
+	q := store.Request{ID: "q1", Kind: "question", Title: "要不要\n继续？"}
+	m := decode(pushMessage(q, pushWho{Tool: "gemini", Project: "blog", Machine: "mac.local", Many: true}))
+	if m.Title != "Gemini CLI 在终端等你回答 · blog · mac" || m.Body != "要不要 继续？" || m.URL != "/r/q1" || m.Kind != "question" {
 		t.Fatalf("question: %+v", m)
 	}
-	if m := decode(pushMessage(q, "mac", "")); m.Title != "mac：等你回答" {
-		t.Fatalf("question 无项目: %+v", m)
+	if m := decode(pushMessage(q, pushWho{Tool: "claude", Project: "blog", Machine: "mac"})); m.Title != "Claude Code 在终端等你回答 · blog" {
+		t.Fatalf("question 单机: %+v", m)
+	}
+	if m := decode(pushMessage(q, pushWho{})); m.Title != "Agent 在终端等你回答" {
+		t.Fatalf("question 查不到会话: %+v", m)
 	}
 	wh := store.Request{ID: "w1", Kind: "webhook", Title: "部署到生产"}
-	if m := decode(pushMessage(wh, "", "")); m.Title != "webhook" || m.Body != "部署到生产" || m.URL != "/r/w1" {
+	if m := decode(pushMessage(wh, pushWho{Project: "x", Machine: "mac", Many: true})); m.Title != "工作流等你批准" || m.Body != "部署到生产" || m.URL != "/r/w1" {
 		t.Fatalf("webhook: %+v", m)
 	}
 	// id 里的特殊字符在 url 里转义
 	odd := wh
 	odd.ID = "a/b?c"
-	if m := decode(pushMessage(odd, "", "")); m.ID != "a/b?c" || m.URL != "/r/a%2Fb%3Fc" {
+	if m := decode(pushMessage(odd, pushWho{})); m.ID != "a/b?c" || m.URL != "/r/a%2Fb%3Fc" {
 		t.Fatalf("转义: %+v", m)
+	}
+}
+
+// 标题超长：先把机器名从尾部截短（截没了连同分隔符去掉），再截项目名，最后整体截断；截断处不留尾随空格。
+func TestPushTitleTrim(t *testing.T) {
+	const head = "Claude Code 要联网" // 15 个字符
+	proj := strings.Repeat("p", 20)
+	mach := strings.Repeat("m", pushTitleLen-15-3-20-3) // 正好 80 个字符
+	if got := pushTitle(head, proj, mach); got != head+" · "+proj+" · "+mach {
+		t.Fatalf("放得下不应砍: %q", got)
+	}
+	if got := pushTitle(head, proj, mach+"M"); got != head+" · "+proj+" · "+mach {
+		t.Fatalf("多一个字符应先砍机器名: %q", got)
+	}
+	if got := pushTitle(head, strings.Repeat("p", 100), "mac"); got != head+" · "+strings.Repeat("p", pushTitleLen-15-3) {
+		t.Fatalf("机器名砍没了再砍项目名: %q", got)
+	}
+	if got := pushTitle(strings.Repeat("h", 100), "proj", "mac"); got != strings.Repeat("h", pushTitleLen) {
+		t.Fatalf("最后整体截断: %q", got)
+	}
+	if got := pushTitle(head, strings.Repeat("p", 61)+" q", ""); got != head+" · "+strings.Repeat("p", 61) {
+		t.Fatalf("截断处不留尾随空格: %q", got)
+	}
+	for _, c := range [][3]string{{head, strings.Repeat("项", 200), strings.Repeat("机", 200)}, {head, "", strings.Repeat("机", 200)}} {
+		if n := utf8.RuneCountInString(pushTitle(c[0], c[1], c[2])); n > pushTitleLen {
+			t.Fatalf("标题 %d 个字符", n)
+		}
+	}
+}
+
+// message 经真实的库：按 session_id 查 sessions.tool；单机不带机器名，第二台接入后带上（去 .local），吊销后又不带；
+// 没有会话、会话查不到时 CLI 是 Agent。
+func TestPushMessageLooksUpToolAndMachines(t *testing.T) {
+	h := newTestHub(t)
+	m1, err := h.st.CreateMachine("xufeideMacBook-Air.local", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid, err := h.st.UpsertSession(m1.ID, proto.Session{Tool: "codex", CLISessionID: "s1", Cwd: "/p/blog"}, "blog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := store.Request{ID: "r1", MachineID: m1.ID, SessionID: sid, Kind: "permission", ToolName: "shell", Risk: "network",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "curl https://example.com"}, ProjectRoot: "/p/blog"}
+	title := func() string {
+		t.Helper()
+		b, err := h.srv.push.message(r)
+		return decodePush(t)(b, err).Title
+	}
+	if got := title(); got != "Codex 要联网 · blog" {
+		t.Fatalf("单机: %q", got)
+	}
+	// 同名重新接入（enroll --force）留下旧行、不吊销：仍是一个名字，不算多台
+	if _, err := h.st.CreateMachine("xufeideMacBook-Air.local", store.RandomToken(), "/home/u"); err != nil {
+		t.Fatal(err)
+	}
+	if got := title(); got != "Codex 要联网 · blog" {
+		t.Fatalf("同名重接: %q", got)
+	}
+	m2, err := h.st.CreateMachine("linux-box", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := title(); got != "Codex 要联网 · blog · xufeideMacBook-Air" {
+		t.Fatalf("两台: %q", got)
+	}
+	if err := h.st.RevokeMachine(m2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := title(); got != "Codex 要联网 · blog" {
+		t.Fatalf("吊销一台后: %q", got)
+	}
+	r.SessionID = ""
+	if got := title(); got != "Agent 要联网 · blog" {
+		t.Fatalf("没有会话: %q", got)
+	}
+	r.SessionID = "missing"
+	if got := title(); got != "Agent 要联网 · blog" {
+		t.Fatalf("会话查不到: %q", got)
 	}
 }
 
@@ -559,7 +710,7 @@ func TestPushMessageWorstCase(t *testing.T) {
 	id := strings.Repeat("a", maxRequestIDLen)
 	for _, kind := range []string{"permission", "question", "webhook"} {
 		r := store.Request{ID: id, Kind: kind, ToolName: long, Payload: policy.Payload{Type: policy.PayloadShell, Command: long}, Risk: long, Title: long, ProjectRoot: "/" + long}
-		b, err := pushMessage(r, long, projectName(r.ProjectRoot))
+		b, err := pushMessage(r, pushWho{Tool: long, Project: projectName(r.ProjectRoot), Machine: long, Many: true})
 		if err != nil {
 			t.Fatalf("%s: %v", kind, err)
 		}
@@ -570,8 +721,18 @@ func TestPushMessageWorstCase(t *testing.T) {
 		if err := json.Unmarshal(b, &m); err != nil || m["id"] != id || m["url"] != "/r/"+id || m["kind"] != kind {
 			t.Fatalf("%s: %v %v", kind, m, err)
 		}
-		if strings.ContainsAny(m["title"]+m["body"], "\x01\n ") {
-			t.Fatalf("%s: 标题、正文不应带控制字符与换行: %q", kind, m["title"]+m["body"])
+		if strings.ContainsAny(m["title"], "\x01\n ") {
+			t.Fatalf("%s: 标题不应带控制字符与换行: %q", kind, m["title"])
+		}
+		body := m["body"]
+		if kind == "permission" {
+			// 正文只有规整之后拼上的那一个换行，第二行是固定提示
+			first, second, ok := strings.Cut(body, "\n")
+			if !ok || second != "点开批准或拒绝" || strings.ContainsAny(first, "\x01\n ") {
+				t.Fatalf("%s: 正文 %q", kind, body)
+			}
+		} else if strings.ContainsAny(body, "\x01\n ") {
+			t.Fatalf("%s: 正文不应带控制字符与换行: %q", kind, body)
 		}
 	}
 }
@@ -996,12 +1157,12 @@ func TestRunListenFailureStopsPushWorker(t *testing.T) {
 func TestPushMessageZeroWidthPadding(t *testing.T) {
 	r := store.Request{ID: "r1", Kind: "permission", ToolName: "Bash", Risk: "destructive",
 		Payload: policy.Payload{Type: policy.PayloadShell, Command: strings.Repeat("\u200b", 640) + strings.Repeat(" \t\n", 700) + "rm -rf ~/x"}}
-	b, err := pushMessage(r, "mac", "")
+	b, err := pushMessage(r, pushWho{Tool: "claude"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var m map[string]string
-	if err := json.Unmarshal(b, &m); err != nil || m["body"] != "Bash: rm -rf ~/x · 风险 destructive" {
+	if err := json.Unmarshal(b, &m); err != nil || m["body"] != "rm -rf ~/x\n点开批准或拒绝" {
 		t.Fatalf("摘要: %q %v", m["body"], err)
 	}
 	// 截断后不留尾随空格

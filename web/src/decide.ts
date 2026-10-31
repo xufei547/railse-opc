@@ -1,7 +1,7 @@
 // 决定面板（批准、拒绝、备注、记住）的状态与规则。纯函数，便于不带浏览器环境测试；DecideSheet 只负责渲染与发请求。
 
 import { ApiError } from './api'
-import { decidedByLabel, isRedacted, stateLabel } from './format'
+import { isRedacted, outcomeText, stateLabel } from './format'
 import type { AuditEvent, DecideBody, Draft, RequestView } from './types'
 
 export type Verdict = 'allow' | 'deny'
@@ -191,13 +191,13 @@ function sameUserDecision(r: RequestView, attempted?: Verdict): boolean {
 
 /**
  * 面板开着时请求有了结果（终端里处理了、过期、机器吊销……）。正是用户这次要做的决定时说“你的决定已生效”，不说成“别处”；
- * 另一个页面做了相反的决定时仍是“别处”的结果（依据会写“手机上决定”）。
+ * 另一个页面做了相反的决定时仍是“别处”的结果（括号里是 outcomeText 的一句人话，如“你批准了”）。
  */
 export function goneMessage(r: RequestView, attempted?: Verdict): string {
   const state = stateLabel(r.state)
   if (sameUserDecision(r, attempted)) return `你的决定已生效：${state}`
-  const by = decidedByLabel(r)
-  return `这条请求在别处有了结果：${state}${by && by !== state ? `（${by}）` : ''}`
+  const outcome = outcomeText(r)
+  return `这条请求在别处有了结果：${state}${outcome ? `（${outcome}）` : ''}`
 }
 
 /**

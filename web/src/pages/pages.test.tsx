@@ -16,7 +16,7 @@ const inRouter = (node: ReactNode, path = '/') => renderToStaticMarkup(<MemoryRo
 
 function req(over: Partial<RequestView> = {}): RequestView {
   return {
-    id: 'r1', machine_id: 'm', session_id: 's', kind: 'permission', tool_name: 'Bash',
+    id: 'r1', machine_id: 'm', session_id: 's', cli: 'claude', kind: 'permission', tool_name: 'Bash',
     payload: { type: 'shell', command: 'git push origin main' }, risk: 'outward', project_root: '/p/blog', engine_reason: '',
     state: 'approved', decided_by: 'user', decision_note: '', rule_id: '', turn_id: '', cli_session_id: '', title: '',
     created_at: '2026-10-23T10:00:00.000000000Z', expires_at: null, decided_at: null, delivered_at: null,
@@ -39,32 +39,40 @@ function machine(over: Partial<Machine> = {}): Machine {
 }
 
 describe('HistoryCard', () => {
-  it('链接到详情；机器 · 项目、状态标签（按色调）、摘要与依据', () => {
+  it('链接到详情；机器 · 项目、状态标签（按色调）、摘要与一句人话的结果', () => {
     const html = inRouter(<HistoryCard request={req({ id: 'a/b', rule_id: 'learned-git-push' })} />)
     expect(html).toContain('href="/r/a%2Fb"')
     expect(html).toContain('mac · blog')
     expect(html).toContain('<span class="tag low">已批准</span>')
     expect(html).toContain('git push origin main')
-    expect(html).toContain('手机上决定（并记住为 learned-git-push）')
+    expect(html).toContain('<div class="sub line">你批准并记住了（规则 learned-git-push）</div>')
     expect(html).not.toContain('含隐藏部分')
   })
 
   it('拒绝红、含隐藏部分有标签；webhook 显示 webhook 与标题', () => {
-    expect(inRouter(<HistoryCard request={req({ state: 'auto_denied', decided_by: 'rule:user-deny', rule_id: 'user-deny' })} />)).toContain(
-      '<span class="tag high">自动拒绝</span>',
-    )
+    const auto = inRouter(<HistoryCard request={req({ state: 'auto_denied', decided_by: 'rule:user-deny', rule_id: 'user-deny' })} />)
+    expect(auto).toContain('<span class="tag high">自动拒绝</span>')
+    expect(auto).toContain('<div class="sub line">规则 user-deny 自动拒绝了</div>')
+    const term = inRouter(<HistoryCard request={req({ state: 'cancelled', decided_by: 'terminal' })} />)
+    expect(term).toContain('<div class="sub line">agent 那边先结束了，不用你处理</div>')
+    expect(term).not.toContain('终端里处理了')
     expect(inRouter(<HistoryCard request={req({ has_redacted: true })} />)).toContain('含隐藏部分')
     const w = inRouter(<HistoryCard request={req({ kind: 'webhook', machine_name: '', project: '', title: '部署 v1.2', state: 'expired', decided_by: 'timeout' })} />)
     expect(w).toContain('webhook')
     expect(w).toContain('部署 v1.2')
     expect(w).toContain('已过期')
-    expect(w).toContain('等待过期')
+    expect(w).toContain('等太久过期了，已按拒绝回调工作流')
+    expect(w).not.toContain('等待过期')
   })
 
-  it('问题没有依据行；HTML 原样转义；超长摘要截断；没有内联样式', () => {
+  it('问题没有结果行；HTML 原样转义；超长摘要截断；没有内联样式', () => {
     const q = inRouter(<HistoryCard request={req({ kind: 'question', state: 'recorded', decided_by: '', title: '要删旧分支吗？' })} />)
     expect(q).toContain('问题')
     expect(q).not.toContain('class="sub line"')
+    // 来源为空或不认识时没有结果行（状态标签已经说了），不露原始值
+    const unknown = inRouter(<HistoryCard request={req({ state: 'cancelled', decided_by: 'something_new' })} />)
+    expect(unknown).not.toContain('class="sub line"')
+    expect(unknown).not.toContain('something_new')
     const html = inRouter(<HistoryCard request={req({ payload: { type: 'shell', command: '<img src=x onerror=alert(1)>' + 'a'.repeat(1000) } })} />)
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;')
     expect(html).not.toContain('<img')

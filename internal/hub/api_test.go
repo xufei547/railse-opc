@@ -910,6 +910,62 @@ func TestRequestViewHasRedactedTitle(t *testing.T) {
 	}
 }
 
+// v0.1.4 第三项：请求视图带 cli（请求所属会话行的 sessions.tool 原值；没有会话、会话行不在时为空串，键总在），
+// 网页据此写“Claude Code 想…”。/api/inbox、/api/requests、/api/requests/{id}、decide 的返回与 /ws/client 的帧都带。
+func TestRequestViewCLI(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	id, secret := enrollMachine(t, h, "mac")
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	c.send(pendingFrame("c1", "s1", "t1", "git push origin main")) // pendingFrame 的会话 tool 是 claude
+	if f := waitBroadcast(t, sub, "request_new", "c1", nil); f["cli"] != "claude" {
+		t.Fatalf("c1 的推送应带 cli claude: %+v", f)
+	}
+	sid, err := h.st.UpsertSession(id, proto.Session{Tool: "codex", CLISessionID: "s9", Cwd: "/p"}, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertReq(t, h.st, store.Request{ID: "c2", MachineID: id, SessionID: sid, State: "pending"})
+	insertReq(t, h.st, store.Request{ID: "c3", MachineID: id, State: "pending"})                       // 没有会话
+	insertReq(t, h.st, store.Request{ID: "c4", MachineID: id, SessionID: "missing", State: "pending"}) // 会话行不在
+	want := map[string]string{"c1": "claude", "c2": "codex", "c3": "", "c4": ""}
+	var inbox struct {
+		Pending []map[string]any `json:"pending"`
+	}
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/inbox", nil, "", ck), &inbox)
+	var requests []map[string]any
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/requests?limit=500", nil, "", ck), &requests)
+	for path, list := range map[string][]map[string]any{"/api/inbox": inbox.Pending, "/api/requests": requests} {
+		if len(list) != len(want) {
+			t.Fatalf("%s: %d 条", path, len(list))
+		}
+		for _, r := range list {
+			if v, ok := r["cli"].(string); !ok || v != want[r["id"].(string)] {
+				t.Fatalf("%s 里 %s 的 cli 应为 %q: %+v", path, r["id"], want[r["id"].(string)], r)
+			}
+		}
+	}
+	var detail struct {
+		Request map[string]any `json:"request"`
+	}
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/requests/c2", nil, "", ck), &detail)
+	if detail.Request["cli"] != "codex" {
+		t.Fatalf("详情应带 cli codex: %+v", detail.Request)
+	}
+	var decided map[string]any
+	decodeBody(t, doReq(t, "POST", h.http.URL+"/api/requests/c1/decide", decideBody(t, "deny", false, ""), "application/json", ck), &decided)
+	if decided["cli"] != "claude" || decided["state"] != "denied" {
+		t.Fatalf("decide 的返回应带 cli claude: %+v", decided)
+	}
+	if f := waitBroadcast(t, sub, "request_updated", "c1", nil); f["cli"] != "claude" {
+		t.Fatalf("决定后的推送应带 cli claude: %+v", f)
+	}
+}
+
 // decide 接口的错误码：坏 JSON、坏 action、备注超过 1000 字符 400；不存在 404；已过期 409。
 // 终审 I4：请求视图带派生字段 has_redacted（载荷任一字段含脱敏占位符时为 true，MCP 参数里存库时转义的写法也算），
 // /api/inbox、/api/requests、/api/requests/{id}、decide 的返回与 /ws/client 推送都带：网页据此醒目告警，展示的不是原文。

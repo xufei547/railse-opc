@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { historyBasis, historyFilters, historyTag, maxLimit, moreState, pageSize, parseFilter } from './history'
+import { historyFilters, historyTag, maxLimit, moreState, pageSize, parseFilter } from './history'
 import type { RequestView } from './types'
 
 function req(over: Partial<RequestView> = {}): RequestView {
   return {
-    id: 'r1', machine_id: 'm', session_id: 's', kind: 'permission', tool_name: 'Bash',
+    id: 'r1', machine_id: 'm', session_id: 's', cli: 'claude', kind: 'permission', tool_name: 'Bash',
     payload: { type: 'shell', command: 'git push' }, risk: 'outward', project_root: '/p/blog', engine_reason: '',
     state: 'approved', decided_by: 'user', decision_note: '', rule_id: '', turn_id: '', cli_session_id: '', title: '',
     created_at: '2026-10-23T10:00:00.000000000Z', expires_at: null, decided_at: null, delivered_at: null,
@@ -47,23 +47,6 @@ describe('historyTag', () => {
   it('问题与完成不是决定，显示种类（历史里的问题不说“等你回答”）', () => {
     expect(historyTag(req({ kind: 'question', state: 'recorded' }))).toEqual({ label: '问题', tone: 'plain' })
     expect(historyTag(req({ kind: 'done', state: 'recorded' }))).toEqual({ label: '完成', tone: 'plain' })
-  })
-})
-
-describe('historyBasis', () => {
-  it('决定了的写依据：谁决定、按哪条规则', () => {
-    expect(historyBasis(req({ decided_by: 'user', rule_id: '' }))).toBe('手机上决定')
-    expect(historyBasis(req({ decided_by: 'user', rule_id: 'learned-git-push' }))).toBe('手机上决定（并记住为 learned-git-push）')
-    expect(historyBasis(req({ state: 'auto_allowed', decided_by: 'rule:builtin-read', rule_id: 'builtin-read' }))).toBe('规则 builtin-read')
-    expect(historyBasis(req({ state: 'passthrough', decided_by: 'terminal' }))).toBe('终端里处理了')
-    expect(historyBasis(req({ state: 'expired', decided_by: 'timeout' }))).toBe('等待过期')
-    expect(historyBasis(req({ kind: 'webhook', state: 'approved', decided_by: 'user' }))).toBe('手机上决定')
-  })
-
-  it('还在等的、问题与完成没有依据', () => {
-    expect(historyBasis(req({ state: 'pending', decided_by: '' }))).toBe('')
-    expect(historyBasis(req({ kind: 'question', state: 'recorded', decided_by: '' }))).toBe('')
-    expect(historyBasis(req({ kind: 'done', state: 'recorded', decided_by: '' }))).toBe('')
   })
 })
 

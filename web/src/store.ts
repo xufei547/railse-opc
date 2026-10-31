@@ -156,6 +156,15 @@ export function reduce(state: State, action: Action): State {
 }
 
 /**
+ * 待决的请求 id：待审批与还在等回答的问题。通知栏里 tag 不在其中的通知已经处理过，可以收掉。
+ * 还没加载过收件箱时回 null（这时的空列表不代表没有待决，不能拿它收通知）。
+ */
+export function waitingIDs(state: Pick<State, 'loaded' | 'pending' | 'questions'>): string[] | null {
+  if (!state.loaded) return null
+  return [...state.pending, ...state.questions].map((r) => r.id)
+}
+
+/**
  * 收件箱按项目分组，组内按创建时间升序（等得最久的在前），组按各自等得最久的那条排序；没有项目的归到“其他”，webhook 单独一组。
  * project 是组标题；key 唯一（项目恰好叫“webhook”或“其他”时也不与那两组合并），给 React 作 key。
  */

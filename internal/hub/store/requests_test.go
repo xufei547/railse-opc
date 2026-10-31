@@ -36,6 +36,22 @@ func TestSessionUpsert(t *testing.T) {
 	}
 }
 
+// SessionTool 按会话行 id 取 tool；没有这一行时 ErrNotFound（推送文案据此显示 CLI 名）。
+func TestSessionTool(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	id, err := s.UpsertSession(m.ID, proto.Session{Tool: "codex", CLISessionID: "s1", Cwd: "/p"}, "proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tool, err := s.SessionTool(id); err != nil || tool != "codex" {
+		t.Fatalf("SessionTool = %q, %v", tool, err)
+	}
+	if tool, err := s.SessionTool("missing"); !errors.Is(err, ErrNotFound) || tool != "" {
+		t.Fatalf("查不到应 ErrNotFound: %q, %v", tool, err)
+	}
+}
+
 // UpsertSession 非空才覆盖 cwd、project；每次刷新 last_event_at，started_at 不变；hub 用它记会话最近活动。
 func TestSessionUpsertRefreshesLastEvent(t *testing.T) {
 	s := openTemp(t)

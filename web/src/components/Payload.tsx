@@ -1,4 +1,4 @@
-import { isRedacted, riskLabel, riskTone } from '../format'
+import { engineReasonLabel, riskLabel, riskTone } from '../format'
 import type { Payload as PayloadT, RequestView } from '../types'
 
 // 载荷、标题都按纯文本渲染（React 转义），从不用 dangerouslySetInnerHTML；长内容在 pre 里折行，不撑破手机布局。
@@ -38,7 +38,7 @@ export function RedactedWarning({ request: r }: { request: RequestView }) {
       {r.kind === 'permission' && (
         <p>
           引擎是按原文定级的：<span className={`tag ${riskTone(r.risk)}`}>{riskLabel(r.risk)}</span>
-          {r.engine_reason && <>，理由：{r.engine_reason}</>}
+          {r.engine_reason && <>，理由：{engineReasonLabel(r.engine_reason)}</>}
         </p>
       )}
       <p>
@@ -53,15 +53,7 @@ export function Payload({ payload: p }: { payload: PayloadT }) {
   switch (p.type) {
     case 'shell':
       return (
-        <>
-          <pre className="block mono">{p.command ?? ''}</pre>
-          {p.cwd && (
-            <dl className="kv">
-              <dt>目录</dt>
-              <dd className="mono">{p.cwd}</dd>
-            </dl>
-          )}
-        </>
+        <pre className="block mono">{p.command ?? ''}</pre>
       )
     case 'file_write':
       return (
@@ -100,11 +92,10 @@ export function Payload({ payload: p }: { payload: PayloadT }) {
   }
 }
 
-/** 详情页的主体内容：先告警（含隐藏部分时），再按种类展示载荷、webhook 的标题与描述、问题文本。 */
+/** 详情页的主体内容：按种类展示载荷、webhook 的标题与描述、问题文本。告警由 RequestSummary 放在说明卡之前。 */
 export function RequestContent({ request: r }: { request: RequestView }) {
   return (
     <>
-      {isRedacted(r) && <RedactedWarning request={r} />}
       {r.kind === 'permission' ? (
         <Payload payload={r.payload} />
       ) : (

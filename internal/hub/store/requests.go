@@ -95,6 +95,19 @@ func (s *Store) UpsertSession(machineID string, sess proto.Session, project stri
 	return id, err
 }
 
+// SessionTool 返回会话行的 tool（claude、codex、gemini）；没有这一行时返回 ErrNotFound。
+func (s *Store) SessionTool(id string) (string, error) {
+	var tool string
+	err := s.db.QueryRow("SELECT tool FROM sessions WHERE id = ?", id).Scan(&tool)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return tool, nil
+}
+
 const requestCols = "id, machine_id, session_id, kind, tool_name, payload, payload_hash, risk, project_root, engine_reason, state, decided_by, decision_note, rule_id, turn_id, cli_session_id, title, callback, created_at, expires_at, decided_at, delivered_at"
 
 // InsertRequest 插入一条请求。PayloadHash 为空时按存下的载荷 JSON 计算；CreatedAt 为空时用 Now()。

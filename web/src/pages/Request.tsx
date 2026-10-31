@@ -4,8 +4,8 @@ import { ApiError, hub } from '../api'
 import { coalesce } from '../coalesce'
 import { Banner } from '../components/Banner'
 import { DecideSheet } from '../components/DecideSheet'
-import { RequestContent } from '../components/Payload'
-import { AuditList, RequestAttrs } from '../components/RequestAttrs'
+import { RequestSummary, StatusLine } from '../components/Explain'
+import { RequestDetails } from '../components/RequestAttrs'
 import { ResultToast } from '../components/ResultToast'
 import { keepDecided, outcomeView, type Detail, type Outcome, type Verdict } from '../decide'
 import { kindLabel, riskLabel, riskTone } from '../format'
@@ -124,11 +124,9 @@ function RequestDetail({ id }: { id: string }) {
         )}
         {r && data && (
           <>
-            {r.kind === 'question' && (
-              <Banner tone="info">agent 在终端里等你回答这个问题，请去终端回答；它继续之后这条会从收件箱消失。</Banner>
-            )}
-            <RequestContent request={r} />
-            <RequestAttrs request={r} audit={data.audit} />
+            <RequestSummary request={r} />
+            <StatusLine request={r} audit={data.audit} />
+            <RequestDetails request={r} audit={data.audit} />
             {canDecide && (
               <div className="decide-bar">
                 <button type="button" className="btn danger" onClick={() => open('deny')}>
@@ -139,7 +137,6 @@ function RequestDetail({ id }: { id: string }) {
                 </button>
               </div>
             )}
-            <AuditList audit={data.audit} />
           </>
         )}
         {!data && !missing && !error && <div className="empty">加载中…</div>}

@@ -23,10 +23,18 @@ test('登录、看到请求、批准并记住、规则多一条；再拒绝一�
   const card = page.locator('.card', { hasText: 'curl https://api.example.com/v1/x' })
   await expect(card).toBeVisible({ timeout: 15_000 })
   await expect(card.locator('.tag')).toHaveText('联网')
-  await expect(card.locator('.where')).toHaveText('e2e-mac · repo')
+  await expect(card.locator('.where')).toHaveText('Claude Code · e2e-mac · repo')
+  await expect(card.locator('.what')).toHaveText('访问网址 api.example.com')
   await expect(nav.getByRole('link', { name: /收件箱/ }).locator('.badge')).toHaveText('1')
   await card.click()
   await expect(page.getByRole('heading', { name: '审批', exact: true })).toBeVisible()
+  const explain = page.locator('section.explain')
+  await expect(explain.locator('.headline')).toHaveText('Claude Code 想访问网址 api.example.com')
+  await expect(explain.locator('.where')).toHaveText('项目 repo，机器 e2e-mac')
+  await expect(explain.locator('.why')).toHaveText('这条要联网。规则默认不自动放行联网操作，要你决定。')
+  await expect(page.locator('ul.next li')).toHaveCount(3)
+  await expect(page.locator('details.more')).not.toHaveAttribute('open')
+  await expect(page.locator('details.more summary')).toHaveText('详情')
   await page.getByRole('button', { name: '批准', exact: true }).click()
   await expect(dialog).toBeVisible()
   await dialog.getByRole('checkbox', { name: /记住/ }).check()
@@ -43,8 +51,11 @@ test('登录、看到请求、批准并记住、规则多一条；再拒绝一�
   await expect(dialog).toHaveCount(0)
   await expect(toast).toHaveClass(/\bok\b/)
   await expect(toast).toContainText('已批准，并记住为规则')
+  await expect(page.locator('.status-line .tag')).toHaveText('已批准')
+  await expect(page.locator('ul.next')).toHaveCount(0)
   const learnedID = /并记住为规则 (\S+?)；/.exec((await toast.textContent()) ?? '')?.[1]
   expect(learnedID, '结果提示里应有学到的规则 id').toBeTruthy()
+  await expect(page.locator('.status-line')).toContainText(`你批准并记住了（规则 ${learnedID}）`)
 
   // 规则页：两条内置之外恰好多一条学来的，就是刚才那条
   await nav.getByRole('link', { name: '规则', exact: true }).click()
@@ -63,7 +74,9 @@ test('登录、看到请求、批准并记住、规则多一条；再拒绝一�
   const card2 = page.locator('.card', { hasText: 'git push origin main' })
   await expect(card2).toBeVisible({ timeout: 15_000 })
   await expect(card2.locator('.tag')).toHaveText('对外')
+  await expect(card2.locator('.what')).toHaveText('把代码推到远程仓库（origin 的 main）')
   await card2.click()
+  await expect(page.locator('section.explain .headline')).toHaveText('Claude Code 想把代码推到远程仓库（origin 的 main）')
   await page.getByRole('button', { name: '拒绝', exact: true }).click()
   await expect(dialog).toBeVisible()
   await dialog.getByLabel(/备注/).fill('先别推')
@@ -77,16 +90,18 @@ test('登录、看到请求、批准并记住、规则多一条；再拒绝一�
   await expect(dialog).toHaveCount(0)
   await expect(toast).toHaveClass(/\bok\b/)
   await expect(toast).toContainText('已拒绝')
+  await expect(page.locator('.status-line .tag')).toHaveText('已拒绝')
+  await expect(page.locator('.status-line')).toContainText('你拒绝了')
 
-  // 历史：这条是“已拒绝”，依据“手机上决定”
+  // 历史：这条是“已拒绝”，结果一句“你拒绝了”
   await nav.getByRole('link', { name: '历史', exact: true }).click()
   const hist = page.locator('.card', { hasText: 'git push origin main' })
   await expect(hist).toBeVisible()
   await expect(hist.locator('.tag')).toHaveText('已拒绝')
-  await expect(hist.locator('.sub')).toHaveText('手机上决定')
+  await expect(hist.locator('.sub')).toHaveText('你拒绝了')
   const hist1 = page.locator('.card', { hasText: 'curl https://api.example.com/v1/x' })
   await expect(hist1.locator('.tag')).toHaveText('已批准')
-  await expect(hist1.locator('.sub')).toHaveText(`手机上决定（并记住为 ${learnedID}）`)
+  await expect(hist1.locator('.sub')).toHaveText(`你批准并记住了（规则 ${learnedID}）`)
   await expect(nav.getByRole('link', { name: /收件箱/ }).locator('.badge')).toHaveCount(0)
 
   // 规则仍只有一条学来的：拒绝没有勾“记住”
