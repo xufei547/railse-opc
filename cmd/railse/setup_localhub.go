@@ -16,6 +16,7 @@ import (
 
 	"github.com/xufei547/railse-opc/internal/hub"
 	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
@@ -63,10 +64,10 @@ var hubJobRunning = func(hubDir, bin string) bool {
 func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, notes []string, err error) {
 	// 一看就不对的输入在动手之前挡住：不白开 Funnel、不白设密码
 	if o.Port < 1 || o.Port > 65535 {
-		return localHub{}, "", nil, fmt.Errorf("hub 端口 %d 不在 1..65535", o.Port)
+		return localHub{}, "", nil, fmt.Errorf(i18n.T("hub 端口 %d 不在 1..65535"), o.Port)
 	}
 	if goos != "darwin" && goos != "linux" {
-		return localHub{}, "", nil, errors.New("本机 hub 只支持 macOS（launchd）与 Linux（systemd）：要靠它们托管 hub")
+		return localHub{}, "", nil, errors.New(i18n.T("本机 hub 只支持 macOS（launchd）与 Linux（systemd）：要靠它们托管 hub"))
 	}
 	listen := "127.0.0.1:" + strconv.Itoa(o.Port)
 	lh = localHub{Port: o.Port}
@@ -74,7 +75,7 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 	if o.PublicURL != "" {
 		base, perr := parsePublicOrigin(o.PublicURL)
 		if perr != nil {
-			return localHub{}, "", nil, fmt.Errorf("对外地址%w", perr)
+			return localHub{}, "", nil, fmt.Errorf(i18n.T("对外地址%w"), perr)
 		}
 		lh.PublicURL, lh.Provider = base, "custom"
 	}
@@ -86,18 +87,18 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 	managed := answers && hubJobRunning(o.HubDir, o.Bin)
 	switch {
 	case answers && !managed:
-		return localHub{}, "", nil, fmt.Errorf("%s 已有一个不是托管的 hub 在跑（手动起的？）：先停掉它，或用 --hub-port 换端口", listen)
+		return localHub{}, "", nil, fmt.Errorf(i18n.T("%s 已有一个不是托管的 hub 在跑（手动起的？）：先停掉它，或用 --hub-port 换端口"), listen)
 	case !answers:
 		if c, derr := net.DialTimeout("tcp", listen, 500*time.Millisecond); derr == nil {
 			c.Close()
-			return localHub{}, "", nil, fmt.Errorf("%s 被别的程序占用：用 --hub-port 换一个", listen)
+			return localHub{}, "", nil, fmt.Errorf(i18n.T("%s 被别的程序占用：用 --hub-port 换一个"), listen)
 		}
 	}
 
 	// 1. 对外地址：只读，这时不改 Tailscale 的任何配置（Funnel 等 hub 应答之后再开）
 	var ts tsFunnel
 	if lh.Provider == "custom" {
-		fmt.Fprintf(o.Stdout, "对外地址用你给的 %s（自己的隧道要把它转到 %s）\n", lh.PublicURL, listen)
+		fmt.Fprintf(o.Stdout, i18n.T("对外地址用你给的 %s（自己的隧道要把它转到 %s）\n"), lh.PublicURL, listen)
 	} else {
 		var on bool
 		if ts, on, err = tailscaleAddr(o.Port); err != nil {
@@ -105,9 +106,9 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 		}
 		lh.PublicURL, lh.Provider = "https://"+ts.dns, "tailscale"
 		if on {
-			fmt.Fprintf(o.Stdout, "对外地址 %s（Tailscale Funnel 已把它转到 %s）\n", lh.PublicURL, listen)
+			fmt.Fprintf(o.Stdout, i18n.T("对外地址 %s（Tailscale Funnel 已把它转到 %s）\n"), lh.PublicURL, listen)
 		} else {
-			fmt.Fprintf(o.Stdout, "对外地址 %s（hub 应答之后再开 Tailscale Funnel 把它转到 %s）\n", lh.PublicURL, listen)
+			fmt.Fprintf(o.Stdout, i18n.T("对外地址 %s（hub 应答之后再开 Tailscale Funnel 把它转到 %s）\n"), lh.PublicURL, listen)
 		}
 	}
 
@@ -132,49 +133,49 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 		return localHub{}, "", nil, err
 	}
 	if set {
-		fmt.Fprintf(o.Stdout, "网页密码已设好（hub 数据目录 %s）\n", o.HubDir)
+		fmt.Fprintf(o.Stdout, i18n.T("网页密码已设好（hub 数据目录 %s）\n"), o.HubDir)
 	} else {
-		fmt.Fprintf(o.Stdout, "网页密码已设过，沿用（hub 数据目录 %s）\n", o.HubDir)
+		fmt.Fprintf(o.Stdout, i18n.T("网页密码已设过，沿用（hub 数据目录 %s）\n"), o.HubDir)
 	}
 
 	// 3. 与上次的 local-hub.json 比。“变了”：之前没有这个文件，或对外地址、端口与这次不同；变了的要重新托管。
 	// 只有对外地址从 A 变成 B 才提醒手机（之前没有文件时手机上还没有图标）
 	old, had, lerr := loadLocalHub(o.HubDir)
 	if lerr != nil { // 坏文件：这次照新的设置重写，当作变了
-		fmt.Fprintf(o.Stderr, "警告：%v；按这次的设置重写\n", lerr)
+		fmt.Fprintf(o.Stderr, i18n.T("警告：%v；按这次的设置重写\n"), lerr)
 	}
 	changed := !had || old.PublicURL != lh.PublicURL || old.Port != lh.Port
 	if had && old.PublicURL != lh.PublicURL {
-		note := fmt.Sprintf("对外地址从 %s 变成 %s：手机上旧的图标要删掉重新添加、重新开启通知", old.PublicURL, lh.PublicURL)
+		note := fmt.Sprintf(i18n.T("对外地址从 %s 变成 %s：手机上旧的图标要删掉重新添加、重新开启通知"), old.PublicURL, lh.PublicURL)
 		fmt.Fprintln(o.Stdout, note)
 		notes = append(notes, note)
 	}
 	// 从 Tailscale Funnel 换成自己的隧道：Funnel 不会自己关，旧的 ts.net 地址可能仍是公网入口（也可能从没开成：首次停在“Funnel 未开通”
 	// 时 local-hub.json 已写下 tailscale）。只提醒，不替用户关（443 上可能还有别的配置）
 	if had && old.Provider == "tailscale" && lh.Provider == "custom" {
-		notes = append(notes, fmt.Sprintf("之前用的 Tailscale Funnel 可能还开着（tailscale funnel status 看），%s 可能仍是公网入口（转到本机 127.0.0.1:%d）；"+
-			"不用就 tailscale funnel --https=443 off", old.PublicURL, old.Port))
+		notes = append(notes, fmt.Sprintf(i18n.T("之前用的 Tailscale Funnel 可能还开着（tailscale funnel status 看），%s 可能仍是公网入口（转到本机 127.0.0.1:%d）；不用就 tailscale funnel --https=443 off"),
+			old.PublicURL, old.Port))
 	}
 
 	// 4. 托管并启动（用最前面看好的端口情况）。用现有的 setup autostart --hub，-- 之后是本机 hub 的 hub run 参数；
 	// 已托管的会先停掉旧的再拉起
 	hosted := false
 	if managed && !changed {
-		fmt.Fprintf(o.Stdout, "本机 hub 已在跑（版本 %s），跳过托管\n", v)
+		fmt.Fprintf(o.Stdout, i18n.T("本机 hub 已在跑（版本 %s），跳过托管\n"), v)
 		// 升级后 setup 不会重启已在跑的本机 hub：它还是旧版本时认不得提问，选择题只会交回终端。只提示，不替用户重启；
 		// 本程序是开发构建（版本串 dev）时没法比，不提示
 		if version != "dev" && v != version {
-			fmt.Fprintf(o.Stdout, "本机 hub 还是旧版本（%s，本程序是 %s）：Claude Code 的选择题会直接交回终端，请重启本机 hub：%s\n", v, version, localHubRestartCmd(goos))
+			fmt.Fprintf(o.Stdout, i18n.T("本机 hub 还是旧版本（%s，本程序是 %s）：Claude Code 的选择题会直接交回终端，请重启本机 hub：%s\n"), v, version, localHubRestartCmd(goos))
 		}
 	} else {
-		what := fmt.Sprintf("托管并启动 hub（只监听 %s）", listen)
+		what := fmt.Sprintf(i18n.T("托管并启动 hub（只监听 %s）"), listen)
 		if managed { // 托管的 hub 在跑，但不是按这次的对外地址、端口装的（或之前不是本机 hub 的装法）
-			what = "托管的 hub 不是按这次的对外地址与端口装的，重新托管"
+			what = i18n.T("托管的 hub 不是按这次的对外地址与端口装的，重新托管")
 		}
 		fmt.Fprintln(o.Stdout, what)
 		args := append([]string{"--hub", "--dir", o.HubDir, "--bin", o.Bin, "--"}, localHubRunArgs(lh)...)
 		if runAutostart(args, o.Stdout, o.Stderr) != 0 {
-			return localHub{}, "", notes, errors.New("托管 hub 失败，见上面")
+			return localHub{}, "", notes, errors.New(i18n.T("托管 hub 失败，见上面"))
 		}
 		hosted = true
 	}
@@ -183,23 +184,23 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 	if err := saveLocalHub(o.HubDir, lh); err != nil {
 		return localHub{}, "", notes, err
 	}
-	fmt.Fprintf(o.Stdout, "已写入 %s\n", localHubPath(o.HubDir))
+	fmt.Fprintf(o.Stdout, i18n.T("已写入 %s\n"), localHubPath(o.HubDir))
 
 	// 5. 等应答：launchd、systemd 拉起 hub 要一会儿
 	v, ok := waitHub(o.Port, localHubWait)
 	if !ok {
-		return localHub{}, "", notes, fmt.Errorf("hub 托管了但 %s 内没应答：看 %s", localHubWait, logHint(goos, autostartSpec{Kind: "hub", Dir: o.HubDir}))
+		return localHub{}, "", notes, fmt.Errorf(i18n.T("hub 托管了但 %s 内没应答：看 %s"), localHubWait, logHint(goos, autostartSpec{Kind: "hub", Dir: o.HubDir}))
 	}
 	if hosted {
-		fmt.Fprintf(o.Stdout, "本机 hub 已应答（版本 %s）\n", v)
+		fmt.Fprintf(o.Stdout, i18n.T("本机 hub 已应答（版本 %s）\n"), v)
 	}
 
 	// 6. 开 Funnel 之前再确认一次端口上是我们托管的 hub：Funnel 一开，这个端口就到了公网上
 	if _, ok := hubAnswers(o.Port); !ok {
-		return localHub{}, "", notes, fmt.Errorf("hub 应答过后又没了应答，没开 Funnel：看 %s", logHint(goos, autostartSpec{Kind: "hub", Dir: o.HubDir}))
+		return localHub{}, "", notes, fmt.Errorf(i18n.T("hub 应答过后又没了应答，没开 Funnel：看 %s"), logHint(goos, autostartSpec{Kind: "hub", Dir: o.HubDir}))
 	}
 	if !hubJobRunning(o.HubDir, o.Bin) {
-		return localHub{}, "", notes, fmt.Errorf("%s 上应答的不是托管的 hub（托管作业没在跑，端口被别的程序抢了？），没开 Funnel：先停掉占着端口的程序，或用 --hub-port 换端口", listen)
+		return localHub{}, "", notes, fmt.Errorf(i18n.T("%s 上应答的不是托管的 hub（托管作业没在跑，端口被别的程序抢了？），没开 Funnel：先停掉占着端口的程序，或用 --hub-port 换端口"), listen)
 	}
 
 	// 7. 这时才开 Funnel（serve 配置里已经对了就不动）
@@ -214,7 +215,7 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 		if token, err = st.CreateEnrollToken(10 * time.Minute); err != nil {
 			return localHub{}, "", notes, err
 		}
-		fmt.Fprintln(o.Stdout, "已生成一次性接入码（10 分钟内有效，只交给下一步接入本机守护进程，不显示）")
+		fmt.Fprintln(o.Stdout, i18n.T("已生成一次性接入码（10 分钟内有效，只交给下一步接入本机守护进程，不显示）"))
 	}
 	return lh, token, notes, nil
 }
@@ -241,11 +242,11 @@ func tailscaleAddr(port int) (ts tsFunnel, on bool, err error) {
 	}
 	switch {
 	case st.BackendState != "Running":
-		return tsFunnel{}, false, fmt.Errorf("本机 Tailscale 没在运行或没登录（状态 %s）：打开 Tailscale 登录后重跑", st.BackendState)
+		return tsFunnel{}, false, fmt.Errorf(i18n.T("本机 Tailscale 没在运行或没登录（状态 %s）：打开 Tailscale 登录后重跑"), st.BackendState)
 	case st.DNSName == "":
-		return tsFunnel{}, false, errors.New("这台机器在 Tailscale 里没有域名：在管理台开启 MagicDNS 后重跑")
+		return tsFunnel{}, false, errors.New(i18n.T("这台机器在 Tailscale 里没有域名：在管理台开启 MagicDNS 后重跑"))
 	case !slices.Contains(st.CertDomains, st.DNSName):
-		return tsFunnel{}, false, errors.New("这个 tailnet 没开 HTTPS 证书：管理台 DNS 页开启 HTTPS Certificates 后重跑")
+		return tsFunnel{}, false, errors.New(i18n.T("这个 tailnet 没开 HTTPS 证书：管理台 DNS 页开启 HTTPS Certificates 后重跑"))
 	}
 	sc, err := cli.ServeConfig(ctx)
 	if err != nil {
@@ -264,7 +265,7 @@ func tailscaleAddr(port int) (ts tsFunnel, on bool, err error) {
 // serveTarget 是 serve 配置里一个挂载点指向哪里，给人看：反向代理是它的目标，别的（文件、固定文本）不细说。
 func serveTarget(proxy string) string {
 	if proxy == "" {
-		return "别的内容（不是反向代理）"
+		return i18n.T("别的内容（不是反向代理）")
 	}
 	return proxy
 }
@@ -286,8 +287,8 @@ func (ts tsFunnel) checkMounts(sc tailscale.ServeConfig) error {
 		return nil
 	}
 	slices.Sort(mounts)
-	return fmt.Errorf("https://%s 上除了 / 还有 serve 配置：%s。Funnel 按 %s 整体开，开了它们会一起公开到公网，所以没开：先用 tailscale serve "+
-		"撤掉它们（tailscale serve status 看现有配置）后重跑，或用 --public-url 走自己的隧道", ts.dns, strings.Join(mounts, "、"), key)
+	return fmt.Errorf(i18n.T("https://%s 上除了 / 还有 serve 配置：%s。Funnel 按 %s 整体开，开了它们会一起公开到公网，所以没开：先用 tailscale serve 撤掉它们（tailscale serve status 看现有配置）后重跑，或用 --public-url 走自己的隧道"),
+		ts.dns, strings.Join(mounts, i18n.T("、")), key)
 }
 
 // enable 在 hub 应答之后开 Funnel：重读 serve 配置（第 1 步之后可能隔了几分钟的密码输入），已把 https://<域名> 转到 127.0.0.1:<port>
@@ -308,10 +309,10 @@ func (ts tsFunnel) enable(port int, stdout io.Writer) error {
 		return err
 	}
 	if h, ok := sc.Web[ts.dns+":443"].Handlers["/"]; ok && h.Proxy != "http://"+listen {
-		fmt.Fprintf(stdout, "将替换 https://%s 原来指向 %s 的 Funnel/serve 配置\n", ts.dns, serveTarget(h.Proxy))
+		fmt.Fprintf(stdout, i18n.T("将替换 https://%s 原来指向 %s 的 Funnel/serve 配置\n"), ts.dns, serveTarget(h.Proxy))
 	}
-	fmt.Fprintf(stdout, "开 Tailscale Funnel：https://%s 转到 %s\n", ts.dns, listen)
-	fmt.Fprintf(stdout, "tailnet 没开通 Funnel 时 tailscale 会等你去浏览器开通，最多等 %s，之后这里会打印开通链接\n", tailscale.Timeout)
+	fmt.Fprintf(stdout, i18n.T("开 Tailscale Funnel：https://%s 转到 %s\n"), ts.dns, listen)
+	fmt.Fprintf(stdout, i18n.T("tailnet 没开通 Funnel 时 tailscale 会等你去浏览器开通，最多等 %s，之后这里会打印开通链接\n"), tailscale.Timeout)
 	ferr := ts.cli.EnableFunnel(ctx, port)
 	var nf tailscale.ErrFunnelNotEnabled
 	if ferr != nil && !errors.As(ferr, &nf) {
@@ -321,12 +322,12 @@ func (ts tsFunnel) enable(port int, stdout io.Writer) error {
 	sc, err = ts.cli.ServeConfig(ctx)
 	switch {
 	case err == nil && sc.FunnelFor(ts.dns, port):
-		fmt.Fprintf(stdout, "Tailscale Funnel 已把 https://%s 转到 %s\n", ts.dns, listen)
+		fmt.Fprintf(stdout, i18n.T("Tailscale Funnel 已把 https://%s 转到 %s\n"), ts.dns, listen)
 		return nil
 	case nf.EnableURL != "":
 		return nf
 	case err != nil:
 		return err
 	}
-	return fmt.Errorf("开了 Funnel 但 serve 配置里没看到 https://%s 转到 %s，看 tailscale funnel status", ts.dns, listen)
+	return fmt.Errorf(i18n.T("开了 Funnel 但 serve 配置里没看到 https://%s 转到 %s，看 tailscale funnel status"), ts.dns, listen)
 }

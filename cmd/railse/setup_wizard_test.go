@@ -13,6 +13,7 @@ import (
 
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
@@ -723,5 +724,59 @@ func TestSetupWizardSkipsFirstQuestionWhenEnrolled(t *testing.T) {
 	}
 	if s := out.String(); strings.Contains(s, askWherePrompt) || !strings.Contains(s, "已接入过") || !strings.Contains(s, rerunPrompt("https://hub.example.com", "重装钩子（连同 Codex 的 notify）、托管并启动守护进程")) {
 		t.Fatalf("已接入时不该问 hub 在哪里，应照 setup all 走到重装确认:\n%s", s)
+	}
+}
+
+func TestPrintPhoneStepEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	var b bytes.Buffer
+	printPhoneStep(&b, "https://hub.example", true)
+	got := b.String()
+	for _, want := range []string{"Next: open this on your phone", "https://hub.example", "Tailscale", "Add to Home Screen", "turn on notifications"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("英文提示缺 %q：\n%s", want, got)
+		}
+	}
+	if hasCJK(got) {
+		t.Fatalf("英文提示里有中文：\n%s", got)
+	}
+}
+
+// hasCJK 报告字符串里有没有中日韩统一表意文字（U+4E00–U+9FFF）或全角标点（U+FF00–U+FFEF）。
+func hasCJK(s string) bool {
+	for _, r := range s {
+		if (r >= 0x4E00 && r <= 0x9FFF) || (r >= 0xFF00 && r <= 0xFFEF) || (r >= 0x3000 && r <= 0x303F) {
+			return true
+		}
+	}
+	return false
+}
+
+// 向导首屏的英文：第一问（hub 在哪里、两个选项、默认项）、答错后的重问说明、Ctrl-D 取消的那句，都不带中文。
+func TestSetupWizardFirstScreenEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	setupAllEnv(t)
+	tailscaleFound(t, true)
+	fakeStdin(t, true, "3\n") // 答 3：说明怎么答再问；接着 Ctrl-D 取消
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup"}, &out, &errOut); code != 1 {
+		t.Fatalf("Ctrl-D 应取消、退出 1: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	for _, want := range []string{"Where is your hub?", "1) This machine", "Tailscale", "2) An existing hub", "Choose [1]: ", "Answer 1 or 2"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("英文首屏缺 %q:\n%s", want, s)
+		}
+	}
+	if strings.Count(s, "Choose [1]: ") != 2 {
+		t.Fatalf("答 3 应重问一次:\n%s", s)
+	}
+	if errOut.String() != "Cancelled, nothing was done\n" {
+		t.Fatalf("取消的那句: %q", errOut.String())
+	}
+	if hasCJK(s) || hasCJK(errOut.String()) {
+		t.Fatalf("英文首屏里有中文:\n%s\n%s", s, errOut.String())
 	}
 }

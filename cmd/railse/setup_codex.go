@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 const setupCodexNotifyUsage = `  railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]
@@ -23,17 +24,17 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("setup codex-notify", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		fmt.Fprintf(stderr, "用法:\n%s\n", setupCodexNotifyUsage)
+		fmt.Fprintf(stderr, i18n.T("用法:\n%s\n"), i18n.T(setupCodexNotifyUsage))
 		fs.PrintDefaults()
 	}
-	dir := fs.String("dir", "", "守护进程数据目录（脚本放在这里），默认 $RAILSE_HOME 或 ~/.railse；不是 ~/.railse 时 railse 那一行带 --socket")
-	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
-	dryRun := fs.Bool("dry-run", false, "只打印不写")
+	dir := fs.String("dir", "", i18n.T("守护进程数据目录（脚本放在这里），默认 $RAILSE_HOME 或 ~/.railse；不是 ~/.railse 时 railse 那一行带 --socket"))
+	bin := fs.String("bin", "", i18n.T("railse 可执行文件路径，默认当前程序"))
+	dryRun := fs.Bool("dry-run", false, i18n.T("只打印不写"))
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintf(stderr, "多余的参数 %q\n用法:\n%s\n", fs.Args(), setupCodexNotifyUsage)
+		fmt.Fprintf(stderr, i18n.T("多余的参数 %q\n用法:\n%s\n"), fs.Args(), i18n.T(setupCodexNotifyUsage))
 		return 2
 	}
 	cfg, err := agentConfigFor(*dir)
@@ -64,7 +65,7 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Fprintf(stderr, "取不到家目录（%v），找不到 ~/.codex/config.toml\n", err)
+		fmt.Fprintf(stderr, i18n.T("取不到家目录（%v），找不到 ~/.codex/config.toml\n"), err)
 		return 1
 	}
 	show := hooksconf.CodexConfigPath(home)
@@ -85,12 +86,12 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 		if *bin != "" {
 			given = b
 		}
-		fmt.Fprintf(stderr, "%s 看不懂（%v），什么都没改：请手动改好这一处（notify 要写成第一个 [表] 之前的字符串数组，"+
-			"如 notify = [\"/path/to/cmd\", \"--flag\"]）再重跑 %s\n", show, err, codexNotifyCmd(socket, given))
+		fmt.Fprintf(stderr, i18n.T("%s 看不懂（%v），什么都没改：请手动改好这一处（notify 要写成第一个 [表] 之前的字符串数组，如 notify = [\"/path/to/cmd\", \"--flag\"]）再重跑 %s\n"),
+			show, err, codexNotifyCmd(socket, given))
 		return 1
 	}
 	for _, t := range n.Tables {
-		fmt.Fprintf(stderr, "警告：%s 里 %s 下面的 notify 是那个表的键，Codex 读不到，已忽略（没有串进脚本）；请手动删掉它\n", show, t)
+		fmt.Fprintf(stderr, i18n.T("警告：%s 里 %s 下面的 notify 是那个表的键，Codex 读不到，已忽略（没有串进脚本）；请手动删掉它\n"), show, t)
 	}
 	data := hooksconf.SetCodexNotify(existing, n, []string{script})
 	prev := codexPrevNotify(n, script, show, stderr)
@@ -106,19 +107,19 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 	if *dryRun {
 		scriptNote, configNote := "", ""
 		if scriptSame {
-			scriptNote = "（已是最新）"
+			scriptNote = i18n.T("（已是最新）")
 		}
 		switch {
 		case configSame:
-			configNote = "（已是最新）"
+			configNote = i18n.T("（已是最新）")
 		case backup:
-			configNote = "（会先备份到 " + backupPath(show, backupNow()) + "）"
+			configNote = fmt.Sprintf(i18n.T("（会先备份到 %s）"), backupPath(show, backupNow()))
 		}
 		fmt.Fprintf(stdout, "== %s%s ==\n%s== %s%s ==\n%s", script, scriptNote, body, show, configNote, data)
 		return 0
 	}
 	if scriptSame {
-		fmt.Fprintf(stdout, "%s 已是最新\n", script)
+		fmt.Fprintf(stdout, i18n.T("%s 已是最新\n"), script)
 	} else {
 		if err := os.MkdirAll(dataDir, 0o700); err != nil {
 			fmt.Fprintln(stderr, err)
@@ -128,29 +129,29 @@ func runSetupCodexNotify(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "已写入 %s\n", script)
+		fmt.Fprintf(stdout, i18n.T("已写入 %s\n"), script)
 	}
 	if configSame {
-		fmt.Fprintf(stdout, "%s 已是最新\n", show)
+		fmt.Fprintf(stdout, i18n.T("%s 已是最新\n"), show)
 	} else {
 		if backup {
 			bak, err := writeBackup(show, existing)
 			if err != nil {
-				fmt.Fprintf(stderr, "备份 %s 失败，没有改它：%v\n", show, err)
+				fmt.Fprintf(stderr, i18n.T("备份 %s 失败，没有改它：%v\n"), show, err)
 				return 1
 			}
-			fmt.Fprintf(stdout, "已备份 %s 到 %s\n", show, bak)
+			fmt.Fprintf(stdout, i18n.T("已备份 %s 到 %s\n"), show, bak)
 		}
 		if err := writeFileAtomic(path, data, mode); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "已写入 %s：notify 指向 %s\n", show, script)
+		fmt.Fprintf(stdout, i18n.T("已写入 %s：notify 指向 %s\n"), show, script)
 	}
 	if len(prev) > 0 {
-		fmt.Fprintf(stdout, "Codex 的 notify 先调原来的 %s，再调 railse\n", hooksconf.ShellJoin(prev))
+		fmt.Fprintf(stdout, i18n.T("Codex 的 notify 先调原来的 %s，再调 railse\n"), hooksconf.ShellJoin(prev))
 	} else {
-		fmt.Fprintln(stdout, "Codex 的 notify 只调 railse（没有前一跳）")
+		fmt.Fprintln(stdout, i18n.T("Codex 的 notify 只调 railse（没有前一跳）"))
 	}
 	return 0
 }
@@ -197,9 +198,9 @@ func codexPrevNotify(n hooksconf.CodexNotify, script, show string, stderr io.Wri
 			// 别处的、读得到却没有标记行的 codex-notify.sh：用户自己的脚本，整个保留
 		default:
 			if err == nil {
-				err = errors.New("没有标记行")
+				err = errors.New(i18n.T("没有标记行"))
 			}
-			fmt.Fprintf(stderr, "警告：原来的 notify 记在 %s 的标记行里，读不到（%v），前一跳没有保留；要找回请看 %s*\n", first, err, show+backupSuffix)
+			fmt.Fprintf(stderr, i18n.T("警告：原来的 notify 记在 %s 的标记行里，读不到（%v），前一跳没有保留；要找回请看 %s*\n"), first, err, show+backupSuffix)
 			return nil
 		}
 	case len(n.Argv) >= 3 && filepath.Base(first) == "railse" && n.Argv[1] == "hook" && n.Argv[2] == "codex-notify":
@@ -207,7 +208,7 @@ func codexPrevNotify(n hooksconf.CodexNotify, script, show string, stderr io.Wri
 	}
 	for _, a := range prev {
 		if sameScript(a, script) {
-			fmt.Fprintf(stderr, "警告：原来的 notify（%s）会调到这次的脚本 %s 自己，没有串成前一跳（串上也只是又进到脚本自己、什么都不做）；要找回原来的 notify 请看 %s*\n",
+			fmt.Fprintf(stderr, i18n.T("警告：原来的 notify（%s）会调到这次的脚本 %s 自己，没有串成前一跳（串上也只是又进到脚本自己、什么都不做）；要找回原来的 notify 请看 %s*\n"),
 				hooksconf.ShellJoin(prev), script, show+backupSuffix)
 			return nil
 		}
