@@ -22,6 +22,8 @@ jobs:
       # setup-go v6 起导出 GOTOOLCHAIN=local，不自动换工具链：go run 编的 golangci-lint，它 go.mod 的 go 版本不能高于本仓库 go.mod 的
       - run: make lint
       - run: go test ./... -race -count=1
+      # 英文冒烟：脚本自己把 RAILSE_LANG 设成 en（盖过上面作业级的 zh），英文输出里不得有中日韩字符
+      - run: go build -o /tmp/railse ./cmd/railse && scripts/english-smoke.sh /tmp/railse
   # install.sh 的本地发布测试（假发布 + 127.0.0.1 上的 HTTP 服务）；Linux 上走 sha256sum 分支，/bin/sh 是 dash
   install-script:
     runs-on: ubuntu-latest
