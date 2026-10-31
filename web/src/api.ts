@@ -1,3 +1,4 @@
+import type { Lang } from './i18n'
 import type { AnswerBody, AuditEvent, DecideBody, Draft, Inbox, Machine, RequestView, Rule, Status, VapidInfo } from './types'
 
 /** hub 回了非 2xx（status 为 HTTP 状态码），或根本连不上（status 为 0）。message 是给人看的中文文案。 */
@@ -106,8 +107,8 @@ export const hub = {
   pause: () => post<void>('/api/pause'),
   resume: () => post<void>('/api/resume'),
   pushVapid: () => get<VapidInfo>('/api/push/vapid'),
-  /** sub 是 PushSubscription.toJSON() 的原样结果。 */
-  pushSubscribe: (sub: unknown) => post<void>('/api/push/subscribe', sub),
+  /** sub 是 PushSubscription.toJSON() 的原样结果；lang 是这台设备想要的推送文案语言。 */
+  pushSubscribe: (sub: unknown, lang: Lang) => post<void>('/api/push/subscribe', { ...(sub as Record<string, unknown>), lang }),
   pushUnsubscribe: (endpoint: string) => del<void>('/api/push/subscribe', { endpoint }),
   pushCheck: (endpoint: string) => post<{ active: boolean }>('/api/push/check', { endpoint }),
   pushTest: (endpoint: string) => post<void>('/api/push/test', { endpoint }),

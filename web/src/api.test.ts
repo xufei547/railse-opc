@@ -101,7 +101,7 @@ describe('request', () => {
   it('推送接口的路径、方法与请求体', async () => {
     const calls = stubFetch(204, undefined)
     const sub = { endpoint: 'https://push.example/x', keys: { p256dh: 'p', auth: 'a' } }
-    await hub.pushSubscribe(sub)
+    await hub.pushSubscribe(sub, 'zh')
     await hub.pushUnsubscribe('https://push.example/x')
     await hub.pushTest('https://push.example/x')
     expect(calls.map((c) => [c.init.method, c.url])).toEqual([
@@ -109,7 +109,7 @@ describe('request', () => {
       ['DELETE', '/api/push/subscribe'],
       ['POST', '/api/push/test'],
     ])
-    expect(JSON.parse(calls[0]?.init.body as string)).toEqual(sub)
+    expect(JSON.parse(calls[0]?.init.body as string)).toEqual({ ...sub, lang: 'zh' })
     expect(JSON.parse(calls[1]?.init.body as string)).toEqual({ endpoint: 'https://push.example/x' })
   })
 

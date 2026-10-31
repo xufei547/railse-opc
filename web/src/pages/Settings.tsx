@@ -4,7 +4,8 @@ import { hub } from '../api'
 import { Banner } from '../components/Banner'
 import { useActions, type Actions } from '../components/Confirm'
 import { failure, formatUptime, onlineCount, pauseCopy } from '../manage'
-import { browserEnv, logoutDevice, usePush, type PushControl } from '../push'
+import { lang, readChoice, resolveLang, saveChoice, setLang, t, type LangChoice } from '../i18n'
+import { browserEnv, logoutDevice, resubscribeForLang, usePush, type PushApi, type PushControl, type PushEnv } from '../push'
 import { useStore } from '../StoreProvider'
 
 export function Settings() {
@@ -85,6 +86,19 @@ export function Settings() {
           <input type="checkbox" role="switch" checked={paused} disabled={actions.busy || !status} onChange={togglePause} />
         </label>
         <NotificationView push={push} act={actions.act} busy={actions.busy || leaving} />
+        <LanguageView
+          choice={readChoice(typeof localStorage === 'undefined' ? null : localStorage)}
+          busy={actions.busy || leaving}
+          onChange={(c) =>
+            void switchLanguage(c, {
+              storage: typeof localStorage === 'undefined' ? null : localStorage,
+              env: browserEnv,
+              api: hub,
+              reload: () => window.location.reload(),
+              pushOn: push.status === 'on',
+            })
+          }
+        />
         <h2 className="section-title">hub</h2>
         <dl className="kv">
           <dt>规则版本</dt>
@@ -178,6 +192,54 @@ export function NotificationView({ push, act, busy = false }: { push: PushContro
           </button>
         </div>
       )}
+    </section>
+  )
+}
+
+/** 切换语言：先存，再（推送开着时）把订阅连同新语言重登记，最后整页刷新让每一处文案重算。重登记失败不拦着刷新。 */
+export async function switchLanguage(
+  choice: LangChoice,
+  deps: {
+    storage: Pick<Storage, 'setItem' | 'removeItem'> | null
+    env: Pick<PushEnv, 'getSubscription'>
+    api: Pick<PushApi, 'pushSubscribe'>
+    reload: () => void
+    pushOn: boolean
+  },
+): Promise<void> {
+  saveChoice(deps.storage, choice)
+  setLang(resolveLang(choice, typeof navigator === 'undefined' ? undefined : navigator.language))
+  if (deps.pushOn) {
+    try {
+      await resubscribeForLang(deps.env, deps.api)
+    } catch {
+      // 下次开启通知或 SW 重订阅时会再带语言
+    }
+  }
+  deps.reload()
+}
+
+const choices: { value: LangChoice; label: () => string }[] = [
+  { value: 'auto', label: () => t('跟随系统') },
+  { value: 'zh', label: () => t('中文') },
+  { value: 'en', label: () => 'English' },
+]
+
+export function LanguageView({ choice, onChange, busy }: { choice: LangChoice; onChange: (c: LangChoice) => void; busy: boolean }) {
+  return (
+    <section>
+      <h2 className="section-title">{t('语言')}
+        {lang() === 'zh' ? ' / Language' : ''}
+      </h2>
+      <div className="choices" role="radiogroup" aria-label={t('语言')}>
+        {choices.map((c) => (
+          <label key={c.value} className="option">
+            <input type="radio" name="lang" value={c.value} checked={choice === c.value} disabled={busy} onChange={() => onChange(c.value)} />
+            <span>{c.label()}</span>
+          </label>
+        ))}
+      </div>
+      <p className="sub line">{t('通知的文字也跟着这个语言；换了之后这台设备的订阅会重新登记。')}</p>
     </section>
   )
 }

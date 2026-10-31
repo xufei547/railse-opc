@@ -1,5 +1,6 @@
 {
-  "name": "Railse 一人公司",
+  "name": "Railse",
+  "description": "Approvals and questions from your coding agents, on your phone.",
   "short_name": "Railse",
   "start_url": "/",
   "scope": "/",

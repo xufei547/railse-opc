@@ -54,6 +54,7 @@ function load(
   let showFails = o.showFails ?? 0
   const self = {
     location: new URL(`${origin}/sw.js`),
+    navigator: { language: 'zh-CN' },
     addEventListener: (type: string, fn: (e: unknown) => void) => {
       handlers[type] = fn
     },
@@ -420,7 +421,7 @@ describe('sw.js：订阅换了', () => {
     expect(keyArg(sw)).toEqual(hubKey)
     expect(sw.fetches[1]?.url).toBe('/api/push/subscribe')
     expect(sw.fetches[1]?.init).toMatchObject({ method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } })
-    expect(JSON.parse(String(sw.fetches[1]?.init?.body))).toEqual({ endpoint: 'https://push.example/new', keys: { p256dh: 'p', auth: 'a' } })
+    expect(JSON.parse(String(sw.fetches[1]?.init?.body))).toEqual({ endpoint: 'https://push.example/new', keys: { p256dh: 'p', auth: 'a' }, lang: 'zh-CN' })
     expect(sw.fetches[2]?.init).toMatchObject({ method: 'DELETE', credentials: 'same-origin' })
     expect(JSON.parse(String(sw.fetches[2]?.init?.body))).toEqual({ endpoint: 'https://push.example/old' })
     expect(sw.fetches).toHaveLength(3)

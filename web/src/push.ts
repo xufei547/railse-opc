@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { hub } from './api'
 import type { OutcomeView } from './decide'
+import { lang, t } from './i18n'
 import { failure } from './manage'
 import { getSubscription, isIOS, isStandalone, pushSupported, subscribe, urlBase64ToUint8Array } from './pwa'
 
@@ -152,7 +153,7 @@ export async function enablePush(publicKey: string, oldEndpoint: string | null, 
   if (!publicKey) throw new Error('还没拿到 hub 的推送公钥，请刷新页面后再试')
   const sub = await env.subscribe(publicKey)
   try {
-    await api.pushSubscribe(sub.toJSON())
+    await api.pushSubscribe(sub.toJSON(), lang())
   } catch (e) {
     await sub.unsubscribe().catch(() => false)
     throw e
@@ -229,12 +230,18 @@ export interface PushControl {
   refresh(): Promise<void>
 }
 
-const enabledView: OutcomeView = { tone: 'ok', title: '通知已开启', text: '新的审批与提问会推送到这台设备。可以发一条测试通知，确认收得到。' }
-const disabledView: OutcomeView = { tone: 'ok', title: '通知已关闭', text: '这台设备不再收到推送；随时可以重新开启。' }
-const testedView: OutcomeView = {
+const enabledView = (): OutcomeView => ({ tone: 'ok', title: t('通知已开启'), text: t('新的审批与提问会推送到这台设备。可以发一条测试通知，确认收得到。') })
+const disabledView = (): OutcomeView => ({ tone: 'ok', title: t('通知已关闭'), text: t('这台设备不再收到推送；随时可以重新开启。') })
+const testedView = (): OutcomeView => ({
   tone: 'ok',
-  title: '测试通知已发出',
-  text: '几秒内这台设备应弹出“Railse：通知正常”。没有弹出的话，看看系统的专注模式与通知设置。',
+  title: t('测试通知已发出'),
+  text: t('几秒内这台设备应弹出“Railse：通知正常”。没有弹出的话，看看系统的专注模式与通知设置。'),
+})
+
+/** 切换语言后把现有订阅连同新语言再登记一次（同一 endpoint 覆盖）。没有订阅就什么都不做。 */
+export async function resubscribeForLang(env: Pick<PushEnv, 'getSubscription'>, api: Pick<PushApi, 'pushSubscribe'>): Promise<void> {
+  const sub = await env.getSubscription()
+  if (sub) await api.pushSubscribe(sub.toJSON(), lang())
 }
 
 /**
@@ -293,17 +300,17 @@ export function usePush(env: PushEnv = browserEnv, api: PushApi = hub): PushCont
     if (busyRef.current) return Promise.resolve(null)
     // 第一个调用：enablePush → env.subscribe → Notification.requestPermission()，之前没有 await 与网络请求（iOS 手势规则）
     const pending = enablePush(latest.current?.publicKey ?? '', latest.current?.endpoint ?? null, env, api)
-    return settle(pending, enabledView, '没有开启通知', '开启失败')
+    return settle(pending, enabledView(), '没有开启通知', '开启失败')
   }, [env, api, settle])
 
   const disable = useCallback((): Promise<OutcomeView | null> => {
     if (busyRef.current) return Promise.resolve(null)
-    return settle(disablePush(env, api), disabledView, '没有关闭通知', '关闭失败')
+    return settle(disablePush(env, api), disabledView(), '没有关闭通知', '关闭失败')
   }, [env, api, settle])
 
   const test = useCallback((): Promise<OutcomeView | null> => {
     if (busyRef.current) return Promise.resolve(null)
-    return settle(testPush(env, api), testedView, '测试通知没有发出', '发送失败')
+    return settle(testPush(env, api), testedView(), '测试通知没有发出', '发送失败')
   }, [env, api, settle])
 
   return {
