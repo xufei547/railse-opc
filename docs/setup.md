@@ -230,7 +230,7 @@ hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux
 | `cli.codex` | Codex CLI 版本 | 版本是否与录制钩子样本时（0.145.0）一致；不在 PATH 里 skip | 同上 |
 | `cli.gemini` | Gemini CLI 版本 | 版本不低于 0.65.0（更早的版本钩子在确认之后才触发）；不在 PATH 里 skip | 升级 Gemini CLI（fail） |
 | `hubsrv.dir` | hub 数据目录 | 目录在、是 0700 | 显式 `--hub-dir` 写错了就改对；不跑 hub 的机器去掉它 |
-| `hubsrv.db` | hub 数据库 | `hub.db` 是 0600，库版本与程序一致 | 库比程序新（fail）：升级 railse；库旧（warn）：下次 `hub run` 自动升级，先备份；被锁：稍后重跑；hub 异常退出留下未恢复的 WAL（warn）：启动一次 `railse hub run`；真损坏才从备份恢复 |
+| `hubsrv.db` | hub 数据库 | `hub.db` 是 0600，库版本与程序一致 | 库比程序新（fail）：升级 railse；库旧（warn）：下次 `hub run` 自动升级（事务里完成，失败不改库；程序不会替你备份，想留退路先自己备份）；被锁：稍后重跑；hub 异常退出留下未恢复的 WAL（warn）：启动一次 `railse hub run`；真损坏才从备份恢复 |
 | `hubsrv.password` | 网页密码 | 设过网页密码 | `railse hub password`（warn） |
 | `hubsrv.vapid` | 推送密钥 | 推送密钥在、解得开 | 还没有（warn）：首次 `railse hub run` 会生成；损坏（fail）：`railse hub vapid --rotate`，所有手机重新开启通知 |
 | `hubsrv.acme` | ACME 证书目录 | `acme/` 是 0700、里面的文件 0600；没有这个目录（没用 ACME）时 skip | 按提示 `chmod` |
@@ -243,7 +243,7 @@ hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux
 2. 重启守护进程：托管的重跑 `railse setup autostart`（当初给过 `--dir`、`--bin` 的照样带上；macOS 会重新 bootout、bootstrap，Linux 会 `daemon-reload` 并 `restart`）；前台跑的停掉后重新 `railse agent run`。也可以重跑 `railse setup`（当初给过 `--dir`、`--bin`、`--project` 的改用 `railse setup all` 带上它们）：跳过接入，重装钩子、接 Codex 的 `notify`、重装托管并重启守护进程，再体检；在终端里动手之前会先确认一次。
 3. 重启 hub：系统单元 `sudo systemctl restart railse-hub`，Linux 用户单元 `systemctl --user restart railse-hub`，macOS `launchctl kickstart -k gui/$(id -u)/dev.railse.hub`。也可以重跑 `railse setup autostart --hub`，但要带上当初 `--` 之后的全部参数，否则托管文件会被改写成不带它们的。
 4. hub 与各工作机升级到同一版本：协议号不一致时 hub 拒绝守护进程的握手。升级后在工作机上跑 `railse doctor` 确认 `hub.reachable` 与 `agent.hub` 都是 ok。
-5. 从 0.1.4 及更早升级到 0.1.5（手机上答 Claude Code 的选择题）：hub 要先于或与守护进程同时升级（旧版 hub 不认识提问；本机 hub 与守护进程是同一个二进制，不受影响）；已经装过钩子的机器重跑一次 `railse setup hooks --claude`（或重跑 `railse setup`）补上 `PreToolUse` 钩子，不重跑也不影响别的功能，只是选择题不进手机，`railse doctor` 的 `hooks.claude` 会为此报 warn。hub 的库会在下次 `hub run` 时自动升到 schema v3（先备份）。
+5. 从 0.1.4 及更早升级到 0.1.5（手机上答 Claude Code 的选择题）：hub 要先于或与守护进程同时升级（旧版 hub 不认识提问；本机 hub 与守护进程是同一个二进制，不受影响）；已经装过钩子的机器重跑一次 `railse setup hooks --claude`（或重跑 `railse setup`）补上 `PreToolUse` 钩子，不重跑也不影响别的功能，只是选择题不进手机，`railse doctor` 的 `hooks.claude` 会为此报 warn。hub 的库会在下次 `hub run` 时自动升到 schema v3：迁移在一个事务里完成，失败不改动库；升级后旧版程序打不开 v3 库（报“数据库版本 3 比程序（2）新，请升级 railse”），想保留回退余地，升级前自己备份 hub 数据目录。
 6. 从 0.1.0 升级：0.1.0 的 Claude、Gemini 钩子只能用 `--project` 装成项目级。不打算改的什么都不用做。想改成用户级（对所有项目生效）的，跑完 `railse setup hooks`（或 `railse setup`）后，在每个用 `--project` 装过的项目里删掉 `.claude/settings.local.json`、`.gemini/settings.json` 里 Railse 的条目（在项目里跑 `railse doctor` 会逐个指出；在项目目录里跑 `setup hooks` 时它也会在 stderr 提醒）。不删也能用，但 Gemini 的钩子会触发两次，Claude 两处的条目不同（如换过程序路径或 `--dir`）时也会两次。
 
 ## 发布（维护者）

@@ -2,7 +2,7 @@
 
 ## 是什么
 
-`railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（PWA，由 hub 同源托管，见“网页”与 [web.md](web.md)）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对每条请求只能回答放行（allow）或拒绝（deny），没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、ping、pong、error 七种。
+`railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（PWA，由 hub 同源托管，见“网页”与 [web.md](web.md)）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对审批只能回答放行（allow）或拒绝（deny）；对 Claude Code 的选择题只能给出答案（填进选项的文字，不是命令）或交回终端；仍然没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、ping、pong、error 七种。
 
 hub 还托管手机网页（见“网页”），并能把新请求推到手机（Web Push，见“手机推送”）；TLS 可由 hub 内置的 ACME（Let's Encrypt）直出，也可交给反向代理（见“部署与反向代理”）；开机自启用 `railse setup autostart --hub`，安装、托管与体检的完整步骤见 [setup.md](setup.md)。
 
@@ -66,7 +66,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 - **Gemini 的请求永远不进 hub。** Gemini 的钩子只能拒绝不能放行，守护进程直接交回原生确认框（`decided_by: gemini`），只作审计上报；hub 也拒收 Gemini 会话的 pending。
 - **连续 3 次握手被 hub 以 401 拒绝（机器被吊销或密钥无效）后**，守护进程停止重连 hub（`railse agent status` 显示 `hub: disabled`），请求一律立即交回终端，日志提示重新接入；要重新 `railse agent enroll --force` 并重启守护进程。前两次 401 照常按退避重连，日志记“回 HTTP 401（第 N/3 次）”，期间状态是 `hub: connecting`。只有成功握手（收到 hub 的 welcome）才重新计数；连不上、5xx、超时、协议版本不一致都不清零，所以 401 与 502 交替时照样会停用，而 hub 重启或代理切换时偶发的一两次 401 只要随后连上过就不累计。按默认退避，吊销后至少约 7 秒才停用（断线后等 1 秒，前两次 401 后再等 2、4 秒；断线前连接没稳定过、或中间夹着连不上时退避更长，停用更晚），启动时就被拒至少约 3 秒。
 - **协议版本不一致**时 hub 拒绝握手（Error 帧“协议版本 X，hub 需要 Y”，以 1008 关闭，审计 `agent_proto_mismatch`），守护进程日志提示升级较旧的一方，每 10 分钟再试。
-- **断线与重连。** 守护进程重连退避 1、2、4、8、16、30 秒，连接稳定后归零；超过 60 秒收不到 hub 的任何帧就主动断开重连。重连时 hello 带上本机仍在等的请求：hub 补发其中已决定的；hub 里多出来的 pending 改为 `cancelled`（`decided_by: agent_restart`）。钩子在决定前退出 → hub 记 `cancelled/terminal`；本机等满期限 → `expired/timeout`；hub 自己每分钟把过了 `expires_at` 的 pending 标为 `expired/timeout`。Codex 15 分钟内重发同一请求（同会话、同回合、同工具、同载荷）时，旧的那条改为 `cancelled/resend`，收件箱只剩新的；提问的“同载荷”按题目内容算（题目、选项都一样才算同一条），同一回合里两道不同的题各是各的。
+- **断线与重连。** 守护进程重连退避 1、2、4、8、16、30 秒，连接稳定后归零；超过 60 秒收不到 hub 的任何帧就主动断开重连。重连时 hello 带上本机仍在等的请求：hub 补发其中已决定的；hub 里多出来的 pending 改为 `cancelled`（`decided_by: agent_restart`）。钩子在决定前退出 → hub 记 `cancelled/terminal`；本机等满期限 → `expired/timeout`；hub 自己每分钟把过了 `expires_at` 的 pending 标为 `expired/timeout`。Codex 15 分钟内重发同一请求（同会话、同回合、同工具、同载荷）时，旧的那条改为 `cancelled/resend`，收件箱只剩新的；提问的“同载荷”按整个提问内容算（每道题的题面、标题、选项文字与说明、是否多选都一样才算同一条），同一回合里两道不同的题各是各的。
 - **hub 结束请求会通知守护进程。** hub 自己结束一条守护进程的 pending（过期扫描、手机决定时发现已过期、被重发顶掉）时，立即对该机器发带 `request_id` 的 Error 帧“请求已在 hub 结束”，守护进程把它交回终端（本机审计记 `expired/hub_unreachable`），不再挂满本机期限。守护进程的时钟比 hub 慢时，hub 会按自己的时间更早判过期，也由此及时收尾。机器当时不在线的，重连后重发 pending 时 hub 回“请求已结束”，同样交回终端。
 
 ## API
@@ -116,7 +116,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 
 记不住时请求保持 pending，回 422，文案以“不能记住：”开头，例如：只读、项目内改动和联网操作之外的不能记成放行（`outward`、`destructive` 永远不行）；没有项目根的命令或文件写入不能记成放行（全局也不行：定级依赖项目根；项目根是家目录、它的上级或根目录时也算没有）；含凭据的命令（载荷里有 `<redacted>`）；命令、路径等超过 4 KiB；规则集已接近下发上限；拒绝匹配不上这条请求（例如 `a && b` 这样的复合命令，请手写规则）；webhook 请求；显式 `scope: project` 而没有项目根。
 
-**`/ws/client` 帧**：每帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`。`request_new`、`request_updated` 的 `data` 是请求视图（与 `/api/inbox` 里每条同形状，守护进程、webhook、question/done 的请求都一样），`rules_updated` 是 `{"version"}`，`status` 是 `{"paused"}`。请求的状态变化、决定未送达（undeliverable），以及 `delivered_at` 从空变成有值（守护进程的送达回执、送达对账、webhook 回调成功）都推 `request_updated`。question 不再等（同一会话来了新事件）时不单独推 `request_updated`：之后的 question、done、待审批与提问本身以 `request_new` 推出，网页收到 `request_new` 时应重新拉 `/api/inbox`，`questions` 随之更新；由守护进程审计补进的历史行（本机自动放行、自动拒绝等）不推送，它们让 question 不再等的变化要到下一次全量拉取才看得到。推送只是“有变化”的提示：慢的订阅者（积压 64 帧）会被丢帧，网页每次连上或怀疑漏帧时必须全量重新拉取（`/api/inbox`、`/api/status`、`/api/rules` 等）。hub 每 30 秒复核一次登录并 ping，登录失效（登出、换密码、过期）时以 1008 关闭；网页不该发数据帧，发了就断开。
+**`/ws/client` 帧**：每帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`。`request_new`、`request_updated` 的 `data` 是请求视图（与 `/api/inbox` 里每条同形状，守护进程、webhook、question/done、提问的请求都一样），`rules_updated` 是 `{"version"}`，`status` 是 `{"paused"}`。请求的状态变化、决定未送达（undeliverable），以及 `delivered_at` 从空变成有值（守护进程的送达回执、送达对账、webhook 回调成功）都推 `request_updated`。question 不再等（同一会话来了新事件）时不单独推 `request_updated`：之后的 question、done、待审批与提问本身以 `request_new` 推出，网页收到 `request_new` 时应重新拉 `/api/inbox`，`questions` 随之更新；由守护进程审计补进的历史行（本机自动放行、自动拒绝等）不推送，它们让 question 不再等的变化要到下一次全量拉取才看得到。推送只是“有变化”的提示：慢的订阅者（积压 64 帧）会被丢帧，网页每次连上或怀疑漏帧时必须全量重新拉取（`/api/inbox`、`/api/status`、`/api/rules` 等）。hub 每 30 秒复核一次登录并 ping，登录失效（登出、换密码、过期）时以 1008 关闭；网页不该发数据帧，发了就断开。
 
 **webhook。** `POST /api/webhook/approvals`，`Authorization: Bearer <来源令牌>`，请求体至多 64 KiB：
 
@@ -147,7 +147,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
   2. 再 `railse hub vapid --rotate` 换推送密钥：旧公钥作废，并再删一次订阅（两步之间若有设备重新登记，也一并删掉）；
   3. 每台还在用的手机用新密码重新登录，到设置里重新开启通知。
 - **跨站。** 写接口、`/api/logout` 与 `/ws/client` 校验同源 Origin，是 SameSite 之外的第二道防线。
-- **hub 的权力被限死。** 对请求只能回 allow 或 deny，没有向机器下发命令的通道。“记住”永远不会生成放行 `outward`、`destructive`（以及 `unknown`、`write_outside`）的规则，`learned` 来源的这类放行在导入时也被拒绝。网页导入的 `user` 规则可以放行 `outward`、`destructive`（用户决定 B）：这类规则在 `/api/rules` 标 `elevated: true`，导入时审计 `rules_imported` 带上它们的 id，从停用改为启用时审计 `rule_enabled_elevated`。
+- **hub 的权力被限死。** 对审批只能回 allow 或 deny，对 Claude Code 的提问只能给出答案（填进选择题的文字，不是命令）或交回终端（`passthrough`），没有向机器下发命令的通道。“记住”永远不会生成放行 `outward`、`destructive`（以及 `unknown`、`write_outside`）的规则，`learned` 来源的这类放行在导入时也被拒绝。网页导入的 `user` 规则可以放行 `outward`、`destructive`（用户决定 B）：这类规则在 `/api/rules` 标 `elevated: true`，导入时审计 `rules_imported` 带上它们的 id，从停用改为启用时审计 `rule_enabled_elevated`。
 - **数据最小化。** 守护进程上报前对载荷与事件文本脱敏，hub 收到后再脱敏一次并截断各字段；hub 不信任守护进程送来的路径与命令，只存储与展示。审计里不含钩子进程的环境变量。
 - **明文接入会警告。** `railse agent enroll --hub http://…`（非本机地址）提示明文传输密钥。
 - **ACME 私钥明文存盘（设计 5.3 例外）。** 直出 TLS 时 Let's Encrypt 的账户私钥与证书私钥（autocert 的格式）明文存在数据目录的 `acme/`：目录 0700（hub 启动时建好并收紧），文件 0600（写临时文件再改名），`railse doctor` 检查两者的权限。它们只给 TLS 握手与 ACME 请求用，不经任何接口、日志或审计出现。拿到证书私钥就能冒充 hub：备份数据目录时把它当私密数据保管；疑似泄露时停掉 hub、删掉 `acme/` 再启动，重新签发（注意频率限制）。
