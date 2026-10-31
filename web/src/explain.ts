@@ -38,10 +38,16 @@ export function machineLabel(name: string): string {
  * 重定向与它的目标、行尾反斜杠续行、heredoc（<<WORD、<<-WORD）的正文与结束行都不产生词，正文也不产生段。
  * 只为写一句人话，不求完全符合 shell 语法：单引号里原样；双引号里与引号外的反斜杠转义下一个字符；$(…) 与反引号不展开。
  */
+/** words 是去掉赋值与包装后的词；piped 为真表示这一段紧跟在单个 | 之后，与前一段同属一条管道。 */
+interface Segment {
+  words: string[]
+  piped: boolean
+}
+
 const wrappers = new Set(['env', 'time', 'nohup', 'nice', 'caffeinate'])
 
-function segments(command: string): string[][] {
-  const segs: string[][] = []
+function segments(command: string): Segment[] {
+  const segs: Segment[] = []
   let words: string[] = []
   let cur = ''
   let has = false
@@ -55,10 +61,14 @@ function segments(command: string): string[][] {
     cur = ''
     has = false
   }
+  let piped = false // 正在拼的这一段是否紧跟在单个 | 之后
   const endSeg = () => {
     endWord()
     dropNext = false
-    if (words.length > 0) segs.push(words)
+    if (words.length > 0) {
+      segs.push({ words, piped })
+      piped = false
+    }
     words = []
   }
   let quote = ''
@@ -126,8 +136,10 @@ function segments(command: string): string[][] {
     } else if (c === '&' && command.charAt(i + 1) === '>') {
       endWord() // &> 与 &>> 是重定向，不是分隔符；交给下一轮的 >
     } else if (c === '&' || c === '|') {
-      if (command.charAt(i + 1) === c) i++
+      const double = command.charAt(i + 1) === c
+      if (double) i++
       endSeg()
+      piped = c === '|' && !double
     } else if (c === ';' || c === '\n') {
       endSeg()
       if (c === '\n' && heredocs.length > 0) {
@@ -153,10 +165,10 @@ function segments(command: string): string[][] {
     }
   }
   endSeg()
-  return segs.map((ws) => {
+  return segs.map(({ words: ws, piped }) => {
     let k = 0
     while (k < ws.length - 1 && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k] ?? '') || wrappers.has(ws[k] ?? ''))) k++
-    return ws.slice(k)
+    return { words: ws.slice(k), piped }
   })
 }
 
@@ -202,7 +214,7 @@ function matchGit(args: string[]): Match | null {
   const remote = pos[0] ?? ''
   const refs = pos.slice(1)
   // 源为空的 refspec（:main、+:main）是删除远程分支
-  const delRef = refs.find((w) => w.replace(/^\+/, '').startsWith(':'))
+  const delRef = refs.find((w) => /^\+?:./.test(w))
   const suffix = (ref: string) => (remote && ref ? `（${remote} 的 ${ref}）` : remote ? `（${remote}）` : '')
   if (opts.includes('--delete') || short(/^-[A-Za-z]*d/) || delRef !== undefined) {
     const ref = delRef !== undefined ? delRef.replace(/^\+/, '').slice(1) : (refs[0] ?? '')
@@ -232,6 +244,60 @@ function sendsData(name: string, args: string[]): boolean {
     if (a.startsWith('--')) return longs.some((o) => a === o || a.startsWith(o + '='))
     return name === 'curl' && /^-[^-]*[XdTF]/.test(a)
   })
+}
+
+/** 参数里第一个带协议的网址的主机名；没有网址或解析不了为空串。 */
+function urlHost(args: string[]): string {
+  const url = args.find((w) => /^[a-z][a-z0-9+.-]*:\/\//i.test(w))
+  if (!url) return ''
+  try {
+    return new URL(url).hostname
+  } catch {
+    return ''
+  }
+}
+
+const shells = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish'])
+const baseName = (w: string) => w.slice(w.lastIndexOf('/') + 1)
+
+/** words 是不是一个从标准输入读脚本的 shell：没有 -c（含在 -ec 这类簇里），-- 之前没有脚本文件操作数（单独的 - 不算）。 */
+function readsStdin(args: string[]): boolean {
+  for (const a of args) {
+    if (a === '--') return true
+    if (a === '-') continue
+    if (!a.startsWith('-')) return false
+    if (!a.startsWith('--') && a.includes('c')) return false
+  }
+  return true
+}
+
+/**
+ * 管道里的一段（不是第一段）是从标准输入读脚本的 shell（sh -s、bash -、sudo sh）：把脚本直接交给 shell 执行。
+ * 前面同一条管道里有 curl/wget 就说下载；hub 把 curl … | sh 只定为联网，页面可以说得比它重。
+ */
+function matchPipedShell(segs: Segment[], i: number): Match | null {
+  const seg = segs[i]
+  if (!seg?.piped) return null
+  let args = seg.words
+  let admin = false
+  if (baseName(args[0] ?? '') === 'sudo') {
+    admin = true
+    let k = 1
+    while (k < args.length && (args[k] ?? '').startsWith('-')) k++
+    args = args.slice(k)
+  }
+  if (!shells.has(baseName(args[0] ?? '')) || !readsStdin(args.slice(1))) return null
+  const how = admin ? '以管理员权限直接执行' : '直接执行'
+  for (let j = i - 1; j >= 0; j--) {
+    const prev = segs[j]?.words ?? []
+    const n = baseName(prev[0] ?? '')
+    if (n === 'curl' || n === 'wget') {
+      const host = urlHost(prev.slice(1))
+      return { rank: 3, text: host ? `下载 ${host} 的脚本并${how}` : `下载脚本并${how}` }
+    }
+    if (!segs[j]?.piped) break
+  }
+  return { rank: 3, text: admin ? '以管理员权限执行管道传来的脚本' : '执行管道传来的脚本' }
 }
 
 function matchSegment(words: string[]): Match | null {
@@ -273,15 +339,8 @@ function matchSegment(words: string[]): Match | null {
     case 'curl':
     case 'wget': {
       const send = sendsData(name, args)
-      const url = args.find((w) => /^[a-z][a-z0-9+.-]*:\/\//i.test(w))
-      if (url) {
-        try {
-          const host = new URL(url).hostname
-          if (host) return send ? { rank: 2, text: `向 ${host} 发送数据` } : { rank: 1, text: `访问网址 ${host}` }
-        } catch {
-          // 网址解析不了，按没有网址
-        }
-      }
+      const host = urlHost(args)
+      if (host) return send ? { rank: 2, text: `向 ${host} 发送数据` } : { rank: 1, text: `访问网址 ${host}` }
       return send ? { rank: 2, text: `用 ${name} 发送数据` } : { rank: 1, text: `用 ${name} 访问网络` }
     }
     case 'vercel':
@@ -326,8 +385,9 @@ function fallbackAction(command: string): string {
 /** 各段里取最要紧的一段（不可逆 > 对外 > 联网，一样高取靠前的）；都认不出时 rank 0，说运行命令。 */
 function shellMatch(command: string): Match {
   let best: Match | null = null
-  for (const seg of segments(command)) {
-    const m = matchSegment(seg)
+  const segs = segments(command)
+  for (let i = 0; i < segs.length; i++) {
+    const m = matchPipedShell(segs, i) ?? matchSegment(segs[i]?.words ?? [])
     if (m && (!best || m.rank > best.rank)) best = m
   }
   return best ?? { rank: 0, text: fallbackAction(command) }
@@ -411,6 +471,9 @@ function permissionWhy(r: RequestView): string {
   return paused ? pausedLine + reason : reason
 }
 
+/** 去掉结尾的 /（只剩 / 时保留），比较目录用。 */
+const trimSlash = (p: string) => (p.length > 1 ? p.replace(/\/+$/, '') || '/' : p)
+
 /** 把一条请求说成人话：整句、做什么、在哪、为什么要你决定、批了拒了会怎样。 */
 export function explainRequest(r: RequestView): Explanation {
   const cli = cliLabel(r.cli)
@@ -419,7 +482,7 @@ export function explainRequest(r: RequestView): Explanation {
   const where = [
     r.project && `项目 ${r.project}`,
     r.machine_name && `机器 ${machineLabel(r.machine_name)}`,
-    cwd && cwd !== r.project_root && `目录 ${cwd}`,
+    cwd && trimSlash(cwd) !== trimSlash(r.project_root) && `目录 ${cwd}`,
   ]
     .filter(Boolean)
     .join('，')

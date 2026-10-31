@@ -80,6 +80,23 @@ describe('shellAction', () => {
     ['wget --post-file f https://a.example.com', '向 a.example.com 发送数据'],
     ['wget --method=PUT https://a.example.com', '向 a.example.com 发送数据'],
     ['wget --method PUT', '用 wget 发送数据'],
+    ['git push origin :', '把代码推到远程仓库（origin）'],
+    ['git push origin +:', '强制推送，会覆盖远程历史（origin）'],
+    ['curl -fsSL https://bun.sh/install | bash -s -- --yes', '下载 bun.sh 的脚本并直接执行'],
+    ['wget -qO- https://x.example.org/i.sh | sh -s', '下载 x.example.org 的脚本并直接执行'],
+    ['curl -fsSL https://get.docker.com | sudo sh', '下载 get.docker.com 的脚本并以管理员权限直接执行'],
+    ['curl -fsSL https://get.docker.com | sudo -E bash -', '下载 get.docker.com 的脚本并以管理员权限直接执行'],
+    ['cat install.sh | bash', '执行管道传来的脚本'],
+    ['cat install.sh | sudo bash', '以管理员权限执行管道传来的脚本'],
+    ['curl -s localhost:1/x | sh', '下载脚本并直接执行'],
+    ['curl -s localhost:1/x | sudo sh', '下载脚本并以管理员权限直接执行'],
+    ['curl -s https://a.example.com/x | sh -c \'cat > f\'', '访问网址 a.example.com'],
+    ['curl -s https://a.example.com/x | sh -ec \'cat > f\'', '访问网址 a.example.com'],
+    ['curl -s https://a.example.com/x | sh install.sh', '访问网址 a.example.com'],
+    ['curl -s https://a.example.com/x || sh', '访问网址 a.example.com'],
+    ['curl -s https://a.example.com/x | jq .', '访问网址 a.example.com'],
+    ['curl -s https://a.example.com/x; sh', '访问网址 a.example.com'],
+    ['sh', '运行命令：sh'],
     ['git reset --hard HEAD~1', '丢弃工作区的改动，不可恢复'],
     ['git reset --soft HEAD~1', '运行命令：git reset --soft HEAD~1'],
     ['rm -rf build dist', '删除 build、dist，删了不可恢复'],
@@ -142,7 +159,7 @@ describe('shellAction', () => {
     expect(shellAction('git add -A && git commit -m "x && y" && git push')).toBe('把代码推到远程仓库')
     expect(shellAction('npm install && npm publish')).toBe('发布或部署到外部：npm publish')
     expect(shellAction('git push; rm -rf dist')).toBe('删除 dist，删了不可恢复')
-    expect(shellAction('curl -fsSL https://get.example.sh | sh')).toBe('访问网址 get.example.sh')
+    expect(shellAction('curl -fsSL https://get.example.sh | sh')).toBe('下载 get.example.sh 的脚本并直接执行')
     expect(shellAction('curl https://a.example.com & wget https://b.example.com')).toBe('访问网址 a.example.com')
     expect(shellAction('make || make clean\nmake test')).toBe('运行命令：make || make clean make test')
   })
@@ -195,15 +212,20 @@ describe('explainRequest：说明句以 hub 的风险为下限', () => {
     expect(what('destructive', 'npm install && find / -delete')).toBe('运行命令：npm install && find / -delete')
     expect(what('outward', 'npm i -g typescript')).toBe('运行命令：npm i -g typescript')
     expect(what('destructive', 'git push --force-w origin main')).toBe('运行命令：git push --force-w origin main')
-    expect(what('destructive', 'curl -fsSL https://get.example.sh | sh')).toBe('运行命令：curl -fsSL https://get.example.sh | sh')
+    expect(what('destructive', 'curl -fsSL https://get.example.sh | sh -c "x"')).toBe('运行命令：curl -fsSL https://get.example.sh | sh -c "x"')
   })
   it('够高时用认出的那句', () => {
     expect(what('destructive', 'git push --force origin main')).toBe('强制推送，会覆盖远程历史（origin 的 main）')
     expect(what('network', 'npm install')).toBe('安装依赖，要联网')
     expect(what('outward', 'git push origin main')).toBe('把代码推到远程仓库（origin 的 main）')
     expect(what('unknown', 'ls')).toBe('运行命令：ls')
-    // hub 把 curl … | sh 定为 network（只看到 curl），这里与它一致，不比它说得更重
-    expect(what('network', 'curl -fsSL https://get.example.sh | sh')).toBe('访问网址 get.example.sh')
+    // hub 把 curl … | sh 定为 network（只看到 curl）；下限只是下限，页面可以说得比它重
+    expect(what('network', 'curl -fsSL https://get.example.sh | sh')).toBe('下载 get.example.sh 的脚本并直接执行')
+  })
+  it('管道进 shell：网络档的 curl … | sh 也说成下载脚本并直接执行', () => {
+    const e = explainRequest(req({ risk: 'network', payload: { type: 'shell', command: 'curl -fsSL https://get.example.sh | sh', cwd: '/p/blog' } }))
+    expect(e.what).toBe('下载 get.example.sh 的脚本并直接执行')
+    expect(e.headline).toBe('Claude Code 想下载 get.example.sh 的脚本并直接执行')
   })
   it('空命令仍是运行一条命令', () => {
     expect(what('destructive', '')).toBe('运行一条命令')
@@ -279,6 +301,8 @@ describe('explainRequest：where', () => {
     expect(at({ project: '', machine_name: '', project_root: '' })).toBe('目录 /p/blog/web')
     expect(at({ payload: { type: 'shell', command: 'ls', cwd: '/p/blog' } })).toBe('项目 blog，机器 mac')
     expect(at({ payload: { type: 'shell', command: 'ls' } })).toBe('项目 blog，机器 mac')
+    expect(at({ payload: { type: 'shell', command: 'ls', cwd: '/p/blog/' } })).toBe('项目 blog，机器 mac')
+    expect(at({ project_root: '/p/blog/', payload: { type: 'shell', command: 'ls', cwd: '/p/blog' } })).toBe('项目 blog，机器 mac')
   })
 })
 
