@@ -55,6 +55,7 @@ test('登录、看到请求、批准并记住、规则多一条；再拒绝一�
   await expect(page.locator('ul.next')).toHaveCount(0)
   const learnedID = /并记住为规则 (\S+?)；/.exec((await toast.textContent()) ?? '')?.[1]
   expect(learnedID, '结果提示里应有学到的规则 id').toBeTruthy()
+  await expect(page.locator('.status-line')).toContainText(`你批准并记住了（规则 ${learnedID}）`)
 
   // 规则页：两条内置之外恰好多一条学来的，就是刚才那条
   await nav.getByRole('link', { name: '规则', exact: true }).click()
@@ -90,16 +91,17 @@ test('登录、看到请求、批准并记住、规则多一条；再拒绝一�
   await expect(toast).toHaveClass(/\bok\b/)
   await expect(toast).toContainText('已拒绝')
   await expect(page.locator('.status-line .tag')).toHaveText('已拒绝')
+  await expect(page.locator('.status-line')).toContainText('你拒绝了')
 
-  // 历史：这条是“已拒绝”，依据“手机上决定”
+  // 历史：这条是“已拒绝”，结果一句“你拒绝了”
   await nav.getByRole('link', { name: '历史', exact: true }).click()
   const hist = page.locator('.card', { hasText: 'git push origin main' })
   await expect(hist).toBeVisible()
   await expect(hist.locator('.tag')).toHaveText('已拒绝')
-  await expect(hist.locator('.sub')).toHaveText('手机上决定')
+  await expect(hist.locator('.sub')).toHaveText('你拒绝了')
   const hist1 = page.locator('.card', { hasText: 'curl https://api.example.com/v1/x' })
   await expect(hist1.locator('.tag')).toHaveText('已批准')
-  await expect(hist1.locator('.sub')).toHaveText(`手机上决定（并记住为 ${learnedID}）`)
+  await expect(hist1.locator('.sub')).toHaveText(`你批准并记住了（规则 ${learnedID}）`)
   await expect(nav.getByRole('link', { name: /收件箱/ }).locator('.badge')).toHaveCount(0)
 
   // 规则仍只有一条学来的：拒绝没有勾“记住”

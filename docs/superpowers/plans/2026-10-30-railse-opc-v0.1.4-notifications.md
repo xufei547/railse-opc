@@ -1535,3 +1535,29 @@ git commit -m "web: 审批页说人话：最上面说明卡（谁想做什么、
 - `go test ./... -race -count=1`
 - `make e2e`
 - `git diff main --stat -- go.mod go.sum web/package.json web/package-lock.json` 为空；`git status` 干净。
+
+### 第三项追加：处理结果说人话（2026-10-31）
+
+作者真机反馈：审批页处理后的状态行“已取消 · 终端里处理了 · 10-31 16:22”看不懂。状态标签（已批准、已拒绝、已取消、已过期……）保留，后面那句换成按 `state` + `decided_by` 组合写的人话。
+
+- **一个函数两处用。** `format.ts` 新增 `outcomeText(r)`；审批页的 `StatusLine`、历史卡片（删掉 `history.ts` 的 `historyBasis`）、面板开着时有了结果的提示（`decide.ts` 的 `goneMessage`，括号里同样是这句）都用它。详情里的“依据”“备注”保留原始字段（`decidedByLabel`、`decision_note`），给排查用，不动。
+- **还在等的、问题与完成、来源为空或不认识的** 回空串：状态标签已经说了，不露 `decided_by` 的原始值（原来不认识的原样显示）。
+
+| state | decided_by | 文案 |
+|---|---|---|
+| approved / denied | user | 你批准了 / 你拒绝了；带 rule_id 时“你批准并记住了（规则 x）”/“你拒绝并记住了（规则 x）” |
+| auto_allowed / auto_denied | rule:x（或 rule_id，含暂停时生效的 deny 规则） | 规则 x 自动批准了 / 规则 x 自动拒绝了（取不到规则 id 时“规则自动批准了”） |
+| cancelled | terminal | agent 那边先结束了，不用你处理 |
+| 其余 | terminal | 交回终端处理了 |
+| expired | timeout | 等太久过期了，agent 已交回终端；webhook：等太久过期了，已按拒绝回调工作流 |
+| — | hub_unreachable | 当时连不上 hub，agent 在终端里自己处理了 |
+| — | no_hub | 当时本机没接 hub，agent 在终端里自己处理了 |
+| — | agent_restart | 守护进程重启，这条作废了 |
+| — | shutdown | 守护进程停止，这条作废了 |
+| — | resend | agent 重发了一条新的，这条作废 |
+| — | machine_revoked | 这台机器已被吊销 |
+| — | paused | 自动审批暂停中，这条交回终端了 |
+| — | gemini | 交回 Gemini，在终端里让你确认 |
+| — | error / hub_error | 处理出错，交回终端了 |
+
+和建议文案不一样的地方：terminal + cancelled 去掉了开头的“已取消：”（状态标签已经是“已取消”，紧跟着再说一遍重复）；规则自动决定写成“规则 x 自动批准了”（规则 id 放进句子，不另加括号）；gemini 写成“交回 Gemini，在终端里让你确认”（passthrough 是把 Gemini 自己的确认框交回终端，“Gemini 自己确认了”读起来像 Gemini 替你批了）；多认了守护进程写的 `no_hub` 与 hub 写的 `hub_error`；webhook 过期单独说回调。

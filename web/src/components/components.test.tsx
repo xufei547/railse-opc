@@ -197,11 +197,12 @@ describe('StatusLine', () => {
     expect(line(req({ kind: 'question', state: 'recorded', title: 'q' }))).toBe('')
   })
 
-  it('已处理：状态标签、依据、决定时间、送达，一行', () => {
+  it('已处理：状态标签、一句人话、决定时间、送达，一行', () => {
     const html = line(req({ state: 'approved', decided_by: 'user', decided_at: '2026-10-23T10:01:00.000000000Z', delivered_at: '2026-10-23T10:01:01.000000000Z' }))
     expect(html).toMatch(/^<p class="status-line">/)
     expect(html).toContain('<span class="tag low">已批准</span>')
-    expect(html).toContain('手机上决定')
+    expect(html).toContain('你批准了')
+    expect(html).not.toContain('手机上决定')
     expect(html).toContain('已送达 agent')
     expect(html).toContain('<time dateTime="2026-10-23T10:01:00.000000000Z">')
     const denied = line(req({ state: 'denied', decided_by: 'user' }), [
@@ -209,6 +210,12 @@ describe('StatusLine', () => {
     ])
     expect(denied).toContain('<span class="tag high">已拒绝</span>')
     expect(denied).toContain('决定未送达')
+    const gone = line(req({ state: 'cancelled', decided_by: 'terminal', decided_at: '2026-10-31T08:22:00.000000000Z' }))
+    expect(gone).toContain('<span class="tag plain">已取消</span>')
+    expect(gone).toContain('agent 那边先结束了，不用你处理')
+    expect(gone).not.toContain('终端里处理了')
+    // 来源不认识时只有标签与时间，不露原始值
+    expect(line(req({ state: 'cancelled', decided_by: 'something_new' }))).not.toContain('something_new')
   })
 })
 

@@ -3,8 +3,8 @@ import { Link, useSearchParams } from 'react-router'
 import { hub } from '../api'
 import { coalesce } from '../coalesce'
 import { Banner } from '../components/Banner'
-import { absoluteTime, clip, isRedacted, payloadSummary, relativeTime } from '../format'
-import { historyBasis, historyFilters, historyTag, maxLimit, moreState, pageSize, parseFilter } from '../history'
+import { absoluteTime, clip, isRedacted, outcomeText, payloadSummary, relativeTime } from '../format'
+import { historyFilters, historyTag, maxLimit, moreState, pageSize, parseFilter } from '../history'
 import { failure } from '../manage'
 import { useStore } from '../StoreProvider'
 import type { RequestView } from '../types'
@@ -12,12 +12,12 @@ import type { RequestView } from '../types'
 /** 卡片摘要至多这么多字符（CSS 再按行数收起）：500 条长命令也不撑出一大块 DOM。 */
 const summaryMax = 300
 
-/** 历史里的一条：链接到详情；机器 · 项目、状态（或种类）、相对时间、摘要与依据。 */
+/** 历史里的一条：链接到详情；机器 · 项目、状态（或种类）、相对时间、摘要与一句人话的结果（outcomeText，与审批页状态行同一个函数）。 */
 export function HistoryCard({ request: r }: { request: RequestView }) {
   const where = r.kind === 'webhook' ? 'webhook' : [r.machine_name, r.project].filter(Boolean).join(' · ')
   const main = r.kind === 'permission' ? payloadSummary(r.payload) : r.title
   const tag = historyTag(r)
-  const basis = historyBasis(r)
+  const outcome = outcomeText(r)
   return (
     <Link className="card" to={`/r/${encodeURIComponent(r.id)}`}>
       <div className="row">
@@ -29,7 +29,7 @@ export function HistoryCard({ request: r }: { request: RequestView }) {
         </time>
       </div>
       <pre className="cmd">{clip(main, summaryMax)}</pre>
-      {basis && <div className="sub line">{basis}</div>}
+      {outcome && <div className="sub line">{outcome}</div>}
     </Link>
   )
 }

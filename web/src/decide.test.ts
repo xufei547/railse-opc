@@ -288,7 +288,7 @@ describe('结果文案', () => {
   })
 
   it('打开面板时请求在别处有了结果', () => {
-    expect(goneMessage(req({ state: 'cancelled', decided_by: 'terminal' }))).toBe('这条请求在别处有了结果：已取消（终端里处理了）')
+    expect(goneMessage(req({ state: 'cancelled', decided_by: 'terminal' }))).toBe('这条请求在别处有了结果：已取消（agent 那边先结束了，不用你处理）')
     expect(goneMessage(req({ state: 'expired', decided_by: '' }))).toBe('这条请求在别处有了结果：已过期')
   })
 
@@ -298,9 +298,9 @@ describe('结果文案', () => {
   })
 
   it('在另一个页面做了相反的决定、或不知道这次要做什么时，照旧说是别处的结果', () => {
-    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }), 'deny')).toBe('这条请求在别处有了结果：已批准（手机上决定）')
-    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }))).toBe('这条请求在别处有了结果：已批准（手机上决定）')
-    expect(goneMessage(req({ state: 'cancelled', decided_by: 'machine_revoked' }), 'allow')).toBe('这条请求在别处有了结果：已取消（机器已吊销）')
+    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }), 'deny')).toBe('这条请求在别处有了结果：已批准（你批准了）')
+    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }))).toBe('这条请求在别处有了结果：已批准（你批准了）')
+    expect(goneMessage(req({ state: 'cancelled', decided_by: 'machine_revoked' }), 'allow')).toBe('这条请求在别处有了结果：已取消（这台机器已被吊销）')
   })
 })
 
@@ -340,7 +340,7 @@ describe('outcomeView：决定结果的提示（固定在底部，始终可见�
     expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'deny' }, approved)).toEqual({
       tone: 'warn',
       title: '没有生效',
-      text: '这条请求在别处有了结果：已批准（手机上决定）',
+      text: '这条请求在别处有了结果：已批准（你批准了）',
     })
     // 不知道这次要做什么（如面板开着时请求没了）：不认作你的决定
     expect(outcomeView({ kind: 'gone', message: '这条请求已不存在' }, approved).tone).toBe('warn')

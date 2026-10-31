@@ -1,6 +1,6 @@
 // 历史页的筛选、标签与分页。纯函数，便于不带浏览器环境测试。
 
-import { decidedByLabel, stateLabel } from './format'
+import { stateLabel } from './format'
 import type { RequestView } from './types'
 
 /** [state 参数, 文案]。空串是全部；recorded 是问题与完成（hub 把 question、done 存成 recorded 行）。 */
@@ -44,11 +44,6 @@ export function historyTag(r: Pick<RequestView, 'kind' | 'state'>): { label: str
   return { label: stateLabel(r.state), tone: stateTones[r.state] ?? 'plain' }
 }
 
-/** 卡片上的依据（谁决定、按哪条规则）；还在等的、问题与完成没有。 */
-export function historyBasis(r: Pick<RequestView, 'kind' | 'state' | 'decided_by' | 'rule_id'>): string {
-  if (r.kind === 'question' || r.kind === 'done' || r.state === 'pending') return ''
-  return decidedByLabel(r)
-}
 
 export type More = 'more' | 'loading' | 'capped' | 'none'
 

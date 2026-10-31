@@ -105,6 +105,41 @@ export function decidedByLabel(r: Pick<RequestView, 'decided_by' | 'rule_id' | '
   return decidedBy[by] ?? (by || (r.state === 'pending' ? '' : stateLabel(r.state)))
 }
 
+/** 不是你、也不是规则决定时，按 decided_by 说一句人话（hub 与守护进程写出的来源，见 internal/hub/requests.go、internal/agent）。 */
+const outcomeBy: Record<string, string> = {
+  hub_unreachable: '当时连不上 hub，agent 在终端里自己处理了',
+  no_hub: '当时本机没接 hub，agent 在终端里自己处理了',
+  agent_restart: '守护进程重启，这条作废了',
+  shutdown: '守护进程停止，这条作废了',
+  resend: 'agent 重发了一条新的，这条作废',
+  machine_revoked: '这台机器已被吊销',
+  paused: '自动审批暂停中，这条交回终端了',
+  gemini: '交回 Gemini，在终端里让你确认',
+  error: '处理出错，交回终端了',
+  hub_error: '处理出错，交回终端了',
+}
+
+/**
+ * 处理结果的一句人话：审批页处理后的状态行与历史卡片共用，跟在状态标签后面。按 state 与 decided_by 的组合说，
+ * 不露 decided_by 的原始值；还在等的、问题与完成、来源为空或不认识的回空串（状态标签已经说了）。
+ * 详情里的“依据”仍用 decidedByLabel（给排查用）。
+ */
+export function outcomeText(r: Pick<RequestView, 'kind' | 'state' | 'decided_by' | 'rule_id'>): string {
+  const { state, decided_by: by } = r
+  if (r.kind === 'question' || r.kind === 'done' || state === 'pending' || state === 'recorded') return ''
+  if (by === 'user' && (state === 'approved' || state === 'denied')) {
+    const verb = state === 'approved' ? '批准' : '拒绝'
+    return r.rule_id ? `你${verb}并记住了（规则 ${r.rule_id}）` : `你${verb}了`
+  }
+  if (state === 'auto_allowed' || state === 'auto_denied') {
+    const rule = r.rule_id || (by.startsWith('rule:') ? by.slice(5) : '')
+    return `规则${rule ? ` ${rule} ` : ''}自动${state === 'auto_allowed' ? '批准' : '拒绝'}了`
+  }
+  if (by === 'terminal') return state === 'cancelled' ? 'agent 那边先结束了，不用你处理' : '交回终端处理了'
+  if (by === 'timeout') return r.kind === 'webhook' ? '等太久过期了，已按拒绝回调工作流' : '等太久过期了，agent 已交回终端'
+  return outcomeBy[by] ?? ''
+}
+
 /** 截到至多 max 个 UTF-16 单元再加省略号；不把代理对切成半个字符。卡片摘要用它，免得超长命令撑出一大块 DOM。 */
 export function clip(s: string, max: number): string {
   if (s.length <= max) return s

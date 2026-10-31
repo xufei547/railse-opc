@@ -10,6 +10,7 @@ import {
   engineReasonLabel,
   isRedacted,
   kindLabel,
+  outcomeText,
   parseTime,
   payloadSummary,
   relativeTime,
@@ -187,5 +188,59 @@ describe('engineReasonLabel', () => {
     expect(engineReasonLabel('命中规则 user-network-ask')).toBe('命中规则 user-network-ask')
     expect(engineReasonLabel('自动审批已暂停')).toBe('自动审批已暂停')
     expect(engineReasonLabel('')).toBe('')
+  })
+})
+
+describe('outcomeText', () => {
+  type R = Parameters<typeof outcomeText>[0]
+  const r = (over: Partial<R>): R => ({ kind: 'permission', state: 'approved', decided_by: '', rule_id: '', ...over })
+  // [state, decided_by, rule_id, 期望]：hub 与守护进程实际写出的组合（internal/hub/requests.go、internal/agent）
+  const cases: [string, string, string, string][] = [
+    ['approved', 'user', '', '你批准了'],
+    ['approved', 'user', 'learned-net-1', '你批准并记住了（规则 learned-net-1）'],
+    ['denied', 'user', '', '你拒绝了'],
+    ['denied', 'user', 'user-deny-rm', '你拒绝并记住了（规则 user-deny-rm）'],
+    ['auto_allowed', 'rule:builtin-read', 'builtin-read', '规则 builtin-read 自动批准了'],
+    ['auto_allowed', 'rule:builtin-read', '', '规则 builtin-read 自动批准了'],
+    ['auto_denied', 'rule:user-deny-x', 'user-deny-x', '规则 user-deny-x 自动拒绝了'],
+    ['auto_denied', 'paused', 'user-deny-x', '规则 user-deny-x 自动拒绝了'],
+    ['auto_allowed', '', '', '规则自动批准了'],
+    ['cancelled', 'terminal', '', 'agent 那边先结束了，不用你处理'],
+    ['passthrough', 'terminal', '', '交回终端处理了'],
+    ['expired', 'timeout', '', '等太久过期了，agent 已交回终端'],
+    ['expired', 'hub_unreachable', '', '当时连不上 hub，agent 在终端里自己处理了'],
+    ['passthrough', 'no_hub', '', '当时本机没接 hub，agent 在终端里自己处理了'],
+    ['cancelled', 'agent_restart', '', '守护进程重启，这条作废了'],
+    ['cancelled', 'shutdown', '', '守护进程停止，这条作废了'],
+    ['cancelled', 'resend', '', 'agent 重发了一条新的，这条作废'],
+    ['cancelled', 'machine_revoked', '', '这台机器已被吊销'],
+    ['passthrough', 'paused', '', '自动审批暂停中，这条交回终端了'],
+    ['passthrough', 'gemini', '', '交回 Gemini，在终端里让你确认'],
+    ['passthrough', 'error', '', '处理出错，交回终端了'],
+    ['expired', 'hub_error', '', '处理出错，交回终端了'],
+  ]
+  it.each(cases)('%s + %s（%s）→ %s', (state, decided_by, rule_id, want) => {
+    expect(outcomeText(r({ state: state as R['state'], decided_by, rule_id }))).toBe(want)
+  })
+
+  it('webhook：你的决定同样说；等太久过期时说已按拒绝回调工作流', () => {
+    expect(outcomeText(r({ kind: 'webhook', state: 'approved', decided_by: 'user' }))).toBe('你批准了')
+    expect(outcomeText(r({ kind: 'webhook', state: 'expired', decided_by: 'timeout' }))).toBe('等太久过期了，已按拒绝回调工作流')
+  })
+
+  it('还在等的、问题与完成、来源为空或不认识的：空串（状态标签已经说了，不露原始值）', () => {
+    expect(outcomeText(r({ state: 'pending' }))).toBe('')
+    expect(outcomeText(r({ kind: 'question', state: 'recorded' }))).toBe('')
+    expect(outcomeText(r({ kind: 'done', state: 'recorded', decided_by: 'hub' }))).toBe('')
+    expect(outcomeText(r({ state: 'expired', decided_by: '' }))).toBe('')
+    expect(outcomeText(r({ state: 'cancelled', decided_by: 'something_new' }))).toBe('')
+  })
+
+  it('不出现行话', () => {
+    const jargon = /终端里处理了|守护进程重连后不再持有|决定来源出错|手机上决定|等待过期|被重发顶掉|rule:|_/
+    for (const [state, decided_by, rule_id] of cases) {
+      const text = outcomeText(r({ state: state as R['state'], decided_by, rule_id })).replace(/（规则 [^）]+）|规则 \S+ 自动/g, '')
+      expect(text).not.toMatch(jargon)
+    }
   })
 })

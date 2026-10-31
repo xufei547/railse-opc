@@ -1,5 +1,5 @@
 import { explainRequest } from '../explain'
-import { absoluteTime, deliveryLabel, decidedByLabel, isRedacted } from '../format'
+import { absoluteTime, deliveryLabel, isRedacted, outcomeText } from '../format'
 import { historyTag } from '../history'
 import type { AuditEvent, RequestView } from '../types'
 import { RedactedWarning, RequestContent } from './Payload'
@@ -31,14 +31,14 @@ export function RequestSummary({ request: r }: { request: RequestView }) {
   )
 }
 
-/** 已处理的审批、webhook 在命令下面的一行：状态、依据、决定时间、送达，用“ · ”连起来。 */
+/** 已处理的审批、webhook 在命令下面的一行：状态标签、一句人话的结果（outcomeText，与历史卡片同一个函数）、决定时间、送达，用“ · ”连起来。 */
 export function StatusLine({ request: r, audit }: { request: RequestView; audit: AuditEvent[] }) {
   if ((r.kind !== 'permission' && r.kind !== 'webhook') || r.state === 'pending') return null
   const tag = historyTag(r)
-  const basis = decidedByLabel(r)
+  const outcome = outcomeText(r)
   const delivery = deliveryLabel(r, audit.some((a) => a.action === 'undeliverable'))
   const parts = [
-    basis && basis !== tag.label ? <span key="basis">{basis}</span> : null,
+    outcome ? <span key="outcome">{outcome}</span> : null,
     r.decided_at ? (
       <time key="time" dateTime={r.decided_at}>
         {absoluteTime(r.decided_at)}
