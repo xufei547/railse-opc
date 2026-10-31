@@ -122,7 +122,7 @@ The docs under `docs/` are in Chinese.
 
 ## Status and limitations
 
-- This is v0.1.2, the first version, and the author is dogfooding it.
+- This is v0.1.5, and the author is dogfooding it.
 - The phone web app, the CLI output and the docs under `docs/` are in Chinese only for now.
 - Gemini CLI hooks can deny but can't approve: rule denials still apply, and everything else goes back to Gemini's own prompt and never reaches the phone. Needs Gemini CLI 0.65.0 or later.
 - On the phone you can only answer Claude Code's multiple-choice questions (`AskUserQuestion`). Questions from Codex and Gemini, and an agent stopping to wait for your next message, are still reminders only: you go back to the terminal.

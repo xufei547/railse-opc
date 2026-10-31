@@ -115,7 +115,7 @@ railse setup all --local-hub
 
 ## 现状与限制
 
-- v0.1.2，第一版，作者自用中。
+- v0.1.5，作者自用中。
 - Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。
 - 手机上只能答 Claude Code 的选择题（`AskUserQuestion`）。Codex、Gemini 的提问，以及 agent 停下来等你说下一句话的，仍只提醒，要回终端。
 - 从 0.1.5 之前升级的：已经装过钩子的机器要重跑一次 `railse setup hooks --claude`，补上选择题用的 `PreToolUse` 钩子（`railse doctor` 的 `hooks.claude` 会提示）；hub 要先于或与守护进程同时升级，hub 还是旧版时选择题直接交回终端。本机 hub 与守护进程是分别托管的两个进程，重跑 `railse setup` 不会重启已在跑的本机 hub，升级后要自己重启它（macOS `launchctl kickstart -k gui/$(id -u)/dev.railse.hub`，Linux `systemctl --user restart railse-hub`），见 [docs/setup.md](docs/setup.md) 的「升级」。
