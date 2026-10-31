@@ -22,5 +22,9 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
-  projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
+  projects: [
+    { name: 'chromium', use: { browserName: 'chromium' }, testIgnore: /en\.spec\.ts$/ },
+    // 英文系统的手机：navigator.language 为 en-US，网页应整页英文
+    { name: 'en', use: { browserName: 'chromium', locale: 'en-US' }, testMatch: /en\.spec\.ts$/ },
+  ],
 })

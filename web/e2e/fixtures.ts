@@ -136,14 +136,14 @@ export function behavior(out: HookOut): string {
 }
 
 /** 打开网页、登录，等到空的收件箱（各用例开始时都没有待处理的事）。 */
-export async function login(page: Page, env: E2EEnv) {
+export async function login(page: Page, env: E2EEnv, lang: 'zh' | 'en' = 'zh') {
   const resp = await page.goto(env.baseURL + '/')
   // 网页由 hub 同源托管，HTML 带 CSP：下面“没有违规”的断言才有意义
   expect(resp?.headers()['content-security-policy']).toContain("script-src 'self'")
   await expect(page).toHaveURL(/\/login/)
-  await page.getByLabel('密码').fill(env.password)
-  await page.getByRole('button', { name: '登录', exact: true }).click()
-  await expect(page.getByText('没有等你处理的事')).toBeVisible()
+  await page.getByLabel(lang === 'en' ? 'Password' : '密码').fill(env.password)
+  await page.getByRole('button', { name: lang === 'en' ? 'Log in' : '登录', exact: true }).click()
+  await expect(page.getByText(lang === 'en' ? 'Nothing waiting for you' : '没有等你处理的事')).toBeVisible()
 }
 
 /**
