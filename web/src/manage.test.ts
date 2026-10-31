@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ApiError } from './api'
+import { setLang } from './i18n'
 import { elevatedEnabled, failure, fileSize, formatUptime, hitsLabel, importMax, machineSeen, onlineCount, pauseCopy, sortMachines, sourceLabel } from './manage'
 import type { Machine, Rule, Status } from './types'
 
@@ -131,11 +132,64 @@ describe('fileSize 与 importMax', () => {
 
 describe('pauseCopy', () => {
   it('暂停只管审批：开关、确认框、暂停后的提示与收件箱横幅都说选择题照样送到这里，不说“所有请求”', () => {
-    for (const [k, s] of Object.entries(pauseCopy)) {
+    for (const [k, s] of Object.entries(pauseCopy())) {
       expect(s, k).toContain('选择题')
       expect(s, k).not.toContain('所有请求')
     }
-    expect(pauseCopy.confirm).toContain('Claude Code 的选择题不受暂停影响，照样送到这里')
-    expect(pauseCopy.confirm).toContain('railse agent pause')
+    expect(pauseCopy().confirm).toContain('Claude Code 的选择题不受暂停影响，照样送到这里')
+    expect(pauseCopy().confirm).toContain('railse agent pause')
+  })
+})
+
+describe('manage 的英文', () => {
+  beforeEach(() => setLang('en'))
+  afterEach(() => setLang('zh'))
+  const han = /[　-〿一-鿿＀-￯]/
+
+  it('pauseCopy：四句都是英文，都说选择题照样送到这里，不说“所有请求”', () => {
+    const copy = pauseCopy()
+    expect(Object.keys(copy)).toEqual(['sub', 'confirm', 'done', 'banner'])
+    for (const [k, s] of Object.entries(copy)) {
+      expect(s, k).not.toMatch(han)
+      expect(s, k).toContain('multiple-choice questions')
+      expect(s, k).not.toMatch(/all requests|every request/i)
+    }
+    expect(copy.confirm).toContain('railse agent pause')
+    expect(copy.confirm).toContain('\n')
+    expect(copy.banner).toMatch(/^Auto-approval paused/)
+  })
+
+  it('来源、命中、机器在线', () => {
+    expect(sourceLabel('builtin')).toBe('Built-in')
+    expect(sourceLabel('user')).toBe('Hand-written')
+    expect(sourceLabel('learned')).toBe('Learned')
+    expect(hitsLabel(rule({ hit_count: 0 }), now)).toBe('No matches yet')
+    expect(hitsLabel(rule({ hit_count: 1, last_hit_at: null }), now)).toBe('Matched once')
+    expect(hitsLabel(rule({ hit_count: 2, last_hit_at: null }), now)).toBe('Matched 2 times')
+    expect(hitsLabel(rule({ hit_count: 3, last_hit_at: '2026-10-23T11:55:00.000000000Z' }), now)).toBe('Matched 3 times, last 5 min ago')
+    expect(machineSeen(machine({ online: true }), now)).toBe('Online')
+    expect(machineSeen(machine({ last_seen: '2026-10-23T10:00:00.000000000Z' }), now)).toBe('Last seen 2 hr ago')
+    expect(machineSeen(machine(), now)).toBe('Never connected')
+  })
+
+  it('formatUptime：单复数，只留两级', () => {
+    expect(formatUptime('0s')).toBe('0 seconds')
+    expect(formatUptime('1s')).toBe('1 second')
+    expect(formatUptime('3m20s')).toBe('3 minutes')
+    expect(formatUptime('1h2m3s')).toBe('1 hour 2 minutes')
+    expect(formatUptime('1h1m0s')).toBe('1 hour 1 minute')
+    expect(formatUptime('5h0m9s')).toBe('5 hours')
+    expect(formatUptime('26h5m0s')).toBe('1 day 2 hours')
+    expect(formatUptime('49h0m0s')).toBe('2 days 1 hour')
+    expect(formatUptime('72h0m5s')).toBe('3 days')
+    expect(formatUptime('')).toBe('-')
+    expect(formatUptime('abc')).toBe('abc')
+  })
+
+  it('fileSize', () => {
+    expect(fileSize(1)).toBe('1 byte')
+    expect(fileSize(900)).toBe('900 bytes')
+    expect(fileSize(1500)).toBe('2 KB')
+    expect(fileSize(3 * 1024 * 1024 + 1)).toBe('3.0 MB')
   })
 })

@@ -63,7 +63,7 @@ export function Inbox() {
         )}
         {state.status?.paused && (
           <Banner tone="info">
-            {pauseCopy.banner}
+            {pauseCopy().banner}
             <Link to="/settings">去设置</Link>
           </Banner>
         )}

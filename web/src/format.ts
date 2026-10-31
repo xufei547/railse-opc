@@ -1,3 +1,4 @@
+import { lang, t } from './i18n'
 import type { Payload, RequestView } from './types'
 
 /**
@@ -9,38 +10,88 @@ export function parseTime(iso: string): number {
 }
 
 export function relativeTime(iso: string, now: Date = new Date()): string {
-  const t = parseTime(iso)
-  if (Number.isNaN(t)) return ''
-  const sec = Math.round((now.getTime() - t) / 1000)
-  if (sec < 45) return '刚刚'
-  if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))} 分钟前`
-  if (sec < 86400) return `${Math.round(sec / 3600)} 小时前`
-  if (sec < 172800) return '昨天'
-  const d = new Date(t)
+  const ms = parseTime(iso)
+  if (Number.isNaN(ms)) return ''
+  const sec = Math.round((now.getTime() - ms) / 1000)
+  if (sec < 45) return t('刚刚')
+  if (sec < 3600) return t('{n} 分钟前', { n: Math.max(1, Math.round(sec / 60)) })
+  if (sec < 86400) return t('{n} 小时前', { n: Math.round(sec / 3600) })
+  if (sec < 172800) return t('昨天')
+  const d = new Date(ms)
   return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-const risks: Record<string, [string, 'low' | 'mid' | 'high']> = {
-  read: ['只读', 'low'],
-  write_in_project: ['项目内改动', 'low'],
-  unknown: ['无法判断', 'mid'],
-  write_outside: ['项目外改动', 'mid'],
-  network: ['联网', 'mid'],
-  outward: ['对外', 'high'],
-  destructive: ['不可逆', 'high'],
-}
+// 词条表都是函数：模块级常量在 import 时就把语言定死了（App 先于 initLang 被 import）。
+const risks = (): Record<string, [string, 'low' | 'mid' | 'high']> => ({
+  read: [t('只读'), 'low'],
+  write_in_project: [t('项目内改动'), 'low'],
+  unknown: [t('无法判断'), 'mid'],
+  write_outside: [t('项目外改动'), 'mid'],
+  network: [t('联网'), 'mid'],
+  outward: [t('对外'), 'high'],
+  destructive: [t('不可逆'), 'high'],
+})
 
 export function riskLabel(risk: string): string {
-  return risks[risk]?.[0] ?? (risk || '未分级')
+  return risks()[risk]?.[0] ?? (risk || t('未分级'))
 }
 
-/** 引擎理由里只把“按 <风险> 默认询问”里认识的风险词换成中文；规则 id 等其余文字原样。 */
+/** 引擎理由里只把“按 <风险> 默认询问”里认识的风险词换成中文；规则 id 等其余文字原样。英文见 engineReasonEn。 */
 export function engineReasonLabel(reason: string): string {
-  return reason.replace(/按 (\S+) 默认询问/, (m, risk: string) => (risks[risk] ? `按「${risks[risk][0]}」默认询问` : m))
+  if (lang() === 'en') return engineReasonEn(reason)
+  const rs = risks()
+  return reason.replace(/按 (\S+) 默认询问/, (m, risk: string) => (rs[risk] ? `按「${rs[risk][0]}」默认询问` : m))
+}
+
+// 守护进程写进本机审计、随历史行带上来的固定理由（internal/agent/server.go、requests.go）。
+const agentReasonsEn: Record<string, string> = {
+  自动审批已暂停: 'Auto-approval paused',
+  '自动审批已暂停，交回终端处理': 'Auto-approval paused; handed back to the terminal',
+  '本机没有连接 hub，交回终端处理': "This machine isn't connected to a hub; handed back to the terminal",
+  '等待过期，交回终端处理': 'Timed out; handed back to the terminal',
+  '守护进程正在停止，交回终端处理': 'The daemon was stopping; handed back to the terminal',
+  钩子进程在决定前退出: 'The hook exited before a decision was made',
+  // internal/agent/hubdecider.go:18-29
+  'Gemini 只能拒绝不能放行，交回原生确认框': "Gemini can only deny here, not allow; handed back to Gemini's own prompt",
+  '没有配置 hub，交回终端处理': 'No hub configured; handed back to the terminal',
+  '连不上 hub，交回终端处理': "Couldn't reach the hub; handed back to the terminal",
+  'hub 拒绝了本机密钥，交回终端处理': "The hub rejected this machine's key; handed back to the terminal",
+  '无法送往 hub，交回终端处理': "Couldn't send it to the hub; handed back to the terminal",
+  '与 hub 断线超过宽限，交回终端处理': 'Lost the hub connection for too long; handed back to the terminal',
+  'hub 没有给出有效决定，交回终端处理': "The hub didn't return a valid decision; handed back to the terminal",
+  'hub 版本太旧，不认识提问，交回终端处理': 'The hub is too old to handle questions; handed back to the terminal',
+  已在手机上批准: 'Approved on the phone',
+  已在手机上拒绝: 'Denied on the phone',
+  已在手机上回答: 'Answered on the phone',
+  在手机上选了在终端回答: 'Chose on the phone to answer in the terminal',
+  // internal/agent/server.go:433
+  '决定来源给的答案不完整，交回终端处理': "The answer was incomplete; handed back to the terminal",
+  '决定来源出错，交回终端处理': 'Error while deciding; handed back to the terminal',
+  '脱敏后有题面相同的题，分不清答的是哪道，交回终端处理':
+    "After redaction two questions read the same, so the answers couldn't be matched; handed back to the terminal",
+}
+
+/**
+ * 引擎理由的英文：engine_reason 原文是中文（引擎与守护进程写的），照中文前缀解析后整句换成英文；
+ * 认不出的（多半是带错误原文的）原样。
+ */
+function engineReasonEn(reason: string): string {
+  if (reason.startsWith('命中规则 ')) return `Matched rule ${reason.slice('命中规则 '.length)}`
+  const m = /^无规则命中，按 (\S+) 默认询问$/.exec(reason)
+  if (m) {
+    const risk = m[1] ?? ''
+    return `No rule matched, so it asks (default for ${risks()[risk]?.[0] ?? risk})`
+  }
+  const fixed = agentReasonsEn[reason]
+  if (fixed) return fixed
+  // 带 Go 错误原文的理由（脱敏后题目超出上限等）：认前后缀，整句换成英文
+  if (reason.startsWith('答案不合规')) return "The answer didn't fit the questions; handed back to the terminal"
+  if (reason.endsWith('，交回终端处理')) return 'Handed back to the terminal'
+  return reason
 }
 
 export function riskTone(risk: string): 'low' | 'mid' | 'high' {
-  return risks[risk]?.[1] ?? 'mid'
+  return risks()[risk]?.[1] ?? 'mid'
 }
 
 export function payloadSummary(p: Payload): string {
@@ -58,41 +109,41 @@ export function payloadSummary(p: Payload): string {
   }
 }
 
-const states: Record<string, string> = {
-  pending: '等待决定',
-  approved: '已批准',
-  denied: '已拒绝',
-  cancelled: '已取消',
-  expired: '已过期',
-  auto_allowed: '自动放行',
-  auto_denied: '自动拒绝',
-  passthrough: '交回终端',
-  recorded: '已记录',
-  answered: '已回答',
-}
+const states = (): Record<string, string> => ({
+  pending: t('等待决定'),
+  approved: t('已批准'),
+  denied: t('已拒绝'),
+  cancelled: t('已取消'),
+  expired: t('已过期'),
+  auto_allowed: t('自动放行'),
+  auto_denied: t('自动拒绝'),
+  passthrough: t('交回终端'),
+  recorded: t('已记录'),
+  answered: t('已回答'),
+})
 
 export function stateLabel(state: string): string {
-  return states[state] ?? state
+  return states()[state] ?? state
 }
 
-const kinds: Record<string, string> = { permission: '审批', question: '等你回答', done: '完成', webhook: 'webhook', ask: '提问' }
+const kinds = (): Record<string, string> => ({ permission: t('审批'), question: t('等你回答'), done: t('完成'), webhook: 'webhook', ask: t('提问') })
 
 export function kindLabel(kind: string): string {
-  return kinds[kind] ?? kind
+  return kinds()[kind] ?? kind
 }
 
-const decidedBy: Record<string, string> = {
-  terminal: '终端里处理了',
-  timeout: '等待过期',
-  hub_unreachable: '连不上 hub，交回终端',
-  gemini: 'Gemini 交回原生确认',
-  paused: '已暂停自动审批',
-  shutdown: '守护进程停止',
-  resend: '被重发顶掉',
-  agent_restart: '守护进程重连后不再持有',
-  machine_revoked: '机器已吊销',
-  error: '决定来源出错',
-}
+const decidedBy = (): Record<string, string> => ({
+  terminal: t('终端里处理了'),
+  timeout: t('等待过期'),
+  hub_unreachable: t('连不上 hub，交回终端'),
+  gemini: t('Gemini 交回原生确认'),
+  paused: t('已暂停自动审批'),
+  shutdown: t('守护进程停止'),
+  resend: t('被重发顶掉'),
+  agent_restart: t('守护进程重连后不再持有'),
+  machine_revoked: t('机器已吊销'),
+  error: t('决定来源出错'),
+})
 
 /**
  * 一条记录的依据：谁决定的、按哪条规则。
@@ -101,25 +152,25 @@ const decidedBy: Record<string, string> = {
  */
 export function decidedByLabel(r: Pick<RequestView, 'decided_by' | 'rule_id' | 'state'>): string {
   const by = r.decided_by
-  if (by === 'user' && r.state === 'answered') return '手机上回答'
-  if (by === 'user') return r.rule_id ? `手机上决定（并记住为 ${r.rule_id}）` : '手机上决定'
-  if (by.startsWith('rule:') || r.rule_id) return `规则 ${r.rule_id || by.slice(5)}`
-  return decidedBy[by] ?? (by || (r.state === 'pending' ? '' : stateLabel(r.state)))
+  if (by === 'user' && r.state === 'answered') return t('手机上回答')
+  if (by === 'user') return r.rule_id ? t('手机上决定（并记住为 {rule}）', { rule: r.rule_id }) : t('手机上决定')
+  if (by.startsWith('rule:') || r.rule_id) return t('规则 {rule}', { rule: r.rule_id || by.slice(5) })
+  return decidedBy()[by] ?? (by || (r.state === 'pending' ? '' : stateLabel(r.state)))
 }
 
 /** 不是你、也不是规则决定时，按 decided_by 说一句人话（hub 与守护进程写出的来源，见 internal/hub/requests.go、internal/agent）。 */
-const outcomeBy: Record<string, string> = {
-  hub_unreachable: '当时连不上 hub，agent 在终端里自己处理了',
-  no_hub: '当时本机没接 hub，agent 在终端里自己处理了',
-  agent_restart: '守护进程重启，这条作废了',
-  shutdown: '守护进程停止，这条作废了',
-  resend: 'agent 重发了一条新的，这条作废',
-  machine_revoked: '这台机器已被吊销',
-  paused: '自动审批暂停中，这条交回终端了',
-  gemini: '交回 Gemini，在终端里让你确认',
-  error: '处理出错，交回终端了',
-  hub_error: '处理出错，交回终端了',
-}
+const outcomeBy = (): Record<string, string> => ({
+  hub_unreachable: t('当时连不上 hub，agent 在终端里自己处理了'),
+  no_hub: t('当时本机没接 hub，agent 在终端里自己处理了'),
+  agent_restart: t('守护进程重启，这条作废了'),
+  shutdown: t('守护进程停止，这条作废了'),
+  resend: t('agent 重发了一条新的，这条作废'),
+  machine_revoked: t('这台机器已被吊销'),
+  paused: t('自动审批暂停中，这条交回终端了'),
+  gemini: t('交回 Gemini，在终端里让你确认'),
+  error: t('处理出错，交回终端了'),
+  hub_error: t('处理出错，交回终端了'),
+})
 
 /**
  * 处理结果的一句人话：审批页处理后的状态行与历史卡片共用，跟在状态标签后面。按 state 与 decided_by 的组合说，
@@ -130,6 +181,7 @@ const outcomeBy: Record<string, string> = {
 export function outcomeText(r: Pick<RequestView, 'kind' | 'state' | 'decided_by' | 'rule_id'>): string {
   const { state, decided_by: by } = r
   if (r.kind === 'question' || r.kind === 'done' || state === 'pending' || state === 'recorded') return ''
+  if (lang() === 'en') return outcomeTextEn(r)
   if (by === 'user' && state === 'answered') return '你答了'
   if (by === 'user' && state === 'passthrough' && r.kind === 'ask') return '交回终端问了'
   if (by === 'user' && (state === 'approved' || state === 'denied')) {
@@ -142,7 +194,25 @@ export function outcomeText(r: Pick<RequestView, 'kind' | 'state' | 'decided_by'
   }
   if (by === 'terminal') return state === 'cancelled' ? 'agent 那边先结束了，不用你处理' : '交回终端处理了'
   if (by === 'timeout') return r.kind === 'webhook' ? '等太久过期了，已按拒绝回调工作流' : '等太久过期了，agent 已交回终端'
-  return outcomeBy[by] ?? ''
+  return outcomeBy()[by] ?? ''
+}
+
+/** outcomeText 的英文：分支与中文一一对应，只是整句换成英文（动词与规则 id 的语序不同，不查英文表）。 */
+function outcomeTextEn(r: Pick<RequestView, 'kind' | 'state' | 'decided_by' | 'rule_id'>): string {
+  const { state, decided_by: by } = r
+  if (by === 'user' && state === 'answered') return 'You answered'
+  if (by === 'user' && state === 'passthrough' && r.kind === 'ask') return 'Handed back to the terminal to ask'
+  if (by === 'user' && (state === 'approved' || state === 'denied')) {
+    const verb = state === 'approved' ? 'approved' : 'denied'
+    return r.rule_id ? `You ${verb} and remembered it (rule ${r.rule_id})` : `You ${verb}`
+  }
+  if (state === 'auto_allowed' || state === 'auto_denied') {
+    const rule = r.rule_id || (by.startsWith('rule:') ? by.slice(5) : '')
+    return `${rule ? `Rule ${rule}` : 'A rule'} ${state === 'auto_allowed' ? 'allowed' : 'denied'} it automatically`
+  }
+  if (by === 'terminal') return state === 'cancelled' ? 'The agent moved on; nothing for you to do' : 'Handled in the terminal'
+  if (by === 'timeout') return r.kind === 'webhook' ? 'Timed out; the workflow was told "denied"' : 'Timed out; the agent went back to the terminal'
+  return outcomeBy()[by] ?? ''
 }
 
 /** 截到至多 max 个 UTF-16 单元再加省略号；不把代理对切成半个字符。卡片摘要用它，免得超长命令撑出一大块 DOM。 */
@@ -166,28 +236,28 @@ export function absoluteTime(iso: string, now: Date = new Date()): string {
   return d.getFullYear() === now.getFullYear() ? `${md} ${hm}` : `${d.getFullYear()}-${md} ${hm}`
 }
 
-const auditActions: Record<string, string> = {
-  request_pending: '登记',
-  allow: '批准',
-  deny: '拒绝',
-  answer: '回答',
-  rule_learned: '学到规则',
-  rule_learn_rolled_back: '撤销学到的规则',
-  push_sent: '推送到手机',
-  webhook_callback: '回调来源',
-  undeliverable: '决定未送达',
-  cancelled_resend: '被重发顶掉',
-}
+const auditActions = (): Record<string, string> => ({
+  request_pending: t('登记'),
+  allow: t('批准'),
+  deny: t('拒绝'),
+  answer: t('回答'),
+  rule_learned: t('学到规则'),
+  rule_learn_rolled_back: t('撤销学到的规则'),
+  push_sent: t('推送到手机'),
+  webhook_callback: t('回调来源'),
+  undeliverable: t('决定未送达'),
+  cancelled_resend: t('被重发顶掉'),
+})
 
 /** 审计动作的中文名。hub 结束请求时用状态名作动作（approved、expired……），这些沿用状态文案；不认识的原样。 */
 export function auditLabel(action: string): string {
-  return auditActions[action] ?? stateLabel(action)
+  return auditActions()[action] ?? stateLabel(action)
 }
 
-const actors: Record<string, string> = { user: '你', agent: '守护进程', system: 'hub' }
+const actors = (): Record<string, string> => ({ user: t('你'), agent: t('守护进程'), system: 'hub' })
 
 export function actorLabel(actor: string): string {
-  return actors[actor] ?? actor
+  return actors()[actor] ?? actor
 }
 
 /** 审计 detail（JSON 对象）展开成“k=v k=v”；去掉空串、null 与 false（ok=false 是回调失败，保留）。不是 JSON 时原样。 */
@@ -219,12 +289,12 @@ export function isRedacted(r: Pick<RequestView, 'has_redacted' | 'title'>): bool
  */
 export function deliveryLabel(r: Pick<RequestView, 'state' | 'kind' | 'delivered_at'>, undeliverable: boolean): string {
   if (r.state === 'answered') {
-    if (r.delivered_at) return '已送达 agent'
-    return undeliverable ? '答案未送达：agent 已不再等这条（多半已在终端问了你）' : '还没送达 agent'
+    if (r.delivered_at) return t('已送达 agent')
+    return undeliverable ? t('答案未送达：agent 已不再等这条（多半已在终端问了你）') : t('还没送达 agent')
   }
   if (r.state !== 'approved' && r.state !== 'denied') return ''
   const hook = r.kind === 'webhook'
-  if (r.delivered_at) return hook ? '已回调来源' : '已送达 agent'
-  if (undeliverable) return '决定未送达：agent 已不再等这条（多半已交回终端）'
-  return hook ? '还没回调成功' : '还没送达 agent'
+  if (r.delivered_at) return hook ? t('已回调来源') : t('已送达 agent')
+  if (undeliverable) return t('决定未送达：agent 已不再等这条（多半已交回终端）')
+  return hook ? t('还没回调成功') : t('还没送达 agent')
 }

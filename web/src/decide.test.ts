@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ApiError } from './api'
 import {
   canConfirm,
@@ -20,6 +20,7 @@ import {
   type SheetAction,
   type SheetState,
 } from './decide'
+import { setLang } from './i18n'
 import type { Draft, RequestView } from './types'
 
 function req(over: Partial<RequestView> = {}): RequestView {
@@ -446,5 +447,73 @@ describe('keepDecided', () => {
   it('换了一条请求时取新的', () => {
     const other = { request: req({ id: 'r2', state: 'pending' }), audit: [] }
     expect(keepDecided(a({ state: 'approved' }), other)).toBe(other)
+  })
+})
+
+describe('decide 的英文', () => {
+  beforeEach(() => setLang('en'))
+  afterEach(() => setLang('zh'))
+  const han = /[　-〿一-鿿＀-￯]/
+  const ask = (over: Partial<RequestView>) =>
+    req({ kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', decided_by: 'user', ...over })
+
+  it('不能记住的原因、备注说明、范围', () => {
+    expect(rememberBlock(req({ kind: 'webhook' }))).toBe("Webhook requests can't be remembered")
+    expect(rememberBlock(req({ kind: 'question' }))).toBe("This kind of request can't be remembered")
+    expect(rememberBlock(req({ has_redacted: true }))).toBe("Requests with hidden parts can't be remembered")
+    expect(noteHint(req())).toBe("Note (only kept in the audit log; the agent won't see it)")
+    expect(noteHint(req({ kind: 'webhook' }))).toBe('Note (kept in the audit log and sent back to the source system)')
+    expect(scopeOptions(req())).toEqual([
+      { scope: 'project', label: 'Project blog', disabled: false },
+      { scope: 'global', label: 'All projects', disabled: false },
+    ])
+    expect(scopeOptions(req({ project_root: '', project: '' }))[0]).toEqual({ scope: 'project', label: 'Project', disabled: true })
+  })
+
+  it('决定成功的提示以 Approved / Denied 开头', () => {
+    expect(doneMessage(req({ state: 'approved' }))).toBe('Approved; the decision is on its way to the agent')
+    expect(doneMessage(req({ state: 'approved', rule_id: 'learned-net-1' }))).toBe('Approved, and remembered as rule learned-net-1; the decision is on its way to the agent')
+    expect(doneMessage(req({ state: 'denied' }))).toBe('Denied; the decision is on its way to the agent')
+    expect(doneMessage(req({ state: 'denied', rule_id: 'user-deny-x', delivered_at: '2026-10-23T10:00:05Z' }))).toBe('Denied, and remembered as rule user-deny-x; delivered to the agent')
+    expect(doneMessage(req({ state: 'approved', kind: 'webhook' }))).toBe('Approved; sending it back to the source')
+    expect(doneMessage(req({ state: 'approved', kind: 'webhook', delivered_at: '2026-10-23T10:00:05Z' }))).toBe('Approved; sent back to the source')
+    expect(doneMessage(req({ state: 'approved', delivered_at: '2026-10-23T10:00:05Z' }))).toBe('Approved; delivered to the agent')
+  })
+
+  it('提问作答与交回终端的提示', () => {
+    expect(doneMessage(ask({ state: 'answered' }))).toBe('Answered; the answer is on its way to the agent')
+    expect(doneMessage(ask({ state: 'answered', delivered_at: '2026-10-31T10:00:05Z' }))).toBe('Answered; delivered to the agent')
+    expect(doneMessage(ask({ state: 'passthrough' }))).toBe('Handed back to the terminal; the agent will ask you there')
+  })
+
+  it('别处有了结果、你的决定已生效', () => {
+    expect(goneMessage(req({ state: 'cancelled', decided_by: 'terminal' }))).toBe(
+      'This request was already handled elsewhere: Cancelled (The agent moved on; nothing for you to do)',
+    )
+    expect(goneMessage(req({ state: 'expired', decided_by: '' }))).toBe('This request was already handled elsewhere: Expired')
+    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }), 'allow')).toBe('Your decision took effect: Approved')
+    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }), 'deny')).toBe('This request was already handled elsewhere: Approved (You approved)')
+  })
+
+  it('outcomeView 的标题', () => {
+    const approved = req({ state: 'approved', decided_by: 'user' })
+    expect(outcomeView({ kind: 'done', request: approved }, approved)).toEqual({ tone: 'ok', title: 'Done', text: 'Approved; the decision is on its way to the agent' })
+    expect(outcomeView({ kind: 'gone', message: 'x', attempted: 'allow' }, approved)).toMatchObject({ tone: 'ok', title: 'Your decision took effect' })
+    expect(outcomeView({ kind: 'gone', message: 'x', attempted: 'deny' }, approved)).toEqual({
+      tone: 'warn',
+      title: "Didn't take effect",
+      text: 'This request was already handled elsewhere: Approved (You approved)',
+    })
+    expect(outcomeView({ kind: 'gone', message: 'Request expired' }, null)).toEqual({ tone: 'warn', title: "Didn't take effect", text: 'Request expired' })
+  })
+
+  it('所有提示都没有中文', () => {
+    const views = [
+      outcomeView({ kind: 'done', request: ask({ state: 'answered' }) }, null),
+      outcomeView({ kind: 'gone', message: 'x', attempted: 'answer', sent: { q: 'A' } }, ask({ state: 'passthrough' })),
+      doneMessage(req({ state: 'expired' })),
+      goneMessage(req({ state: 'cancelled', decided_by: 'machine_revoked' }), 'allow'),
+    ]
+    expect(JSON.stringify(views)).not.toMatch(han)
   })
 })

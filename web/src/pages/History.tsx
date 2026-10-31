@@ -99,7 +99,7 @@ export function History() {
         <label className="field">
           <span>筛选</span>
           <select className="input" value={filter} onChange={(e) => choose(e.target.value)}>
-            {historyFilters.map(([v, label]) => (
+            {historyFilters().map(([v, label]) => (
               <option key={v} value={v}>
                 {label}
               </option>

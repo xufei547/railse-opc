@@ -2,6 +2,7 @@
 // 只为让人一眼看懂，不参与定级；该不该问你、风险几档，以 hub 给的 risk 为准。
 import { askQuestions } from './ask'
 import { clip, isRedacted } from './format'
+import { lang, t } from './i18n'
 import type { RequestView } from './types'
 
 export interface Explanation {
@@ -182,9 +183,18 @@ interface Match {
 const sshArgOpts = new Set('BbcDEeFIiJLlmOoPpQRSWw'.split('').map((c) => '-' + c))
 const installers = new Set(['npm', 'pnpm', 'yarn', 'bun'])
 
+const isEn = () => lang() === 'en'
+
+/** 英文的并列：a、a and b、a, b and c。 */
+function listEn(xs: string[]): string {
+  return xs.length <= 2 ? xs.join(' and ') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1) ?? ''}`
+}
+
 function installText(pkgs: string[]): Match {
-  const names = pkgs.length > 3 ? `${pkgs.slice(0, 3).join('、')} 等 ${pkgs.length} 个` : pkgs.join('、')
-  return { rank: 1, text: names ? `安装依赖 ${names}，要联网` : '安装依赖，要联网' }
+  let names: string
+  if (isEn()) names = pkgs.length > 3 ? `${pkgs.slice(0, 3).join(', ')} and ${pkgs.length - 3} more` : listEn(pkgs)
+  else names = pkgs.length > 3 ? `${pkgs.slice(0, 3).join('、')} 等 ${pkgs.length} 个` : pkgs.join('、')
+  return { rank: 1, text: names ? t('安装依赖 {names}，要联网', { names }) : t('安装依赖，要联网') }
 }
 
 const positional = (ws: string[]) => ws.filter((w) => !w.startsWith('-'))
@@ -198,7 +208,7 @@ function matchGit(args: string[]): Match | null {
   const sub = args[i]
   const rest = args.slice(i + 1)
   if (sub === 'reset') {
-    return rest.includes('--hard') ? { rank: 3, text: '丢弃工作区的改动，不可恢复' } : null
+    return rest.includes('--hard') ? { rank: 3, text: t('丢弃工作区的改动，不可恢复') } : null
   }
   if (sub !== 'push') return null
   const opts: string[] = []
@@ -216,13 +226,18 @@ function matchGit(args: string[]): Match | null {
   const refs = pos.slice(1)
   // 源为空的 refspec（:main、+:main）是删除远程分支
   const delRef = refs.find((w) => /^\+?:./.test(w))
-  const suffix = (ref: string) => (remote && ref ? `（${remote} 的 ${ref}）` : remote ? `（${remote}）` : '')
+  // 括号里的远程与分支：中文“（origin 的 main）”，英文“ (main on origin)”
+  const suffix = (ref: string) => {
+    if (!remote) return ''
+    if (isEn()) return ref ? ` (${ref} on ${remote})` : ` (${remote})`
+    return ref ? `（${remote} 的 ${ref}）` : `（${remote}）`
+  }
   if (opts.includes('--delete') || short(/^-[A-Za-z]*d/) || delRef !== undefined) {
     const ref = delRef !== undefined ? delRef.replace(/^\+/, '').slice(1) : (refs[0] ?? '')
-    return { rank: 3, text: `删除远程分支${suffix(ref)}` }
+    return { rank: 3, text: t('删除远程分支{at}', { at: suffix(ref) }) }
   }
   if (opts.includes('--mirror') || opts.includes('--prune')) {
-    return { rank: 3, text: `让远程和本地完全一致，可能删掉远程的分支${suffix('')}` }
+    return { rank: 3, text: t('让远程和本地完全一致，可能删掉远程的分支{at}', { at: suffix('') }) }
   }
   let force = opts.some((w) => w === '--force' || w.startsWith('--force-with-lease')) || short(/^-[A-Za-z]*f/)
   let ref = refs[0] ?? ''
@@ -231,7 +246,9 @@ function matchGit(args: string[]): Match | null {
     ref = ref.slice(1)
   }
   if (ref.includes(':')) ref = ref.slice(ref.lastIndexOf(':') + 1)
-  return force ? { rank: 3, text: `强制推送，会覆盖远程历史${suffix(ref)}` } : { rank: 2, text: `把代码推到远程仓库${suffix(ref)}` }
+  return force
+    ? { rank: 3, text: t('强制推送，会覆盖远程历史{at}', { at: suffix(ref) }) }
+    : { rank: 2, text: t('把代码推到远程仓库{at}', { at: suffix(ref) }) }
 }
 
 // 照 internal/policy/commands.go：curl 的短选项簇含 X d T F 之一（-d@file、-sd 也算），或这些长选项；wget 的这三个长选项。
@@ -299,17 +316,17 @@ function matchPipedShell(segs: Segment[], i: number): Match | null {
     args = args.slice(k)
   }
   if (!shells.has(baseName(args[0] ?? '')) || !readsStdin(args.slice(1))) return null
-  const how = admin ? '以管理员权限直接执行' : '直接执行'
   for (let j = i - 1; j >= 0 && j >= i - pipeLookBack; j--) {
     const prev = segs[j]?.words ?? []
     const n = baseName(prev[0] ?? '')
     if (n === 'curl' || n === 'wget') {
       const host = urlHost(prev.slice(1))
-      return { rank: 3, text: host ? `下载 ${host} 的脚本并${how}` : `下载脚本并${how}` }
+      if (host) return { rank: 3, text: admin ? t('下载 {host} 的脚本并以管理员权限直接执行', { host }) : t('下载 {host} 的脚本并直接执行', { host }) }
+      return { rank: 3, text: admin ? t('下载脚本并以管理员权限直接执行') : t('下载脚本并直接执行') }
     }
     if (!segs[j]?.piped) break
   }
-  return { rank: 3, text: admin ? '以管理员权限执行管道传来的脚本' : '执行管道传来的脚本' }
+  return { rank: 3, text: admin ? t('以管理员权限执行管道传来的脚本') : t('执行管道传来的脚本') }
 }
 
 function matchSegment(words: string[]): Match | null {
@@ -318,22 +335,23 @@ function matchSegment(words: string[]): Match | null {
   const name = first.slice(first.lastIndexOf('/') + 1)
   const args = words.slice(1)
   const pos = positional(args)
-  const deploy = (): Match => ({ rank: 2, text: `发布或部署到外部：${clip(words.join(' '), 80)}` })
+  const deploy = (): Match => ({ rank: 2, text: t('发布或部署到外部：{cmd}', { cmd: clip(words.join(' '), 80) }) })
   switch (name) {
     case 'git':
       return matchGit(args)
     case 'rm': {
       const dd = args.indexOf('--')
       const paths = [...positional(dd < 0 ? args : args.slice(0, dd)), ...(dd < 0 ? [] : args.slice(dd + 1))]
-      return { rank: 3, text: paths.length ? `删除 ${clip(paths.join('、'), 80)}，删了不可恢复` : '删除文件，删了不可恢复' }
+      const list = clip(paths.join(isEn() ? ', ' : '、'), 80)
+      return { rank: 3, text: paths.length ? t('删除 {paths}，删了不可恢复', { paths: list }) : t('删除文件，删了不可恢复') }
     }
     case 'sudo': {
       const cmd = args.join(' ')
-      return { rank: 3, text: cmd ? `以管理员权限运行：${clip(cmd, 80)}` : '以管理员权限运行命令' }
+      return { rank: 3, text: cmd ? t('以管理员权限运行：{cmd}', { cmd: clip(cmd, 80) }) : t('以管理员权限运行命令') }
     }
     case 'docker':
       return (pos[0] === 'system' && pos[1] === 'prune') || (pos[0] === 'volume' && (pos[1] === 'prune' || pos[1] === 'rm'))
-        ? { rank: 3, text: '清理 Docker 数据，不可恢复' }
+        ? { rank: 3, text: t('清理 Docker 数据，不可恢复') }
         : null
     case 'ssh': {
       let host = ''
@@ -346,14 +364,14 @@ function matchSegment(words: string[]): Match | null {
           break
         }
       }
-      return { rank: 2, text: host ? `连接远程机器 ${host}` : '连接远程机器' }
+      return { rank: 2, text: host ? t('连接远程机器 {host}', { host }) : t('连接远程机器') }
     }
     case 'curl':
     case 'wget': {
       const send = sendsData(name, args)
       const host = urlHost(args)
-      if (host) return send ? { rank: 2, text: `向 ${host} 发送数据` } : { rank: 1, text: `访问网址 ${host}` }
-      return send ? { rank: 2, text: `用 ${name} 发送数据` } : { rank: 1, text: `用 ${name} 访问网络` }
+      if (host) return send ? { rank: 2, text: t('向 {host} 发送数据', { host }) } : { rank: 1, text: t('访问网址 {host}', { host }) }
+      return send ? { rank: 2, text: t('用 {name} 发送数据', { name }) } : { rank: 1, text: t('用 {name} 访问网络', { name }) }
     }
     case 'vercel':
       return deploy()
@@ -391,7 +409,7 @@ function matchSegment(words: string[]): Match | null {
 /** 兜底：原样说运行命令（空白并成一个空格，超长截断）；空命令说运行一条命令。 */
 function fallbackAction(command: string): string {
   const c = command.trim()
-  return c ? `运行命令：${clip(c.replace(/\s+/g, ' '), 80)}` : '运行一条命令'
+  return c ? t('运行命令：{cmd}', { cmd: clip(c.replace(/\s+/g, ' '), 80) }) : t('运行一条命令')
 }
 
 /** 各段里取最要紧的一段（不可逆 > 对外 > 联网，一样高取靠前的）；都认不出时 rank 0，说运行命令。 */
@@ -423,104 +441,125 @@ function permissionWhat(r: RequestView): string {
     }
     case 'file_write': {
       const path = p.path ?? ''
-      if (!path) return '修改文件'
-      if (r.risk === 'write_outside') return `修改项目外的文件 ${path}`
-      if (r.risk === 'destructive') return `改敏感文件 ${path}（密钥、配置或开机自启）`
-      return `修改文件 ${path}`
+      if (!path) return t('修改文件')
+      if (r.risk === 'write_outside') return t('修改项目外的文件 {path}', { path })
+      if (r.risk === 'destructive') return t('改敏感文件 {path}（密钥、配置或开机自启）', { path })
+      return t('修改文件 {path}', { path })
     }
     case 'network': {
       if (p.url) {
         try {
           const host = new URL(p.url).hostname
-          if (host) return `访问 ${host}`
+          if (host) return t('访问 {target}', { target: host })
         } catch {
           // 网址解析不了，原样
         }
-        return `访问 ${p.url}`
+        return t('访问 {target}', { target: p.url })
       }
-      return r.tool_name ? `用 ${r.tool_name} 联网` : '联网'
+      // “联网”这个键是风险标签（Network），这里是动作，英文另说
+      return r.tool_name ? t('用 {tool} 联网', { tool: r.tool_name }) : isEn() ? 'Use the network' : '联网'
     }
     case 'mcp':
-      if (p.server && p.tool) return `调用 ${p.server} 的 ${p.tool}`
-      if (p.server) return `调用 ${p.server} 的工具`
-      return p.tool ? `调用 MCP 工具 ${p.tool}` : '调用 MCP 工具'
+      if (p.server && p.tool) return t('调用 {server} 的 {tool}', { server: p.server, tool: p.tool })
+      if (p.server) return t('调用 {server} 的工具', { server: p.server })
+      return p.tool ? t('调用 MCP 工具 {tool}', { tool: p.tool }) : t('调用 MCP 工具')
     default:
-      return r.tool_name ? `使用工具 ${r.tool_name}` : '做一件事'
+      return r.tool_name ? t('使用工具 {tool}', { tool: r.tool_name }) : t('做一件事')
   }
 }
 
-const pausedLine = '自动审批已暂停，所有请求都会问你。'
-
+// engine_reason 原文是中文，照中文前缀判断；输出按语言
 function permissionWhy(r: RequestView): string {
   const paused = r.engine_reason.startsWith('自动审批已暂停')
+  const pausedLine = t('自动审批已暂停，所有请求都会问你。')
   let reason: string
   switch (r.risk) {
     case 'read':
     case 'write_in_project':
       if (paused) return pausedLine
       reason = r.engine_reason.startsWith('命中规则')
-        ? '本来可以自动放行，但有规则要求问你。'
-        : '这类操作本来可以自动放行，但现在没有规则放行它，要你决定。'
+        ? t('本来可以自动放行，但有规则要求问你。')
+        : t('这类操作本来可以自动放行，但现在没有规则放行它，要你决定。')
       break
     case 'network':
-      reason = '这条要联网。规则默认不自动放行联网操作，要你决定。'
+      reason = t('这条要联网。规则默认不自动放行联网操作，要你决定。')
       break
     case 'outward':
-      reason = '这会影响仓库之外的人和系统（推送、发布、部署）。规则永远不会自动放行这类操作，要你决定。'
+      reason = t('这会影响仓库之外的人和系统（推送、发布、部署）。规则永远不会自动放行这类操作，要你决定。')
       break
     case 'destructive':
-      reason = '这是不可逆的操作。规则永远不会自动放行，要你决定。'
+      reason = t('这是不可逆的操作。规则永远不会自动放行，要你决定。')
       break
     case 'write_outside':
-      reason = '要改项目目录之外的文件。规则默认不自动放行，要你决定。'
+      reason = t('要改项目目录之外的文件。规则默认不自动放行，要你决定。')
       break
     case 'unknown':
-      reason = r.payload.type === 'shell' ? '这条命令不在已知名单里，规则判断不了，要你决定。' : '这个操作不在已知名单里，规则判断不了，要你决定。'
+      reason =
+        r.payload.type === 'shell'
+          ? t('这条命令不在已知名单里，规则判断不了，要你决定。')
+          : t('这个操作不在已知名单里，规则判断不了，要你决定。')
       break
     default:
-      reason = '规则定不了，要你决定。'
+      reason = t('规则定不了，要你决定。')
   }
-  return paused ? pausedLine + reason : reason
+  // 中文句子之间不空格，英文要
+  if (!paused) return reason
+  return isEn() ? `${pausedLine} ${reason}` : pausedLine + reason
 }
 
 /** 去掉结尾的 /（只剩 / 时保留），比较目录用。 */
 const trimSlash = (p: string) => (p.length > 1 ? p.replace(/\/+$/, '') || '/' : p)
+
+const upperFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+const lowerFirst = (s: string) => s.charAt(0).toLowerCase() + s.slice(1)
 
 /** 把一条请求说成人话：整句、做什么、在哪、为什么要你决定、批了拒了会怎样。 */
 export function explainRequest(r: RequestView): Explanation {
   const cli = cliLabel(r.cli)
   // 命令的目录不是项目根时也说出来（项目根就是项目名，不重复）
   const cwd = r.payload.type === 'shell' ? (r.payload.cwd ?? '') : ''
-  const where = [
-    r.project && `项目 ${r.project}`,
-    r.machine_name && `机器 ${machineLabel(r.machine_name)}`,
-    cwd && trimSlash(cwd) !== trimSlash(r.project_root) && `目录 ${cwd}`,
+  const en = isEn()
+  // 英文：“Project blog, machine mac, directory /x”，整句句首大写
+  const parts = [
+    r.project && (en ? `project ${r.project}` : `项目 ${r.project}`),
+    r.machine_name && (en ? `machine ${machineLabel(r.machine_name)}` : `机器 ${machineLabel(r.machine_name)}`),
+    cwd && trimSlash(cwd) !== trimSlash(r.project_root) && (en ? `directory ${cwd}` : `目录 ${cwd}`),
   ]
     .filter(Boolean)
-    .join('，')
+    .join(en ? ', ' : '，')
+  const where = en ? upperFirst(parts) : parts
   switch (r.kind) {
     case 'question':
-      return { headline: `${cli} 在终端等你回答`, what: '在终端等你回答', where, why: '', next: ['去那台机器的终端回答，这里只是提醒。'] }
-    case 'done':
-      return { headline: `${cli} 做完了这一轮`, what: '做完了这一轮', where, why: '', next: [] }
-    case 'webhook': {
-      const what = '工作流等你批准'
       return {
-        headline: r.title ? `${what}：${clip(r.title, 80)}` : what,
+        headline: t('{cli} 在终端等你回答', { cli }),
+        what: t('在终端等你回答'),
+        where,
+        why: '',
+        next: [t('去那台机器的终端回答，这里只是提醒。')],
+      }
+    case 'done':
+      return { headline: t('{cli} 做完了这一轮', { cli }), what: t('做完了这一轮'), where, why: '', next: [] }
+    case 'webhook': {
+      const what = t('工作流等你批准')
+      return {
+        headline: r.title ? t('工作流等你批准：{title}', { title: clip(r.title, 80) }) : what,
         what,
         where,
         why: '',
-        next: r.state === 'pending' ? ['批准或拒绝会回调给发起它的工作流。'] : [],
+        next: r.state === 'pending' ? [t('批准或拒绝会回调给发起它的工作流。')] : [],
       }
     }
     case 'ask': {
       const first = askQuestions(r)[0]
       return {
-        headline: `${cli} 在问你`,
-        what: first ? `在问你：${clip(first.question, 60)}` : '在问你',
+        headline: t('{cli} 在问你', { cli }),
+        what: first ? t('在问你：{question}', { question: clip(first.question, 60) }) : t('在问你'),
         where,
         why: '',
-        next: r.state === 'pending' ? ['选一个答案，agent 立刻继续。', '也可以自己填一句。', '「让它在终端问我」会把问题交回终端。'] : [],
+        next:
+          r.state === 'pending'
+            ? [t('选一个答案，agent 立刻继续。'), t('也可以自己填一句。'), t('「让它在终端问我」会把问题交回终端。')]
+            : [],
       }
     }
   }
@@ -528,10 +567,12 @@ export function explainRequest(r: RequestView): Explanation {
   const next: string[] = []
   const pending = r.state === 'pending'
   if (pending) {
-    next.push('批准：agent 执行这一条，只这一次。', '拒绝：agent 收到拒绝，会换个做法或停下来。')
+    next.push(t('批准：agent 执行这一条，只这一次。'), t('拒绝：agent 收到拒绝，会换个做法或停下来。'))
     if (!isRedacted(r)) next.push(rememberLine(r))
   }
-  return { headline: `${cli} 想${what}`, what, where, why: pending ? permissionWhy(r) : '', next }
+  // 英文的 what 句首大写（卡片第一行单独显示），接在 “wants to” 后面时小写；各个 what 都以动词开头
+  const headline = en ? `${cli} wants to ${lowerFirst(what)}` : `${cli} 想${what}`
+  return { headline, what, where, why: pending ? permissionWhy(r) : '', next }
 }
 
 /** “记住”那行：这类操作只能存成拒绝规则（对外、不可逆、未知、项目外，或命令、文件写入没有项目根）时别许诺“不再问”。 */
@@ -539,5 +580,7 @@ function rememberLine(r: RequestView): string {
   const denyOnly =
     ['outward', 'destructive', 'unknown', 'write_outside'].includes(r.risk) ||
     ((r.payload.type === 'shell' || r.payload.type === 'file_write') && r.project_root === '')
-  return denyOnly ? '勾「记住」只能存成拒绝规则，下次同类的直接拒绝；这类操作不能记成放行。' : '勾「记住」可以存成规则，下次同类的不再问。'
+  return denyOnly
+    ? t('勾「记住」只能存成拒绝规则，下次同类的直接拒绝；这类操作不能记成放行。')
+    : t('勾「记住」可以存成规则，下次同类的不再问。')
 }

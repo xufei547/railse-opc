@@ -1,27 +1,31 @@
 // 历史页的筛选、标签与分页。纯函数，便于不带浏览器环境测试。
 
 import { stateLabel } from './format'
+import { t } from './i18n'
 import type { RequestView } from './types'
 
-/** [state 参数, 文案]。空串是全部；recorded 是问题与完成（hub 把 question、done 存成 recorded 行）。 */
-export const historyFilters: readonly (readonly [string, string])[] = [
-  ['', '全部'],
-  ['approved', '已批准'],
-  ['denied', '已拒绝'],
-  ['answered', '已回答'],
-  ['auto_allowed', '自动放行'],
-  ['auto_denied', '自动拒绝'],
-  ['passthrough', '交回终端'],
-  ['expired', '已过期'],
-  ['cancelled', '已取消'],
-  ['recorded', '问题与完成'],
-]
-
-const known = new Set(historyFilters.map(([v]) => v))
+/**
+ * [state 参数, 文案]。空串是全部；recorded 是问题与完成（hub 把 question、done 存成 recorded 行）。
+ * 是函数而不是常量：文案按调用时的语言取。
+ */
+export function historyFilters(): readonly (readonly [string, string])[] {
+  return [
+    ['', t('全部')],
+    ['approved', t('已批准')],
+    ['denied', t('已拒绝')],
+    ['answered', t('已回答')],
+    ['auto_allowed', t('自动放行')],
+    ['auto_denied', t('自动拒绝')],
+    ['passthrough', t('交回终端')],
+    ['expired', t('已过期')],
+    ['cancelled', t('已取消')],
+    ['recorded', t('问题与完成')],
+  ]
+}
 
 /** 地址栏 ?state= 的值：认得的原样，没有或不认得的当作全部。 */
 export function parseFilter(v: string | null): string {
-  return v !== null && known.has(v) ? v : ''
+  return v !== null && historyFilters().some(([s]) => s === v) ? v : ''
 }
 
 /** 先拉这么多条；“加载更多”一次升到 maxLimit（hub 的上限）。 */
@@ -41,8 +45,8 @@ const stateTones: Record<string, Tone> = {
 
 /** 卡片上的标签：审批、webhook 与提问显示状态（放行与已回答绿、拒绝红、等待琥珀、其余灰）；问题与完成不是决定，显示种类。 */
 export function historyTag(r: Pick<RequestView, 'kind' | 'state'>): { label: string; tone: Tone } {
-  if (r.kind === 'question') return { label: '问题', tone: 'plain' }
-  if (r.kind === 'done') return { label: '完成', tone: 'plain' }
+  if (r.kind === 'question') return { label: t('问题'), tone: 'plain' }
+  if (r.kind === 'done') return { label: t('完成'), tone: 'plain' }
   return { label: stateLabel(r.state), tone: stateTones[r.state] ?? 'plain' }
 }
 

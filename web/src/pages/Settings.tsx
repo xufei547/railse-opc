@@ -36,13 +36,13 @@ export function Settings() {
     }
     actions.ask({
       title: '暂停自动审批？',
-      body: pauseCopy.confirm,
+      body: pauseCopy().confirm,
       confirmLabel: '暂停',
       danger: false,
       run: async () => {
         await hub.pause()
         await reload()
-        return { tone: 'ok', title: '已暂停自动审批', text: pauseCopy.done }
+        return { tone: 'ok', title: '已暂停自动审批', text: pauseCopy().done }
       },
     })
   }
@@ -81,7 +81,7 @@ export function Settings() {
         <label className="switch">
           <span>
             暂停自动审批
-            <span className="sub line">{pauseCopy.sub}</span>
+            <span className="sub line">{pauseCopy().sub}</span>
           </span>
           <input type="checkbox" role="switch" checked={paused} disabled={actions.busy || !status} onChange={togglePause} />
         </label>

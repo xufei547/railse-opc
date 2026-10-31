@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   absoluteTime,
   actorLabel,
@@ -18,6 +18,7 @@ import {
   riskTone,
   stateLabel,
 } from './format'
+import { setLang } from './i18n'
 import type { RequestView } from './types'
 
 describe('parseTime', () => {
@@ -280,5 +281,161 @@ describe('outcomeText', () => {
     for (const decided_by of ['future_source', 'hub_restart', 'rule_engine_v2', 'Terminal']) {
       for (const state of states) expect(outcomeText(r({ state, decided_by }))).not.toContain(decided_by)
     }
+  })
+})
+
+const han = /[　-〿一-鿿＀-￯]/
+
+describe('outcomeText（英文）', () => {
+  beforeEach(() => setLang('en'))
+  afterEach(() => setLang('zh'))
+  it('八个分支都是英文句子', () => {
+    const cases: [Parameters<typeof outcomeText>[0], string][] = [
+      [{ kind: 'ask', state: 'answered', decided_by: 'user', rule_id: '' }, 'You answered'],
+      [{ kind: 'ask', state: 'passthrough', decided_by: 'user', rule_id: '' }, 'Handed back to the terminal to ask'],
+      [{ kind: 'permission', state: 'approved', decided_by: 'user', rule_id: 'allow-curl' }, 'You approved and remembered it (rule allow-curl)'],
+      [{ kind: 'permission', state: 'denied', decided_by: 'user', rule_id: '' }, 'You denied'],
+      [{ kind: 'permission', state: 'auto_allowed', decided_by: 'rule:r1', rule_id: '' }, 'Rule r1 allowed it automatically'],
+      [{ kind: 'permission', state: 'cancelled', decided_by: 'terminal', rule_id: '' }, 'The agent moved on; nothing for you to do'],
+      [{ kind: 'permission', state: 'passthrough', decided_by: 'terminal', rule_id: '' }, 'Handled in the terminal'],
+      [{ kind: 'webhook', state: 'expired', decided_by: 'timeout', rule_id: '' }, 'Timed out; the workflow was told "denied"'],
+    ]
+    for (const [r, want] of cases) expect(outcomeText(r)).toBe(want)
+  })
+
+  it('其余组合：规则自动拒绝、没有规则 id、等太久、各个来源都是英文；空串照旧', () => {
+    type R = Parameters<typeof outcomeText>[0]
+    const r = (over: Partial<R>): R => ({ kind: 'permission', state: 'approved', decided_by: '', rule_id: '', ...over })
+    expect(outcomeText(r({ state: 'approved', decided_by: 'user' }))).toBe('You approved')
+    expect(outcomeText(r({ state: 'denied', decided_by: 'user', rule_id: 'user-deny-rm' }))).toBe('You denied and remembered it (rule user-deny-rm)')
+    expect(outcomeText(r({ state: 'auto_denied', decided_by: 'paused', rule_id: 'user-deny-x' }))).toBe('Rule user-deny-x denied it automatically')
+    expect(outcomeText(r({ state: 'auto_allowed', decided_by: '' }))).toBe('A rule allowed it automatically')
+    expect(outcomeText(r({ state: 'expired', decided_by: 'timeout' }))).toBe('Timed out; the agent went back to the terminal')
+    expect(outcomeText(r({ state: 'pending' }))).toBe('')
+    expect(outcomeText(r({ state: 'cancelled', decided_by: 'something_new' }))).toBe('')
+    const sources = ['hub_unreachable', 'no_hub', 'agent_restart', 'shutdown', 'resend', 'machine_revoked', 'paused', 'gemini', 'error', 'hub_error']
+    for (const decided_by of sources) {
+      const text = outcomeText(r({ state: 'passthrough', decided_by }))
+      expect(text, decided_by).not.toBe('')
+      expect(text, decided_by).not.toMatch(han)
+    }
+    expect(outcomeText(r({ state: 'expired', decided_by: 'hub_unreachable' }))).toBe("Couldn't reach the hub; the agent handled it in the terminal")
+    expect(outcomeText(r({ state: 'passthrough', decided_by: 'paused' }))).toBe('Auto-approval is paused; handed back to the terminal')
+  })
+})
+
+describe('format 的英文', () => {
+  beforeEach(() => setLang('en'))
+  afterEach(() => setLang('zh'))
+
+  it('relativeTime：just now、min ago、h ago、yesterday；更早的日期两种语言相同', () => {
+    const now = new Date('2026-10-23T12:00:00Z')
+    expect(relativeTime('2026-10-23T11:59:50Z', now)).toBe('just now')
+    expect(relativeTime('2026-10-23T11:57:00Z', now)).toBe('3 min ago')
+    expect(relativeTime('2026-10-23T09:00:00Z', now)).toBe('3 hr ago')
+    expect(relativeTime('2026-10-22T09:00:00Z', now)).toBe('yesterday')
+    expect(relativeTime('2026-10-01T09:00:00Z', now)).toMatch(/^10-01$/)
+  })
+
+  it('风险标签：短名词，与 hub 推送的动词一致', () => {
+    expect(riskLabel('read')).toBe('Read-only')
+    expect(riskLabel('write_in_project')).toBe('Write in project')
+    expect(riskLabel('unknown')).toBe('Unknown')
+    expect(riskLabel('write_outside')).toBe('Write outside project')
+    expect(riskLabel('network')).toBe('Network')
+    expect(riskLabel('outward')).toBe('Outward')
+    expect(riskLabel('destructive')).toBe('Destructive')
+    expect(riskLabel('')).toBe('Unrated')
+    expect(riskLabel('weird')).toBe('weird')
+    expect(riskTone('outward')).toBe('high')
+  })
+
+  it('状态、种类、审计动作、谁做的', () => {
+    const states = ['pending', 'approved', 'denied', 'cancelled', 'expired', 'auto_allowed', 'auto_denied', 'passthrough', 'recorded', 'answered']
+    for (const s of states) expect(stateLabel(s), s).not.toMatch(han)
+    expect(stateLabel('approved')).toBe('Approved')
+    expect(stateLabel('denied')).toBe('Denied')
+    expect(stateLabel('auto_allowed')).toBe('Auto-approved')
+    expect(stateLabel('passthrough')).toBe('Back to terminal')
+    expect(stateLabel('mystery')).toBe('mystery')
+    for (const k of ['permission', 'question', 'done', 'webhook', 'ask']) expect(kindLabel(k), k).not.toMatch(han)
+    expect(kindLabel('permission')).toBe('Approval')
+    expect(kindLabel('question')).toBe('Waiting for your answer')
+    expect(kindLabel('ask')).toBe('Question')
+    const actions = ['request_pending', 'allow', 'deny', 'answer', 'rule_learned', 'rule_learn_rolled_back', 'push_sent', 'webhook_callback', 'undeliverable', 'cancelled_resend', 'approved', 'expired']
+    for (const a of actions) expect(auditLabel(a), a).not.toMatch(han)
+    expect(auditLabel('allow')).toBe('Approve')
+    expect(auditLabel('deny')).toBe('Deny')
+    expect(auditLabel('approved')).toBe('Approved')
+    expect(auditLabel('brand_new')).toBe('brand_new')
+    expect(actorLabel('user')).toBe('You')
+    expect(actorLabel('agent')).toBe('Daemon')
+    expect(actorLabel('system')).toBe('hub')
+  })
+
+  it('依据', () => {
+    expect(decidedByLabel({ decided_by: 'user', rule_id: '', state: 'answered' })).toBe('Answered on the phone')
+    expect(decidedByLabel({ decided_by: 'user', rule_id: '', state: 'approved' })).toBe('Decided on the phone')
+    expect(decidedByLabel({ decided_by: 'user', rule_id: 'learned-git-push', state: 'approved' })).toBe('Decided on the phone (remembered as learned-git-push)')
+    expect(decidedByLabel({ decided_by: 'rule:user-deny-x', rule_id: '', state: 'auto_denied' })).toBe('Rule user-deny-x')
+    const sources = ['terminal', 'timeout', 'hub_unreachable', 'gemini', 'paused', 'shutdown', 'resend', 'agent_restart', 'machine_revoked', 'error']
+    for (const decided_by of sources) expect(decidedByLabel({ decided_by, rule_id: '', state: 'cancelled' }), decided_by).not.toMatch(han)
+    expect(decidedByLabel({ decided_by: '', rule_id: '', state: 'recorded' })).toBe('Recorded')
+  })
+
+  it('engineReasonLabel：照中文前缀解析，输出英文；不认识的原样', () => {
+    expect(engineReasonLabel('无规则命中，按 outward 默认询问')).toBe('No rule matched, so it asks (default for Outward)')
+    expect(engineReasonLabel('无规则命中，按 weird 默认询问')).toBe('No rule matched, so it asks (default for weird)')
+    expect(engineReasonLabel('命中规则 user-network-ask')).toBe('Matched rule user-network-ask')
+    expect(engineReasonLabel('自动审批已暂停')).toBe('Auto-approval paused')
+    expect(engineReasonLabel('自动审批已暂停，交回终端处理')).toBe('Auto-approval paused; handed back to the terminal')
+    expect(engineReasonLabel('等待过期，交回终端处理')).toBe('Timed out; handed back to the terminal')
+    expect(engineReasonLabel('脱敏后题目超出上限（x），交回终端处理')).toBe('Handed back to the terminal')
+    expect(engineReasonLabel('答案不合规: x')).toBe("The answer didn't fit the questions; handed back to the terminal")
+    expect(engineReasonLabel('')).toBe('')
+    expect(engineReasonLabel('something else')).toBe('something else')
+  })
+
+  it('engineReasonLabel：守护进程固定理由（hubdecider.go、server.go）逐条有英文且无汉字', () => {
+    const cases: [string, string][] = [
+      ['Gemini 只能拒绝不能放行，交回原生确认框', "Gemini can only deny here, not allow; handed back to Gemini's own prompt"],
+      ['没有配置 hub，交回终端处理', 'No hub configured; handed back to the terminal'],
+      ['连不上 hub，交回终端处理', "Couldn't reach the hub; handed back to the terminal"],
+      ['hub 拒绝了本机密钥，交回终端处理', "The hub rejected this machine's key; handed back to the terminal"],
+      ['无法送往 hub，交回终端处理', "Couldn't send it to the hub; handed back to the terminal"],
+      ['与 hub 断线超过宽限，交回终端处理', 'Lost the hub connection for too long; handed back to the terminal'],
+      ['hub 没有给出有效决定，交回终端处理', "The hub didn't return a valid decision; handed back to the terminal"],
+      ['hub 版本太旧，不认识提问，交回终端处理', 'The hub is too old to handle questions; handed back to the terminal'],
+      ['已在手机上批准', 'Approved on the phone'],
+      ['已在手机上拒绝', 'Denied on the phone'],
+      ['已在手机上回答', 'Answered on the phone'],
+      ['在手机上选了在终端回答', 'Chose on the phone to answer in the terminal'],
+      ['自动审批已暂停，交回终端处理', 'Auto-approval paused; handed back to the terminal'],
+      ['脱敏后有题面相同的题，分不清答的是哪道，交回终端处理', "After redaction two questions read the same, so the answers couldn't be matched; handed back to the terminal"],
+      ['决定来源给的答案不完整，交回终端处理', 'The answer was incomplete; handed back to the terminal'],
+      ['钩子进程在决定前退出', 'The hook exited before a decision was made'],
+      ['守护进程正在停止，交回终端处理', 'The daemon was stopping; handed back to the terminal'],
+      ['等待过期，交回终端处理', 'Timed out; handed back to the terminal'],
+      ['决定来源出错，交回终端处理', 'Error while deciding; handed back to the terminal'],
+    ]
+    for (const [zh, en] of cases) {
+      expect(engineReasonLabel(zh), zh).toBe(en)
+      expect(engineReasonLabel(zh), zh).not.toMatch(han)
+    }
+  })
+
+  it('deliveryLabel', () => {
+    expect(deliveryLabel(view({ state: 'approved', delivered_at: '2026-10-23T10:00:05Z' }), false)).toBe('Delivered to the agent')
+    expect(deliveryLabel(view({ state: 'denied' }), false)).toBe('Not delivered to the agent yet')
+    expect(deliveryLabel(view({ state: 'approved', kind: 'webhook', delivered_at: '2026-10-23T10:00:05Z' }), false)).toBe('Sent back to the source')
+    expect(deliveryLabel(view({ state: 'approved', kind: 'webhook' }), false)).toBe('Not sent back to the source yet')
+    const lines = [
+      deliveryLabel(view({ state: 'approved' }), true),
+      deliveryLabel(view({ kind: 'ask', state: 'answered' }), true),
+      deliveryLabel(view({ kind: 'ask', state: 'answered' }), false),
+    ]
+    expect(JSON.stringify(lines)).not.toMatch(han)
+    expect(lines[0]).toMatch(/^Decision not delivered/)
+    expect(lines[1]).toMatch(/^Answer not delivered/)
   })
 })

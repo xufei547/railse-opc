@@ -2,6 +2,7 @@
 
 import { ApiError } from './api'
 import { isRedacted, outcomeText, stateLabel } from './format'
+import { lang, t } from './i18n'
 import type { AuditEvent, DecideBody, Draft, RequestView } from './types'
 
 export type Verdict = 'allow' | 'deny'
@@ -49,9 +50,9 @@ export function canRemember(r: RequestView): boolean {
 
 /** 不能“记住”的原因（给开关下方的说明）；能记住时回 null。 */
 export function rememberBlock(r: RequestView): string | null {
-  if (r.kind === 'webhook') return 'webhook 请求不能记住'
-  if (r.kind !== 'permission') return '这类请求不能记住'
-  if (isRedacted(r)) return '含被隐藏部分的请求不能记住'
+  if (r.kind === 'webhook') return t('webhook 请求不能记住')
+  if (r.kind !== 'permission') return t('这类请求不能记住')
+  if (isRedacted(r)) return t('含被隐藏部分的请求不能记住')
   return null
 }
 
@@ -155,7 +156,7 @@ export function retryable(e: unknown): boolean {
 
 /** 备注框的说明：审批的备注不会给 agent（钩子只看到固定文案）；webhook 的备注随回调发给来源。 */
 export function noteHint(r: RequestView): string {
-  return r.kind === 'webhook' ? '备注（进审计，并随回调发给来源系统）' : '备注（只进审计，不会给 agent 看）'
+  return r.kind === 'webhook' ? t('备注（进审计，并随回调发给来源系统）') : t('备注（只进审计，不会给 agent 看）')
 }
 
 export interface ScopeOption {
@@ -167,13 +168,14 @@ export interface ScopeOption {
 /** 范围按钮：没有项目根时“项目”不可选（hub 缺省就记成全局）。 */
 export function scopeOptions(r: RequestView): ScopeOption[] {
   return [
-    { scope: 'project', label: r.project ? `项目 ${r.project}` : '项目', disabled: r.project_root === '' },
-    { scope: 'global', label: '全局', disabled: false },
+    { scope: 'project', label: r.project ? t('项目 {name}', { name: r.project }) : t('项目'), disabled: r.project_root === '' },
+    { scope: 'global', label: t('全局'), disabled: false },
   ]
 }
 
 /** 决定（或作答）成功后的提示。 */
 export function doneMessage(r: RequestView): string {
+  if (lang() === 'en') return doneMessageEn(r)
   if (r.kind === 'ask') {
     if (r.state === 'answered') return `已回答，${r.delivered_at ? '已送达 agent' : '答案正在送回 agent'}`
     if (r.state === 'passthrough') return '已交回终端，agent 会在终端里问你'
@@ -183,6 +185,23 @@ export function doneMessage(r: RequestView): string {
   let tail: string
   if (r.kind === 'webhook') tail = r.delivered_at ? '已回调来源' : '正在回调来源'
   else tail = r.delivered_at ? '已送达 agent' : '决定正在送回 agent'
+  return verb + learned + tail
+}
+
+/**
+ * doneMessage 的英文：以 Approved / Denied（或状态名）开头，记住时接“, and remembered as rule …”，分号后说送没送到。
+ * 句尾那半句是小写的从句，与 deliveryLabel 的独立标签（Delivered to the agent）大小写不同，所以不与它共用英文表的键。
+ */
+function doneMessageEn(r: RequestView): string {
+  if (r.kind === 'ask') {
+    if (r.state === 'answered') return `Answered; ${r.delivered_at ? 'delivered to the agent' : 'the answer is on its way to the agent'}`
+    if (r.state === 'passthrough') return 'Handed back to the terminal; the agent will ask you there'
+  }
+  const verb = r.state === 'approved' ? 'Approved' : r.state === 'denied' ? 'Denied' : stateLabel(r.state)
+  const learned = r.rule_id ? `, and remembered as rule ${r.rule_id}; ` : '; '
+  let tail: string
+  if (r.kind === 'webhook') tail = r.delivered_at ? 'sent back to the source' : 'sending it back to the source'
+  else tail = r.delivered_at ? 'delivered to the agent' : 'the decision is on its way to the agent'
   return verb + learned + tail
 }
 
@@ -213,9 +232,9 @@ function sameUserDecision(r: RequestView, attempted?: Attempt, sent?: Record<str
  */
 export function goneMessage(r: RequestView, attempted?: Attempt, sent?: Record<string, string>): string {
   const state = stateLabel(r.state)
-  if (sameUserDecision(r, attempted, sent)) return `你的决定已生效：${state}`
+  if (sameUserDecision(r, attempted, sent)) return t('你的决定已生效：{state}', { state })
   const outcome = outcomeText(r)
-  return `这条请求在别处有了结果：${state}${outcome ? `（${outcome}）` : ''}`
+  return outcome ? t('这条请求在别处有了结果：{state}（{outcome}）', { state, outcome }) : t('这条请求在别处有了结果：{state}', { state })
 }
 
 /**
@@ -243,13 +262,13 @@ export interface OutcomeView {
 export function outcomeView(o: Outcome, current: RequestView | null): OutcomeView {
   if (o.kind === 'done') {
     const r = current && current.id === o.request.id && current.state !== 'pending' ? current : o.request
-    return { tone: 'ok', title: '已生效', text: doneMessage(r) }
+    return { tone: 'ok', title: t('已生效'), text: doneMessage(r) }
   }
-  if (current && sameUserDecision(current, o.attempted, o.sent)) return { tone: 'ok', title: '你的决定已生效', text: doneMessage(current) }
+  if (current && sameUserDecision(current, o.attempted, o.sent)) return { tone: 'ok', title: t('你的决定已生效'), text: doneMessage(current) }
   if (current && o.attempted && current.decided_by === 'user' && current.state !== 'pending') {
-    return { tone: 'warn', title: '没有生效', text: goneMessage(current, o.attempted, o.sent) }
+    return { tone: 'warn', title: t('没有生效'), text: goneMessage(current, o.attempted, o.sent) }
   }
-  return { tone: 'warn', title: '没有生效', text: o.message }
+  return { tone: 'warn', title: t('没有生效'), text: o.message }
 }
 
 /** 按键是不是要关面板的 Esc。输入法组字时的 Esc 是取消候选（isComposing，或 Safari 的 keyCode 229），不能关面板丢掉备注。 */

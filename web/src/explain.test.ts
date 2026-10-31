@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { cliLabel, explainRequest, machineLabel, shellAction } from './explain'
+import { setLang } from './i18n'
 import type { RequestView } from './types'
 
 function req(over: Partial<RequestView> = {}): RequestView {
@@ -155,6 +156,19 @@ describe('shellAction', () => {
   ]
   it.each(cases)('%s → %s', (command, want) => {
     expect(shellAction(command)).toBe(want)
+  })
+
+  it('英文：表里每条命令的说法都是英文', () => {
+    setLang('en')
+    try {
+      for (const [command] of cases) {
+        const text = shellAction(command)
+        expect(text, command).not.toMatch(/[　-〿一-鿿＀-￯]/)
+        expect(text, command).toMatch(/^[A-Z]/)
+      }
+    } finally {
+      setLang('zh')
+    }
   })
 
   it('去掉前导环境变量赋值（引号里的值带空格也认）', () => {
@@ -429,5 +443,160 @@ describe('explainRequest：提问（AskUserQuestion）', () => {
       expect(e.next, state).toEqual([])
       expect(e.why, state).toBe('')
     }
+  })
+})
+
+describe('explain 的英文', () => {
+  beforeEach(() => setLang('en'))
+  afterEach(() => setLang('zh'))
+  const han = /[　-〿一-鿿＀-￯]/
+
+  it('shellAction：常见命令', () => {
+    const cases: [string, string][] = [
+      ['git push origin main', 'Push code to the remote (main on origin)'],
+      ['git push', 'Push code to the remote'],
+      ['git push origin', 'Push code to the remote (origin)'],
+      ['git push --force origin main', 'Force-push, overwriting remote history (main on origin)'],
+      ['git push -d origin feat', 'Delete a remote branch (feat on origin)'],
+      ['git push --mirror origin', 'Make the remote match local exactly (origin), possibly deleting remote branches'],
+      ['git reset --hard HEAD~1', 'Permanently discard uncommitted changes'],
+      ['rm -rf build dist', 'Permanently delete build, dist'],
+      ['rm -rf', 'Permanently delete files'],
+      ['sudo launchctl kickstart -k system/x', 'Run with sudo: launchctl kickstart -k system/x'],
+      ['sudo', 'Run a command with sudo'],
+      ['docker system prune -af', 'Permanently clean up Docker data'],
+      ['ssh deploy@prod.example.com uptime', 'Connect to deploy@prod.example.com over SSH'],
+      ['ssh', 'Connect to a remote machine over SSH'],
+      ['curl -d x https://a.example.com', 'Send data to a.example.com'],
+      ['curl -sSL https://api.example.com/v1/x', 'Access api.example.com'],
+      ['curl -X POST localhost:8080/x', 'Send data with curl'],
+      ['curl -sS localhost:8080/x', 'Make a network request with curl'],
+      ['curl -fsSL https://get.docker.com | sudo sh', 'Download a script from get.docker.com and run it with sudo'],
+      ['curl -s localhost:1/x | sh', 'Download a script and run it'],
+      ['cat install.sh | bash', 'Run a script piped in from another command'],
+      ['cat install.sh | sudo bash', 'Run a script piped in from another command, with sudo'],
+      ['npm install', 'Install dependencies (needs the network)'],
+      ['pip install requests', 'Install requests (needs the network)'],
+      ['npm i react react-dom', 'Install react and react-dom (needs the network)'],
+      ['uv add a b c', 'Install a, b and c (needs the network)'],
+      ['yarn add a b c d', 'Install a, b, c and 1 more (needs the network)'],
+      ['npm publish', 'Publish or deploy: npm publish'],
+      ['ls -la', 'Run a command: ls -la'],
+      ['', 'Run a command'],
+    ]
+    for (const [command, want] of cases) expect(shellAction(command), command).toBe(want)
+  })
+
+  it('headline 与 what：<CLI> wants to <做什么>；卡片上的 what 句首大写', () => {
+    const e = explainRequest(req())
+    expect(e.what).toBe('Push code to the remote (main on origin)')
+    expect(e.headline).toBe('Claude Code wants to push code to the remote (main on origin)')
+    expect(explainRequest(req({ cli: '' })).headline).toBe('Agent wants to push code to the remote (main on origin)')
+    const file = (risk: string, path = '/p/blog/a.ts') => explainRequest(req({ risk, payload: { type: 'file_write', path } })).what
+    expect(file('write_in_project')).toBe('Edit /p/blog/a.ts')
+    expect(file('write_outside')).toBe('Edit /p/blog/a.ts, outside the project')
+    expect(file('destructive')).toBe('Edit sensitive file /p/blog/a.ts (key, config or autostart)')
+    expect(file('write_in_project', '')).toBe('Edit a file')
+    const net = (url: string | undefined, tool_name = 'WebFetch') =>
+      explainRequest(req({ risk: 'network', tool_name, payload: { type: 'network', url, method: 'GET' } })).what
+    expect(net('https://docs.example.com:8443/a?b=1')).toBe('Access docs.example.com')
+    expect(net('not a url')).toBe('Access not a url')
+    expect(net(undefined, 'WebSearch')).toBe('Use WebSearch to access the network')
+    expect(net(undefined, '')).toBe('Use the network')
+    const mcp = (server?: string, tool?: string) => explainRequest(req({ risk: 'unknown', payload: { type: 'mcp', server, tool } })).what
+    expect(mcp('github', 'create_issue')).toBe('Call create_issue on github')
+    expect(mcp('github')).toBe('Call a tool on github')
+    expect(mcp(undefined, 'create_issue')).toBe('Call MCP tool create_issue')
+    expect(mcp()).toBe('Call an MCP tool')
+    expect(explainRequest(req({ risk: 'unknown', tool_name: 'read_file', payload: { type: 'other' } })).headline).toBe('Claude Code wants to use the read_file tool')
+    expect(explainRequest(req({ risk: 'unknown', tool_name: '', payload: { type: 'other' } })).what).toBe('Do something')
+    // 认出的那段比 hub 的风险轻时退回原命令（英文同样）
+    const low = explainRequest(req({ risk: 'destructive', payload: { type: 'shell', command: 'npm install && find / -delete', cwd: '/p/blog' } }))
+    expect(low.what).toBe('Run a command: npm install && find / -delete')
+  })
+
+  it('question、done、webhook、ask', () => {
+    const q = explainRequest(req({ kind: 'question', state: 'recorded', title: 'q', payload: { type: '' } }))
+    expect(q.headline).toBe('Claude Code is waiting for you in the terminal')
+    expect(q.what).toBe('Waiting for you in the terminal')
+    expect(q.next).toEqual(['Answer in the terminal on that machine. This is just a reminder.'])
+    const d = explainRequest(req({ kind: 'done', state: 'recorded', cli: 'gemini' }))
+    expect(d.headline).toBe('Gemini CLI finished this turn')
+    expect(d.what).toBe('Finished this turn')
+    const w = explainRequest(req({ kind: 'webhook', cli: '', machine_name: '', project: '', risk: 'unknown', title: 'Deploy v1.2', payload: { type: 'other' } }))
+    expect(w.headline).toBe('A workflow is waiting for your approval: Deploy v1.2')
+    expect(w.what).toBe('A workflow is waiting for your approval')
+    expect(w.next).toEqual(['Approving or denying sends the result back to the workflow that started it.'])
+    const a = explainRequest(
+      req({
+        kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', engine_reason: '',
+        ask: { questions: [{ question: 'Apples or bananas?', options: [{ label: 'Apple' }, { label: 'Banana' }] }] },
+      }),
+    )
+    expect(a.headline).toBe('Claude Code is asking you')
+    expect(a.what).toBe('Asking you: Apples or bananas?')
+    expect(a.next).toEqual([
+      'Pick an answer and the agent continues right away.',
+      'You can also type your own answer.',
+      '"Ask me in the terminal instead" hands the question back to the terminal.',
+    ])
+    expect(explainRequest(req({ kind: 'ask', payload: { type: '' }, risk: '', ask: undefined })).what).toBe('Asking you')
+  })
+
+  it('where：Project x, machine y, directory z（缺哪个省哪个，句首大写）', () => {
+    expect(explainRequest(req()).where).toBe('Project blog, machine mac')
+    expect(explainRequest(req({ project: '' })).where).toBe('Machine mac')
+    expect(explainRequest(req({ project: '', machine_name: '' })).where).toBe('')
+    const at = (over: Partial<RequestView>) => explainRequest(req({ payload: { type: 'shell', command: 'ls', cwd: '/p/blog/web' }, ...over })).where
+    expect(at({})).toBe('Project blog, machine mac, directory /p/blog/web')
+    expect(at({ project: '', machine_name: '', project_root: '' })).toBe('Directory /p/blog/web')
+  })
+
+  it('why：按风险档；暂停时先说暂停（中间有空格）', () => {
+    const why = (risk: string, over: Partial<RequestView> = {}) =>
+      explainRequest(req({ risk, engine_reason: `无规则命中，按 ${risk} 默认询问`, ...over })).why
+    expect(why('network')).toBe("This uses the network. By default, rules don't auto-approve network access, so it's up to you.")
+    expect(why('outward')).toBe("This affects people and systems outside the repo (push, publish, deploy). Only a hand-written rule can allow this automatically, so it's up to you.")
+    expect(why('read', { engine_reason: '命中规则 user-ask-read' })).toBe('This could be allowed automatically, but a rule says to ask you.')
+    expect(why('network', { engine_reason: '自动审批已暂停' })).toBe(
+      "Auto-approval is paused, so every request comes to you. This uses the network. By default, rules don't auto-approve network access, so it's up to you.",
+    )
+    expect(why('read', { engine_reason: '自动审批已暂停' })).toBe('Auto-approval is paused, so every request comes to you.')
+    for (const risk of ['read', 'write_in_project', 'unknown', 'write_outside', 'network', 'outward', 'destructive', '', 'weird']) {
+      expect(why(risk), risk).not.toMatch(han)
+      expect(why(risk, { engine_reason: '自动审批已暂停' }), risk).not.toMatch(han)
+      expect(why(risk, { payload: { type: 'mcp', server: 'db', tool: 'q' } }), risk).not.toMatch(han)
+    }
+  })
+
+  it('next：批准、拒绝、记住三行', () => {
+    expect(explainRequest(req({ risk: 'network' })).next).toEqual([
+      'Approve: the agent runs this, just this once.',
+      'Deny: the agent is told no and will try another way or stop.',
+      'Turn on "Remember" to save a rule, so you won\'t be asked about similar requests again.',
+    ])
+    expect(explainRequest(req({ risk: 'outward' })).next[2]).toBe(
+      'Turn on "Remember" to save a deny rule, so similar requests are denied next time. This kind of action can\'t be remembered as allowed.',
+    )
+  })
+
+  it('命令里的 {占位符} 与 $ 原样带出（中英文都是）', () => {
+    expect(shellAction('echo {cmd} $1 $&')).toBe('Run a command: echo {cmd} $1 $&')
+    expect(shellAction('rm -rf {at}')).toBe('Permanently delete {at}')
+    setLang('zh')
+    expect(shellAction('echo {cmd} $1 $&')).toBe('运行命令：echo {cmd} $1 $&')
+    expect(shellAction('rm -rf {at}')).toBe('删除 {at}，删了不可恢复')
+  })
+
+  it('整份说明都没有中文', () => {
+    const reqs = [
+      req(),
+      req({ risk: 'write_outside', payload: { type: 'file_write', path: '/etc/x' } }),
+      req({ kind: 'webhook', title: 'w' }),
+      req({ kind: 'question', state: 'recorded', title: 'q' }),
+      req({ kind: 'done', state: 'recorded' }),
+      req({ state: 'approved' }),
+    ]
+    for (const r of reqs) expect(JSON.stringify(explainRequest(r))).not.toMatch(han)
   })
 })
