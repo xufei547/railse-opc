@@ -50,7 +50,7 @@ Railse OPC 是给“用 AI agent 经营一人公司的人”用的公司层驾�
 | 第 5 份计划执行中的决策（2026-10-25） | `railse doctor` 唯一会起的进程是三个 CLI 的 `--version`（10 秒超时，sudo 下不跑）。`--system` 只配 `--hub`，默认数据目录 `/var/lib/railse-hub`（`StateDirectory=railse-hub`），doctor 的默认 hub 目录在 Linux 上回退到它。hub 不以 root 运行：文案只提 `CAP_NET_BIND_SERVICE`，hub 以 euid 0 启动时警告不拒绝，`railse setup all` 拒绝 root。golangci-lint 的 errcheck 只对 `_test.go` 排除。发布归档带 `docs/*.md`。GitHub 仓库 `xufei547/railse-opc`（原定 `railse/railse-opc`，2026-10-26 因 GitHub 上没有 railse 组织改到作者名下，模块路径随之改为 `github.com/xufei547/railse-opc`）。MCP 命令键下的 argv 数组与 shell 解释器的 args 按命令行语境脱敏。为 autocert 引入 `golang.org/x/net` 与 `golang.org/x/text` 作 indirect（`x/crypto` 的传递依赖，不算新增第三方依赖）。 |
 | Gemini CLI 最低版本 | 0.65.0。更早的版本在用户确认之后才触发 `BeforeTool`，钩子无法在审批前拦截（2026-10-21 实验）；`railse doctor` 对低于 0.65.0 的版本报警 |
 | v0.1.3：本机 hub 一条命令（2026-10-28 已拍板） | 实验证实 hub 跑在工作机上、用 Tailscale Funnel 暴露即可让手机收推送并批准（本机 MacBook Air，推送 2 秒内到，批准回到 hub；WebSocket 经 Funnel 正常）。决定：`railse setup all --local-hub`（向导第一问“hub 在哪里”）在本机起 hub 并接入，不要服务器、域名、证书。对外地址只认 Tailscale Funnel（`tailscale` CLI，不引 Go 依赖；`--public-url` 可换成自己的隧道），hub 监听 `127.0.0.1:<端口>`（默认 8787）、`--trusted-proxy 127.0.0.1,::1`，由 `setup autostart --hub` 托管；守护进程接本机的 `http://127.0.0.1:<端口>`，手机打开 Funnel 的 https 地址；`<hub 数据目录>/local-hub.json` 记端口与对外地址，供重跑与 doctor 用。Funnel 未在管理台开通时把 tailscale 给的开通链接原样打印、退出 1，不绕过。已知代价写进文档：机器睡眠 hub 随之不在（单机用户无损失，多机放常开的那台）；Tailscale 改机器名即换域名，手机要重新开启通知；手机挂代理节点时可能连不上 Funnel 入口（本机实验：Clash 节点握手即断，直连通），提示关代理或给 `ts.net` 加直连规则。飞书/Telegram 机器人通道（完全不要入站）另列为后续候选。 |
-| v0.1.5：手机上答 Claude Code 的选择题（2026-10-31 已拍板） | 真机验证（Claude Code 2.1.280 交互模式）：`PreToolUse` 钩子对 `AskUserQuestion` 返回 `permissionDecision: allow` 加 `updatedInput`（原 `questions` 回填、加 `answers`）即可代答，终端不再弹选项；答案不是选项标签也被接受。决定：新请求种类 `ask`，不过引擎、不能记住；网页答题页（单选、多选、自己填、交回终端）；接口 `POST /api/requests/{id}/answer`；schema v3 加 `ask`、`answers` 列，state 加 `answered`；钩子安装加 `PreToolUse`（matcher `AskUserQuestion`）。`PermissionRequest` 对 `AskUserQuestion` 的 allow 无效（官方文档），改为一律交回终端。不做：agent 停下等下一句话的自由文本（钩子无注入途径，Channels 是研究预览）；Codex、Gemini 没有口子。计划 `docs/superpowers/plans/2026-10-31-railse-opc-v0.1.5-answer-questions.md`。 |
+| v0.1.5：手机上答 Claude Code 的选择题（2026-10-31 已拍板） | 真机验证（Claude Code 2.1.280 交互模式）：`PreToolUse` 钩子对 `AskUserQuestion` 返回 `permissionDecision: allow` 加 `updatedInput`（原 `questions` 回填、加 `answers`）即可代答，终端不再弹选项；答案不是选项标签也被接受。决定：新请求种类 `ask`，不过引擎、不能记住；网页答题页（单选、多选、自己填、交回终端）；接口 `POST /api/requests/{id}/answer`；schema v3 加 `ask`、`answers` 列，state 加 `answered`；钩子安装加 `PreToolUse`（matcher `AskUserQuestion`）。`PermissionRequest` 对 `AskUserQuestion` 的 allow 无效（官方文档），改为一律交回终端。不做：agent 停下等下一句话的自由文本（钩子无注入途径，Channels 是研究预览）；Codex、Gemini 没有口子。提问也带项目根（推送标题与卡片里显示项目名）。升级：旧版 hub 不认识提问，所以 hub 要先于或与守护进程同时升级（本机 hub 与守护进程是同一个二进制，不受影响）；已装过钩子的机器要重跑 `railse setup hooks --claude`，`railse doctor` 的 `hooks.claude` 会为缺 `PreToolUse` 报 warn。计划 `docs/superpowers/plans/2026-10-31-railse-opc-v0.1.5-answer-questions.md`。 |
 | v0.1.4：通知说人话、批过的自动收掉（2026-10-30） | 作者第一条真机反馈：推送看不懂、不知道要做什么；批完之后通知栏里的旧通知一直留着，点进去是早就批过的请求。推送文案改成“谁要做什么、在哪、该干嘛”：permission 标题“<CLI> 要<动词>”，CLI 按请求所属会话的 `sessions.tool`（Claude Code、Codex、Gemini CLI，查不到为 Agent），动词按风险档（联网、往外发、做不可逆的操作、改项目外的文件、跑一个没见过的命令、改项目里的文件、读文件，其余“做一件事”）；有项目追加项目名，接入且未吊销的机器不止一个名字（同名重接不算）再追加机器名（去 `.local`），超长先截机器名、再截项目名；正文第一行载荷摘要（认不出的工具写工具名）、第二行“点开批准或拒绝”，不再出现风险英文词与工具名。question 标题“<CLI> 在终端等你回答”，webhook 标题“工作流等你批准”。旧通知：iOS 对不弹通知的推送会吊销订阅，不能用静默推送去收；改由网页每次拿到收件箱状态（首次加载、实时帧、自己决定之后）关掉 tag 不在待决集合（待审批 ∪ 等你回答）里的通知，同一秒至多一次（间隔末尾用最新集合补一次）；代价是终端里处理掉的请求，通知要等网页下次打开才消失，写进 docs/web.md。第三项（2026-10-31，作者第二条真机反馈：审批页只有原始字段，几次点错）：请求视图加 `cli`；网页 `explain.ts` 把请求说成“<CLI> 想<做什么>”（shell 按段找最要紧的一段：不可逆 > 对外 > 联网）、在哪、为什么要你决定（按风险，暂停时先说暂停）、批了拒了会怎样；审批页最上面是说明卡，字段表与审计收进默认折叠的“详情”，处理后状态一行显示；收件箱卡片第一行是“做什么”，CLI 挪到第三行。说明句以 hub 的风险为下限：认出的那段比风险轻时退回原命令；删除远程分支单独说；为什么、批了拒了会怎样只在还等你决定时显示。处理后的状态行与历史卡片共用一句人话的结果（按 state + decided_by 组合，如“你批准了”“agent 那边先结束了，不用你处理”），不再露 decided_by 原始值；详情里的依据与备注保留原始字段给排查用。 |
 
 ## 1. 架构与组件
@@ -123,16 +123,16 @@ Railse OPC 是给“用 AI agent 经营一人公司的人”用的公司层驾�
 |---|---|
 | id | UUID，由守护进程生成 |
 | session_id、machine_id | 归属 |
-| kind | `permission`、`question`、`done`、`webhook` |
+| kind | `permission`、`question`、`done`、`webhook`、`ask`（v0.1.5：Claude Code 的 `AskUserQuestion`） |
 | payload | 统一载荷，见 2.2 |
 | risk | 风险等级，见 4.1 |
-| state | `pending`、`auto_allowed`、`auto_denied`、`approved`、`denied`、`passthrough`、`expired`、`cancelled` |
+| state | `pending`、`auto_allowed`、`auto_denied`、`approved`、`denied`、`answered`（v0.1.5：`ask` 已在手机上回答）、`passthrough`、`expired`、`cancelled` |
 | decided_by | 命中的规则 id、`user`、`timeout`、`terminal`（终端里处理了）、`hub_unreachable`、`no_hub`、`paused`、`error` |
 | decision_note | 用户备注，可空 |
 | created_at、expires_at、decided_at、delivered_at | 时间戳 |
 | callback | 仅 webhook 类：回调 URL 与令牌 |
 
-第一版只有 `permission` 和 `webhook` 可操作；`question` 和 `done` 只展示，详情页告诉用户去哪台机器哪个目录的终端处理。
+第一版只有 `permission` 和 `webhook` 可操作；`question` 和 `done` 只展示，详情页告诉用户去哪台机器哪个目录的终端处理。v0.1.5 起 `ask` 也可操作，但它不是批准或拒绝：题目放在 `ask`、作答后的答案放在 `answers`（schema v3 的两列），经 `POST /api/requests/{id}/answer` 回答或交回终端；不过引擎、不看暂停开关、不能记住。
 
 **Rule 规则**：id、scope（`global`，或 `machine: <id>`，或 `project: <路径模式>`）、match（见 4.3）、action（`allow`、`deny`、`ask`）、source（`builtin`、`user`、`learned`）、enabled、hit_count、last_hit_at、created_at、created_from_request_id。
 
@@ -176,6 +176,7 @@ pending ──用户在 hub 决定──▶ approved | denied
 pending ──到期──▶ expired
 pending ──钩子进程消失（终端里处理了、Ctrl-C、CLI 退出）──▶ cancelled
 pending ──没有 hub、总开关暂停、或决定来源出错，交回终端──▶ passthrough（decided_by 为 no_hub、paused、error）
+pending ──（仅 ask）用户在手机上回答──▶ answered；在手机上选「让它在终端问我」──▶ passthrough（decided_by 为 user）
 ```
 
 `passthrough` 与 `expired`、`hub_unreachable` 的区别：`expired` 是等满期限；`hub_unreachable` 是本机守护进程连不上 hub 等 30 秒后放弃（见 3.2）；`passthrough` 是根本没去等。三者对 CLI 的效果相同，都是让终端弹原生框。
@@ -325,7 +326,7 @@ CI：GitHub Actions，Go 测试带 `-race`、golangci-lint、网页构建、交�
 ### 6.2 第一版包含
 
 - 适配器：Claude Code、Codex CLI、Gemini CLI、通用 webhook。
-- 请求种类：`permission` 与 `webhook` 可操作；`question` 与 `done` 只展示。
+- 请求种类：`permission` 与 `webhook` 可操作；`question` 与 `done` 只展示（v0.1.5 起 `ask` 也可操作，见 0.6）。
 - 策略：风险分类器、三层规则、默认规则包、YAML 导入导出、批准并记住、规则建议、暂停总开关。
 - 网页：登录、按项目分组的收件箱、请求详情、批准/拒绝/记住、带依据的历史、规则列表（看、启停、删）、机器列表与吊销、开启通知。
 - 推送：仅 Web Push。

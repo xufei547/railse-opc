@@ -4,7 +4,7 @@
 
 [中文](README.md)
 
-An approval tool for one person running several AI coding agents at once. Claude Code, Codex CLI and Gemini CLI stop and ask "allow this?" every time they want to run a command or edit a file. Railse takes over that step: what the rules can decide is approved or denied on the spot, what they can't goes to your phone, you tap once, and the agent carries on.
+An approval tool for one person running several AI coding agents at once. Claude Code, Codex CLI and Gemini CLI stop and ask "allow this?" every time they want to run a command or edit a file. Railse takes over that step: what the rules can decide is approved or denied on the spot, what they can't goes to your phone, you tap once, and the agent carries on. The same goes for Claude Code's multiple-choice questions ("use approach A or B?"): the question goes to your phone, you pick an option or type a line, and it continues right away.
 
 OPC stands for "one-person company".
 
@@ -40,7 +40,9 @@ Railse turns all of that into one rule: **every approval goes through the rules 
 5. **The floor is hard-coded in the engine.** Outward and destructive actions can never be remembered as allowed. The only way to allow them is a hand-written rule that names the risk level explicitly. The engine checks this when rules are created and when they're imported, and the web app can't override it.
 6. **A Railse failure never blocks an agent or approves anything.** If the daemon isn't running, the hub can't be reached for 30 seconds, or a hook hits any error, the answer is "no decision": the CLI shows its own permission prompt, and the worst case is exactly what you had before installing Railse.
 
-The inbox also shows agents' questions and completions, telling you which machine and directory to go to in the terminal. Human-approval steps from workflows like n8n can be posted to the hub's webhook and show up in the same inbox as agent approvals.
+7. **Claude Code's multiple-choice questions can be answered on your phone.** When it asks with `AskUserQuestion`, the question skips the rules and goes straight to your phone. You pick an option or type your own line and the agent continues at once, with no prompt in the terminal; or tap 让它在终端问我 (ask me in the terminal) to hand it back. With no hub, an unreachable hub or a timeout, the terminal asks as usual.
+
+Besides approvals and these questions, the inbox also shows when an agent stops to wait for your next message and when it finishes, telling you which machine and directory to go to in the terminal. Human-approval steps from workflows like n8n can be posted to the hub's webhook and show up in the same inbox as agent approvals.
 
 <p align="center"><img src="assets/demo.gif" width="390" alt="Demo: log in to the phone web app; Claude Code wants to run curl, no rule decides it, and the request shows up in the inbox; approve it with remember turned on; the rules page now has a learned rule"></p>
 
@@ -124,6 +126,8 @@ The docs under `docs/` are in Chinese.
 - This is v0.1.2, the first version, and the author is dogfooding it.
 - The phone web app, the CLI output and the docs under `docs/` are in Chinese only for now.
 - Gemini CLI hooks can deny but can't approve: rule denials still apply, and everything else goes back to Gemini's own prompt and never reaches the phone. Needs Gemini CLI 0.65.0 or later.
+- On the phone you can only answer Claude Code's multiple-choice questions (`AskUserQuestion`). Questions from Codex and Gemini, and an agent stopping to wait for your next message, are still reminders only: you go back to the terminal.
+- Upgrading from before 0.1.5: on machines that already have the hooks installed, rerun `railse setup hooks --claude` once to add the `PreToolUse` hook the questions need (`railse doctor` reports it under `hooks.claude`). Upgrade the hub before, or together with, the daemon; a local hub is unaffected.
 - Codex hooks only fire in interactive sessions (`codex exec` doesn't trigger them). Before the first use, review them with `/hooks` inside Codex.
 - The hub is one process with one SQLite database and can't run as multiple instances.
 - A project inside a system directory such as `/opt`, `/usr` or `/var` has no project root, even if it's a git repo (`/opt/homebrew` is one), so every write needs approval. Projects under your home directory, `/tmp` or macOS's per-user `$TMPDIR` aren't affected.

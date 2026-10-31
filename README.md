@@ -4,7 +4,7 @@
 
 [English](README.en.md)
 
-一个人同时开几个 AI 编程 agent 时用的审批工具。Claude Code、Codex CLI、Gemini CLI 每次要跑命令、改文件都会停下来问你「允许吗」，Railse 把这一步接过来：规则定得了的直接批或拒，定不了的推到手机，你在手机上点一下，agent 接着跑。
+一个人同时开几个 AI 编程 agent 时用的审批工具。Claude Code、Codex CLI、Gemini CLI 每次要跑命令、改文件都会停下来问你「允许吗」，Railse 把这一步接过来：规则定得了的直接批或拒，定不了的推到手机，你在手机上点一下，agent 接着跑。Claude Code 用选择题问你「用方案 A 还是 B」时也一样：题目推到手机，选一个或自己填一句，它立刻继续。
 
 ## 它解决什么问题
 
@@ -38,7 +38,9 @@ Railse 把这些归成一件事：**每条审批先过一遍规则，规则定�
 5. **底线写死在引擎里。** 对外和不可逆两档永远不能通过「记住」变成放行，只能自己手写规则，而且必须写明风险档。引擎在生成和导入规则时都校验，网页上改不掉。
 6. **Railse 自己出故障不卡 agent，也不误批。** 守护进程没起、hub 连不上超过 30 秒、钩子出任何异常，都回「不作决定」，CLI 弹自己的审批框，最坏就是回到没装 Railse 时的样子。
 
-除了审批，agent 的提问和完成也会进收件箱，告诉你去哪台机器哪个目录的终端处理；n8n 这类工作流的人工审批节点可以通过 hub 的 webhook 接进来，和 agent 的审批排在同一个收件箱里。
+7. **Claude Code 的选择题可以在手机上答。** 它用 `AskUserQuestion` 问你时，题目不过规则，直接推到手机，选一个选项或自己填一句，agent 立刻继续，终端不再弹选项；也可以点「让它在终端问我」，交回终端。没接 hub、hub 连不上、等过期，终端照常问。
+
+除了审批和选择题，agent 停下来等你说下一句话、以及完成，也会进收件箱，告诉你去哪台机器哪个目录的终端处理；n8n 这类工作流的人工审批节点可以通过 hub 的 webhook 接进来，和 agent 的审批排在同一个收件箱里。
 
 <p align="center"><img src="assets/demo.gif" width="390" alt="演示：手机网页上登录；Claude Code 要跑 curl，规则定不了，请求出现在收件箱；批准时勾上「记住」；规则页多了一条「学来的」规则"></p>
 
@@ -115,6 +117,8 @@ railse setup all --local-hub
 
 - v0.1.2，第一版，作者自用中。
 - Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。
+- 手机上只能答 Claude Code 的选择题（`AskUserQuestion`）。Codex、Gemini 的提问，以及 agent 停下来等你说下一句话的，仍只提醒，要回终端。
+- 从 0.1.5 之前升级的：已经装过钩子的机器要重跑一次 `railse setup hooks --claude`，补上选择题用的 `PreToolUse` 钩子（`railse doctor` 的 `hooks.claude` 会提示）；hub 要先于或与守护进程同时升级，本机 hub 不受影响。
 - Codex 的钩子只在交互会话里生效，`codex exec` 不触发；第一次使用前在 Codex 里跑 `/hooks` 审核一遍。
 - hub 单机单库（SQLite），不能多实例部署。
 - 项目在 `/opt`、`/usr`、`/var` 这类系统目录里时没有项目根（`/opt/homebrew` 是 git 仓库也一样），所有写入都要审批；家目录、`/tmp` 和 macOS 的 `$TMPDIR` 下的项目不受影响。
