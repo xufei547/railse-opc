@@ -347,6 +347,40 @@ describe('outcomeView：决定结果的提示（固定在底部，始终可见�
   })
 })
 
+describe('提问的结果文案（答题表单与决定面板同一套）', () => {
+  const ask = (over: Partial<RequestView>) =>
+    req({ kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', decided_by: 'user', ...over })
+
+  it('答了：答案正在送回或已送达；交回终端：agent 会在终端里问你', () => {
+    expect(doneMessage(ask({ state: 'answered' }))).toBe('已回答，答案正在送回 agent')
+    expect(doneMessage(ask({ state: 'answered', delivered_at: '2026-10-31T10:00:05Z' }))).toBe('已回答，已送达 agent')
+    expect(doneMessage(ask({ state: 'passthrough' }))).toBe('已交回终端，agent 会在终端里问你')
+    const answered = ask({ state: 'answered' })
+    expect(outcomeView({ kind: 'done', request: answered }, answered)).toEqual({ tone: 'ok', title: '已生效', text: '已回答，答案正在送回 agent' })
+  })
+
+  it('409 但重新拉到的正是你这次的回答或交回终端：绿色；是另一个页面做的另一件事：红色，说明现在的结果', () => {
+    const answered = ask({ state: 'answered' })
+    const passed = ask({ state: 'passthrough' })
+    expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'answer' }, answered)).toEqual({
+      tone: 'ok',
+      title: '你的决定已生效',
+      text: '已回答，答案正在送回 agent',
+    })
+    expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'passthrough' }, passed).tone).toBe('ok')
+    expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'answer' }, passed)).toEqual({
+      tone: 'warn',
+      title: '没有生效',
+      text: '这条请求在别处有了结果：交回终端（交回终端问了）',
+    })
+    expect(outcomeView({ kind: 'gone', message: '请求已过期', attempted: 'answer' }, ask({ state: 'expired', decided_by: 'timeout' }))).toEqual({
+      tone: 'warn',
+      title: '没有生效',
+      text: '请求已过期',
+    })
+  })
+})
+
 describe('isEscape', () => {
   it('Esc 关面板；输入法组字中的 Esc（取消候选）不算', () => {
     expect(isEscape({ key: 'Escape', isComposing: false, keyCode: 27 })).toBe(true)

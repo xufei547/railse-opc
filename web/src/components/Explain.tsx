@@ -31,9 +31,12 @@ export function RequestSummary({ request: r }: { request: RequestView }) {
   )
 }
 
-/** 已处理的审批、webhook 在命令下面的一行：状态标签、一句人话的结果（outcomeText，与历史卡片同一个函数）、决定时间、送达，用“ · ”连起来。 */
+/**
+ * 已处理的审批、webhook、提问在内容下面的一行：状态标签、一句人话的结果（outcomeText，与历史卡片同一个函数）、决定时间、送达，
+ * 用“ · ”连起来。
+ */
 export function StatusLine({ request: r, audit }: { request: RequestView; audit: AuditEvent[] }) {
-  if ((r.kind !== 'permission' && r.kind !== 'webhook') || r.state === 'pending') return null
+  if ((r.kind !== 'permission' && r.kind !== 'webhook' && r.kind !== 'ask') || r.state === 'pending') return null
   const tag = historyTag(r)
   const outcome = outcomeText(r)
   const delivery = deliveryLabel(r, audit.some((a) => a.action === 'undeliverable'))

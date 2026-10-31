@@ -16,8 +16,9 @@ describe('historyFilters 与 parseFilter', () => {
   it('筛选项：全部在前，覆盖 pending 以外的每个状态，问题与完成用 recorded', () => {
     expect(historyFilters[0]).toEqual(['', '全部'])
     expect(historyFilters.map(([v]) => v)).toEqual([
-      '', 'approved', 'denied', 'auto_allowed', 'auto_denied', 'passthrough', 'expired', 'cancelled', 'recorded',
+      '', 'approved', 'denied', 'answered', 'auto_allowed', 'auto_denied', 'passthrough', 'expired', 'cancelled', 'recorded',
     ])
+    expect(Object.fromEntries(historyFilters)['answered']).toBe('已回答')
     expect(Object.fromEntries(historyFilters)['recorded']).toBe('问题与完成')
   })
 
@@ -42,6 +43,13 @@ describe('historyTag', () => {
     expect(historyTag(req({ state: 'expired' }))).toEqual({ label: '已过期', tone: 'plain' })
     expect(historyTag(req({ state: 'cancelled' }))).toEqual({ label: '已取消', tone: 'plain' })
     expect(historyTag(req({ kind: 'webhook', state: 'denied' }))).toEqual({ label: '已拒绝', tone: 'high' })
+  })
+
+  it('提问显示状态：已回答绿、交回终端与其余灰', () => {
+    expect(historyTag(req({ kind: 'ask', state: 'answered' }))).toEqual({ label: '已回答', tone: 'low' })
+    expect(historyTag(req({ kind: 'ask', state: 'passthrough' }))).toEqual({ label: '交回终端', tone: 'plain' })
+    expect(historyTag(req({ kind: 'ask', state: 'expired' }))).toEqual({ label: '已过期', tone: 'plain' })
+    expect(historyTag(req({ kind: 'ask', state: 'pending' }))).toEqual({ label: '等待决定', tone: 'mid' })
   })
 
   it('问题与完成不是决定，显示种类（历史里的问题不说“等你回答”）', () => {

@@ -1,7 +1,9 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
-import type { AuditEvent, RequestView } from '../types'
+import { initAsk, type AskAction, type AskState } from '../ask'
+import type { AuditEvent, Question, RequestView } from '../types'
+import { AskFormView } from './AskForm'
 import { DecideSheet } from './DecideSheet'
 import { RequestSummary, StatusLine } from './Explain'
 import { RequestContent } from './Payload'
@@ -33,6 +35,18 @@ const webhook = (over: Partial<RequestView> = {}) =>
   })
 
 const noop = () => {}
+
+// 真机上 AskUserQuestion 的题（Claude Code 2.1.280），外加一道多选、一道没有选项的
+const fruit: Question = {
+  question: '你更喜欢苹果还是香蕉？',
+  header: '水果',
+  options: [{ label: 'Apple', description: '苹果' }, { label: 'Banana', description: '香蕉' }],
+}
+const many: Question = { question: '要哪些？', options: [{ label: 'x' }, { label: 'y' }], multiSelect: true }
+const free: Question = { question: '还有什么要说的？', options: null }
+
+const ask = (over: Partial<RequestView> = {}) =>
+  req({ kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', engine_reason: '', ask: { questions: [fruit] }, ...over })
 
 describe('RequestCard', () => {
   it('审批卡片：第一行做什么（不带 CLI 名）、风险标签；第二行命令；第三行 CLI · 机器 · 项目', () => {
@@ -83,6 +97,115 @@ describe('RequestCard', () => {
   it('没有内联样式', () => {
     expect(card(req({ has_redacted: true }))).not.toContain('style=')
     expect(card(webhook())).not.toContain('style=')
+  })
+})
+
+describe('RequestCard：提问', () => {
+  it('第一行在问你与第一题、“提问”标签，没有风险标签；第二行第一题的选项用“ / ”连起来；第三行 CLI · 机器 · 项目', () => {
+    const html = card(ask({ ask: { questions: [fruit, many] } }))
+    expect(html).toContain('<span class="what">在问你：你更喜欢苹果还是香蕉？</span>')
+    expect(html).toContain('<span class="tag plain">提问</span>')
+    expect(html).not.toMatch(/class="tag (low|mid|high)"/)
+    expect(html).not.toContain('未分级')
+    expect(html).toContain('<pre class="cmd">Apple / Banana</pre>')
+    expect(html).toContain('<div class="where">Claude Code · mac · blog</div>')
+  })
+
+  it('没有选项（options 为 null 或缺失）时第二行为空；题目里的 <redacted> 照常显示并有“含隐藏部分”', () => {
+    expect(card(ask({ ask: { questions: [free] } }))).toContain('<pre class="cmd"></pre>')
+    expect(card(ask({ ask: { questions: [{ question: 'q' }] } }))).toContain('<pre class="cmd"></pre>')
+    const r = card(ask({ has_redacted: true, ask: { questions: [{ question: 'token=<redacted> 还能用吗？', options: [] }] } }))
+    expect(r).toContain('在问你：token=&lt;redacted&gt; 还能用吗？')
+    expect(r).toContain('<span class="tag high">含隐藏部分</span>')
+    expect(r).not.toContain('style=')
+  })
+})
+
+describe('AskFormView', () => {
+  const form = (questions: Question[], state: AskState = initAsk(questions)) =>
+    renderToStaticMarkup(<AskFormView questions={questions} state={state} dispatch={noop as (a: AskAction) => void} onAnswer={noop} onPassthrough={noop} />)
+  const st = (questions: Question[], over: Partial<AskState>): AskState => ({ ...initAsk(questions), ...over })
+  /** 页面上的 input 标签（属性顺序由 React 定，断言不依赖它）。 */
+  const inputTags = (html: string, type: string) => [...html.matchAll(/<input [^>]*\/>/g)].map((m) => m[0]).filter((t) => t.includes(`type="${type}"`))
+
+  it('每题一组（role=group，名字是题面）：标题小标签、题面、选项（单选 radio、带说明）、自己填', () => {
+    const html = form([fruit])
+    expect(html).toContain('<span class="tag plain">水果</span>')
+    const group = /<div class="question" role="group" aria-labelledby="([^"]+)">/.exec(html)
+    expect(group).not.toBeNull()
+    expect(html).toContain(`id="${group![1]}">你更喜欢苹果还是香蕉？</p>`)
+    expect(html.match(/type="radio"/g)).toHaveLength(2)
+    expect(html).not.toContain('type="checkbox"')
+    // 选项的名字是标签、说明是 aria-describedby
+    const textOf = (id: string | undefined) => (id ? new RegExp(`id="${id}">([^<]*)<`).exec(html)?.[1] : undefined)
+    const named = inputTags(html, 'radio').map((t) => [textOf(/aria-labelledby="([^"]+)"/.exec(t)?.[1]), textOf(/aria-describedby="([^"]+)"/.exec(t)?.[1])])
+    expect(named).toEqual([
+      ['Apple', '苹果'],
+      ['Banana', '香蕉'],
+    ])
+    // 同一题的单选同名，自己填有可读的名字、限 1000 字
+    const names = inputTags(html, 'radio').map((t) => /name="([^"]+)"/.exec(t)?.[1])
+    expect(names[0]).toBeTruthy()
+    expect(new Set(names).size).toBe(1)
+    expect(html).toMatch(/<label class="field"><span>自己填<\/span><input class="input" type="text" maxLength="1000"/i)
+    expect(html).not.toContain('style=')
+  })
+
+  it('多选题是 checkbox，并提示可多选；没有选项的题只有自己填', () => {
+    const html = form([many, free])
+    expect(html.match(/type="checkbox"/g)).toHaveLength(2)
+    expect(html).toContain('可多选')
+    expect(html).not.toContain('type="radio"')
+    expect(html.match(/type="text"/g)).toHaveLength(2)
+    expect(html).toContain('还有什么要说的？')
+  })
+
+  it('选中的、填了的照状态显示', () => {
+    const html = form([fruit, free], st([fruit, free], { picked: [[1], []], custom: ['', '都不喜欢'] }))
+    expect(inputTags(html, 'radio').map((t) => [/value="(\d)"/.exec(t)?.[1], t.includes('checked=""')])).toEqual([
+      ['0', false],
+      ['1', true],
+    ])
+    expect(html).toContain('value="都不喜欢"')
+  })
+
+  it('“回答”在每题都有答案才可点；“让它在终端问我”是次要的链接样式按钮，随时可点', () => {
+    const answer = (h: string) => /<button type="button" class="btn primary block"([^>]*)>([^<]*)<\/button>/.exec(h)
+    const link = (h: string) => /<button type="button" class="link-btn"([^>]*)>([^<]*)<\/button>/.exec(h)
+    const qs = [fruit, free]
+    let html = form(qs, st(qs, { picked: [[1], []] }))
+    expect(answer(html)?.[1]).toContain('disabled=""')
+    expect(answer(html)?.[2]).toBe('回答')
+    expect(link(html)?.[1]).not.toContain('disabled')
+    expect(link(html)?.[2]).toBe('让它在终端问我')
+    html = form(qs, st(qs, { picked: [[1], []], custom: ['', ' 好 '] }))
+    expect(answer(html)?.[1]).not.toContain('disabled')
+    html = form(qs, st(qs, { custom: ['', '  '] }))
+    expect(answer(html)?.[1]).toContain('disabled=""')
+  })
+
+  it('提交中：所有选项、输入框与两个按钮都 disabled，按钮文案说在做什么', () => {
+    const qs = [fruit, free]
+    const busy = form(qs, st(qs, { picked: [[1], []], custom: ['', 'x'], busy: 'answer' }))
+    expect(busy).toContain('正在提交…')
+    expect(busy.match(/<(input|button) /g)?.length).toBe(busy.match(/disabled=""/g)?.length)
+    const passing = form(qs, st(qs, { busy: 'passthrough' }))
+    expect(passing).toContain('正在交回终端…')
+    expect(passing.match(/<(input|button) /g)?.length).toBe(passing.match(/disabled=""/g)?.length)
+  })
+
+  it('失败时在按钮上方显示 hub 的原文（role=alert），可以改了再试', () => {
+    const html = form([fruit], st([fruit], { picked: [[0]], error: '连不上 hub，请检查网络' }))
+    expect(html).toContain('<div class="error" role="alert">连不上 hub，请检查网络</div>')
+    expect(html.indexOf('role="alert"')).toBeLessThan(html.indexOf('class="btn primary block"'))
+    expect(html).not.toMatch(/<button[^>]*disabled/)
+  })
+
+  it('题面、选项里的 HTML 与 <redacted> 原样转义显示', () => {
+    const html = form([{ question: '<b>token=<redacted></b>？', options: [{ label: '<i>a</i>' }] }])
+    expect(html).toContain('&lt;b&gt;token=&lt;redacted&gt;&lt;/b&gt;？')
+    expect(html).toContain('&lt;i&gt;a&lt;/i&gt;')
+    expect(html).not.toContain('<b>')
   })
 })
 
@@ -186,6 +309,56 @@ describe('RequestSummary', () => {
     expect(q).toContain('要删旧分支吗？')
     expect(q).toContain('<li>去那台机器的终端回答，这里只是提醒。</li>')
     expect(summary(req({ state: 'approved', decided_by: 'user' }))).not.toContain('class="next"')
+  })
+})
+
+describe('提问的说明与结果', () => {
+  const summary = (r: RequestView) => renderToStaticMarkup(<RequestSummary request={r} />)
+  const line = (r: RequestView, audit: AuditEvent[] = []) => renderToStaticMarkup(<StatusLine request={r} audit={audit} />)
+
+  it('待答：说明卡“在问你”、next 三行；没有批准、拒绝、记住的话，也不列答案（题目在答题表单里）', () => {
+    const html = summary(ask())
+    expect(html).toContain('<p class="headline">Claude Code 在问你</p>')
+    expect(html).toContain('<p class="where">项目 blog，机器 mac</p>')
+    expect(html).not.toContain('class="why"')
+    for (const s of ['选一个答案，agent 立刻继续。', '也可以自己填一句。', '「让它在终端问我」会把问题交回终端。']) expect(html).toContain(`<li>${s}</li>`)
+    expect(html).not.toMatch(/批准|拒绝|记住/)
+    expect(html).not.toContain('class="answers"')
+    expect(renderToStaticMarkup(<RequestContent request={ask()} />)).toBe('')
+  })
+
+  it('答了：每题一行“问题 → 你的答案”', () => {
+    const r = ask({ state: 'answered', decided_by: 'user', ask: { questions: [fruit, many] }, answers: { '你更喜欢苹果还是香蕉？': 'Banana', '要哪些？': 'x, y' } })
+    const html = summary(r)
+    expect(html).toContain('<ul class="answers">')
+    expect(html).toContain('<li><span class="q">你更喜欢苹果还是香蕉？</span> → <strong class="a">Banana</strong></li>')
+    expect(html).toContain('<li><span class="q">要哪些？</span> → <strong class="a">x, y</strong></li>')
+    expect(html).not.toContain('class="next"')
+  })
+
+  it('交回终端、过期：只列问题，不带箭头', () => {
+    const html = summary(ask({ state: 'passthrough', decided_by: 'user' }))
+    expect(html).toContain('<li><span class="q">你更喜欢苹果还是香蕉？</span></li>')
+    expect(html).not.toContain('→')
+  })
+
+  it('含隐藏部分：醒目告警在说明卡之前，提示去终端核对；不提“记住”', () => {
+    const html = summary(ask({ has_redacted: true, ask: { questions: [{ question: 'token=<redacted> 还能用吗？', options: [] }] } }))
+    expect(html.indexOf('不是原文')).toBeLessThan(html.indexOf('class="headline"'))
+    expect(html).toContain('去终端核对原文')
+    expect(html).not.toContain('记住')
+  })
+
+  it('状态行：已回答（绿）· 你答了 · 时间 · 送达；交回终端 · 交回终端问了；待答不显示', () => {
+    expect(line(ask())).toBe('')
+    const answered = line(ask({ state: 'answered', decided_by: 'user', decided_at: '2026-10-31T10:01:00.000000000Z', delivered_at: '2026-10-31T10:01:01.000000000Z' }))
+    expect(answered).toContain('<span class="tag low">已回答</span>')
+    expect(answered).toContain('你答了')
+    expect(answered).toContain('已送达 agent')
+    const passed = line(ask({ state: 'passthrough', decided_by: 'user', decided_at: '2026-10-31T10:01:00.000000000Z' }))
+    expect(passed).toContain('<span class="tag plain">交回终端</span>')
+    expect(passed).toContain('交回终端问了')
+    expect(passed).not.toContain('送达')
   })
 })
 

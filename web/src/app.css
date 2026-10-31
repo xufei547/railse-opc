@@ -115,6 +115,19 @@ pre.block { background: var(--card); border: 1px solid var(--line); border-radiu
 .explain .where { color: var(--muted); overflow-wrap: anywhere; }
 ul.next { font-size: 13px; color: var(--muted); padding-left: 18px; margin: 8px 0; }
 .status-line { font-size: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+/* 提问：详情页的答题表单（每题一块，选项整行可点）、答完后的“问题 → 答案”、次要的“让它在终端问我” */
+.ask { margin: 8px 0; }
+.ask .question { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; }
+.ask .tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.ask .q-text { margin: 0 0 6px; font-size: 16px; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask .option { display: flex; align-items: flex-start; gap: 10px; min-height: 44px; padding: 10px 0; border-top: 1px solid var(--line); cursor: pointer; }
+.ask .option input { width: 22px; height: 22px; margin: 1px 0 0; flex: none; }
+.ask .option .label { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask .field { margin-bottom: 0; }
+.link-btn { display: block; margin: 4px auto 0; min-height: 44px; padding: 0 12px; background: none; border: 0; color: var(--muted); font-size: 14px; text-decoration: underline; cursor: pointer; }
+.link-btn:disabled { opacity: 0.5; cursor: default; }
+ul.answers { list-style: none; margin: 8px 0; padding: 0; }
+ul.answers li { padding: 8px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
 details.more { margin-top: 12px; }
 details.more summary { color: var(--muted); font-size: 14px; cursor: pointer; padding: 10px 0; }
 dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; margin: 8px 0; font-size: 14px; }

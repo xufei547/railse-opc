@@ -68,13 +68,14 @@ const states: Record<string, string> = {
   auto_denied: '自动拒绝',
   passthrough: '交回终端',
   recorded: '已记录',
+  answered: '已回答',
 }
 
 export function stateLabel(state: string): string {
   return states[state] ?? state
 }
 
-const kinds: Record<string, string> = { permission: '审批', question: '等你回答', done: '完成', webhook: 'webhook' }
+const kinds: Record<string, string> = { permission: '审批', question: '等你回答', done: '完成', webhook: 'webhook', ask: '提问' }
 
 export function kindLabel(kind: string): string {
   return kinds[kind] ?? kind
@@ -100,6 +101,7 @@ const decidedBy: Record<string, string> = {
  */
 export function decidedByLabel(r: Pick<RequestView, 'decided_by' | 'rule_id' | 'state'>): string {
   const by = r.decided_by
+  if (by === 'user' && r.state === 'answered') return '手机上回答'
   if (by === 'user') return r.rule_id ? `手机上决定（并记住为 ${r.rule_id}）` : '手机上决定'
   if (by.startsWith('rule:') || r.rule_id) return `规则 ${r.rule_id || by.slice(5)}`
   return decidedBy[by] ?? (by || (r.state === 'pending' ? '' : stateLabel(r.state)))
@@ -122,11 +124,14 @@ const outcomeBy: Record<string, string> = {
 /**
  * 处理结果的一句人话：审批页处理后的状态行与历史卡片共用，跟在状态标签后面。按 state 与 decided_by 的组合说，
  * 不露 decided_by 的原始值；还在等的、问题与完成、来源为空或不认识的回空串（状态标签已经说了）。
+ * 提问在手机上答了说“你答了”，在手机上交回终端说“交回终端问了”；其余结束（过期、终端里先答了等）与审批同一套说法。
  * 详情里的“依据”仍用 decidedByLabel（给排查用）。
  */
 export function outcomeText(r: Pick<RequestView, 'kind' | 'state' | 'decided_by' | 'rule_id'>): string {
   const { state, decided_by: by } = r
   if (r.kind === 'question' || r.kind === 'done' || state === 'pending' || state === 'recorded') return ''
+  if (by === 'user' && state === 'answered') return '你答了'
+  if (by === 'user' && state === 'passthrough' && r.kind === 'ask') return '交回终端问了'
   if (by === 'user' && (state === 'approved' || state === 'denied')) {
     const verb = state === 'approved' ? '批准' : '拒绝'
     return r.rule_id ? `你${verb}并记住了（规则 ${r.rule_id}）` : `你${verb}了`
@@ -165,6 +170,7 @@ const auditActions: Record<string, string> = {
   request_pending: '登记',
   allow: '批准',
   deny: '拒绝',
+  answer: '回答',
   rule_learned: '学到规则',
   rule_learn_rolled_back: '撤销学到的规则',
   push_sent: '推送到手机',
@@ -208,10 +214,14 @@ export function isRedacted(r: Pick<RequestView, 'has_redacted' | 'title'>): bool
 }
 
 /**
- * 手机上批准、拒绝之后决定有没有送到：delivered_at 非空是已送达钩子（webhook 是回调成功）；
- * hub 记过 undeliverable（守护进程已不再持有这条）时是送不到了。其他状态回空串。
+ * 手机上批准、拒绝、回答之后决定（答案）有没有送到：delivered_at 非空是已送达钩子（webhook 是回调成功）；
+ * hub 记过 undeliverable（守护进程已不再持有这条）时是送不到了。其他状态（含交回终端，它不等送达）回空串。
  */
 export function deliveryLabel(r: Pick<RequestView, 'state' | 'kind' | 'delivered_at'>, undeliverable: boolean): string {
+  if (r.state === 'answered') {
+    if (r.delivered_at) return '已送达 agent'
+    return undeliverable ? '答案未送达：agent 已不再等这条（多半已在终端问了你）' : '还没送达 agent'
+  }
   if (r.state !== 'approved' && r.state !== 'denied') return ''
   const hook = r.kind === 'webhook'
   if (r.delivered_at) return hook ? '已回调来源' : '已送达 agent'

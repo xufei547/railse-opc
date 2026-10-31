@@ -1,5 +1,6 @@
 // 审批页说明卡与收件箱卡片用的人话：把一条请求说成“谁想做什么、在哪、为什么要你决定、批了拒了会怎样”。
 // 只为让人一眼看懂，不参与定级；该不该问你、风险几档，以 hub 给的 risk 为准。
+import { askQuestions } from './ask'
 import { clip, isRedacted } from './format'
 import type { RequestView } from './types'
 
@@ -10,9 +11,9 @@ export interface Explanation {
   what: string
   /** “项目 x，机器 y”，缺哪个省哪个，都没有为空串。 */
   where: string
-  /** 为什么要你决定；只在还等你决定的审批上有，question、webhook、done 与已处理的为空串。 */
+  /** 为什么要你决定；只在还等你决定的审批上有，question、webhook、done、提问与已处理的为空串。 */
   why: string
-  /** 批了、拒了、记住会怎样；只在还能决定时（待决的审批与 webhook、question）有，其余为空数组。 */
+  /** 批了、拒了、记住会怎样（提问是怎么答）；只在还能决定时（待决的审批、webhook 与提问，question）有，其余为空数组。 */
   next: string[]
 }
 
@@ -510,6 +511,16 @@ export function explainRequest(r: RequestView): Explanation {
         where,
         why: '',
         next: r.state === 'pending' ? ['批准或拒绝会回调给发起它的工作流。'] : [],
+      }
+    }
+    case 'ask': {
+      const first = askQuestions(r)[0]
+      return {
+        headline: `${cli} 在问你`,
+        what: first ? `在问你：${clip(first.question, 60)}` : '在问你',
+        where,
+        why: '',
+        next: r.state === 'pending' ? ['选一个答案，agent 立刻继续。', '也可以自己填一句。', '「让它在终端问我」会把问题交回终端。'] : [],
       }
     }
   }
