@@ -1,6 +1,7 @@
 // 答题表单（单选、多选、自己填、交回终端）的状态与规则。纯函数，便于不带浏览器环境测试；AskForm 只负责渲染与发请求。
 
 import { classifyError } from './decide'
+import { t } from './i18n'
 import type { AnswerBody, Option, Question, RequestView } from './types'
 
 /** 一道题的答法：回答（带答案），或把问题交回终端。 */
@@ -141,7 +142,7 @@ export async function sendAsk(run: () => Promise<RequestView>): Promise<{ done: 
   try {
     return { done: await run() }
   } catch (e) {
-    const c = classifyError(e, '提交失败')
+    const c = classifyError(e, t('提交失败'))
     return c.gone ? { gone: c.message } : { failed: c.message }
   }
 }

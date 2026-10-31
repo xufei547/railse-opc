@@ -67,3 +67,17 @@ export function t(zh: string, vars?: Record<string, string | number>): string {
   if (!vars) return s
   return s.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m))
 }
+
+/**
+ * 句子中间夹着元素（链接、代码）时用：先按整句取译文（占位不传 vars，原样留着），再按 {name} 切开、把占位换成 parts 里的元素。
+ * 整句仍是一个键，英文可以调语序；空段去掉，没给的占位原样留着。
+ */
+export function splitVars<T>(s: string, parts: Record<string, T>): (string | T)[] {
+  return s
+    .split(/(\{\w+\})/)
+    .filter((p) => p !== '')
+    .map((p) => {
+      const k = /^\{(\w+)\}$/.exec(p)?.[1]
+      return k !== undefined && k in parts ? (parts[k] as T) : p
+    })
+}

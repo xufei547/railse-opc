@@ -1,7 +1,7 @@
-import type { Lang } from './i18n'
+import { t, type Lang } from './i18n'
 import type { AnswerBody, AuditEvent, DecideBody, Draft, Inbox, Machine, RequestView, Rule, Status, VapidInfo } from './types'
 
-/** hub 回了非 2xx（status 为 HTTP 状态码），或根本连不上（status 为 0）。message 是给人看的中文文案。 */
+/** hub 回了非 2xx（status 为 HTTP 状态码），或根本连不上（status 为 0）。message 是给人看的文案：hub 给的原文照带，网页自己写的按当前语言。 */
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message)
@@ -20,7 +20,8 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
 export const requestTimeoutMs = 15_000
 const importTimeoutMs = 75_000 // 导入规则的请求体至多 1 MiB，慢网络上要多给些时间
 
-const timeoutMsg = '请求超时：hub 没有响应，请检查网络'
+// 是函数而不是常量：文案按抛出时的语言取
+const timeoutMsg = () => t('请求超时：hub 没有响应，请检查网络')
 
 interface Options {
   body?: unknown
@@ -50,13 +51,13 @@ export async function request<T>(method: string, path: string, opts: Options = {
     try {
       resp = await fetch(path, { method, headers, body, credentials: 'same-origin', signal: ctrl.signal })
     } catch {
-      if (ctrl.signal.aborted) throw new ApiError(0, timeoutMsg)
-      // fetch 只在网络层失败时 reject（断网、hub 没开、被代理掐断），浏览器给的是英文的 TypeError
-      throw new ApiError(0, '连不上 hub，请检查网络')
+      if (ctrl.signal.aborted) throw new ApiError(0, timeoutMsg())
+      // fetch 只在网络层失败时 reject（断网、hub 没开、被代理掐断），浏览器给的 TypeError 文案各家不一
+      throw new ApiError(0, t('连不上 hub，请检查网络'))
     }
     if (resp.status === 204) return undefined as T
     if (!resp.ok) {
-      let msg = `请求失败（${resp.status}）`
+      let msg = t('请求失败（{status}）', { status: resp.status })
       try {
         const j = (await resp.json()) as { error?: unknown }
         if (typeof j?.error === 'string' && j.error) msg = j.error
@@ -69,8 +70,8 @@ export async function request<T>(method: string, path: string, opts: Options = {
     try {
       return (await resp.json()) as T
     } catch {
-      if (ctrl.signal.aborted) throw new ApiError(0, timeoutMsg)
-      throw new ApiError(resp.status, `hub 的响应不是 JSON（${resp.status}）`)
+      if (ctrl.signal.aborted) throw new ApiError(0, timeoutMsg())
+      throw new ApiError(resp.status, t('hub 的响应不是 JSON（{status}）', { status: resp.status }))
     }
   } finally {
     clearTimeout(timer)

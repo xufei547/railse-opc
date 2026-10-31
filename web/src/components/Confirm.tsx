@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState, type ReactNode } from 'react'
 import { confirmClosed, confirmReducer, type ConfirmRequest, type ConfirmState } from '../confirm'
 import { isEscape, type OutcomeView } from '../decide'
+import { t } from '../i18n'
 import { failure } from '../manage'
 import { inertSiblings } from '../modal'
 import { ResultToast } from './ResultToast'
@@ -72,10 +73,10 @@ export function ConfirmSheet({
         )}
         <div className="btn-row">
           <button type="button" className="btn" onClick={close} disabled={state.busy} ref={cancel}>
-            取消
+            {t('取消')}
           </button>
           <button type="button" data-testid="confirm" className={`btn ${req.danger ? 'danger' : 'primary'}`} onClick={onConfirm} disabled={state.busy}>
-            {state.busy ? '正在提交…' : req.confirmLabel}
+            {state.busy ? t('正在提交…') : req.confirmLabel}
           </button>
         </div>
       </div>
@@ -126,7 +127,7 @@ export function useActions(): Actions {
       const v = await run()
       if (v) setResult(v)
     } catch (e) {
-      const m = failure(e, '操作失败')
+      const m = failure(e, t('操作失败'))
       if (m) setResult({ tone: 'warn', title: failTitle, text: m })
     } finally {
       running.current = false
@@ -144,7 +145,7 @@ export function useActions(): Actions {
       dispatch({ type: 'done' })
       if (v) setResult(v)
     } catch (e) {
-      const m = failure(e, '操作失败')
+      const m = failure(e, t('操作失败'))
       if (m === null) dispatch({ type: 'done' }) // 401：正在跳登录页
       else dispatch({ type: 'failed', message: m })
     } finally {

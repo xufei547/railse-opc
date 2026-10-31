@@ -1,3 +1,5 @@
+import { t } from './i18n'
+
 /** 是否从主屏幕图标启动（iOS 只有这时才有推送能力）。 */
 export function isStandalone(): boolean {
   const nav = navigator as Navigator & { standalone?: boolean }
@@ -54,9 +56,9 @@ export async function getSubscription(): Promise<PushSubscription | null> {
  */
 export async function subscribe(publicKey: string): Promise<PushSubscription> {
   const permission = await Notification.requestPermission()
-  if (permission !== 'granted') throw new Error('没有获得通知权限')
+  if (permission !== 'granted') throw new Error(t('没有获得通知权限'))
   const reg = (await navigator.serviceWorker.getRegistration()) ?? (await registerServiceWorker())
-  if (!reg) throw new Error('Service Worker 没有注册成功，刷新页面后再试')
+  if (!reg) throw new Error(t('Service Worker 没有注册成功，刷新页面后再试'))
   // pushManager.subscribe 要求有激活的 worker：刚注册的要等它激活
   const ready = await navigator.serviceWorker.ready
   const old = await ready.pushManager.getSubscription()
@@ -65,6 +67,6 @@ export async function subscribe(publicKey: string): Promise<PushSubscription> {
     return await ready.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) })
   } catch (e) {
     // 浏览器给的是英文（如 Chrome 连不上推送服务时的 “Registration failed - push service error”），原样附上便于排查
-    throw new Error(`浏览器没能订阅推送：${e instanceof Error ? e.message || e.name : String(e)}`)
+    throw new Error(t('浏览器没能订阅推送：{reason}', { reason: e instanceof Error ? e.message || e.name : String(e) }))
   }
 }

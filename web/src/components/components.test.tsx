@@ -1,9 +1,11 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { initAsk, type AskAction, type AskState } from '../ask'
+import { setLang } from '../i18n'
 import type { AuditEvent, Question, RequestView } from '../types'
 import { AskFormView } from './AskForm'
+import { ConfirmSheet } from './Confirm'
 import { DecideSheet } from './DecideSheet'
 import { RequestSummary, StatusLine } from './Explain'
 import { RequestContent } from './Payload'
@@ -511,5 +513,141 @@ describe('ResultToast', () => {
   })
   it('页面还有批准、拒绝栏时浮在它上面', () => {
     expect(renderToStaticMarkup(<ResultToast view={{ tone: 'warn', title: '没有生效', text: 'x' }} onClose={noop} raised />)).toMatch(/class="toast banner warn raised"/)
+  })
+})
+
+describe('英文（SSR）：组件里没有中文', () => {
+  beforeEach(() => setLang('en'))
+  afterEach(() => setLang('zh'))
+  const cjk = /[　-〿一-鿿＀-￯]/
+  // 英文用例用英文的题目、标题；引擎理由是引擎写的中文原文（英文下由 engineReasonLabel 整句换掉）
+  const en = (over: Partial<RequestView> = {}) => req({ engine_reason: '无规则命中，按 outward 默认询问', ...over })
+  const hook = (over: Partial<RequestView> = {}) =>
+    webhook({ engine_reason: '', title: 'Deploy v1.2 to production', payload: { type: 'other', tool: 'webhook', diff_preview: 'Canary 10% first' }, ...over })
+  const apple: Question = {
+    question: 'Apple or banana?',
+    header: 'Fruit',
+    options: [{ label: 'Apple', description: 'The red one' }, { label: 'Banana', description: 'The yellow one' }],
+  }
+  const which: Question = { question: 'Which ones?', options: [{ label: 'x' }, { label: 'y' }], multiSelect: true }
+  const other: Question = { question: 'Anything else?', options: null }
+  const question = (over: Partial<RequestView> = {}) => ask({ ask: { questions: [apple] }, ...over })
+
+  it('RequestCard：审批、含隐藏部分、webhook、问题、提问', () => {
+    const html = card(en({ has_redacted: true }))
+    expect(html).toContain('<span class="tag high">Hidden parts</span>')
+    expect(html).toContain('Outward')
+    for (const h of [
+      html,
+      card(hook()),
+      card(en({ kind: 'question', state: 'recorded', title: 'Delete the old branch?', payload: { type: '' } })),
+      card(question({ ask: { questions: [apple, which] } })),
+    ]) {
+      expect(h).not.toMatch(cjk)
+    }
+  })
+
+  it('AskFormView：可多选、自己填、还有几题没答、让它在终端问我；提交中的两种文案', () => {
+    const qs = [apple, which, other]
+    const html = renderToStaticMarkup(<AskFormView questions={qs} state={initAsk(qs)} dispatch={noop as (a: AskAction) => void} onAnswer={noop} onPassthrough={noop} />)
+    expect(html).toContain('<span class="sub">Pick one or more</span>')
+    expect(html).toContain('<span>Your own answer</span>')
+    expect(html).toContain('3 left to answer')
+    expect(html).toContain('>Ask me in the terminal instead</button>')
+    // “回答”按钮的标签由 Task 8 改（answerLabel），这里先把它剔掉再查
+    expect(html.replace('>回答</button>', '></button>')).not.toMatch(cjk)
+    const busy = (s: Partial<AskState>) =>
+      renderToStaticMarkup(<AskFormView questions={qs} state={{ ...initAsk(qs), ...s }} dispatch={noop as (a: AskAction) => void} onAnswer={noop} onPassthrough={noop} />)
+    const answering = busy({ picked: [[0], [1], []], custom: ['', '', 'no'], busy: 'answer' })
+    expect(answering).toContain('Submitting…')
+    expect(answering).not.toMatch(cjk)
+    const passing = busy({ busy: 'passthrough' })
+    expect(passing).toContain('Handing back to the terminal…')
+    expect(passing.replace('>回答</button>', '></button>')).not.toMatch(cjk)
+  })
+
+  it('DecideSheet：标题按动作与载荷、记住开关、取消与确认', () => {
+    const sheet = (r: RequestView, action: 'allow' | 'deny') => renderToStaticMarkup(<DecideSheet request={r} action={action} onClose={noop} onDone={noop} />)
+    const allow = sheet(en(), 'allow')
+    expect(allow).toContain('<h2 id="sheet-title">Approve this command</h2>')
+    expect(allow).toContain('Remember: auto-approve similar requests from now on')
+    expect(allow).toMatch(/<button type="button" class="btn">Cancel<\/button>/)
+    expect(allow).toMatch(/data-testid="confirm"[^>]*>Approve<\/button>/)
+    const deny = sheet(en(), 'deny')
+    expect(deny).toContain('<h2 id="sheet-title">Deny this command</h2>')
+    expect(deny).toContain('Remember: auto-deny similar requests from now on')
+    expect(deny).toMatch(/data-testid="confirm"[^>]*>Deny<\/button>/)
+    expect(sheet(en({ payload: { type: 'file_write', path: '/p/blog/a.go' } }), 'allow')).toContain('>Approve this file edit</h2>')
+    expect(sheet(en({ payload: { type: 'network', url: 'https://x.dev' } }), 'deny')).toContain('>Deny this network access</h2>')
+    expect(sheet(en({ payload: { type: 'mcp', server: 'fs', tool: 'write' } }), 'allow')).toContain('>Approve this MCP call</h2>')
+    expect(sheet(hook(), 'allow')).toContain('>Approve this request</h2>')
+    expect(sheet(question(), 'deny')).toContain('>Deny this action</h2>')
+    for (const h of [allow, deny, sheet(hook(), 'deny'), sheet(en({ has_redacted: true }), 'allow'), sheet(question(), 'allow')]) expect(h).not.toMatch(cjk)
+  })
+
+  it('RequestSummary：说明卡、含隐藏部分的告警（命令、webhook、提问）', () => {
+    const summary = (r: RequestView) => renderToStaticMarkup(<RequestSummary request={r} />)
+    const shell = summary(en({ has_redacted: true, payload: { type: 'shell', command: 'curl -H "Authorization: <redacted>" https://x' } }))
+    expect(shell).toContain('<section class="explain" aria-label="What this request does">')
+    expect(shell).toContain("Parts are hidden; what&#x27;s shown below isn&#x27;t the original")
+    expect(shell).toContain('heredoc')
+    expect(shell).toContain('Outward')
+    expect(shell).toContain('Reason: No rule matched')
+    expect(shell).toContain('check the original in the terminal')
+    expect(shell).toContain('remembered')
+    const w = summary(hook({ has_redacted: true }))
+    expect(w).toContain('in the source system')
+    expect(w).not.toContain('remembered')
+    const q = summary(question({ has_redacted: true }))
+    expect(q).toContain('in the terminal')
+    expect(q).not.toContain('remembered')
+    for (const h of [shell, w, q, summary(en()), summary(question())]) expect(h).not.toMatch(cjk)
+  })
+
+  it('RequestContent：文件改动、联网、MCP 的字段名', () => {
+    const content = (r: RequestView) => renderToStaticMarkup(<RequestContent request={r} />)
+    const fw = content(en({ payload: { type: 'file_write', path: '/p/a.go', diff_preview: '+x' } }))
+    expect(fw).toContain('<dt>Path</dt>')
+    const nw = content(en({ payload: { type: 'network', method: 'POST', url: 'https://api.example.com' } }))
+    expect(nw).toContain('<dt>Request</dt>')
+    const mcp = content(en({ payload: { type: 'mcp', server: 'fs', tool: 'write', args: { path: '/a' } } }))
+    expect(mcp).toContain('<dt>Server</dt>')
+    expect(mcp).toContain('<dt>Tool</dt>')
+    for (const h of [fw, nw, mcp, content(hook())]) expect(h).not.toMatch(cjk)
+  })
+
+  it('RequestAttrs、RequestDetails、AuditList、StatusLine', () => {
+    const audit: AuditEvent[] = [
+      { id: 2, ts: '2026-10-23T10:01:00Z', machine_id: 'm', actor: 'user', request_id: 'r1', action: 'allow', detail: '{"note":"","remember":true,"rule_id":"learned-x"}' },
+      { id: 1, ts: '2026-10-23T10:00:00Z', machine_id: 'm', actor: 'agent', request_id: 'r1', action: 'request_pending', detail: '{"risk":"network","tool":"Bash"}' },
+    ]
+    const decided = en({
+      state: 'approved', decided_by: 'user', rule_id: 'learned-x', decision_note: 'fine this once',
+      decided_at: '2026-10-23T10:01:00.000000000Z', payload: { type: 'shell', command: 'git push', cwd: '/p/blog/sub' },
+    })
+    const attrs = renderToStaticMarkup(<RequestAttrs request={decided} audit={audit} />)
+    for (const label of ['Directory', 'Machine', 'Project', 'Tool', 'Risk', 'Engine', 'Status', 'Decided by', 'Delivery', 'Note', 'Created', 'Decided']) {
+      expect(attrs).toContain(`<dt>${label}</dt>`)
+    }
+    const pending = renderToStaticMarkup(<RequestAttrs request={en({ expires_at: '2026-10-23T10:30:00Z' })} audit={[]} />)
+    expect(pending).toContain('<dt>Expires</dt>')
+    const details = renderToStaticMarkup(<RequestDetails request={decided} audit={audit} />)
+    expect(details).toMatch(/^<details class="more"><summary>Details<\/summary>/)
+    expect(details).toContain('Audit log')
+    const line = renderToStaticMarkup(<StatusLine request={{ ...decided, delivered_at: '2026-10-23T10:01:01Z' }} audit={audit} />)
+    for (const h of [attrs, pending, details, line]) expect(h).not.toMatch(cjk)
+  })
+
+  it('ResultToast 与 ConfirmSheet', () => {
+    const toast = renderToStaticMarkup(<ResultToast view={{ tone: 'ok', title: 'Done', text: 'Approved; delivered to the agent' }} onClose={noop} />)
+    expect(toast).toContain('>Got it</button>')
+    expect(toast).not.toMatch(cjk)
+    const ask = { title: 'Delete rule user-1?', body: 'This takes effect on every machine right away.', confirmLabel: 'Delete', danger: true }
+    const idle = renderToStaticMarkup(<ConfirmSheet state={{ req: ask, busy: false, error: null }} onCancel={noop} onConfirm={noop} />)
+    expect(idle).toContain('>Cancel</button>')
+    expect(idle).toMatch(/data-testid="confirm"[^>]*>Delete<\/button>/)
+    const busy = renderToStaticMarkup(<ConfirmSheet state={{ req: ask, busy: true, error: null }} onCancel={noop} onConfirm={noop} />)
+    expect(busy).toContain('Submitting…')
+    for (const h of [idle, busy]) expect(h).not.toMatch(cjk)
   })
 })

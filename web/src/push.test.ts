@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './api'
+import { setLang } from './i18n'
 import {
   classify,
   disablePush,
@@ -448,5 +449,18 @@ describe('testPush', () => {
     await expect(testPush(s.env, s.api)).rejects.toThrow('hub 没有这条订阅，请重新开启通知')
     s = setup({ sub: fakeSub('https://push.example/a'), test: new ApiError(502, '推送服务说这条订阅已失效，hub 已删掉它；请重新开启通知') })
     await expect(testPush(s.env, s.api)).rejects.toThrow('推送服务说这条订阅已失效，hub 已删掉它；请重新开启通知')
+  })
+})
+
+describe('推送的英文错误', () => {
+  afterEach(() => setLang('zh'))
+  it('没有公钥、没有订阅、读不到推送配置', async () => {
+    setLang('en')
+    let s = setup()
+    await expect(enablePush('', null, s.env, s.api)).rejects.toThrow("The hub's push key hasn't loaded yet. Reload the page and try again.")
+    await expect(testPush(s.env, s.api)).rejects.toThrow("Notifications aren't on for this device yet")
+    // 没有原文可带（错误没有文案）时用兜底句
+    s = setup({ vapid: new Error('') })
+    expect(await probe(s.env, s.api)).toMatchObject({ status: 'unknown', reason: "Couldn't read the hub's push settings" })
   })
 })

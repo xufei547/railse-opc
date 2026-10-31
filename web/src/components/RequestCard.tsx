@@ -2,6 +2,7 @@ import { Link } from 'react-router'
 import { askQuestions, questionOptions } from '../ask'
 import { explainRequest, cliLabel, machineLabel } from '../explain'
 import { absoluteTime, clip, isRedacted, kindLabel, payloadSummary, relativeTime, riskLabel, riskTone } from '../format'
+import { t } from '../i18n'
 import type { RequestView } from '../types'
 
 /** 卡片摘要至多这么多字符（CSS 再按行数收起）：超长命令不撑出一大块 DOM。 */
@@ -37,7 +38,7 @@ export function RequestCard({ request: r }: { request: RequestView }) {
         ) : (
           <span className="tag plain">{kindLabel(r.kind)}</span>
         )}
-        {isRedacted(r) && <span className="tag high">含隐藏部分</span>}
+        {isRedacted(r) && <span className="tag high">{t('含隐藏部分')}</span>}
         <time className="time" dateTime={r.created_at} title={absoluteTime(r.created_at)}>
           {relativeTime(r.created_at)}
         </time>

@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
+import { setLang } from '../i18n'
 import { Login } from './Login'
 
 describe('Login', () => {
@@ -32,5 +33,21 @@ describe('Login', () => {
 
   it('没有内联样式（hub 的 CSP 不许）', () => {
     expect(html).not.toContain('style=')
+  })
+
+  it('英文下：密码标签与登录按钮是英文（e2e 靠它们找元素），没有中文', () => {
+    setLang('en')
+    try {
+      const en = renderToStaticMarkup(
+        <MemoryRouter initialEntries={['/login']}>
+          <Login />
+        </MemoryRouter>,
+      )
+      expect(en).toContain('<span>Password</span>')
+      expect(en).toMatch(/<button class="btn primary block" type="submit"[^>]*>Log in<\/button>/)
+      expect(en).not.toMatch(/[　-〿一-鿿＀-￯]/)
+    } finally {
+      setLang('zh')
+    }
   })
 })

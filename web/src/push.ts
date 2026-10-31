@@ -115,7 +115,7 @@ export async function probe(env: PushEnv, api: PushApi): Promise<Probe> {
     publicKey = v.enabled ? v.public_key : ''
     reason = v.enabled ? '' : v.reason
   } catch (e) {
-    reason = failure(e, '读不到 hub 的推送配置') ?? ''
+    reason = failure(e, t('读不到 hub 的推送配置')) ?? ''
   }
 
   let sub: PushSubscription | null = null
@@ -135,7 +135,7 @@ export async function probe(env: PushEnv, api: PushApi): Promise<Probe> {
         hubActive = (await api.pushCheck(sub.endpoint)).active
       } catch (e) {
         hubActive = null
-        reason = failure(e, '查不到这台设备的订阅') ?? ''
+        reason = failure(e, t('查不到这台设备的订阅')) ?? ''
       }
     }
   }
@@ -150,7 +150,7 @@ export async function probe(env: PushEnv, api: PushApi): Promise<Probe> {
  * 然后抛出 hub 的原文。换了新端点时顺手让 hub 删掉旧的（删不掉也不要紧：推送服务会对旧端点回 404/410，hub 随后删掉）。
  */
 export async function enablePush(publicKey: string, oldEndpoint: string | null, env: PushEnv, api: PushApi): Promise<void> {
-  if (!publicKey) throw new Error('还没拿到 hub 的推送公钥，请刷新页面后再试')
+  if (!publicKey) throw new Error(t('还没拿到 hub 的推送公钥，请刷新页面后再试'))
   const sub = await env.subscribe(publicKey)
   try {
     await api.pushSubscribe(sub.toJSON(), lang())
@@ -212,7 +212,7 @@ async function within(p: Promise<unknown>, ms: number): Promise<void> {
 /** 让 hub 给本机订阅发一条测试通知。hub 的 404（没有这条订阅）、502（推送服务没收下）、503（推送停用）原文抛出。 */
 export async function testPush(env: PushEnv, api: PushApi): Promise<void> {
   const sub = await env.getSubscription()
-  if (!sub) throw new Error('这台设备还没有开启通知')
+  if (!sub) throw new Error(t('这台设备还没有开启通知'))
   await api.pushTest(sub.endpoint)
 }
 
@@ -300,17 +300,17 @@ export function usePush(env: PushEnv = browserEnv, api: PushApi = hub): PushCont
     if (busyRef.current) return Promise.resolve(null)
     // 第一个调用：enablePush → env.subscribe → Notification.requestPermission()，之前没有 await 与网络请求（iOS 手势规则）
     const pending = enablePush(latest.current?.publicKey ?? '', latest.current?.endpoint ?? null, env, api)
-    return settle(pending, enabledView(), '没有开启通知', '开启失败')
+    return settle(pending, enabledView(), t('没有开启通知'), t('开启失败'))
   }, [env, api, settle])
 
   const disable = useCallback((): Promise<OutcomeView | null> => {
     if (busyRef.current) return Promise.resolve(null)
-    return settle(disablePush(env, api), disabledView(), '没有关闭通知', '关闭失败')
+    return settle(disablePush(env, api), disabledView(), t('没有关闭通知'), t('关闭失败'))
   }, [env, api, settle])
 
   const test = useCallback((): Promise<OutcomeView | null> => {
     if (busyRef.current) return Promise.resolve(null)
-    return settle(testPush(env, api), testedView(), '测试通知没有发出', '发送失败')
+    return settle(testPush(env, api), testedView(), t('测试通知没有发出'), t('发送失败'))
   }, [env, api, settle])
 
   return {

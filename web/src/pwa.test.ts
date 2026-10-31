@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { setLang } from './i18n'
 import { getSubscription, isIOS, isStandalone, pushSupported, registerServiceWorker, subscribe, urlBase64ToUint8Array } from './pwa'
 
 afterEach(() => {
@@ -194,5 +195,19 @@ describe('Service Worker 与订阅', () => {
     await expect(registerServiceWorker()).resolves.toBeNull()
     vi.stubGlobal('navigator', {})
     await expect(registerServiceWorker()).resolves.toBeNull()
+  })
+
+  it('英文：没给权限、注册失败、浏览器订阅失败（带上浏览器给的原因）', async () => {
+    setLang('en')
+    try {
+      stubSW({ permission: 'denied' })
+      await expect(subscribe('BAEC')).rejects.toThrow("Notification permission wasn't granted")
+      stubSW({ registered: false, registerFails: true })
+      await expect(subscribe('BAEC')).rejects.toThrow("The service worker didn't register. Reload the page and try again.")
+      stubSW({ subscribeError: new Error('Registration failed - push service error') })
+      await expect(subscribe('BAEC')).rejects.toThrow("The browser couldn't subscribe to push: Registration failed - push service error")
+    } finally {
+      setLang('zh')
+    }
   })
 })

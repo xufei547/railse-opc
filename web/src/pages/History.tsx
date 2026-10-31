@@ -6,6 +6,7 @@ import { coalesce } from '../coalesce'
 import { Banner } from '../components/Banner'
 import { absoluteTime, clip, isRedacted, outcomeText, payloadSummary, relativeTime } from '../format'
 import { historyFilters, historyTag, maxLimit, moreState, pageSize, parseFilter } from '../history'
+import { t } from '../i18n'
 import { failure } from '../manage'
 import { useStore } from '../StoreProvider'
 import type { RequestView } from '../types'
@@ -31,7 +32,7 @@ export function HistoryCard({ request: r }: { request: RequestView }) {
       <div className="row">
         <span className="where">{where}</span>
         <span className={`tag ${tag.tone}`}>{tag.label}</span>
-        {isRedacted(r) && <span className="tag high">含隐藏部分</span>}
+        {isRedacted(r) && <span className="tag high">{t('含隐藏部分')}</span>}
         <time className="time" dateTime={r.created_at} title={absoluteTime(r.created_at)}>
           {relativeTime(r.created_at)}
         </time>
@@ -70,7 +71,7 @@ export function History() {
         setError(null)
       } catch (e) {
         if (stale()) return
-        const m = failure(e, '加载失败')
+        const m = failure(e, t('加载失败'))
         if (m) setError(m)
       }
     }),
@@ -93,11 +94,11 @@ export function History() {
   return (
     <>
       <header className="topbar">
-        <h1>历史</h1>
+        <h1>{t('历史')}</h1>
       </header>
       <div className="page">
         <label className="field">
-          <span>筛选</span>
+          <span>{t('筛选')}</span>
           <select className="input" value={filter} onChange={(e) => choose(e.target.value)}>
             {historyFilters().map(([v, label]) => (
               <option key={v} value={v}>
@@ -108,28 +109,28 @@ export function History() {
         </label>
         {error && (
           <Banner tone="warn">
-            {shown ? `刷新失败：${error}` : error}
+            {shown ? t('刷新失败：{reason}', { reason: error }) : error}
             <button type="button" className="btn" onClick={() => void load()}>
-              重试
+              {t('重试')}
             </button>
           </Banner>
         )}
         {shown?.items.map((r) => (
           <HistoryCard key={r.id} request={r} />
         ))}
-        {shown && shown.items.length === 0 && <div className="empty">没有记录</div>}
+        {shown && shown.items.length === 0 && <div className="empty">{t('没有记录')}</div>}
         {more === 'more' && (
           <button type="button" className="btn block" onClick={() => setLimit(maxLimit)}>
-            加载更多
+            {t('加载更多')}
           </button>
         )}
         {more === 'loading' && !error && (
           <button type="button" className="btn block" disabled>
-            正在加载…
+            {t('正在加载…')}
           </button>
         )}
-        {more === 'capped' && <div className="empty">只显示最近 {maxLimit} 条</div>}
-        {!shown && !error && <div className="empty">加载中…</div>}
+        {more === 'capped' && <div className="empty">{t('只显示最近 {n} 条', { n: maxLimit })}</div>}
+        {!shown && !error && <div className="empty">{t('加载中…')}</div>}
       </div>
     </>
   )

@@ -4,6 +4,7 @@ import { hub } from '../api'
 import { coalesce } from '../coalesce'
 import { Banner } from '../components/Banner'
 import { useActions } from '../components/Confirm'
+import { splitVars, t } from '../i18n'
 import { elevatedEnabled, failure, fileSize, hitsLabel, importMax, sourceLabel } from '../manage'
 import { useStore } from '../StoreProvider'
 import type { Rule } from '../types'
@@ -28,29 +29,32 @@ export function RuleCard({
       <div className="rule-id mono">{r.id}</div>
       <div className="tags">
         <span className="tag plain">{sourceLabel(r.source)}</span>
-        {r.elevated && <span className="tag high">可放行高风险操作</span>}
-        {!r.enabled && <span className="tag plain">已停用</span>}
+        {r.elevated && <span className="tag high">{t('可放行高风险操作')}</span>}
+        {!r.enabled && <span className="tag plain">{t('已停用')}</span>}
       </div>
       <div className="sub line">
         {hitsLabel(r)}
-        {r.created_from && (
-          <>
-            ，来自请求 <Link to={`/r/${encodeURIComponent(r.created_from)}`}>{r.created_from.slice(0, 8)}</Link>
-          </>
-        )}
+        {r.created_from &&
+          splitVars(t('，来自请求 {link}'), {
+            link: (
+              <Link key="link" to={`/r/${encodeURIComponent(r.created_from)}`}>
+                {r.created_from.slice(0, 8)}
+              </Link>
+            ),
+          })}
       </div>
       <details>
-        <summary>规则原文</summary>
+        <summary>{t('规则原文')}</summary>
         <pre className="block mono">{r.yaml}</pre>
       </details>
       <div className="rule-actions">
         <label className="toggle">
-          <input type="checkbox" role="switch" checked={r.enabled} disabled={busy} aria-label={`启用规则 ${r.id}`} onChange={() => onToggle(r)} />
-          <span aria-hidden="true">启用</span>
+          <input type="checkbox" role="switch" checked={r.enabled} disabled={busy} aria-label={t('启用规则 {id}', { id: r.id })} onChange={() => onToggle(r)} />
+          <span aria-hidden="true">{t('启用')}</span>
         </label>
         {r.source !== 'builtin' && (
-          <button type="button" className="btn danger-text" disabled={busy} aria-label={`删除规则 ${r.id}`} onClick={() => onDelete(r)}>
-            删除
+          <button type="button" className="btn danger-text" disabled={busy} aria-label={t('删除规则 {id}', { id: r.id })} onClick={() => onDelete(r)}>
+            {t('删除')}
           </button>
         )}
       </div>
@@ -71,7 +75,7 @@ export function Rules() {
       await sync()
       setError(null)
     } catch (e) {
-      const m = failure(e, '加载失败')
+      const m = failure(e, t('加载失败'))
       if (m) setError(m)
     }
   }, [sync])
@@ -88,14 +92,14 @@ export function Rules() {
     const enable = !r.enabled
     if (enable && r.elevated) {
       actions.ask({
-        title: '启用这条高风险规则？',
-        body: `${r.id}\n它能自动放行对外或不可逆的操作（推送代码、发消息、删除文件等）。启用后立即下发给所有机器，匹配的请求不再问你。`,
-        confirmLabel: '启用',
+        title: t('启用这条高风险规则？'),
+        body: `${r.id}\n` + t('它能自动放行对外或不可逆的操作（推送代码、发消息、删除文件等）。启用后立即下发给所有机器，匹配的请求不再问你。'),
+        confirmLabel: t('启用'),
         danger: true,
         run: async () => {
           await hub.setRuleEnabled(r.id, true)
           await refresh()
-          return { tone: 'ok', title: '已启用', text: `规则 ${r.id} 已启用，所有机器会立即收到更新` }
+          return { tone: 'ok', title: t('已启用'), text: t('规则 {id} 已启用，所有机器会立即收到更新', { id: r.id }) }
         },
       })
       return
@@ -104,19 +108,19 @@ export function Rules() {
       await hub.setRuleEnabled(r.id, enable)
       await refresh()
       return null // 开关本身已经反映了结果
-    }, enable ? '启用失败' : '停用失败')
+    }, enable ? t('启用失败') : t('停用失败'))
   }
 
   function remove(r: Rule) {
     actions.ask({
-      title: '删除这条规则？',
-      body: `${r.id}\n删除后立即下发给所有机器，不能撤销；要找回只能重新导入。`,
-      confirmLabel: '删除',
+      title: t('删除这条规则？'),
+      body: `${r.id}\n` + t('删除后立即下发给所有机器，不能撤销；要找回只能重新导入。'),
+      confirmLabel: t('删除'),
       danger: true,
       run: async () => {
         await hub.deleteRule(r.id)
         await refresh()
-        return { tone: 'ok', title: '已删除', text: `规则 ${r.id} 已删除，所有机器会立即收到更新` }
+        return { tone: 'ok', title: t('已删除'), text: t('规则 {id} 已删除，所有机器会立即收到更新', { id: r.id }) }
       },
     })
   }
@@ -126,22 +130,25 @@ export function Rules() {
     e.target.value = '' // 同一个文件改过之后可以再选
     if (!file) return
     if (file.size > importMax) {
-      actions.notify({ tone: 'warn', title: '没有导入', text: `${file.name} 有 ${fileSize(file.size)}，规则文件至多 1 MiB` })
+      actions.notify({ tone: 'warn', title: t('没有导入'), text: t('{name} 有 {size}，规则文件至多 1 MiB', { name: file.name, size: fileSize(file.size) }) })
       return
     }
     const n = state.rules?.length
     actions.ask({
-      title: '导入并整套替换规则？',
+      title: t('导入并整套替换规则？'),
       body:
-        `用 ${file.name}（${fileSize(file.size)}）整套替换 hub 上现有的${n === undefined ? '' : ` ${n} 条`}规则：文件里没有的规则都会被删掉。` +
-        `导入后立即下发给所有机器。\n建议先点“导出”留一份备份。`,
-      confirmLabel: '导入并替换',
+        (n === undefined
+          ? t('用 {name}（{size}）整套替换 hub 上现有的规则：文件里没有的规则都会被删掉。导入后立即下发给所有机器。', { name: file.name, size: fileSize(file.size) })
+          : t('用 {name}（{size}）整套替换 hub 上现有的 {n} 条规则：文件里没有的规则都会被删掉。导入后立即下发给所有机器。', { name: file.name, size: fileSize(file.size), n })) +
+        '\n' +
+        t('建议先点“导出”留一份备份。'),
+      confirmLabel: t('导入并替换'),
       danger: true,
       run: async () => {
         // 文件原样发给 hub：解析与校验以 hub 为准，失败时面板上显示 hub 的原文
         const { version } = await hub.importRules(file)
         await refresh()
-        return { tone: 'ok', title: '已导入', text: `规则已整套替换并下发给所有机器（版本 ${version}）` }
+        return { tone: 'ok', title: t('已导入'), text: t('规则已整套替换并下发给所有机器（版本 {version}）', { version }) }
       },
     })
   }
@@ -151,13 +158,13 @@ export function Rules() {
   return (
     <>
       <header className="topbar">
-        <h1>规则</h1>
+        <h1>{t('规则')}</h1>
         {/* 同源链接带 cookie，hub 回附件 railse-rules.yaml；不用 blob:/data: 地址（CSP 不许） */}
         <a className="btn" href={hub.exportRulesURL} download="railse-rules.yaml">
-          导出
+          {t('导出')}
         </a>
         <button type="button" className="btn" disabled={actions.busy} onClick={() => fileRef.current?.click()}>
-          导入
+          {t('导入')}
         </button>
         {/* 不设 accept：iOS 认不出 .yaml 时会把所有文件置灰；选错了文件 hub 会说明 */}
         <input ref={fileRef} type="file" className="visually-hidden" tabIndex={-1} aria-hidden="true" onChange={pick} />
@@ -165,23 +172,26 @@ export function Rules() {
       <div className={actions.pageClass}>
         {error && (
           <Banner tone="warn">
-            {rules ? `刷新失败：${error}` : error}
+            {rules ? t('刷新失败：{reason}', { reason: error }) : error}
             <button type="button" className="btn" onClick={() => void refresh()}>
-              重试
+              {t('重试')}
             </button>
           </Banner>
         )}
         {elevated > 0 && (
           <Banner tone="warn">
-            有 {elevated} 条启用着的规则能自动放行对外或不可逆的操作（下面标红的），匹配的请求不会再问你。请确认每一条都是你要的。
+            {/* 英文要分单复数：1 条单独一个键（两个键的中文输出相同） */}
+            {elevated === 1
+              ? t('有 1 条启用着的规则能自动放行对外或不可逆的操作（下面标红的），匹配的请求不会再问你。请确认每一条都是你要的。')
+              : t('有 {n} 条启用着的规则能自动放行对外或不可逆的操作（下面标红的），匹配的请求不会再问你。请确认每一条都是你要的。', { n: elevated })}
           </Banner>
         )}
-        <p className="sub">新规则来自“批准并记住”或导入 YAML；这里只做查看、启停和删除。</p>
+        <p className="sub">{t('新规则来自“批准并记住”或导入 YAML；这里只做查看、启停和删除。')}</p>
         {rules?.map((r) => (
           <RuleCard key={r.id} rule={r} busy={actions.busy} onToggle={toggle} onDelete={remove} />
         ))}
-        {rules === null && !error && <div className="empty">加载中…</div>}
-        {rules?.length === 0 && <div className="empty">没有规则</div>}
+        {rules === null && !error && <div className="empty">{t('加载中…')}</div>}
+        {rules?.length === 0 && <div className="empty">{t('没有规则')}</div>}
       </div>
       {actions.overlays}
     </>

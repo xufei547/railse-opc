@@ -6,6 +6,8 @@ import {
   classifyError,
   decideBody,
   doneMessage,
+  draftLead,
+  draftScope,
   draftShown,
   goneMessage,
   initSheet,
@@ -17,6 +19,7 @@ import {
   retryable,
   scopeOptions,
   sheetReducer,
+  sheetTitle,
   type SheetAction,
   type SheetState,
 } from './decide'
@@ -515,5 +518,45 @@ describe('decide 的英文', () => {
       goneMessage(req({ state: 'cancelled', decided_by: 'machine_revoked' }), 'allow'),
     ]
     expect(JSON.stringify(views)).not.toMatch(han)
+  })
+})
+
+describe('面板标题与草案摘要（整句按语言取）', () => {
+  afterEach(() => setLang('zh'))
+  const shell = req({ payload: { type: 'shell', command: 'git push' } })
+  const hook = req({ kind: 'webhook', payload: { type: 'other', tool: 'webhook' } })
+  const ask = req({ kind: 'ask', payload: { type: '' } })
+
+  it('中文与原来逐字相同', () => {
+    expect(sheetTitle('allow', shell)).toBe('批准这次命令')
+    expect(sheetTitle('deny', req({ payload: { type: 'file_write', path: '/a' } }))).toBe('拒绝这次文件改动')
+    expect(sheetTitle('allow', req())).toBe('批准这次访问')
+    expect(sheetTitle('deny', req({ payload: { type: 'mcp', server: 'fs', tool: 'w' } }))).toBe('拒绝这次MCP 调用')
+    expect(sheetTitle('allow', hook)).toBe('批准这次请求')
+    expect(sheetTitle('deny', ask)).toBe('拒绝这次操作')
+    expect(draftLead('allow', 'shell')).toBe('将放行命令')
+    expect(draftLead('deny', 'network')).toBe('将拒绝访问')
+    expect(draftLead('allow', 'mcp')).toBe('将放行MCP 调用')
+    expect(draftLead('deny', 'file_write')).toBe('将拒绝文件改动')
+    expect(draftLead('allow', 'something')).toBe('将放行')
+    expect(draftScope('project', 'blog')).toBe('（仅项目 blog）')
+    expect(draftScope('global', 'blog')).toBe('（所有项目）')
+  })
+
+  it('英文', () => {
+    setLang('en')
+    expect(sheetTitle('allow', shell)).toBe('Approve this command')
+    expect(sheetTitle('deny', req({ payload: { type: 'file_write', path: '/a' } }))).toBe('Deny this file edit')
+    expect(sheetTitle('allow', req())).toBe('Approve this network access')
+    expect(sheetTitle('deny', req({ payload: { type: 'mcp', server: 'fs', tool: 'w' } }))).toBe('Deny this MCP call')
+    expect(sheetTitle('allow', hook)).toBe('Approve this request')
+    expect(sheetTitle('deny', ask)).toBe('Deny this action')
+    expect(draftLead('allow', 'shell')).toBe('Will allow commands matching')
+    expect(draftLead('deny', 'network')).toBe('Will deny network access matching')
+    expect(draftLead('allow', 'mcp')).toBe('Will allow MCP calls matching')
+    expect(draftLead('deny', 'file_write')).toBe('Will deny file edits matching')
+    expect(draftLead('allow', 'something')).toBe('Will allow')
+    expect(draftScope('project', 'blog')).toBe(' (project blog only)')
+    expect(draftScope('global', 'blog')).toBe(' (all projects)')
   })
 })

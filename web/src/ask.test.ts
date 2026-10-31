@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './api'
 import {
   answerFor,
@@ -15,6 +15,7 @@ import {
   type AskAction,
   type AskState,
 } from './ask'
+import { setLang } from './i18n'
 import type { Question, RequestView } from './types'
 
 function req(over: Partial<RequestView> = {}): RequestView {
@@ -283,5 +284,14 @@ describe('askReducer settled', () => {
     const s = run(initAsk([fruit]), pick(0, 0), { type: 'submit', verb: 'answer' })
     expect(s.busy).toBe('answer')
     expect(run(s, { type: 'settled' })).toMatchObject({ busy: null, error: null })
+  })
+})
+
+describe('sendAsk 的英文兜底', () => {
+  afterEach(() => setLang('zh'))
+  it('不是 ApiError 时用英文兜底；hub 的原文照带', async () => {
+    setLang('en')
+    expect(await sendAsk(() => Promise.reject(new TypeError('boom')))).toEqual({ failed: "Couldn't submit" })
+    expect(await sendAsk(() => Promise.reject(new ApiError(400, '答案不合规：第 1 题没有答案')))).toEqual({ failed: '答案不合规：第 1 题没有答案' })
   })
 })

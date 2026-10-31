@@ -1,6 +1,7 @@
 import { explainRequest } from '../explain'
 import { absoluteTime, deliveryLabel, isRedacted, outcomeText } from '../format'
 import { historyTag } from '../history'
+import { t } from '../i18n'
 import type { AuditEvent, RequestView } from '../types'
 import { RedactedWarning, RequestContent } from './Payload'
 
@@ -14,7 +15,7 @@ export function RequestSummary({ request: r }: { request: RequestView }) {
   return (
     <>
       {isRedacted(r) && <RedactedWarning request={r} />}
-      <section className="explain" aria-label="这条请求要做什么">
+      <section className="explain" aria-label={t('这条请求要做什么')}>
         <p className="headline">{e.headline}</p>
         {e.where && <p className="where">{e.where}</p>}
         {e.why && <p className="why">{e.why}</p>}

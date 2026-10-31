@@ -12,6 +12,7 @@ import {
   riskTone,
   stateLabel,
 } from '../format'
+import { t } from '../i18n'
 import type { AuditEvent, RequestView } from '../types'
 
 function Row({ label, children, mono }: { label: string; children: ReactNode; mono?: boolean }) {
@@ -27,7 +28,7 @@ function When({ iso }: { iso: string }) {
   return (
     <time dateTime={iso}>
       {absoluteTime(iso)}
-      <span className="sub">（{relativeTime(iso)}）</span>
+      <span className="sub">{t('（{when}）', { when: relativeTime(iso) })}</span>
     </time>
   )
 }
@@ -40,36 +41,36 @@ export function RequestAttrs({ request: r, audit }: { request: RequestView; audi
   return (
     <dl className="kv">
       {r.payload.type === 'shell' && r.payload.cwd && (
-        <Row label="目录" mono>
+        <Row label={t('目录')} mono>
           {r.payload.cwd}
         </Row>
       )}
-      {r.machine_name && <Row label="机器">{r.machine_name}</Row>}
+      {r.machine_name && <Row label={t('机器')}>{r.machine_name}</Row>}
       {r.project_root && (
-        <Row label="项目" mono>
+        <Row label={t('项目')} mono>
           {r.project_root}
         </Row>
       )}
-      {r.tool_name && r.kind !== 'webhook' && <Row label="工具">{r.tool_name}</Row>}
+      {r.tool_name && r.kind !== 'webhook' && <Row label={t('工具')}>{r.tool_name}</Row>}
       {r.kind === 'permission' && (
-        <Row label="风险">
+        <Row label={t('风险')}>
           <span className={`tag ${riskTone(r.risk)}`}>{riskLabel(r.risk)}</span>
         </Row>
       )}
-      {r.engine_reason && <Row label="引擎">{engineReasonLabel(r.engine_reason)}</Row>}
-      <Row label="状态">{stateLabel(r.state)}</Row>
-      {basis && basis !== stateLabel(r.state) && <Row label="依据">{basis}</Row>}
-      {delivery && <Row label="送达">{delivery}</Row>}
-      {r.decision_note && <Row label="备注">{r.decision_note}</Row>}
-      <Row label="创建">
+      {r.engine_reason && <Row label={t('引擎')}>{engineReasonLabel(r.engine_reason)}</Row>}
+      <Row label={t('状态')}>{stateLabel(r.state)}</Row>
+      {basis && basis !== stateLabel(r.state) && <Row label={t('依据')}>{basis}</Row>}
+      {delivery && <Row label={t('送达')}>{delivery}</Row>}
+      {r.decision_note && <Row label={t('备注')}>{r.decision_note}</Row>}
+      <Row label={t('创建')}>
         <When iso={r.created_at} />
       </Row>
       {r.decided_at && (
-        <Row label="决定">
+        <Row label={t('决定')}>
           <When iso={r.decided_at} />
         </Row>
       )}
-      {r.expires_at && r.state === 'pending' && <Row label="过期">{absoluteTime(r.expires_at)}</Row>}
+      {r.expires_at && r.state === 'pending' && <Row label={t('过期')}>{absoluteTime(r.expires_at)}</Row>}
     </dl>
   )
 }
@@ -79,7 +80,7 @@ export function AuditList({ audit }: { audit: AuditEvent[] }) {
   if (audit.length === 0) return null
   return (
     <>
-      <div className="group-title">审计</div>
+      <div className="group-title">{t('审计')}</div>
       {audit.map((e) => {
         const d = auditDetail(e.detail)
         return (
@@ -104,7 +105,7 @@ export function AuditList({ audit }: { audit: AuditEvent[] }) {
 export function RequestDetails({ request, audit }: { request: RequestView; audit: AuditEvent[] }) {
   return (
     <details className="more">
-      <summary>详情</summary>
+      <summary>{t('详情')}</summary>
       <RequestAttrs request={request} audit={audit} />
       <AuditList audit={audit} />
     </details>

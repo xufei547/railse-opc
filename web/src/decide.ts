@@ -173,6 +173,46 @@ export function scopeOptions(r: RequestView): ScopeOption[] {
   ]
 }
 
+/**
+ * 面板标题（批准这次命令）。按 (动作, 载荷种类) 整句取：英文的名词要小写、与“请求”“工具”这类标签的大小写不同，不拿短词拼。
+ */
+export function sheetTitle(action: Verdict, r: Pick<RequestView, 'kind' | 'payload'>): string {
+  const allow = action === 'allow'
+  switch (r.payload.type) {
+    case 'shell':
+      return allow ? t('批准这次命令') : t('拒绝这次命令')
+    case 'file_write':
+      return allow ? t('批准这次文件改动') : t('拒绝这次文件改动')
+    case 'network':
+      return allow ? t('批准这次访问') : t('拒绝这次访问')
+    case 'mcp':
+      return allow ? t('批准这次MCP 调用') : t('拒绝这次MCP 调用')
+  }
+  if (r.kind === 'webhook') return allow ? t('批准这次请求') : t('拒绝这次请求')
+  return allow ? t('批准这次操作') : t('拒绝这次操作')
+}
+
+/** 草案摘要的开头（后面接一个空格与等宽的锚点）：“将放行命令”。同样整句取；不认识的载荷只说放行、拒绝。 */
+export function draftLead(action: Verdict, payload: string): string {
+  const allow = action === 'allow'
+  switch (payload) {
+    case 'shell':
+      return allow ? t('将放行命令') : t('将拒绝命令')
+    case 'file_write':
+      return allow ? t('将放行文件改动') : t('将拒绝文件改动')
+    case 'network':
+      return allow ? t('将放行访问') : t('将拒绝访问')
+    case 'mcp':
+      return allow ? t('将放行MCP 调用') : t('将拒绝MCP 调用')
+  }
+  return allow ? t('将放行') : t('将拒绝')
+}
+
+/** 草案摘要的结尾：范围，紧跟在锚点后面（英文自带前导空格，中文是全角括号）。 */
+export function draftScope(scope: Scope, project: string): string {
+  return scope === 'project' ? t('（仅项目 {name}）', { name: project }) : t('（所有项目）')
+}
+
 /** 决定（或作答）成功后的提示。 */
 export function doneMessage(r: RequestView): string {
   if (lang() === 'en') return doneMessageEn(r)

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react'
 import { ApiError, hub } from './api'
 import { coalesce } from './coalesce'
+import { t } from './i18n'
 import { closeStaleNotifications } from './notifications'
 import { initialState, reduce, waitingIDs, type Action, type State } from './store'
 import { closeSessionInvalid, Live } from './ws'
@@ -111,6 +112,6 @@ export function StoreProvider({ children, onUnauthorized }: { children: ReactNod
 
 export function useStore(): Store {
   const s = useContext(Ctx)
-  if (!s) throw new Error('useStore 必须在 StoreProvider 内使用')
+  if (!s) throw new Error(t('useStore 必须在 StoreProvider 内使用'))
   return s
 }

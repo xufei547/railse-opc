@@ -4,7 +4,6 @@
 // 暂停自动审批 auto-approval paused · 交回终端 handed back to the terminal · 等你回答 waiting for your answer ·
 // 自己填 Your own answer · 让它在终端问我 Ask me in the terminal instead
 export const en: Record<string, string> = {
-  正在连接hub: 'Connecting to the hub…',
   跟随系统: 'Follow the system',
   中文: 'Chinese',
   语言: 'Language',
@@ -182,4 +181,265 @@ export const en: Record<string, string> = {
   '机器上用 railse agent pause 设的本机暂停不受这里影响。': "A pause set on a machine with railse agent pause isn't affected by this switch.",
   '审批请求交回终端处理，Claude Code 的选择题照样送到这里；关掉这个开关即可恢复': "Approval requests are handed back to the terminal; Claude Code's multiple-choice questions still come here. Turn the switch off to resume.",
   '自动审批已暂停，审批请求都交回终端处理（Claude Code 的选择题照样送到这里）。': "Auto-approval paused. Approval requests are handed back to the terminal (Claude Code's multiple-choice questions still come here).",
+  // decide.ts：面板标题与草案摘要（按动作与载荷整句取）
+  批准这次命令: 'Approve this command',
+  拒绝这次命令: 'Deny this command',
+  批准这次文件改动: 'Approve this file edit',
+  拒绝这次文件改动: 'Deny this file edit',
+  批准这次访问: 'Approve this network access',
+  拒绝这次访问: 'Deny this network access',
+  '批准这次MCP 调用': 'Approve this MCP call',
+  '拒绝这次MCP 调用': 'Deny this MCP call',
+  批准这次请求: 'Approve this request',
+  拒绝这次请求: 'Deny this request',
+  批准这次操作: 'Approve this action',
+  拒绝这次操作: 'Deny this action',
+  将放行命令: 'Will allow commands matching',
+  将拒绝命令: 'Will deny commands matching',
+  将放行文件改动: 'Will allow file edits matching',
+  将拒绝文件改动: 'Will deny file edits matching',
+  将放行访问: 'Will allow network access matching',
+  将拒绝访问: 'Will deny network access matching',
+  '将放行MCP 调用': 'Will allow MCP calls matching',
+  '将拒绝MCP 调用': 'Will deny MCP calls matching',
+  将放行: 'Will allow',
+  将拒绝: 'Will deny',
+  // 紧跟在锚点后面：中文是全角括号，英文要自带前导空格
+  '（仅项目 {name}）': ' (project {name} only)',
+  '（所有项目）': ' (all projects)',
+  // components/DecideSheet.tsx
+  生成草案失败: "Couldn't draft the rule",
+  决定失败: "Couldn't submit the decision",
+  '记住：以后同类的自动放行': 'Remember: auto-approve similar requests from now on',
+  '记住：以后同类的自动拒绝': 'Remember: auto-deny similar requests from now on',
+  范围: 'Scope',
+  记住的范围: 'Rule scope',
+  重试: 'Retry',
+  '规则原文 {id}': 'Full rule: {id}',
+  '正在生成草案…': 'Drafting the rule…',
+  取消: 'Cancel',
+  '正在提交…': 'Submitting…',
+  批准并记住: 'Approve and remember',
+  拒绝并记住: 'Deny and remember',
+  // components/RequestAttrs.tsx
+  // 跟在绝对时间后面的相对时间：英文要自带前导空格
+  '（{when}）': ' ({when})',
+  目录: 'Directory',
+  机器: 'Machine',
+  工具: 'Tool',
+  风险: 'Risk',
+  引擎: 'Engine',
+  状态: 'Status',
+  依据: 'Decided by',
+  送达: 'Delivery',
+  备注: 'Note',
+  创建: 'Created',
+  决定: 'Decided',
+  过期: 'Expires',
+  审计: 'Audit log',
+  详情: 'Details',
+  // components/Payload.tsx
+  '凭据等敏感值已换成 <redacted>。不在引号里的值只隐藏到空格或 shell 符号（; | & 等）为止；引号里的值、注释和 heredoc 正文整段隐藏，可能连带盖住其中的命令。':
+    'Secrets such as credentials were replaced with <redacted>. An unquoted value is hidden up to the next space or shell symbol (; | & and so on); a quoted value, a comment or a heredoc body is hidden whole, which can hide commands inside it too.',
+  '标题或描述里的凭据等敏感值已换成 <redacted>。': 'Secrets such as credentials in the title or description were replaced with <redacted>.',
+  '凭据等敏感值已换成 <redacted>。': 'Secrets such as credentials were replaced with <redacted>.',
+  '拿不准就去来源系统核对原文再决定。': "If you're not sure, check the original in the source system before deciding.",
+  '拿不准就去终端核对原文再决定。这类请求不能“记住”。': "If you're not sure, check the original in the terminal before deciding. Requests like this can't be remembered.",
+  '拿不准就去终端核对原文再决定。': "If you're not sure, check the original in the terminal before deciding.",
+  '含被隐藏的部分，下面展示的不是原文': "Parts are hidden; what's shown below isn't the original",
+  // 中间夹着风险标签与引擎理由，只能分两段
+  '引擎是按原文定级的：{risk}，理由：{reason}': 'The engine rated the original text: {risk}. Reason: {reason}',
+  '引擎是按原文定级的：{risk}': 'The engine rated the original text: {risk}',
+  路径: 'Path',
+  请求: 'Request',
+  服务: 'Server',
+  // components/RequestCard.tsx
+  含隐藏部分: 'Hidden parts',
+  // components/ResultToast.tsx
+  知道了: 'Got it',
+  // components/Explain.tsx
+  这条请求要做什么: 'What this request does',
+  // components/AskForm.tsx
+  可多选: 'Pick one or more',
+  自己填: 'Your own answer',
+  '还有 {n} 题没答': '{n} left to answer',
+  '正在交回终端…': 'Handing back to the terminal…',
+  让它在终端问我: 'Ask me in the terminal instead',
+  // components/Confirm.tsx
+  操作失败: 'Something went wrong',
+  // api.ts（网页自己写的错误句；hub 给的原文照带，不翻）
+  '请求超时：hub 没有响应，请检查网络': "Request timed out: the hub didn't respond. Check your network.",
+  '连不上 hub，请检查网络': "Can't reach the hub. Check your network.",
+  '请求失败（{status}）': 'Request failed ({status})',
+  'hub 的响应不是 JSON（{status}）': "The hub's response wasn't JSON ({status})",
+  // pwa.ts
+  没有获得通知权限: "Notification permission wasn't granted",
+  'Service Worker 没有注册成功，刷新页面后再试': "The service worker didn't register. Reload the page and try again.",
+  '浏览器没能订阅推送：{reason}': "The browser couldn't subscribe to push: {reason}",
+  // push.ts
+  '读不到 hub 的推送配置': "Couldn't read the hub's push settings",
+  查不到这台设备的订阅: "Couldn't check this device's subscription",
+  '还没拿到 hub 的推送公钥，请刷新页面后再试': "The hub's push key hasn't loaded yet. Reload the page and try again.",
+  这台设备还没有开启通知: "Notifications aren't on for this device yet",
+  没有开启通知: 'Notifications not turned on',
+  开启失败: "Couldn't turn them on",
+  没有关闭通知: 'Notifications not turned off',
+  关闭失败: "Couldn't turn them off",
+  测试通知没有发出: 'Test notification not sent',
+  发送失败: "Couldn't send it",
+  // ask.ts
+  提交失败: "Couldn't submit",
+  // store.ts：收件箱里没有项目的那一组
+  其他: 'Other',
+  // StoreProvider.tsx（只在写错代码时出现）
+  'useStore 必须在 StoreProvider 内使用': 'useStore must be used inside StoreProvider',
+  // App.tsx（导航里的“机器”按语言分支取复数，不走这张表）
+  '正在连接 hub…': 'Connecting to the hub…',
+  收件箱: 'Inbox',
+  '{n} 条等你处理': '{n} waiting for you',
+  历史: 'History',
+  规则: 'Rules',
+  设置: 'Settings',
+  没有这个页面: 'Page not found',
+  // pages/Login.tsx
+  密码不对: 'Wrong password',
+  'hub 还没有设置密码，或正忙，请稍后再试；没设过密码的请在服务器上运行 railse hub password':
+    "The hub has no password yet, or it's busy. Try again in a moment. If you never set one, run railse hub password on the server.",
+  '试得太频繁，一分钟后再试': 'Too many attempts. Try again in a minute.',
+  登录失败: "Couldn't log in",
+  密码: 'Password',
+  '正在登录…': 'Logging in…',
+  登录: 'Log in',
+  // pages/Inbox.tsx
+  实时连接正常: 'Live updates connected',
+  实时连接断开: 'Live updates disconnected',
+  '实时连接断开，正在重连；新请求可能晚到。': 'Live updates disconnected. Reconnecting; new requests may show up late.',
+  刷新: 'Refresh',
+  去设置: 'Go to Settings',
+  // {link} 是后面的“去设置重新开启”链接；英文句子与链接之间要空格
+  '通知已失效，新审批不会推送到这台设备。{link}': "Notifications stopped working; new approvals won't be pushed to this device. {link}",
+  去设置重新开启: 'Turn them back on in Settings',
+  '在 iPhone 上要先用 Safari 的“分享 → 添加到主屏幕”，再从主屏幕图标打开，才能收到通知。':
+    'On iPhone, add Railse to the Home Screen first (in Safari: Share → Add to Home Screen), then open it from the Home Screen icon to get notifications.',
+  待处理: 'Pending',
+  '加载中…': 'Loading…',
+  没有等你处理的事: 'Nothing waiting for you',
+  // pages/Request.tsx
+  加载失败: "Couldn't load",
+  '这条请求已不存在，决定面板已关闭': 'This request no longer exists, so the decision panel was closed.',
+  这条请求已经决定不了: "This request can't be decided anymore.",
+  // {reason} 是 hub 的原文或 api.ts 的整句
+  '刷新失败：{reason}': "Couldn't refresh: {reason}",
+  没有这条请求: 'Request not found',
+  回收件箱: 'Back to inbox',
+  返回: 'Back',
+  // pages/Machines.tsx（页面标题“机器”同 App.tsx，按语言分支取复数）
+  已吊销: 'Revoked',
+  离线: 'Offline',
+  '版本 {version}': 'Version {version}',
+  版本未知: 'Version unknown',
+  '接入于 {when}': 'Enrolled {when}',
+  '吊销 {name}': 'Revoke {name}',
+  吊销: 'Revoke',
+  '吊销 {name}？': 'Revoke {name}?',
+  '它的密钥立即失效、连接马上断开，它还在等的请求会被取消；之后那台机器上的审批都交回终端。':
+    "Its key stops working and it's disconnected right away, and any requests it's waiting on are cancelled. After that, approvals on that machine are handed back to the terminal.",
+  '要重新接入，得在 hub 上运行 railse hub token，再在那台机器上运行 railse agent enroll --force。':
+    'To enroll it again, run railse hub token on the hub, then railse agent enroll --force on that machine.',
+  '{name} 的密钥已失效，不能再连 hub': "{name}'s key no longer works, so it can't connect to the hub.",
+  // {token}、{enroll} 是两段 <code>
+  '还没有机器。在 hub 上运行 {token}，再在机器上运行 {enroll}。': 'No machines yet. Run {token} on the hub, then {enroll} on the machine.',
+  // pages/Rules.tsx
+  可放行高风险操作: 'Can allow high-risk actions',
+  已停用: 'Disabled',
+  // 跟在命中情况后面；{link} 是请求链接
+  '，来自请求 {link}': ' · created from request {link}',
+  规则原文: 'Full rule',
+  '启用规则 {id}': 'Enable rule {id}',
+  启用: 'Enable',
+  '删除规则 {id}': 'Delete rule {id}',
+  删除: 'Delete',
+  '启用这条高风险规则？': 'Enable this high-risk rule?',
+  '它能自动放行对外或不可逆的操作（推送代码、发消息、删除文件等）。启用后立即下发给所有机器，匹配的请求不再问你。':
+    "It can automatically allow outward or destructive actions (pushing code, sending messages, deleting files and so on). Once enabled, it goes out to every machine right away and matching requests won't ask you anymore.",
+  已启用: 'Enabled',
+  '规则 {id} 已启用，所有机器会立即收到更新': 'Rule {id} is enabled. Every machine gets the update right away.',
+  启用失败: "Couldn't enable the rule",
+  停用失败: "Couldn't disable the rule",
+  '删除这条规则？': 'Delete this rule?',
+  '删除后立即下发给所有机器，不能撤销；要找回只能重新导入。':
+    "The change goes out to every machine right away and can't be undone. The only way to get the rule back is to import it again.",
+  已删除: 'Deleted',
+  '规则 {id} 已删除，所有机器会立即收到更新': 'Rule {id} was deleted. Every machine gets the update right away.',
+  没有导入: 'Not imported',
+  '{name} 有 {size}，规则文件至多 1 MiB': '{name} is {size}. A rules file can be 1 MiB at most.',
+  '导入并整套替换规则？': 'Import and replace all rules?',
+  '用 {name}（{size}）整套替换 hub 上现有的规则：文件里没有的规则都会被删掉。导入后立即下发给所有机器。':
+    "This replaces every rule on the hub with {name} ({size}). Rules that aren't in the file will be deleted. The new rules go out to every machine right away.",
+  '用 {name}（{size}）整套替换 hub 上现有的 {n} 条规则：文件里没有的规则都会被删掉。导入后立即下发给所有机器。':
+    "This replaces every rule on the hub (currently {n}) with {name} ({size}). Rules that aren't in the file will be deleted. The new rules go out to every machine right away.",
+  '建议先点“导出”留一份备份。': 'Consider exporting a backup first.',
+  导入并替换: 'Import and replace',
+  已导入: 'Imported',
+  '规则已整套替换并下发给所有机器（版本 {version}）': 'All rules were replaced and sent to every machine (version {version}).',
+  导出: 'Export',
+  导入: 'Import',
+  // 英文要分单复数：1 条单独一个键
+  '有 1 条启用着的规则能自动放行对外或不可逆的操作（下面标红的），匹配的请求不会再问你。请确认每一条都是你要的。':
+    "1 enabled rule can automatically allow outward or destructive actions (marked in red below), so matching requests won't ask you. Make sure it's what you want.",
+  '有 {n} 条启用着的规则能自动放行对外或不可逆的操作（下面标红的），匹配的请求不会再问你。请确认每一条都是你要的。':
+    "{n} enabled rules can automatically allow outward or destructive actions (marked in red below), so matching requests won't ask you. Make sure each one is what you want.",
+  '新规则来自“批准并记住”或导入 YAML；这里只做查看、启停和删除。':
+    'New rules come from "Approve and remember" or a YAML import. Here you can view, enable, disable and delete them.',
+  没有规则: 'No rules yet',
+  // pages/History.tsx
+  筛选: 'Show',
+  没有记录: 'Nothing here',
+  加载更多: 'Load more',
+  '正在加载…': 'Loading…',
+  '只显示最近 {n} 条': 'Showing only the latest {n}',
+  // pages/Settings.tsx
+  已恢复自动审批: 'Auto-approval resumed',
+  '规则照常自动放行与拒绝，决定不了的送到手机': "Rules approve and deny automatically again; anything they can't decide goes to your phone.",
+  恢复失败: "Couldn't resume auto-approval",
+  '暂停自动审批？': 'Pause auto-approval?',
+  暂停: 'Pause',
+  退出失败: "Couldn't log out",
+  // {reason} 是 hub 的原文或 api.ts 的整句
+  '退出失败：{reason}': "Couldn't log out: {reason}",
+  '状态刷新失败：{reason}': "Couldn't refresh the status: {reason}",
+  暂停自动审批: 'Pause auto-approval',
+  规则版本: 'Rules version',
+  在线机器: 'Machines online',
+  已运行: 'Uptime',
+  '正在退出…': 'Logging out…',
+  退出登录: 'Log out',
+  通知: 'Notifications',
+  '正在检查这台设备的通知状态…': 'Checking notifications on this device…',
+  '这个浏览器不支持网页推送，这台设备收不到新审批的通知。': "This browser doesn't support web push, so this device can't get notifications for new approvals.",
+  'iPhone、iPad 上要先把 Railse 加到主屏幕，再从主屏幕图标打开，才能开启通知：':
+    'On iPhone and iPad, add Railse to the Home Screen and open it from there before you can turn on notifications:',
+  '这个 hub 没有启用推送': "Push isn't enabled on this hub",
+  '这个 hub 没有启用推送：{reason}': "Push isn't enabled on this hub: {reason}",
+  '这个 hub 没有启用推送：hub 没有配置 --public-url': "Push isn't enabled on this hub: it was started without --public-url.",
+  hub: 'Hub',
+  '通知权限被拒绝了。iPhone、iPad 上到“设置 → 通知 → Railse”里允许通知；电脑上在浏览器地址栏左侧的网站设置里允许。改好后回到这里。':
+    'Notification permission was denied. On iPhone and iPad, allow it in Settings → Notifications → Railse; on a computer, allow it in the site settings at the left of the address bar. Then come back here.',
+  '还没开启。开启后，新的审批与提问会推送到这台设备。': 'Off. Turn them on to get new approvals and questions on this device.',
+  '已开启：新的审批与提问会推送到这台设备。': 'On: new approvals and questions are pushed to this device.',
+  '通知已失效：hub 上已经没有这台设备的订阅（推送服务注销了它，或 hub 换了推送密钥），新审批不会推送过来。重新开启即可。':
+    "Notifications stopped working: the hub no longer has this device's subscription (the push service dropped it, or the hub changed its push keys), so new approvals won't be pushed here. Turn them back on to fix it.",
+  查不到通知状态: "Couldn't check notifications",
+  // {reason} 是 push.ts 的整句或 hub 的原文
+  '查不到通知状态：{reason}': "Couldn't check notifications: {reason}",
+  '在 Safari 里点“分享”按钮（找不到时先点地址栏旁的“⋯”）': 'In Safari, tap the Share button (if you don\'t see it, tap "⋯" next to the address bar first)',
+  '选“添加到主屏幕”，再点“添加”': 'Choose "Add to Home Screen", then tap "Add"',
+  '回到主屏幕，点 Railse 图标打开，到“设置”里开启通知': 'Go back to the Home Screen, open Railse from its icon, and turn on notifications in Settings',
+  '需要 iOS 16.4 或更新的系统。': 'Requires iOS 16.4 or later.',
+  重新开启通知: 'Turn notifications back on',
+  开启通知: 'Turn on notifications',
+  清除旧订阅: 'Clear old subscription',
+  发一条测试通知: 'Send a test notification',
+  关闭通知: 'Turn off notifications',
+  重新检查: 'Check again',
 }

@@ -13,6 +13,7 @@ import {
   type AskState,
   type AskVerb,
 } from '../ask'
+import { t } from '../i18n'
 import type { Question, RequestView } from '../types'
 
 // 题面、选项、答案都按纯文本渲染（React 转义），从不用 dangerouslySetInnerHTML；含 <redacted> 的照常显示（告警在说明卡之前）。
@@ -44,7 +45,7 @@ export function AskFormView({ questions, state: s, dispatch, onAnswer, onPassthr
             {(q.header || multi) && (
               <div className="tags">
                 {q.header && <span className="tag plain">{q.header}</span>}
-                {multi && <span className="sub">可多选</span>}
+                {multi && <span className="sub">{t('可多选')}</span>}
               </div>
             )}
             <p className="q-text" id={`${id}-q${i}`}>
@@ -75,7 +76,7 @@ export function AskFormView({ questions, state: s, dispatch, onAnswer, onPassthr
               </label>
             ))}
             <label className="field">
-              <span>自己填</span>
+              <span>{t('自己填')}</span>
               <input
                 className="input"
                 type="text"
@@ -96,14 +97,14 @@ export function AskFormView({ questions, state: s, dispatch, onAnswer, onPassthr
       )}
       {left > 0 && (
         <p className="sub ask-hint" role="status">
-          还有 {left} 题没答
+          {t('还有 {n} 题没答', { n: left })}
         </p>
       )}
       <button type="button" className="btn primary block" onClick={onAnswer} disabled={!canAnswer(questions, s)}>
-        {s.busy === 'answer' ? '正在提交…' : '回答'}
+        {s.busy === 'answer' ? t('正在提交…') : '回答'}
       </button>
       <button type="button" className="link-btn" onClick={onPassthrough} disabled={busy}>
-        {s.busy === 'passthrough' ? '正在交回终端…' : '让它在终端问我'}
+        {s.busy === 'passthrough' ? t('正在交回终端…') : t('让它在终端问我')}
       </button>
     </div>
   )

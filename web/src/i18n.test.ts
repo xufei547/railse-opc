@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { lang, normalize, readChoice, resolveLang, saveChoice, setLang, t } from './i18n'
+import { lang, normalize, readChoice, resolveLang, saveChoice, setLang, splitVars, t } from './i18n'
 import { en } from './locales/en'
 
 afterEach(() => setLang('zh'))
@@ -53,11 +53,20 @@ describe('t', () => {
     delete en['测试键']
   })
   it('{name} 占位两种语言都替换；没给的占位原样留着', () => {
-    en['还有 {n} 题没答'] = '{n} left to answer'
-    expect(t('还有 {n} 题没答', { n: 2 })).toBe('还有 2 题没答')
+    en['测试用 {n} 题'] = '{n} left to answer'
+    expect(t('测试用 {n} 题', { n: 2 })).toBe('测试用 2 题')
     setLang('en')
-    expect(t('还有 {n} 题没答', { n: 2 })).toBe('2 left to answer')
-    expect(t('还有 {n} 题没答')).toBe('{n} left to answer')
-    delete en['还有 {n} 题没答']
+    expect(t('测试用 {n} 题', { n: 2 })).toBe('2 left to answer')
+    expect(t('测试用 {n} 题')).toBe('{n} left to answer')
+    delete en['测试用 {n} 题']
+  })
+})
+
+describe('splitVars', () => {
+  it('按 {name} 切开，占位换成给的东西；空段去掉，没给的占位原样留着', () => {
+    expect(splitVars('还没有 {a}，再 {b}。', { a: 1, b: 2 })).toEqual(['还没有 ', 1, '，再 ', 2, '。'])
+    expect(splitVars('{a}{b}', { a: 'x', b: 'y' })).toEqual(['x', 'y'])
+    expect(splitVars('没有占位', { a: 1 })).toEqual(['没有占位'])
+    expect(splitVars('留着 {c}', {})).toEqual(['留着 ', '{c}'])
   })
 })
