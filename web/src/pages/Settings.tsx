@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router'
 import { hub } from '../api'
 import { Banner } from '../components/Banner'
 import { useActions, type Actions } from '../components/Confirm'
-import { failure, formatUptime, onlineCount } from '../manage'
+import { failure, formatUptime, onlineCount, pauseCopy } from '../manage'
 import { browserEnv, logoutDevice, usePush, type PushControl } from '../push'
 import { useStore } from '../StoreProvider'
 
@@ -35,15 +35,13 @@ export function Settings() {
     }
     actions.ask({
       title: '暂停自动审批？',
-      body:
-        '暂停后各机器不再自动放行，也不再把请求送到这里：除了手写的拒绝规则照常生效，所有请求都交回终端处理。\n' +
-        '机器上用 railse agent pause 设的本机暂停不受这里影响。',
+      body: pauseCopy.confirm,
       confirmLabel: '暂停',
       danger: false,
       run: async () => {
         await hub.pause()
         await reload()
-        return { tone: 'ok', title: '已暂停自动审批', text: '所有请求交回终端处理；关掉这个开关即可恢复' }
+        return { tone: 'ok', title: '已暂停自动审批', text: pauseCopy.done }
       },
     })
   }
@@ -82,7 +80,7 @@ export function Settings() {
         <label className="switch">
           <span>
             暂停自动审批
-            <span className="sub line">打开后所有请求交回终端处理；手写的拒绝规则仍然生效</span>
+            <span className="sub line">{pauseCopy.sub}</span>
           </span>
           <input type="checkbox" role="switch" checked={paused} disabled={actions.busy || !status} onChange={togglePause} />
         </label>

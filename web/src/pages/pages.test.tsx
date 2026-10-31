@@ -394,6 +394,9 @@ describe('四个页面的首屏（还没数据）', () => {
     expect(html).toContain('<dt>待处理</dt>')
     expect(html).not.toContain('待审批')
     expect(html).toContain('退出登录')
+    // 暂停只管审批，选择题照样送来
+    expect(html).toContain('Claude Code 的选择题不受影响')
+    expect(html).not.toContain('所有请求')
     // 通知区块在总开关与 hub 信息之间，首屏在检查中
     expect(html).toContain('<h2 class="section-title">通知</h2>')
     expect(html).toContain('正在检查')

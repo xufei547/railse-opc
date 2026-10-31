@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { Banner } from '../components/Banner'
 import { RequestCard } from '../components/RequestCard'
+import { pauseCopy } from '../manage'
 import { usePush } from '../push'
 import { isIOS, isStandalone } from '../pwa'
 import { groupByProject } from '../store'
@@ -62,7 +63,8 @@ export function Inbox() {
         )}
         {state.status?.paused && (
           <Banner tone="info">
-            自动审批已暂停，所有请求都交回终端处理。<Link to="/settings">去设置</Link>
+            {pauseCopy.banner}
+            <Link to="/settings">去设置</Link>
           </Banner>
         )}
         {push.status === 'stale' && (
