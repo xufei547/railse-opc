@@ -9,6 +9,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/autostart"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 // quoteAll 把路径逐个按 shell 引起来、以空格连接：提示里的命令遇到带空格的路径也能直接复制运行。
@@ -21,35 +22,35 @@ func quoteAll(paths []string) string {
 }
 
 // permCheck 看 path 存在、类型对（dir 为真时要是目录，否则要是普通文件）、权限恰为 want。跟随符号链接，看的是真正的文件。
-// missingHint 是不存在时的修复提示。
+// name 与 missingHint（不存在时的修复提示）由调用方过 i18n.T。
 func permCheck(id, name, path string, want os.FileMode, dir bool, missingHint string) Check {
 	st, err := os.Stat(path)
 	if os.IsNotExist(err) {
-		return Check{ID: id, Name: name, Status: Fail, Detail: path + " 不存在", Hint: missingHint}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s 不存在"), path), Hint: missingHint}
 	}
 	if err != nil {
-		return Check{ID: id, Name: name, Status: Fail, Detail: err.Error(), Hint: "确认用跑 railse 的同一个用户运行 doctor"}
+		return Check{ID: id, Name: name, Status: Fail, Detail: err.Error(), Hint: i18n.T("确认用跑 railse 的同一个用户运行 doctor")}
 	}
 	if dir && !st.IsDir() {
-		return Check{ID: id, Name: name, Status: Fail, Detail: path + " 不是目录", Hint: "移走这个文件，" + missingHint}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s 不是目录"), path), Hint: fmt.Sprintf(i18n.T("移走这个文件，%s"), missingHint)}
 	}
 	if !dir && !st.Mode().IsRegular() {
-		return Check{ID: id, Name: name, Status: Fail, Detail: path + " 不是普通文件", Hint: "移走它，" + missingHint}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s 不是普通文件"), path), Hint: fmt.Sprintf(i18n.T("移走它，%s"), missingHint)}
 	}
 	if st.Mode().Perm() != want {
-		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf("%s 权限是 %04o，应为 %04o", path, st.Mode().Perm(), want), Hint: fmt.Sprintf("chmod %o %s", want, hooksconf.ShellQuote(path))}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s 权限是 %04o，应为 %04o"), path, st.Mode().Perm(), want), Hint: fmt.Sprintf("chmod %o %s", want, hooksconf.ShellQuote(path))}
 	}
 	return Check{ID: id, Name: name, Status: OK, Detail: path}
 }
 
 func agentChecks(o Options) []Check {
 	var out []Check
-	dirCheck := permCheck("agent.dir", "守护进程数据目录", o.AgentDir, 0o700, true, "先运行一次 railse agent run，它会建好目录与文件")
+	dirCheck := permCheck("agent.dir", i18n.T("守护进程数据目录"), o.AgentDir, 0o700, true, i18n.T("先运行一次 railse agent run，它会建好目录与文件"))
 	out = append(out, dirCheck)
 	out = append(out, agentFilesCheck(o, dirCheck))
 	out = append(out, agentSocketCheck(o))
 	out = append(out, agentRunningChecks(o)...)
-	out = append(out, autostartCheck("agent.autostart", "守护进程开机自启", o, "agent"))
+	out = append(out, autostartCheck("agent.autostart", i18n.T("守护进程开机自启"), o, "agent"))
 	return out
 }
 
@@ -62,47 +63,49 @@ func agentChecks(o Options) []Check {
 // 相对的 Project 按 doctor 的工作目录取绝对路径。家目录与守护进程一样按本进程的 $HOME（agent 包的 userHome）认，
 // 不用 Options.Home：两者在 railse doctor 里都来自 os.UserHomeDir，测试要用 t.Setenv("HOME") 改。
 func projectRootCheck(o Options) Check {
-	const id, name = "project.root", "项目根"
+	const id = "project.root"
+	name := i18n.T("项目根")
 	if o.Project == "" {
-		return Check{ID: id, Name: name, Status: Skip, Detail: "没给项目目录"}
+		return Check{ID: id, Name: name, Status: Skip, Detail: i18n.T("没给项目目录")}
 	}
 	proj, err := filepath.Abs(o.Project)
 	if err != nil {
-		return Check{ID: id, Name: name, Status: Skip, Detail: fmt.Sprintf("取不到 %s 的绝对路径: %v", o.Project, err)}
+		return Check{ID: id, Name: name, Status: Skip, Detail: fmt.Sprintf(i18n.T("取不到 %s 的绝对路径: %v"), o.Project, err)}
 	}
 	root, kind := agent.ResolveProjectRoot(proj)
 	switch {
 	case kind == agent.RootGit:
 		return Check{ID: id, Name: name, Status: OK, Detail: root}
 	case kind == agent.RootCwd && !o.ProjectExplicit:
-		return Check{ID: id, Name: name, Status: Skip, Detail: "目录 " + root + " 不是 git 仓库，在这里起 agent 会按当前目录当项目根"}
+		return Check{ID: id, Name: name, Status: Skip, Detail: fmt.Sprintf(i18n.T("目录 %s 不是 git 仓库，在这里起 agent 会按当前目录当项目根"), root)}
 	case kind == agent.RootCwd:
-		return Check{ID: id, Name: name, Status: Warn, Detail: "目录 " + root + " 不是 git 仓库，按当前目录当项目根",
-			Hint: "建议在 " + root + " 里 git init（项目根决定哪些写入算项目内）"}
+		return Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf(i18n.T("目录 %s 不是 git 仓库，按当前目录当项目根"), root),
+			Hint: fmt.Sprintf(i18n.T("建议在 %s 里 git init（项目根决定哪些写入算项目内）"), root)}
 	case kind == agent.RootNotPlain:
-		c := Check{ID: id, Name: name, Status: Skip, Detail: "目录 " + agent.CleanCwd(proj) + " 不在家目录下的普通目录里，不按项目根处理"}
+		c := Check{ID: id, Name: name, Status: Skip, Detail: fmt.Sprintf(i18n.T("目录 %s 不在家目录下的普通目录里，不按项目根处理"), agent.CleanCwd(proj))}
 		if o.ProjectExplicit {
-			c.Status, c.Hint = Warn, "要自动放行请 git init 或换到项目目录"
+			c.Status, c.Hint = Warn, i18n.T("要自动放行请 git init 或换到项目目录")
 		}
 		return c
 	case kind == agent.RootSystem:
-		c := Check{ID: id, Name: name, Status: Skip, Detail: "目录 " + agent.CleanCwd(proj) + " 在系统目录里，不按项目根处理（是 git 仓库也一样）"}
+		c := Check{ID: id, Name: name, Status: Skip, Detail: fmt.Sprintf(i18n.T("目录 %s 在系统目录里，不按项目根处理（是 git 仓库也一样）"), agent.CleanCwd(proj))}
 		if o.ProjectExplicit {
-			c.Status, c.Hint = Warn, "要自动放行请换到系统目录之外的项目目录"
+			c.Status, c.Hint = Warn, i18n.T("要自动放行请换到系统目录之外的项目目录")
 		}
 		return c
 	default:
-		why := "是家目录、它的上级或根目录"
+		detail := i18n.T("%s 是家目录、它的上级或根目录，不当项目根：在这里跑 agent 时所有写入都算项目外")
 		if st, err := os.Stat(proj); err != nil || !st.IsDir() {
-			why = "不是存在的目录"
+			detail = i18n.T("%s 不是存在的目录，不当项目根：在这里跑 agent 时所有写入都算项目外")
 		}
-		return Check{ID: id, Name: name, Status: Skip, Detail: proj + " " + why + "，不当项目根：在这里跑 agent 时所有写入都算项目外"}
+		return Check{ID: id, Name: name, Status: Skip, Detail: fmt.Sprintf(detail, proj)}
 	}
 }
 
 // agentFilesCheck 看数据目录里存在的私密文件都是 0600（不存在的不算错：audit.jsonl 等要用到才建）。
 func agentFilesCheck(o Options, dirCheck Check) Check {
-	const id, name = "agent.files", "配置与审计文件权限"
+	const id = "agent.files"
+	name := i18n.T("配置与审计文件权限")
 	if st, err := os.Stat(o.AgentDir); err != nil || !st.IsDir() {
 		return Check{ID: id, Name: name, Status: Skip, Detail: dirCheck.Detail}
 	}
@@ -120,22 +123,23 @@ func agentFilesCheck(o Options, dirCheck Check) Check {
 		}
 	}
 	if len(bad) > 0 {
-		return Check{ID: id, Name: name, Status: Fail, Detail: "不是 0600：" + strings.Join(bad, "、"), Hint: "chmod 600 " + quoteAll(badPaths)}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("不是 0600：%s"), strings.Join(bad, i18n.T("、"))), Hint: "chmod 600 " + quoteAll(badPaths)}
 	}
-	return Check{ID: id, Name: name, Status: OK, Detail: strings.Join(files, "、") + "（存在的）都是 0600"}
+	return Check{ID: id, Name: name, Status: OK, Detail: fmt.Sprintf(i18n.T("%s（存在的）都是 0600"), strings.Join(files, i18n.T("、")))}
 }
 
 func agentSocketCheck(o Options) Check {
-	const id, name = "agent.socket", "socket 文件"
+	const id = "agent.socket"
+	name := i18n.T("socket 文件")
 	sock := filepath.Join(o.AgentDir, "agent.sock")
 	st, err := os.Stat(sock)
 	switch {
 	case err != nil:
-		return Check{ID: id, Name: name, Status: Fail, Detail: sock + " 不存在（守护进程没在跑）", Hint: "railse agent run（前台）或 railse setup autostart（开机自启）"}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s 不存在（守护进程没在跑）"), sock), Hint: i18n.T("railse agent run（前台）或 railse setup autostart（开机自启）")}
 	case st.Mode()&os.ModeSocket == 0:
-		return Check{ID: id, Name: name, Status: Fail, Detail: sock + " 不是 socket", Hint: "移走这个文件后重启守护进程"}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s 不是 socket"), sock), Hint: i18n.T("移走这个文件后重启守护进程")}
 	case st.Mode().Perm() != 0o600:
-		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf("%s 权限是 %04o，应为 0600", sock, st.Mode().Perm()), Hint: "chmod 600 " + hooksconf.ShellQuote(sock) + "，或重启守护进程"}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s 权限是 %04o，应为 0600"), sock, st.Mode().Perm()), Hint: fmt.Sprintf(i18n.T("chmod 600 %s，或重启守护进程"), hooksconf.ShellQuote(sock))}
 	}
 	return Check{ID: id, Name: name, Status: OK, Detail: sock}
 }
@@ -145,45 +149,46 @@ func agentRunningChecks(o Options) []Check {
 	st, err := o.AgentStatus(filepath.Join(o.AgentDir, "agent.sock"))
 	if err != nil {
 		return []Check{
-			{ID: "agent.running", Name: "守护进程在跑", Status: Fail, Detail: err.Error(), Hint: "railse agent run（前台）或 railse setup autostart（开机自启）"},
-			{ID: "agent.hub", Name: "hub 连接", Status: Skip, Detail: "守护进程没在跑"},
+			{ID: "agent.running", Name: i18n.T("守护进程在跑"), Status: Fail, Detail: err.Error(), Hint: i18n.T("railse agent run（前台）或 railse setup autostart（开机自启）")},
+			{ID: "agent.hub", Name: i18n.T("hub 连接"), Status: Skip, Detail: i18n.T("守护进程没在跑")},
 		}
 	}
-	paused := "未暂停"
+	paused := i18n.T("未暂停")
 	if st.Paused {
-		paused = "已暂停"
+		paused = i18n.T("已暂停")
 	}
 	hub := st.Hub
 	if hub == "" {
-		hub = "未知"
+		hub = i18n.T("未知")
 	}
-	running := Check{ID: "agent.running", Name: "守护进程在跑", Status: OK, Detail: fmt.Sprintf("规则 %d 条，待决 %d，%s，hub %s", st.Rules, st.Pending, paused, hub)}
-	const id, name = "agent.hub", "hub 连接"
+	running := Check{ID: "agent.running", Name: i18n.T("守护进程在跑"), Status: OK, Detail: fmt.Sprintf(i18n.T("规则 %d 条，待决 %d，%s，hub %s"), st.Rules, st.Pending, paused, hub)}
+	const id = "agent.hub"
+	name := i18n.T("hub 连接")
 	var hc Check
 	switch st.Hub {
 	case "connected":
-		hc = Check{ID: id, Name: name, Status: OK, Detail: "已连上 " + st.HubURL}
+		hc = Check{ID: id, Name: name, Status: OK, Detail: fmt.Sprintf(i18n.T("已连上 %s"), st.HubURL)}
 	case "connecting":
-		hc = Check{ID: id, Name: name, Status: Warn, Detail: "正在重连 " + st.HubURL, Hint: "看 agent.log 里 hub 连接断开的原因；网络不通或 hub 没起来时都会这样"}
+		hc = Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf(i18n.T("正在重连 %s"), st.HubURL), Hint: i18n.T("看 agent.log 里 hub 连接断开的原因；网络不通或 hub 没起来时都会这样")}
 	case "disabled":
-		hc = Check{ID: id, Name: name, Status: Fail, Detail: st.HubURL + " 连续以 401 拒绝本机密钥（机器被吊销或密钥无效），守护进程已停止重连", Hint: "railse agent enroll --hub … --token … --force 重新接入后重启守护进程"}
+		hc = Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s 连续以 401 拒绝本机密钥（机器被吊销或密钥无效），守护进程已停止重连"), st.HubURL), Hint: i18n.T("railse agent enroll --hub … --token … --force 重新接入后重启守护进程")}
 	case "none":
-		hc = Check{ID: id, Name: name, Status: Warn, Detail: "未接入 hub，引擎定不了的请求会交回终端", Hint: "要在手机上审批就接入：railse agent enroll --hub https://… --token …"}
+		hc = Check{ID: id, Name: name, Status: Warn, Detail: i18n.T("未接入 hub，引擎定不了的请求会交回终端"), Hint: i18n.T("要在手机上审批就接入：railse agent enroll --hub https://… --token …")}
 		// 守护进程只在启动时读 machine.json：文件已在却报 none，是接入之后还没重启它
 		if _, err := os.Lstat(filepath.Join(o.AgentDir, "machine.json")); err == nil {
-			hc.Detail = "守护进程没接 hub，但 machine.json 已在：接入后还没重启守护进程（它只在启动时读 machine.json）"
-			hc.Hint = "接入后还没重启守护进程：托管的用 railse setup autostart" + dirFlag(o) + " 重装，前台跑的停掉后重新 railse agent run" + dirFlag(o)
+			hc.Detail = i18n.T("守护进程没接 hub，但 machine.json 已在：接入后还没重启守护进程（它只在启动时读 machine.json）")
+			hc.Hint = fmt.Sprintf(i18n.T("接入后还没重启守护进程：托管的用 railse setup autostart%s 重装，前台跑的停掉后重新 railse agent run%s"), dirFlag(o), dirFlag(o))
 		}
 	default:
 		// 升级了程序却没重启守护进程时，旧进程不报 hub 状态
-		hc = Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf("守护进程没有报告 hub 状态（%q），可能是升级前启动的旧进程", st.Hub), Hint: "重启守护进程：托管的重跑一次 railse setup autostart，前台跑的停掉后重新 railse agent run"}
+		hc = Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf(i18n.T("守护进程没有报告 hub 状态（%q），可能是升级前启动的旧进程"), st.Hub), Hint: i18n.T("重启守护进程：托管的重跑一次 railse setup autostart，前台跑的停掉后重新 railse agent run")}
 	}
 	return []Check{running, hc}
 }
 
 // autostartCheck 只看托管文件在不在，不跑 launchctl/systemctl。路径与 railse setup autostart 共用 internal/autostart。
 // hub 在 Linux 上也可能装成系统单元（以 root 跑 railse setup autostart --hub --system），那个存在也算。
-// 取不到家目录时只看系统单元，没有就 skip：不拼相对路径。
+// 取不到家目录时只看系统单元，没有就 skip：不拼相对路径。name 由调用方过 i18n.T。
 func autostartCheck(id, name string, o Options, kind string) Check {
 	var paths []string
 	switch o.GOOS {
@@ -199,7 +204,7 @@ func autostartCheck(id, name string, o Options, kind string) Check {
 			paths = append(paths, autostart.UnitPath(o.Home, kind, false))
 		}
 	default:
-		return Check{ID: id, Name: name, Status: Skip, Detail: "不支持 " + o.GOOS + " 的开机自启"}
+		return Check{ID: id, Name: name, Status: Skip, Detail: fmt.Sprintf(i18n.T("不支持 %s 的开机自启"), o.GOOS)}
 	}
 	if o.Home == "" {
 		for _, p := range paths {
@@ -207,7 +212,7 @@ func autostartCheck(id, name string, o Options, kind string) Check {
 				return Check{ID: id, Name: name, Status: OK, Detail: p}
 			}
 		}
-		return Check{ID: id, Name: name, Status: Skip, Detail: noHome}
+		return Check{ID: id, Name: name, Status: Skip, Detail: i18n.T(noHome)}
 	}
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {
@@ -218,5 +223,5 @@ func autostartCheck(id, name string, o Options, kind string) Check {
 	if kind == "hub" {
 		flag = " --hub"
 	}
-	return Check{ID: id, Name: name, Status: Warn, Detail: "没有托管文件 " + strings.Join(paths, " 或 "), Hint: "railse setup autostart" + flag + "：开机自启、退出后自动拉起"}
+	return Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf(i18n.T("没有托管文件 %s"), strings.Join(paths, i18n.T(" 或 "))), Hint: fmt.Sprintf(i18n.T("railse setup autostart%s：开机自启、退出后自动拉起"), flag)}
 }

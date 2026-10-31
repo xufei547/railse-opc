@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/xufei547/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/proto"
 	"github.com/xufei547/railse-opc/internal/tailscale"
 )
@@ -31,7 +32,7 @@ const (
 	Skip Status = "skip"
 )
 
-// Check 是一项检查。ID 固定不变（给脚本与 --json 用），Name、Detail、Hint 是中文。warn 与 fail 必带 Hint。
+// Check 是一项检查。ID 固定不变（给脚本与 --json 用），Name、Detail、Hint 是当前语言的文字（构造检查时过 i18n.T）。warn 与 fail 必带 Hint。
 type Check struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
@@ -96,7 +97,7 @@ type Options struct {
 	FileOwner func(path string) (uid int, ok bool)
 }
 
-// noHome 是取不到家目录时，用到家目录的检查（开机自启、Codex 的钩子与 notify）的 skip 说明。
+// noHome 是取不到家目录时，用到家目录的检查（开机自启、Codex 的钩子与 notify）的 skip 说明（用时过 i18n.T）。
 const noHome = "取不到家目录（$HOME 没设），跳过"
 
 // cliTimeout 是 `<cli> --version` 的时限：首次运行的自更新、登录提示之类卡住时不让 doctor 跟着挂住。是变量只为测试能调短。
@@ -114,7 +115,7 @@ func runCmd(name string, args ...string) (string, error) {
 	cmd.WaitDelay = time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil && ctx.Err() != nil {
-		return string(out), fmt.Errorf("%s 超过 %s 没有结束，已终止", name, cliTimeout)
+		return string(out), fmt.Errorf(i18n.T("%s 超过 %s 没有结束，已终止"), name, cliTimeout)
 	}
 	return string(out), err
 }
@@ -152,7 +153,7 @@ func (o *Options) defaults() {
 				return proto.Status{}, err
 			}
 			if !reply.OK || reply.Status == nil {
-				return proto.Status{}, fmt.Errorf("守护进程答复失败: %s", reply.Error)
+				return proto.Status{}, fmt.Errorf(i18n.T("守护进程答复失败: %s"), reply.Error)
 			}
 			return *reply.Status, nil
 		}

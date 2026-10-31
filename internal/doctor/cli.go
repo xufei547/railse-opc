@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 // 录制钩子样本时的版本（internal/adapter/testdata）与 Gemini 的最低可用版本（实验：0.65.0 之前 BeforeTool 在确认之后才触发）。
@@ -90,45 +92,45 @@ func cliChecks(o Options) []Check {
 	var out []Check
 	sudo := underSudo(o)
 	for _, cli := range []struct{ id, name, cmd, sample string }{
-		{"cli.claude", "Claude Code 版本", "claude", sampleClaude},
-		{"cli.codex", "Codex CLI 版本", "codex", sampleCodex},
-		{"cli.gemini", "Gemini CLI 版本", "gemini", ""},
+		{"cli.claude", i18n.T("Claude Code 版本"), "claude", sampleClaude},
+		{"cli.codex", i18n.T("Codex CLI 版本"), "codex", sampleCodex},
+		{"cli.gemini", i18n.T("Gemini CLI 版本"), "gemini", ""},
 	} {
 		path, err := o.LookPath(cli.cmd)
 		if err != nil {
-			out = append(out, Check{ID: cli.id, Name: cli.name, Status: Skip, Detail: "PATH 里没有 " + cli.cmd})
+			out = append(out, Check{ID: cli.id, Name: cli.name, Status: Skip, Detail: fmt.Sprintf(i18n.T("PATH 里没有 %s"), cli.cmd)})
 			continue
 		}
 		if sudo {
-			out = append(out, Check{ID: cli.id, Name: cli.name, Status: Skip, Detail: "sudo 下不跑 CLI，免得在用户目录留下 root 属主的文件", Hint: "用平时的用户身份重跑 railse doctor"})
+			out = append(out, Check{ID: cli.id, Name: cli.name, Status: Skip, Detail: i18n.T("sudo 下不跑 CLI，免得在用户目录留下 root 属主的文件"), Hint: i18n.T("用平时的用户身份重跑 railse doctor")})
 			continue
 		}
 		text, err := o.RunCmd(path, "--version")
 		v, ok := parseVersion(text)
 		if err != nil {
-			detail := fmt.Sprintf("%s --version 失败：%v", path, err)
+			detail := fmt.Sprintf(i18n.T("%s --version 失败：%v"), path, err)
 			if first := firstLine(text, 200); first != "" {
-				detail += "；输出：" + first
+				detail += fmt.Sprintf(i18n.T("；输出：%s"), first)
 			}
-			out = append(out, Check{ID: cli.id, Name: cli.name, Status: Warn, Detail: detail, Hint: "在终端里手动跑一次 " + cli.cmd + " --version 确认它能用"})
+			out = append(out, Check{ID: cli.id, Name: cli.name, Status: Warn, Detail: detail, Hint: fmt.Sprintf(i18n.T("在终端里手动跑一次 %s --version 确认它能用"), cli.cmd)})
 			continue
 		}
 		if !ok {
-			out = append(out, Check{ID: cli.id, Name: cli.name, Status: Warn, Detail: path + " --version 没有给出版本号", Hint: "在终端里手动跑一次 " + cli.cmd + " --version 确认版本"})
+			out = append(out, Check{ID: cli.id, Name: cli.name, Status: Warn, Detail: fmt.Sprintf(i18n.T("%s --version 没有给出版本号"), path), Hint: fmt.Sprintf(i18n.T("在终端里手动跑一次 %s --version 确认版本"), cli.cmd)})
 			continue
 		}
 		vs := fmt.Sprintf("%d.%d.%d", v[0], v[1], v[2])
 		if cli.cmd == "gemini" {
 			minV, _ := parseVersion(minGemini)
 			if versionLess(v, minV) {
-				out = append(out, Check{ID: cli.id, Name: cli.name, Status: Fail, Detail: fmt.Sprintf("当前 %s，低于 %s：钩子在 %s 之前无法在审批前拦截（确认之后才触发）", vs, minGemini, minGemini), Hint: "升级 Gemini CLI 到 " + minGemini + " 或更新"})
+				out = append(out, Check{ID: cli.id, Name: cli.name, Status: Fail, Detail: fmt.Sprintf(i18n.T("当前 %s，低于 %s：钩子在 %s 之前无法在审批前拦截（确认之后才触发）"), vs, minGemini, minGemini), Hint: fmt.Sprintf(i18n.T("升级 Gemini CLI 到 %s 或更新"), minGemini)})
 			} else {
 				out = append(out, Check{ID: cli.id, Name: cli.name, Status: OK, Detail: vs})
 			}
 			continue
 		}
 		if vs != cli.sample {
-			out = append(out, Check{ID: cli.id, Name: cli.name, Status: Warn, Detail: fmt.Sprintf("钩子格式按 %s 录制，当前 %s 未验证", cli.sample, vs), Hint: "试一次需要审批的操作，确认请求经过 Railse；不行就换回 " + cli.sample + " 并反馈"})
+			out = append(out, Check{ID: cli.id, Name: cli.name, Status: Warn, Detail: fmt.Sprintf(i18n.T("钩子格式按 %s 录制，当前 %s 未验证"), cli.sample, vs), Hint: fmt.Sprintf(i18n.T("试一次需要审批的操作，确认请求经过 Railse；不行就换回 %s 并反馈"), cli.sample)})
 		} else {
 			out = append(out, Check{ID: cli.id, Name: cli.name, Status: OK, Detail: vs})
 		}

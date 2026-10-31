@@ -12,17 +12,18 @@ import (
 	"syscall"
 
 	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 // hookChecks 看三个 CLI 的钩子。Claude、Gemini 的用户级（Home 下）或项目级（Project 下）任一装了就算装了（见 levelsCheck）；
 // Codex 的钩子与 notify 只有用户级，只看 Home。
 func hookChecks(o Options) []Check {
 	codex := []Check{
-		{ID: "hooks.codex", Name: "Codex 钩子", Status: Skip, Detail: noHome},
-		{ID: codexNotifyID, Name: codexNotifyName, Status: Skip, Detail: noHome},
+		{ID: "hooks.codex", Name: i18n.T("Codex 钩子"), Status: Skip, Detail: i18n.T(noHome)},
+		{ID: codexNotifyID, Name: codexNotifyName, Status: Skip, Detail: i18n.T(noHome)},
 	}
 	if o.Home != "" { // Codex 的钩子与 notify 都在用户级的 ~/.codex 下
-		codex = []Check{hookFileCheck("hooks.codex", "Codex 钩子", "codex", hooksconf.CodexPath(o.Home), setupHint(o, "codex", ""), o), codexNotifyCheck(o)}
+		codex = []Check{hookFileCheck("hooks.codex", i18n.T("Codex 钩子"), "codex", hooksconf.CodexPath(o.Home), setupHint(o, "codex", ""), o), codexNotifyCheck(o)}
 	}
 	return []Check{
 		claudeHookCheck(o),
@@ -67,17 +68,17 @@ func socketMismatch(o Options, explicit string) (connects string, ok bool) {
 }
 
 // socketDetail 与 socketHint 说钩子（或 notify）连的 socket 对不上守护进程：重装命令带 --dir；有显式 --socket 的，
-// 也可能是 doctor 自己没给对 --dir。
-func socketDetail(what string, socks []string, o Options) string {
-	return fmt.Sprintf("%s连的是 %s，守护进程在 %s", what, strings.Join(socks, "、"), agentSocket(o))
+// 也可能是 doctor 自己没给对 --dir。format 是过了 i18n.T 的“谁连的是 %s，守护进程在 %s”；fix 是过了 i18n.T 的整句修复
+// （说到“让它连 <AgentDir> 里的守护进程”为止）。
+func socketDetail(format string, socks []string, o Options) string {
+	return fmt.Sprintf(format, strings.Join(socks, i18n.T("、")), agentSocket(o))
 }
 
-func socketHint(fix string, explicitDirs []string, o Options) string {
-	h := fix + "，让它连 " + o.AgentDir + " 里的守护进程"
+func socketHint(fix string, explicitDirs []string) string {
 	if len(explicitDirs) > 0 {
-		h += "；守护进程确实在 " + strings.Join(explicitDirs, "、") + " 的话，railse doctor 加 --dir " + hooksconf.ShellQuote(explicitDirs[0])
+		fix += fmt.Sprintf(i18n.T("；守护进程确实在 %s 的话，railse doctor 加 --dir %s"), strings.Join(explicitDirs, i18n.T("、")), hooksconf.ShellQuote(explicitDirs[0]))
 	}
-	return h
+	return fix
 }
 
 // hasOurs 报告 path 是一份读得了、解析得了、里面有我们条目的钩子配置。
@@ -114,8 +115,9 @@ func sameOurs(a, b, bin string) bool {
 }
 
 // sameHandlers 是 Claude 两处都装了相同的钩子时细节里的说明：Claude Code 对相同的处理器只跑一次，不算重复触发。
+// remove 由调用方过 i18n.T。
 func sameHandlers(other, remove string) string {
-	return other + " 也装了相同的钩子（Claude Code 对相同的处理器只跑一次），可以删掉 " + remove
+	return fmt.Sprintf(i18n.T("%s 也装了相同的钩子（Claude Code 对相同的处理器只跑一次），可以删掉 %s"), other, remove)
 }
 
 func sameFile(a, b string) bool {
@@ -129,7 +131,8 @@ func sameFile(a, b string) bool {
 
 // claudeHookCheck 看 Claude 的钩子：用户级 ~/.claude/settings.json，或项目级（见 claudeProjectCheck）。
 func claudeHookCheck(o Options) Check {
-	const id, name = "hooks.claude", "Claude Code 钩子"
+	const id = "hooks.claude"
+	name := i18n.T("Claude Code 钩子")
 	var project []string
 	if o.Project != "" {
 		local, shared := hooksconf.ClaudePaths(o.Project)
@@ -140,7 +143,8 @@ func claudeHookCheck(o Options) Check {
 
 // geminiHookCheck 看 Gemini 的钩子：用户级 ~/.gemini/settings.json，或项目级 <项目>/.gemini/settings.json。
 func geminiHookCheck(o Options) Check {
-	const id, name = "hooks.gemini", "Gemini 钩子"
+	const id = "hooks.gemini"
+	name := i18n.T("Gemini 钩子")
 	var project []string
 	if o.Project != "" {
 		project = []string{hooksconf.GeminiPath(o.Project)}
@@ -170,7 +174,7 @@ func userPath(o Options, path func(home string) string) string {
 func levelsCheck(id, name, cli, user string, project []string, projectCheck func() Check, o Options) Check {
 	switch {
 	case user == "" && len(project) == 0:
-		return Check{ID: id, Name: name, Status: Skip, Detail: "取不到家目录（$HOME 没设），也没有指定项目目录（--project），跳过"}
+		return Check{ID: id, Name: name, Status: Skip, Detail: i18n.T("取不到家目录（$HOME 没设），也没有指定项目目录（--project），跳过")}
 	case user == "":
 		return projectCheck()
 	}
@@ -200,20 +204,20 @@ func levelsCheck(id, name, cli, user string, project []string, projectCheck func
 			}
 		}
 		if len(same) > 0 {
-			files := strings.Join(same, "、")
-			c.Detail += "；" + sameHandlers(files, files+" 里 Railse 的条目（用户级已对所有项目生效）")
+			files := strings.Join(same, i18n.T("、"))
+			c.Detail += i18n.T("；") + sameHandlers(files, fmt.Sprintf(i18n.T("%s 里 Railse 的条目（用户级已对所有项目生效）"), files))
 		}
 		if len(twice) > 0 {
 			if c.Status == OK {
 				c.Status = Warn
 			}
-			files := strings.Join(twice, "、")
-			c.Detail += "；项目级 " + files + " 也装了，钩子会触发两次"
-			del := "删掉 " + files + " 里 Railse 的钩子条目（用户级已对所有项目生效）"
+			files := strings.Join(twice, i18n.T("、"))
+			c.Detail += fmt.Sprintf(i18n.T("；项目级 %s 也装了，钩子会触发两次"), files)
+			del := fmt.Sprintf(i18n.T("删掉 %s 里 Railse 的钩子条目（用户级已对所有项目生效）"), files)
 			if c.Hint == "" {
 				c.Hint = del
-			} else {
-				c.Hint += "；" + del
+			} else { // 两句修复：英文用句号隔开（与细节里的“；”分开译）
+				c.Hint = fmt.Sprintf(i18n.T("%s；%s"), c.Hint, del)
 			}
 		}
 		return c
@@ -226,11 +230,11 @@ func levelsCheck(id, name, cli, user string, project []string, projectCheck func
 	for _, p := range projLooked {
 		if broken(p, o.Bin) {
 			c := hookFileCheck(id, name, cli, p, setupHint(o, cli, o.Project), o)
-			c.Detail += "；用户级 " + user + " 也没装"
+			c.Detail += fmt.Sprintf(i18n.T("；用户级 %s 也没装"), user)
 			return c
 		}
 	}
-	return Check{ID: id, Name: name, Status: Fail, Detail: "没装钩子（看过 " + strings.Join(looked, "、") + "）", Hint: hint}
+	return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("没装钩子（看过 %s）"), strings.Join(looked, i18n.T("、"))), Hint: hint}
 }
 
 // claudeProjectCheck 看 Claude 的项目级钩子：现在写在 .claude/settings.local.json，旧版写在 .claude/settings.json。
@@ -238,46 +242,47 @@ func levelsCheck(id, name, cli, user string, project []string, projectCheck func
 // warn，完全相同时 Claude Code 只跑一次，不降级，细节里说可以迁走；两处是同一个文件（链接）不算两处；两处都没有：fail；
 // settings.local.json 是坏 JSON 时报它（setup 也要往里写）。
 func claudeProjectCheck(o Options) Check {
-	const id, name = "hooks.claude", "Claude Code 钩子"
+	const id = "hooks.claude"
+	name := i18n.T("Claude Code 钩子")
 	local, shared := hooksconf.ClaudePaths(o.Project)
 	localHas, sharedHas := hasOurs(local, o.Bin), hasOurs(shared, o.Bin) && !sameFile(local, shared)
 	hint := setupHint(o, "claude", o.Project)
-	migrate := "运行 " + hint + " 迁到 settings.local.json"
+	migrate := fmt.Sprintf(i18n.T("运行 %s 迁到 settings.local.json"), hint)
 	switch {
 	case sharedHas && !localHas:
 		if b, err := os.ReadFile(local); err == nil {
 			if _, err := hooksconf.Inspect(b, o.Bin); err != nil { // settings.local.json 坏了：先修它，setup 也要往里写
 				c := hookFileCheck(id, name, "claude", local, hint, o)
-				c.Detail += "；钩子还在 .claude/settings.json（旧位置）"
+				c.Detail += i18n.T("；钩子还在 .claude/settings.json（旧位置）")
 				return c
 			}
 		}
 		c := hookFileCheck(id, name, "claude", shared, hint, o)
 		if c.Status == Fail {
-			c.Detail = "钩子还在 .claude/settings.json（旧位置），且不全：" + c.Detail
+			c.Detail = fmt.Sprintf(i18n.T("钩子还在 .claude/settings.json（旧位置），且不全：%s"), c.Detail)
 			return c
 		}
-		detail := "钩子还在 .claude/settings.json（旧位置）"
+		detail := i18n.T("钩子还在 .claude/settings.json（旧位置）")
 		if c.Status == Warn { // 程序路径不同：同一条命令一并改掉
-			detail += "；" + strings.TrimPrefix(c.Detail, shared+"：")
+			detail += i18n.T("；") + strings.TrimPrefix(c.Detail, fmt.Sprintf(i18n.T("%s：%s"), shared, ""))
 		}
 		return Check{ID: id, Name: name, Status: Warn, Detail: detail, Hint: migrate}
 	case sharedHas && localHas:
 		c := hookFileCheck(id, name, "claude", local, hint, o)
 		if sameOurs(local, shared, o.Bin) {
-			c.Detail += "；" + sameHandlers(shared, shared+" 里 Railse 的条目（运行 "+hint+" 会迁走）")
+			c.Detail += i18n.T("；") + sameHandlers(shared, fmt.Sprintf(i18n.T("%s 里 Railse 的条目（运行 %s 会迁走）"), shared, hint))
 		} else {
 			if c.Status == OK {
 				c.Status = Warn
 			}
-			c.Detail += "；settings.json 与 settings.local.json 都装了，钩子会触发两次"
+			c.Detail += i18n.T("；settings.json 与 settings.local.json 都装了，钩子会触发两次")
 		}
 		switch {
 		case c.Status == OK:
 		case c.Hint == "":
 			c.Hint = migrate
 		default:
-			c.Hint += "（同一条命令也会把 settings.json 里的迁走）"
+			c.Hint += i18n.T("（同一条命令也会把 settings.json 里的迁走）")
 		}
 		return c
 	}
@@ -285,18 +290,18 @@ func claudeProjectCheck(o Options) Check {
 }
 
 // hookFileCheck 看一份钩子配置：Expected(cli) 的每个事件都有我们的条目且超时不低于下限；Bin 非空时程序路径要是它。
-// hint 是重装这份配置的命令（setupHint）。
+// hint 是重装这份配置的命令（setupHint）；name 由调用方过 i18n.T。
 func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return Check{ID: id, Name: name, Status: Fail, Detail: path + " 不存在，没装钩子", Hint: hint}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s 不存在，没装钩子"), path), Hint: hint}
 	}
 	if err != nil {
-		return Check{ID: id, Name: name, Status: Fail, Detail: err.Error(), Hint: "确认用跑 CLI 的同一个用户运行 doctor"}
+		return Check{ID: id, Name: name, Status: Fail, Detail: err.Error(), Hint: i18n.T("确认用跑 CLI 的同一个用户运行 doctor")}
 	}
 	ins, err := hooksconf.Inspect(b, o.Bin)
 	if err != nil {
-		return Check{ID: id, Name: name, Status: Fail, Detail: path + "：" + err.Error(), Hint: "修好 JSON 后再 " + hint}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s：%s"), path, err.Error()), Hint: fmt.Sprintf(i18n.T("修好 JSON 后再 %s"), hint)}
 	}
 	var missing, short, others, socks, explicitDirs []string
 	seen := map[string]bool{}
@@ -306,7 +311,7 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 		case !st.Present:
 			missing = append(missing, ev)
 		case st.Timeout < min:
-			short = append(short, fmt.Sprintf("%s（超时 %d，要 ≥ %d）", ev, st.Timeout, min))
+			short = append(short, fmt.Sprintf(i18n.T("%s（超时 %d，要 ≥ %d）"), ev, st.Timeout, min))
 		}
 		if st.Program != "" && o.Bin != "" && !samePath(st.Program, o.Bin) && !seen[st.Program] {
 			seen[st.Program] = true
@@ -324,7 +329,7 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 		}
 	}
 	// 只缺 PreToolUse 是旧安装：审批、提醒都照常，只是 Claude Code 的选择题进不了手机，所以降为 warn 而不是 fail
-	const askMissing = "缺 PreToolUse：Claude Code 的选择题进不了手机"
+	askMissing := i18n.T("缺 PreToolUse：Claude Code 的选择题进不了手机")
 	noAsk := cli == "claude" && slices.Equal(missing, []string{"PreToolUse"}) && len(short) == 0
 	sort.Strings(missing)
 	sort.Strings(short)
@@ -334,30 +339,30 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 	if (len(missing) > 0 || len(short) > 0) && !noAsk {
 		var parts []string
 		if len(missing) > 0 {
-			parts = append(parts, "缺 "+strings.Join(missing, "、"))
+			parts = append(parts, fmt.Sprintf(i18n.T("缺 %s"), strings.Join(missing, i18n.T("、"))))
 		}
 		if len(short) > 0 {
-			parts = append(parts, "超时不够："+strings.Join(short, "、"))
+			parts = append(parts, fmt.Sprintf(i18n.T("超时不够：%s"), strings.Join(short, i18n.T("、"))))
 		}
-		return Check{ID: id, Name: name, Status: Fail, Detail: path + "：" + strings.Join(parts, "；"), Hint: hint}
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s：%s"), path, strings.Join(parts, i18n.T("；"))), Hint: hint}
 	}
 	if noAsk && len(others) == 0 && len(socks) == 0 {
-		return Check{ID: id, Name: name, Status: Warn, Detail: path + "：" + askMissing, Hint: hint}
+		return Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf(i18n.T("%s：%s"), path, askMissing), Hint: hint}
 	}
 	if len(others) > 0 || len(socks) > 0 {
 		var parts []string
 		if noAsk {
 			parts = append(parts, askMissing)
 		}
-		h := "换过安装路径就重新 " + hint
+		h := fmt.Sprintf(i18n.T("换过安装路径就重新 %s"), hint)
 		if len(others) > 0 {
-			parts = append(parts, fmt.Sprintf("钩子指向 %s，当前程序是 %s", strings.Join(others, "、"), o.Bin))
+			parts = append(parts, fmt.Sprintf(i18n.T("钩子指向 %s，当前程序是 %s"), strings.Join(others, i18n.T("、")), o.Bin))
 		}
 		if len(socks) > 0 {
-			parts = append(parts, socketDetail("钩子", socks, o))
-			h = socketHint("运行 "+hint+" 重装钩子", explicitDirs, o)
+			parts = append(parts, socketDetail(i18n.T("钩子连的是 %s，守护进程在 %s"), socks, o))
+			h = socketHint(fmt.Sprintf(i18n.T("运行 %s 重装钩子，让它连 %s 里的守护进程"), hint, o.AgentDir), explicitDirs)
 		}
-		return Check{ID: id, Name: name, Status: Warn, Detail: path + "：" + strings.Join(parts, "；"), Hint: h}
+		return Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf(i18n.T("%s：%s"), path, strings.Join(parts, i18n.T("；"))), Hint: h}
 	}
 	return Check{ID: id, Name: name, Status: OK, Detail: path}
 }
@@ -374,28 +379,28 @@ func samePath(a, b string) bool {
 func codexNotifyCheck(o Options) Check {
 	path := hooksconf.CodexConfigPath(o.Home)
 	fix := "railse setup codex-notify" + dirFlag(o)
-	hint := "运行 " + fix + "（会保留已有的 notify）"
+	hint := fmt.Sprintf(i18n.T("运行 %s（会保留已有的 notify）"), fix)
 	b, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR): // 新用户第一次体检多半是这样：说不存在，不说成权限问题
-		return notifyWarn(path+" 不存在，Codex 的完成与提问事件不会进收件箱", hint)
+		return notifyWarn(fmt.Sprintf(i18n.T("%s 不存在，Codex 的完成与提问事件不会进收件箱"), path), hint)
 	case err != nil:
 		why := err
 		var pe *fs.PathError
 		if errors.As(err, &pe) { // 细节里不重复路径
 			why = pe.Err
 		}
-		return notifyWarn(path+" 读不到（"+why.Error()+"），Codex 的完成与提问事件不会进收件箱", "确认用跑 Codex 的同一个用户运行 doctor")
+		return notifyWarn(fmt.Sprintf(i18n.T("%s 读不到（%s），Codex 的完成与提问事件不会进收件箱"), path, why.Error()), i18n.T("确认用跑 Codex 的同一个用户运行 doctor"))
 	}
 	n, err := hooksconf.ParseCodexNotify(b)
 	switch {
 	case err != nil:
-		return notifyWarn(path+" 看不懂："+err.Error(), "手动改好这一处，再运行 "+fix)
+		return notifyWarn(fmt.Sprintf(i18n.T("%s 看不懂：%s"), path, err.Error()), fmt.Sprintf(i18n.T("手动改好这一处，再运行 %s"), fix))
 	case !n.Found && len(n.Tables) > 0:
 		table := n.Tables[0]
-		return notifyWarn(fmt.Sprintf("%s 里的 notify 写在了 %s 下面，Codex 读不到", path, table), "运行 "+fix+"（在文件开头写顶层的 notify），再删掉 "+table+" 下面那个")
+		return notifyWarn(fmt.Sprintf(i18n.T("%s 里的 notify 写在了 %s 下面，Codex 读不到"), path, table), fmt.Sprintf(i18n.T("运行 %s（在文件开头写顶层的 notify），再删掉 %s 下面那个"), fix, table))
 	case !n.Found:
-		return notifyWarn(path+" 里没有 notify，Codex 的完成与提问事件不会进收件箱", hint)
+		return notifyWarn(fmt.Sprintf(i18n.T("%s 里没有 notify，Codex 的完成与提问事件不会进收件箱"), path), hint)
 	case len(n.Argv) == 1 && filepath.Base(n.Argv[0]) == hooksconf.NotifyScriptName:
 		return codexNotifyScriptCheck(o, path, n.Argv[0], fix)
 	}
@@ -407,12 +412,12 @@ func codexNotifyCheck(o Options) Check {
 		if i+3 < len(n.Argv) && n.Argv[i+2] == "--socket" {
 			explicit = n.Argv[i+3]
 		}
-		if c, bad := notifySocketCheck(o, path, "notify ", explicit, fix+" 重写 notify"); bad {
+		if c, bad := notifySocketCheck(o, path, i18n.T("notify 连的是 %s，守护进程在 %s"), fmt.Sprintf(i18n.T("运行 %s 重写 notify，让它连 %s 里的守护进程"), fix, o.AgentDir), explicit); bad {
 			return c
 		}
 		return Check{ID: codexNotifyID, Name: codexNotifyName, Status: OK, Detail: path}
 	}
-	return notifyWarn(path+" 的 notify 不调 railse（"+hooksconf.ShellJoin(n.Argv)+"），Codex 的完成与提问事件不会进收件箱", hint)
+	return notifyWarn(fmt.Sprintf(i18n.T("%s 的 notify 不调 railse（%s），Codex 的完成与提问事件不会进收件箱"), path, hooksconf.ShellJoin(n.Argv)), hint)
 }
 
 const codexNotifyID, codexNotifyName = "hooks.codex_notify", "Codex notify"
@@ -426,34 +431,35 @@ func notifyWarn(detail, hint string) Check {
 // 那一行才 ok；那一行连的 socket 对不上 --dir 的守护进程时 warn。fix 是重新生成脚本的命令。没有 railse 那一行的、不在数据目录里
 // 也没有标记行的，是用户自己的 codex-notify.sh：setup codex-notify 会把它保留为前一跳，提示照实说，不说“重新生成”。
 func codexNotifyScriptCheck(o Options, path, script, fix string) Check {
-	hint := "运行 " + fix + " 重新生成"
+	hint := fmt.Sprintf(i18n.T("运行 %s 重新生成"), fix)
 	st, err := os.Stat(script)
 	switch {
 	case err != nil:
-		return notifyWarn(path+" 的 notify 指向 "+script+"，它不存在或读不到", hint)
+		return notifyWarn(fmt.Sprintf(i18n.T("%s 的 notify 指向 %s，它不存在或读不到"), path, script), hint)
 	case !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0:
-		return notifyWarn(path+" 的 notify 指向 "+script+"，它不可执行", hint)
+		return notifyWarn(fmt.Sprintf(i18n.T("%s 的 notify 指向 %s，它不可执行"), path, script), hint)
 	}
 	b, err := os.ReadFile(script)
 	if err != nil {
-		return notifyWarn(err.Error(), "确认用跑 Codex 的同一个用户运行 doctor")
+		return notifyWarn(err.Error(), i18n.T("确认用跑 Codex 的同一个用户运行 doctor"))
 	}
 	c, ok := hooksconf.NotifyScriptHook(b)
 	if !ok {
 		if _, marked, _ := hooksconf.ParseNotifyScript(b); !marked && !samePath(script, filepath.Join(o.AgentDir, hooksconf.NotifyScriptName)) {
-			hint = "运行 " + fix + "：会把这个脚本保留为前一跳，再串上 railse"
+			hint = fmt.Sprintf(i18n.T("运行 %s：会把这个脚本保留为前一跳，再串上 railse"), fix)
 		}
-		return notifyWarn(script+" 里没有 railse 的 hook codex-notify 那一行，Codex 的完成与提问事件不会进收件箱", hint)
+		return notifyWarn(fmt.Sprintf(i18n.T("%s 里没有 railse 的 hook codex-notify 那一行，Codex 的完成与提问事件不会进收件箱"), script), hint)
 	}
-	if c, bad := notifySocketCheck(o, script, "notify 脚本里的 railse ", c.Socket, fix+" 重新生成脚本"); bad {
+	if c, bad := notifySocketCheck(o, script, i18n.T("notify 脚本里的 railse 连的是 %s，守护进程在 %s"), fmt.Sprintf(i18n.T("运行 %s 重新生成脚本，让它连 %s 里的守护进程"), fix, o.AgentDir), c.Socket); bad {
 		return c
 	}
-	return Check{ID: codexNotifyID, Name: codexNotifyName, Status: OK, Detail: path + "（notify 经 " + script + "）"}
+	return Check{ID: codexNotifyID, Name: codexNotifyName, Status: OK, Detail: fmt.Sprintf(i18n.T("%s（notify 经 %s）"), path, script)}
 }
 
 // notifySocketCheck 是 notify 里 railse 连的 socket（explicit 是 --socket 给的，空表示没带）对不上 --dir 的守护进程时的 warn；
-// 对得上或推不出基准时 bad 为假。where 是细节开头的文件，what 说是谁连的，fix 是重写的命令。
-func notifySocketCheck(o Options, where, what, explicit, fix string) (c Check, bad bool) {
+// 对得上或推不出基准时 bad 为假。where 是细节开头的文件，detailFormat 是过了 i18n.T 的“谁连的是 %s，守护进程在 %s”，
+// fix 是过了 i18n.T 的整句修复（见 socketHint）。
+func notifySocketCheck(o Options, where, detailFormat, fix, explicit string) (c Check, bad bool) {
 	s, ok := socketMismatch(o, explicit)
 	if ok {
 		return Check{}, false
@@ -462,5 +468,5 @@ func notifySocketCheck(o Options, where, what, explicit, fix string) (c Check, b
 	if explicit != "" {
 		dirs = []string{filepath.Dir(explicit)}
 	}
-	return notifyWarn(where+"："+socketDetail(what, []string{s}, o), socketHint("运行 "+fix, dirs, o)), true
+	return notifyWarn(fmt.Sprintf(i18n.T("%s：%s"), where, socketDetail(detailFormat, []string{s}, o)), socketHint(fix, dirs)), true
 }
