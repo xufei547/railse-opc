@@ -201,3 +201,11 @@ func proxyNote(goos string, getenv func(string) string, run func(name string, ar
 	}
 	return fmt.Sprintf("本机开着代理；手机若也经同一代理打不开 %s，关掉代理再试，或在代理规则里把 ts.net 设为直连", publicURL)
 }
+
+// localHubRestartCmd 是重启托管的本机 hub 的命令（与 docs/setup.md 升级一节一致）：macOS 用 launchctl kickstart，Linux 用用户单元。
+func localHubRestartCmd(goos string) string {
+	if goos == "darwin" {
+		return "launchctl kickstart -k gui/$(id -u)/dev.railse.hub"
+	}
+	return "systemctl --user restart railse-hub"
+}

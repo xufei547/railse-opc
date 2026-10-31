@@ -15,7 +15,8 @@ import (
 
 // Outcome 是引擎之外的决定来源（hub、手机）给出的结论。
 type Outcome struct {
-	Action    string // allow、deny、passthrough
+	Action    string            // allow、deny、passthrough；答题为 answer 或 passthrough
+	Answers   map[string]string // 仅 answer：脱敏后的题面 → 答案
 	Reason    string
 	RuleID    string
 	DecidedBy string // user、no_hub、hub_unreachable、timeout…
@@ -24,8 +25,11 @@ type Outcome struct {
 }
 
 // PendingRequest 是等待外部决定的请求。Redacted 是脱敏后的载荷，上报 hub 用它。
+// Kind 为 ask 时是要人答的题：Ask 是脱敏后的题目（上报 hub 用它，原题在 Req.Ask），ProjectRoot 按会话 cwd 算（只算路径，不跑引擎），Risk、Redacted、EngineReason 都是零值。
 type PendingRequest struct {
 	ID           string
+	Kind         string // permission（空也当 permission）或 ask
+	Ask          *proto.Ask
 	Req          proto.Request
 	Risk         policy.Risk
 	ProjectRoot  string
@@ -35,7 +39,7 @@ type PendingRequest struct {
 	Deadline     time.Time
 }
 
-// Decider 在引擎答 ask 之后给出最终结论。ctx 取消表示钩子已消失或守护进程正在停止，到期表示过期。
+// Decider 在引擎答 ask 之后给出审批的最终结论，也给答题请求（kind ask）等来答案。ctx 取消表示钩子已消失或守护进程正在停止，到期表示过期。
 // 契约：实现必须尊重 ctx，取消或到期时及时返回（返回 ctx 的错误即可）；服务端不另起 goroutine 兜底，
 // 不理会 ctx 的实现会让这条请求一直挂着，关停时也会卡住 Close。
 type Decider interface {
@@ -80,7 +84,7 @@ func (p *Pending) Count() int {
 }
 
 // List 返回按创建时间排序（相同时按 ID）的副本，重连时上报 hub 用。
-// MCP 参数（json.RawMessage）也复制一份，调用方改返回值不会影响表里正在等待的请求。
+// MCP 参数（json.RawMessage）与题目也复制一份，调用方改返回值不会影响表里正在等待的请求。
 func (p *Pending) List() []PendingRequest {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -89,6 +93,7 @@ func (p *Pending) List() []PendingRequest {
 		c := *pr
 		c.Req.Payload.Args = cloneRaw(pr.Req.Payload.Args)
 		c.Redacted.Args = cloneRaw(pr.Redacted.Args)
+		c.Ask, c.Req.Ask = cloneAsk(pr.Ask), cloneAsk(pr.Req.Ask)
 		out = append(out, c)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -107,7 +112,7 @@ func cloneRaw(b json.RawMessage) json.RawMessage {
 	return append(json.RawMessage(nil), b...)
 }
 
-// HasSession 判断某个 CLI 会话是否有未完成的审批，用于压掉随后的 question 事件。
+// HasSession 判断某个 CLI 会话是否有未完成的审批或答题，用于压掉随后的 question 事件。
 func (p *Pending) HasSession(cliSessionID string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

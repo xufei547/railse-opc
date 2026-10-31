@@ -9,6 +9,7 @@ import type { Machine, RequestView, Rule } from '../types'
 import { History, HistoryCard } from './History'
 import { MachineRow, Machines } from './Machines'
 import { RuleCard, Rules } from './Rules'
+import { RequestBody, RequestHead } from './Request'
 import { NotificationView, Settings } from './Settings'
 
 const noop = () => {}
@@ -78,6 +79,86 @@ describe('HistoryCard', () => {
     expect(html).not.toContain('<img')
     expect(html.length).toBeLessThan(1500)
     expect(html).not.toContain('style=')
+  })
+})
+
+describe('请求详情页：提问', () => {
+  const fruit = { question: '你更喜欢苹果还是香蕉？', header: '水果', options: [{ label: 'Apple', description: '苹果' }, { label: 'Banana', description: '香蕉' }] }
+  const ask = (over: Partial<RequestView> = {}) =>
+    req({
+      kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', engine_reason: '', state: 'pending', decided_by: '',
+      ask: { questions: [fruit] }, ...over,
+    })
+  const page = (r: RequestView) =>
+    inRouter(
+      <>
+        <RequestHead request={r} onBack={noop} />
+        <RequestBody data={{ request: r, audit: [] }} onOpen={noop} onDone={noop} />
+      </>,
+    )
+
+  it('待答：顶栏“提问”、没有风险标签；答题表单；没有批准、拒绝与记住', () => {
+    const html = page(ask())
+    expect(html).toContain('<h1>提问</h1>')
+    expect(html.slice(0, html.indexOf('</header>'))).not.toContain('class="tag')
+    expect(html).toContain('Claude Code 在问你')
+    expect(html.match(/type="radio"/g)).toHaveLength(2)
+    expect(html).toContain('>回答</button>')
+    expect(html).toContain('>让它在终端问我</button>')
+    expect(html).not.toContain('decide-bar')
+    expect(html).not.toMatch(/>(批准|拒绝)</)
+    expect(html).not.toContain('记住')
+    expect(html).not.toContain('风险')
+    // 答题表单在说明之后、默认折叠的详情之前
+    expect(html.indexOf('class="headline"')).toBeLessThan(html.indexOf('class="ask"'))
+    expect(html.indexOf('class="ask"')).toBeLessThan(html.indexOf('<details class="more">'))
+  })
+
+  it('已回答：每题一行“问题 → 你的答案”，状态行“你答了”；不再有表单', () => {
+    const html = page(ask({ state: 'answered', decided_by: 'user', answers: { '你更喜欢苹果还是香蕉？': 'Banana' }, decided_at: '2026-10-31T10:01:00.000000000Z' }))
+    expect(html).toContain('<span class="q">你更喜欢苹果还是香蕉？</span> → <strong class="a">Banana</strong>')
+    expect(html).toContain('<span class="tag low">已回答</span>')
+    expect(html).toContain('你答了')
+    expect(html).not.toContain('type="radio"')
+    expect(html).not.toContain('让它在终端问我')
+    expect(html).not.toContain('decide-bar')
+  })
+
+  it('交回终端：状态行说交回终端问了，列出问题；过期按 outcomeText 说人话', () => {
+    const passed = page(ask({ state: 'passthrough', decided_by: 'user' }))
+    expect(passed).toContain('交回终端问了')
+    expect(passed).toContain('<span class="q">你更喜欢苹果还是香蕉？</span>')
+    expect(passed).not.toContain('type="radio"')
+    expect(page(ask({ state: 'expired', decided_by: 'timeout' }))).toContain('等太久过期了，agent 已交回终端')
+  })
+
+  it('审批照旧：顶栏风险标签、吸底的批准与拒绝，没有答题表单', () => {
+    const html = page(req({ state: 'pending', decided_by: '' }))
+    expect(html).toContain('<h1>审批</h1>')
+    expect(html).toContain('<span class="tag high">对外</span>')
+    expect(html).toContain('class="decide-bar"')
+    expect(html).not.toContain('class="ask"')
+  })
+
+  it('没有内联样式', () => {
+    expect(page(ask())).not.toContain('style=')
+    expect(page(ask({ state: 'answered', decided_by: 'user', answers: { '你更喜欢苹果还是香蕉？': 'B' } }))).not.toContain('style=')
+  })
+})
+
+describe('HistoryCard：提问', () => {
+  it('摘要是第一题；标签是状态；结果一句人话', () => {
+    const r = req({ kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', state: 'answered', ask: { questions: [{ question: '用 A 还是 B？', options: [{ label: 'A' }] }] } })
+    const html = inRouter(<HistoryCard request={r} />)
+    expect(html).toContain('<pre class="cmd">用 A 还是 B？</pre>')
+    expect(html).toContain('<span class="tag low">已回答</span>')
+    expect(html).toContain('<div class="sub line">你答了</div>')
+    const passed = inRouter(<HistoryCard request={{ ...r, state: 'passthrough' }} />)
+    expect(passed).toContain('<span class="tag plain">交回终端</span>')
+    expect(passed).toContain('<div class="sub line">交回终端问了</div>')
+    // options 为 null、没有 ask 也不出错
+    expect(inRouter(<HistoryCard request={{ ...r, ask: { questions: [{ question: 'q', options: null }] } }} />)).toContain('<pre class="cmd">q</pre>')
+    expect(inRouter(<HistoryCard request={{ ...r, ask: undefined }} />)).toContain('<pre class="cmd"></pre>')
   })
 })
 
@@ -310,7 +391,12 @@ describe('四个页面的首屏（还没数据）', () => {
     expect(html).toMatch(/<input type="checkbox" role="switch" disabled=""/)
     expect(html).toContain('规则版本')
     expect(html).toContain('在线机器')
+    expect(html).toContain('<dt>待处理</dt>')
+    expect(html).not.toContain('待审批')
     expect(html).toContain('退出登录')
+    // 暂停只管审批，选择题照样送来
+    expect(html).toContain('Claude Code 的选择题不受影响')
+    expect(html).not.toContain('所有请求')
     // 通知区块在总开关与 hub 信息之间，首屏在检查中
     expect(html).toContain('<h2 class="section-title">通知</h2>')
     expect(html).toContain('正在检查')

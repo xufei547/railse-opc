@@ -54,6 +54,16 @@ describe('request', () => {
     expect(JSON.parse(calls[0]?.init.body as string)).toEqual({ action: 'allow', note: 'ok', remember: true, scope: 'global' })
   })
 
+  it('答题：POST 到 answer，回答带 answers（键原样），交回终端只带 passthrough', async () => {
+    const calls = stubFetch(200, { id: 'a 1', state: 'answered' })
+    await hub.answer('a 1', { answers: { ' 用 A 还是 B？': 'B' } })
+    expect(calls[0]?.url).toBe('/api/requests/a%201/answer')
+    expect(calls[0]?.init.method).toBe('POST')
+    expect(calls[0]?.init.body).toBe('{"answers":{" 用 A 还是 B？":"B"}}')
+    await hub.answer('a 1', { passthrough: true })
+    expect(calls[1]?.init.body).toBe('{"passthrough":true}')
+  })
+
   it('propose 带 action 与 scope，回规则草案', async () => {
     const draft = { rule_id: 'learned-x', scope: 'project', yaml: 'id: learned-x\n', summary: { action: 'allow', payload: 'shell', anchor: 'git push' } }
     const calls = stubFetch(200, draft)

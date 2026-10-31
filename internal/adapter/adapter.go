@@ -3,9 +3,11 @@
 package adapter
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -21,6 +23,7 @@ const (
 	KindQuestion   Kind = "question"    // agent 在等人
 	KindDone       Kind = "done"        // 一轮结束
 	KindSessionEnd Kind = "session_end" // 会话退出
+	KindAsk        Kind = "ask"         // agent 要人答题（Claude 的 AskUserQuestion）
 	KindIgnore     Kind = "ignore"      // 认识但不关心的事件
 )
 
@@ -40,12 +43,18 @@ type Input struct {
 	ToolName string
 	Payload  policy.Payload // 仅 KindPermission
 	Message  string         // question、done 的摘要
+
+	Ask          *proto.Ask      // 仅 KindAsk
+	RawToolInput json.RawMessage // 仅 KindAsk：PreToolUse 的 tool_input 原文，渲染答案时原样回填
 }
 
-// Decision 是守护进程的答复。Action 为 allow、deny 或 passthrough。
+// Decision 是守护进程的答复。Action 为 allow、deny、passthrough 或 answer。
+// answer 带 Answers（问题原文 → 答案）和 KindAsk 时拿到的 RawToolInput。
 type Decision struct {
-	Action string
-	Reason string
+	Action       string
+	Reason       string
+	Answers      map[string]string
+	RawToolInput json.RawMessage
 }
 
 // Output 是写回 CLI 的内容。
@@ -103,6 +112,111 @@ func renderPermission(d Decision) Output {
 	default:
 		return passthrough()
 	}
+}
+
+// 题目各项的上限，防止一道题把守护进程到 hub 的 1 MiB 帧撑爆；长度按字符（rune）计。
+const (
+	askMaxQuestions   = 4
+	askMaxOptions     = 8
+	askMaxQuestionLen = 2000
+	askMaxLabelLen    = 200
+	askMaxDescLen     = 2000
+	askMaxHeaderLen   = 60
+)
+
+// ValidateAsk 校验 AskUserQuestion 的题目：1 到 4 题；每题 question 非空且不超过 2000 字符，各题 question 互不相同
+// （答案以 question 为键，重复了会互相覆盖）；options 0 到 8 个，label 非空且不超过 200 字符，description 不超过 2000 字符；
+// header 不超过 60 字符。不合规返回说明原因的错误，调用方当作不认识这条请求，让终端照常问。
+func ValidateAsk(a *proto.Ask) error {
+	if a == nil || len(a.Questions) == 0 {
+		return fmt.Errorf("AskUserQuestion 的题目不合规: 没有题目")
+	}
+	if len(a.Questions) > askMaxQuestions {
+		return fmt.Errorf("AskUserQuestion 的题目不合规: 有 %d 题，最多 %d 题", len(a.Questions), askMaxQuestions)
+	}
+	for i, q := range a.Questions {
+		n := i + 1
+		if q.Question == "" {
+			return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题 question 为空", n)
+		}
+		if utf8.RuneCountInString(q.Question) > askMaxQuestionLen {
+			return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题 question 超过 %d 字符", n, askMaxQuestionLen)
+		}
+		for j := range i {
+			if a.Questions[j].Question == q.Question {
+				return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题与第 %d 题的 question 相同", n, j+1)
+			}
+		}
+		if utf8.RuneCountInString(q.Header) > askMaxHeaderLen {
+			return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题 header 超过 %d 字符", n, askMaxHeaderLen)
+		}
+		if len(q.Options) > askMaxOptions {
+			return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题有 %d 个选项，最多 %d 个", n, len(q.Options), askMaxOptions)
+		}
+		for j, o := range q.Options {
+			if o.Label == "" {
+				return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 label 为空", n, j+1)
+			}
+			if utf8.RuneCountInString(o.Label) > askMaxLabelLen {
+				return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 label 超过 %d 字符", n, j+1, askMaxLabelLen)
+			}
+			if utf8.RuneCountInString(o.Description) > askMaxDescLen {
+				return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 description 超过 %d 字符", n, j+1, askMaxDescLen)
+			}
+		}
+	}
+	return nil
+}
+
+// preToolUseAnswer 把 answers 合进 rawToolInput（JSON 对象，其他字段逐字节不动，已有 answers 键则覆盖），
+// 并包成 PreToolUse 的 allow 输出，Claude Code 据此不再在终端弹题。
+// 对象由手工拼接：encoding/json 编码 RawMessage 时即使关掉 HTML 转义，也会把 U+2028、U+2029 改写成 \uXXXX，
+// 字段值就不再逐字节相同了。键按字典序排，输出稳定。
+func preToolUseAnswer(rawToolInput json.RawMessage, answers map[string]string) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rawToolInput, &fields); err != nil {
+		return nil, fmt.Errorf("解析 tool_input: %w", err)
+	}
+	if fields == nil { // tool_input 是 null
+		return nil, fmt.Errorf("tool_input 不是 JSON 对象")
+	}
+	ab, err := marshalNoEscape(answers)
+	if err != nil {
+		return nil, err
+	}
+	fields["answers"] = ab
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var buf bytes.Buffer
+	buf.WriteString(`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{`)
+	for i, k := range keys {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		kb, err := marshalNoEscape(k)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(kb)
+		buf.WriteByte(':')
+		buf.Write(fields[k])
+	}
+	buf.WriteString(`}}}`)
+	return buf.Bytes(), nil
+}
+
+// marshalNoEscape 编成 JSON，不做 HTML 转义，也不带 Encoder 追加的换行。
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // denyMessage 是拒绝时给 agent 看的理由，带 Railse 前缀；理由为空时用固定文案。

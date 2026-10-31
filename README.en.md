@@ -4,7 +4,7 @@
 
 [中文](README.md)
 
-An approval tool for one person running several AI coding agents at once. Claude Code, Codex CLI and Gemini CLI stop and ask "allow this?" every time they want to run a command or edit a file. Railse takes over that step: what the rules can decide is approved or denied on the spot, what they can't goes to your phone, you tap once, and the agent carries on.
+An approval tool for one person running several AI coding agents at once. Claude Code, Codex CLI and Gemini CLI stop and ask "allow this?" every time they want to run a command or edit a file. Railse takes over that step: what the rules can decide is approved or denied on the spot, what they can't goes to your phone, you tap once, and the agent carries on. The same goes for Claude Code's multiple-choice questions ("use approach A or B?"): the question goes to your phone, you pick an option or type a line, and it continues right away.
 
 OPC stands for "one-person company".
 
@@ -39,8 +39,9 @@ Railse turns all of that into one rule: **every approval goes through the rules 
 4. **Approve once, not every time.** Turn on 记住 (remember) when you approve or deny, and a rule is created on the spot, scoped to this project by default or to all projects if you choose; you see the draft before it's saved. Rules live on the hub, so they follow you to other machines.
 5. **The floor is hard-coded in the engine.** Outward and destructive actions can never be remembered as allowed. The only way to allow them is a hand-written rule that names the risk level explicitly. The engine checks this when rules are created and when they're imported, and the web app can't override it.
 6. **A Railse failure never blocks an agent or approves anything.** If the daemon isn't running, the hub can't be reached for 30 seconds, or a hook hits any error, the answer is "no decision": the CLI shows its own permission prompt, and the worst case is exactly what you had before installing Railse.
+7. **Claude Code's multiple-choice questions can be answered on your phone.** When it asks with `AskUserQuestion`, the question skips the rules and goes straight to your phone. You pick an option or type your own line and the agent continues at once, with no prompt in the terminal; or tap 让它在终端问我 (ask me in the terminal) to hand it back. With no hub, an unreachable hub or a timeout, the terminal asks as usual.
 
-The inbox also shows agents' questions and completions, telling you which machine and directory to go to in the terminal. Human-approval steps from workflows like n8n can be posted to the hub's webhook and show up in the same inbox as agent approvals.
+Besides approvals and these questions, the inbox also shows when an agent stops to wait for your next message and when it finishes, telling you which machine and directory to go to in the terminal. Human-approval steps from workflows like n8n can be posted to the hub's webhook and show up in the same inbox as agent approvals.
 
 <p align="center"><img src="assets/demo.gif" width="390" alt="Demo: log in to the phone web app; Claude Code wants to run curl, no rule decides it, and the request shows up in the inbox; approve it with remember turned on; the rules page now has a learned rule"></p>
 
@@ -58,7 +59,7 @@ railse agent (policy engine) ──rule matched──▶ allow / deny
 railse hub ──Web Push──▶ phone ──allow / deny──▶ hub ▶ daemon ▶ hook
 ```
 
-Each machine you write code on runs a daemon, `railse agent`. It gets requests from the CLIs' permission hooks over a local Unix socket and sends the ones the rules can't decide to the hub over a WebSocket it opens itself. For each request the hub can only answer allow or deny. It also serves the phone web app (a PWA), so there's nothing else to deploy.
+Each machine you write code on runs a daemon, `railse agent`. It gets requests from the CLIs' permission hooks over a local Unix socket and sends the ones the rules can't decide to the hub over a WebSocket it opens itself. For an approval the hub can only answer allow or deny; for a Claude Code multiple-choice question it can only give an answer (text filled into the question, not a command) or hand it back to the terminal. It also serves the phone web app (a PWA), so there's nothing else to deploy.
 
 ## Install
 
@@ -99,7 +100,7 @@ After that, just use the three CLIs as usual. `railse doctor --project <dir>` te
 
 ## Where the data goes
 
-- **The daemon only connects outward, to the hub.** For each request the hub can answer allow or deny and nothing else; there is no channel for sending commands to your machines.
+- **The daemon only connects outward, to the hub.** For an approval the hub can only answer allow or deny, and for a Claude Code question only give an answer (text filled into the question, not a command) or hand it back to the terminal; there is still no channel for sending commands to your machines. A typed-in answer is free text, though, and Claude acts on it as your reply, so anyone who can log in to the hub's web app can steer the agent through it. That's the same trust boundary as the hub password already granting every approval.
 - **Payloads are redacted on your machine first.** Tokens and passwords in commands that the redaction rules recognize become `<redacted>` before they leave your machine. A secret they don't recognize reaches the hub and the phone unchanged; see [SECURITY.md](SECURITY.md).
 - **The hub stores hashes.** Machine secrets and login sessions are stored only as hashes. The few things that have to be stored in plaintext, such as the push signing key and webhook callback tokens, are listed in SECURITY.md.
 - **You host the hub.** The phone web app is served by the hub behind one password, and the data stays on your own server.
@@ -121,9 +122,11 @@ The docs under `docs/` are in Chinese.
 
 ## Status and limitations
 
-- This is v0.1.2, the first version, and the author is dogfooding it.
+- This is v0.1.5, and the author is dogfooding it.
 - The phone web app, the CLI output and the docs under `docs/` are in Chinese only for now.
 - Gemini CLI hooks can deny but can't approve: rule denials still apply, and everything else goes back to Gemini's own prompt and never reaches the phone. Needs Gemini CLI 0.65.0 or later.
+- On the phone you can only answer Claude Code's multiple-choice questions (`AskUserQuestion`). Questions from Codex and Gemini, and an agent stopping to wait for your next message, are still reminders only: you go back to the terminal.
+- Upgrading from before 0.1.5: on machines that already have the hooks installed, rerun `railse setup hooks --claude` once to add the `PreToolUse` hook the questions need (`railse doctor` reports it under `hooks.claude`). Upgrade the hub before, or together with, the daemon; while the hub is still the old version, questions go straight back to the terminal. A local hub and the daemon are separately managed processes, and rerunning `railse setup` doesn't restart a local hub that's already running, so restart it yourself after upgrading (macOS: `launchctl kickstart -k gui/$(id -u)/dev.railse.hub`; Linux: `systemctl --user restart railse-hub`). See "升级" (upgrading) in [docs/setup.md](docs/setup.md).
 - Codex hooks only fire in interactive sessions (`codex exec` doesn't trigger them). Before the first use, review them with `/hooks` inside Codex.
 - The hub is one process with one SQLite database and can't run as multiple instances.
 - A project inside a system directory such as `/opt`, `/usr` or `/var` has no project root, even if it's a git repo (`/opt/homebrew` is one), so every write needs approval. Projects under your home directory, `/tmp` or macOS's per-user `$TMPDIR` aren't affected.

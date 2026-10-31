@@ -323,12 +323,15 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 			}
 		}
 	}
+	// 只缺 PreToolUse 是旧安装：审批、提醒都照常，只是 Claude Code 的选择题进不了手机，所以降为 warn 而不是 fail
+	const askMissing = "缺 PreToolUse：Claude Code 的选择题进不了手机"
+	noAsk := cli == "claude" && slices.Equal(missing, []string{"PreToolUse"}) && len(short) == 0
 	sort.Strings(missing)
 	sort.Strings(short)
 	sort.Strings(others)
 	sort.Strings(socks)
 	sort.Strings(explicitDirs)
-	if len(missing) > 0 || len(short) > 0 {
+	if (len(missing) > 0 || len(short) > 0) && !noAsk {
 		var parts []string
 		if len(missing) > 0 {
 			parts = append(parts, "缺 "+strings.Join(missing, "、"))
@@ -338,8 +341,14 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 		}
 		return Check{ID: id, Name: name, Status: Fail, Detail: path + "：" + strings.Join(parts, "；"), Hint: hint}
 	}
+	if noAsk && len(others) == 0 && len(socks) == 0 {
+		return Check{ID: id, Name: name, Status: Warn, Detail: path + "：" + askMissing, Hint: hint}
+	}
 	if len(others) > 0 || len(socks) > 0 {
 		var parts []string
+		if noAsk {
+			parts = append(parts, askMissing)
+		}
 		h := "换过安装路径就重新 " + hint
 		if len(others) > 0 {
 			parts = append(parts, fmt.Sprintf("钩子指向 %s，当前程序是 %s", strings.Join(others, "、"), o.Bin))

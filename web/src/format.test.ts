@@ -70,6 +70,8 @@ describe('labels', () => {
     expect(stateLabel('mystery')).toBe('mystery')
     expect(kindLabel('question')).toBe('等你回答')
     expect(kindLabel('webhook')).toBe('webhook')
+    expect(kindLabel('ask')).toBe('提问')
+    expect(stateLabel('answered')).toBe('已回答')
   })
   it('依据：规则自动决定', () => {
     expect(decidedByLabel({ decided_by: 'rule:builtin-readonly', rule_id: 'builtin-readonly', state: 'auto_allowed' })).toBe('规则 builtin-readonly')
@@ -81,6 +83,10 @@ describe('labels', () => {
     expect(decidedByLabel({ decided_by: 'user', rule_id: '', state: 'approved' })).toBe('手机上决定')
     expect(decidedByLabel({ decided_by: 'user', rule_id: 'learned-git-push', state: 'approved' })).toBe('手机上决定（并记住为 learned-git-push）')
     expect(decidedByLabel({ decided_by: 'user', rule_id: 'user-deny-rm', state: 'denied' })).toBe('手机上决定（并记住为 user-deny-rm）')
+  })
+  it('依据：提问在手机上作答说“手机上回答”；交回终端仍是“手机上决定”', () => {
+    expect(decidedByLabel({ decided_by: 'user', rule_id: '', state: 'answered' })).toBe('手机上回答')
+    expect(decidedByLabel({ decided_by: 'user', rule_id: '', state: 'passthrough' })).toBe('手机上决定')
   })
   it('依据：其他来源', () => {
     expect(decidedByLabel({ decided_by: 'hub_unreachable', rule_id: '', state: 'expired' })).toBe('连不上 hub，交回终端')
@@ -133,6 +139,11 @@ describe('审计', () => {
     expect(auditLabel('auto_allowed')).toBe('自动放行')
     expect(auditLabel('brand_new')).toBe('brand_new')
   })
+  it('提问：hub 记的作答是“回答”，守护进程转来的结束行沿用状态文案', () => {
+    expect(auditLabel('answer')).toBe('回答')
+    expect(auditLabel('answered')).toBe('已回答')
+    expect(auditLabel('passthrough')).toBe('交回终端')
+  })
   it('谁做的', () => {
     expect(actorLabel('user')).toBe('你')
     expect(actorLabel('agent')).toBe('守护进程')
@@ -178,6 +189,15 @@ describe('deliveryLabel', () => {
     expect(deliveryLabel(view({ state: 'pending' }), false)).toBe('')
     expect(deliveryLabel(view({ state: 'auto_allowed' }), false)).toBe('')
   })
+
+  it('提问作答后同样给出答案送没送到；交回终端不等送达', () => {
+    const ask = (over: Partial<RequestView>) => view({ kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', decided_by: 'user', ...over })
+    expect(deliveryLabel(ask({ state: 'answered', delivered_at: '2026-10-31T10:00:05Z' }), false)).toBe('已送达 agent')
+    expect(deliveryLabel(ask({ state: 'answered' }), false)).toBe('还没送达 agent')
+    expect(deliveryLabel(ask({ state: 'answered' }), true)).toBe('答案未送达：agent 已不再等这条（多半已在终端问了你）')
+    expect(deliveryLabel(ask({ state: 'passthrough' }), false)).toBe('')
+    expect(deliveryLabel(ask({ state: 'pending', decided_by: '' }), false)).toBe('')
+  })
 })
 
 describe('engineReasonLabel', () => {
@@ -221,6 +241,19 @@ describe('outcomeText', () => {
   ]
   it.each(cases)('%s + %s（%s）→ %s', (state, decided_by, rule_id, want) => {
     expect(outcomeText(r({ state: state as R['state'], decided_by, rule_id }))).toBe(want)
+  })
+
+  it('提问：手机上答了说“你答了”，手机上交回终端说“交回终端问了”；其余结束同审批的口径', () => {
+    const ask = (over: Partial<R>) => r({ kind: 'ask', ...over })
+    expect(outcomeText(ask({ state: 'answered', decided_by: 'user' }))).toBe('你答了')
+    expect(outcomeText(ask({ state: 'passthrough', decided_by: 'user' }))).toBe('交回终端问了')
+    expect(outcomeText(ask({ state: 'pending' }))).toBe('')
+    expect(outcomeText(ask({ state: 'expired', decided_by: 'timeout' }))).toBe('等太久过期了，agent 已交回终端')
+    expect(outcomeText(ask({ state: 'cancelled', decided_by: 'terminal' }))).toBe('agent 那边先结束了，不用你处理')
+    expect(outcomeText(ask({ state: 'passthrough', decided_by: 'no_hub' }))).toBe('当时本机没接 hub，agent 在终端里自己处理了')
+    expect(outcomeText(ask({ state: 'passthrough', decided_by: 'error' }))).toBe('处理出错，交回终端了')
+    // 审批没有“手机上交回终端”这回事：不套用提问的说法
+    expect(outcomeText(r({ state: 'passthrough', decided_by: 'user' }))).toBe('')
   })
 
   it('webhook：你的决定同样说；等太久过期时说已按拒绝回调工作流', () => {

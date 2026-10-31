@@ -161,6 +161,11 @@ func setupLocalHub(goos string, o localHubOpts) (lh localHub, token string, note
 	hosted := false
 	if managed && !changed {
 		fmt.Fprintf(o.Stdout, "本机 hub 已在跑（版本 %s），跳过托管\n", v)
+		// 升级后 setup 不会重启已在跑的本机 hub：它还是旧版本时认不得提问，选择题只会交回终端。只提示，不替用户重启；
+		// 本程序是开发构建（版本串 dev）时没法比，不提示
+		if version != "dev" && v != version {
+			fmt.Fprintf(o.Stdout, "本机 hub 还是旧版本（%s，本程序是 %s）：Claude Code 的选择题会直接交回终端，请重启本机 hub：%s\n", v, version, localHubRestartCmd(goos))
+		}
 	} else {
 		what := fmt.Sprintf("托管并启动 hub（只监听 %s）", listen)
 		if managed { // 托管的 hub 在跑，但不是按这次的对外地址、端口装的（或之前不是本机 hub 的装法）

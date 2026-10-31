@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -192,6 +193,10 @@ func TestAgentWSHelloWelcome(t *testing.T) {
 	wire.Unmarshal(b, &w)
 	if w.RulesVersion != 1 || !strings.Contains(w.RulesYAML, "builtin-readonly") || w.Paused {
 		t.Fatalf("welcome = %+v", w)
+	}
+	// 声明认得提问：守护进程据此才把 AskUserQuestion 送来（旧 hub 不发 features，提问交回终端）
+	if !reflect.DeepEqual(w.Features, []string{wire.FeatureAsk}) || !strings.Contains(string(b), `"features":["ask"]`) {
+		t.Fatalf("welcome 应声明 features [ask]: %s", b)
 	}
 	if !h.srv.agents.connected(id) {
 		t.Fatal("应登记为已连接")
@@ -742,5 +747,106 @@ func TestAgentHubSendTo(t *testing.T) {
 	}
 	if !h.sendTo(cur, wire.Decision{T: wire.TDecision, RequestID: "r", Action: "allow"}) || len(cur.out) != 1 {
 		t.Fatal("当前连接应能发决定")
+	}
+}
+
+// 守护进程送来的答题请求（kind ask）入库：题目逐字节照存（不截断、不去空白、不改写），载荷列 {}、风险与引擎理由为空、
+// payload_hash 是题目的哈希；广播的请求视图带 ask，题目里有脱敏占位符时 has_redacted；审计 request_pending。
+func TestAgentAskFrameStored(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	f := askFrame("a1", "s1", "t1", "  用 <redacted> 连库，还是 A&B？\t", "要不要写测试？")
+	f.Ask.Questions[0].Header = " 方案 "
+	f.Ask.Questions[1].MultiSelect = true
+	f.Risk, f.EngineReason = "outward", "不该存"
+	c.send(f)
+	v := waitBroadcast(t, sub, "request_new", "a1", nil)
+	wantView(t, "ask 的 request_new", v, "mac")
+	if v["kind"] != "ask" || v["ask"] == nil || v["has_redacted"] != true || v["cli"] != "claude" {
+		t.Fatalf("广播的请求视图: %+v", v)
+	}
+	r := getReq(t, h.st, "a1")
+	if r.Kind != "ask" || r.State != "pending" || !reflect.DeepEqual(r.Ask, f.Ask) || r.Risk != "" || r.EngineReason != "" || r.ToolName != "AskUserQuestion" ||
+		r.PayloadHash != store.AskHash(f.Ask) || r.ExpiresAt == nil || r.SessionID == "" || r.CLISessionID != "s1" || r.TurnID != "t1" {
+		t.Fatalf("入库的 ask: %+v", r)
+	}
+	if got := queryDB(t, h, "SELECT payload FROM requests WHERE id = 'a1'"); got != "{}" {
+		t.Fatalf("载荷列应为 {}: %q", got)
+	}
+	if acts := auditActions(t, h.st, "a1"); countOf(acts, "request_pending") != 1 {
+		t.Fatalf("应审计 request_pending: %v", acts)
+	}
+}
+
+// 答题请求的题目没脱敏干净（四处文字任一处再脱敏会变）或不合规（没有题目、题面为空或重复、超过上限），或种类不认识时拒收：
+// 回带 request_id 的 Error（守护进程据此交回终端），不入库，记日志。
+func TestAgentAskFrameRejected(t *testing.T) {
+	h, logs := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	leak := "mysql --password hunter22"
+	cases := []struct {
+		name string
+		mod  func(*wire.PendingRequest)
+		log  string
+	}{
+		{"题面未脱敏", func(f *wire.PendingRequest) { f.Ask.Questions[0].Question = "连库用 " + leak }, "题目未脱敏干净"},
+		{"标题未脱敏", func(f *wire.PendingRequest) { f.Ask.Questions[1].Header = "token=abcdefsecret" }, "题目未脱敏干净"},
+		{"标签未脱敏", func(f *wire.PendingRequest) { f.Ask.Questions[0].Options[0].Label = leak }, "题目未脱敏干净"},
+		{"说明未脱敏", func(f *wire.PendingRequest) { f.Ask.Questions[1].Options[1].Description = leak }, "题目未脱敏干净"},
+		{"没有题目", func(f *wire.PendingRequest) { f.Ask = nil }, "不合规"},
+		{"零道题", func(f *wire.PendingRequest) { f.Ask.Questions = nil }, "不合规"},
+		{"题面为空", func(f *wire.PendingRequest) { f.Ask.Questions[0].Question = "" }, "不合规"},
+		{"题面重复", func(f *wire.PendingRequest) { f.Ask.Questions[1].Question = f.Ask.Questions[0].Question }, "不合规"},
+		{"题太多", func(f *wire.PendingRequest) { f.Ask = testAsk("一", "二", "三", "四", "五") }, "不合规"},
+		{"题面超长", func(f *wire.PendingRequest) { f.Ask.Questions[0].Question = strings.Repeat("长", 2001) }, "不合规"},
+		{"种类不认识", func(f *wire.PendingRequest) { f.Kind = "vote" }, "种类"},
+	}
+	for i, tc := range cases {
+		rid := fmt.Sprintf("x%d", i)
+		f := askFrame(rid, "s1", rid, "第一题", "第二题")
+		tc.mod(&f)
+		c.send(f)
+		kind, b := c.recv(5 * time.Second)
+		var e wire.Error
+		wire.Unmarshal(b, &e)
+		if kind != wire.TError || e.RequestID != rid {
+			t.Fatalf("%s: 应回 Error: %s %s", tc.name, kind, b)
+		}
+		if _, err := h.st.GetRequest(rid); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("%s: 不应入库: %v", tc.name, err)
+		}
+		if !strings.Contains(logs.String(), rid) || !strings.Contains(logs.String(), tc.log) {
+			t.Fatalf("%s: 日志应提到 %s 与 %q: %q", tc.name, rid, tc.log, logs.String())
+		}
+	}
+	if strings.Contains(logs.String(), "hunter22") || strings.Contains(logs.String(), "abcdefsecret") {
+		t.Fatalf("日志不应带出题目原文: %q", logs.String())
+	}
+}
+
+// 旧守护进程送来的 pending 帧没有 kind 键：照旧当审批登记。
+func TestPendingWithoutKindIsPermission(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	b, err := wire.Marshal(pendingFrame("p1", "s1", "t1", "git push origin main"))
+	if err != nil || strings.Contains(string(b), `"kind"`) || strings.Contains(string(b), `"ask"`) {
+		t.Fatalf("审批帧不应带 kind、ask 键: %s %v", b, err)
+	}
+	c.sendRaw(b)
+	waitFor(t, "p1 登记", func() bool { _, err := h.st.GetRequest("p1"); return err == nil })
+	r := getReq(t, h.st, "p1")
+	if r.Kind != "permission" || r.Ask != nil || r.Payload.Command != "git push origin main" || r.Risk != "outward" || r.PayloadHash != store.PayloadHash(r.Payload) {
+		t.Fatalf("没有 kind 的帧应是审批: %+v", r)
 	}
 }

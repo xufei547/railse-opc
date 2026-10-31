@@ -18,10 +18,12 @@ import (
 
 	"github.com/xufei547/railse-opc/internal/hub/store"
 	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 const (
 	decideBodyMax    = 16 << 10 // decide 请求体：备注至多 1000 字符，JSON 转义后也远小于它
+	answerBodyMax    = 64 << 10 // answer 请求体：至多 4 道题，题面至多 2000 字符、答案至多 1000 字符
 	proposeBodyMax   = 1 << 10  // propose 请求体只有 action 与 scope
 	patchBodyMax     = 4 << 10
 	rulesImportMax   = 1 << 20 // 导入的 YAML 至多 1 MiB
@@ -45,6 +47,7 @@ func (s *Server) apiRoutes() {
 	s.mux.HandleFunc("GET /api/requests/{id}", read(s.handleRequest))
 	s.mux.HandleFunc("POST /api/requests/{id}/propose", write(s.handlePropose))
 	s.mux.HandleFunc("POST /api/requests/{id}/decide", write(s.handleDecide))
+	s.mux.HandleFunc("POST /api/requests/{id}/answer", write(s.handleAnswer))
 	s.mux.HandleFunc("GET /api/rules", read(s.handleRules))
 	s.mux.HandleFunc("PATCH /api/rules/{id}", write(s.handleRulePatch))
 	s.mux.HandleFunc("DELETE /api/rules/{id}", write(s.handleRuleDelete))
@@ -73,9 +76,9 @@ func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // requestView 是接口与网页看到的请求：请求本身（不含载荷哈希与 webhook 回调）加 CLI、机器名、项目名与 has_redacted。
-// REST（/api/inbox 的 pending 与 questions、/api/requests、/api/requests/{id}、decide 的返回）与 /ws/client 的 request_new、
-// request_updated 都用它。
-// HasRedacted 为 true 表示载荷里有被脱敏抹掉的部分：网页展示的不是原文（命令行语境的脱敏可能连带吞掉紧贴的后半截命令），
+// REST（/api/inbox 的 pending 与 questions、/api/requests、/api/requests/{id}、decide 与 answer 的返回）与 /ws/client 的 request_new、
+// request_updated 都用它。提问（kind ask）带 ask（题目），作答后带 answers（题面 → 答案原文）。
+// HasRedacted 为 true 表示载荷（或提问的题目）里有被脱敏抹掉的部分：网页展示的不是原文（命令行语境的脱敏可能连带吞掉紧贴的后半截命令），
 // 必须醒目告警，建议去终端核对。
 type requestView struct {
 	store.Request
@@ -100,9 +103,20 @@ func payloadHasRedacted(p policy.Payload) bool {
 	return bytes.Contains(b, []byte(redactedMark)) || bytes.Contains(b, []byte(`\u003credacted\u003e`))
 }
 
-// requestHasRedacted 报告请求展示给人看的内容有没有脱敏占位符：载荷，或标题（question 的消息、webhook 的标题，入库前都已脱敏）。
+// requestHasRedacted 报告请求展示给人看的内容有没有脱敏占位符：载荷，标题（question 的消息、webhook 的标题，入库前都已脱敏），
+// 或提问的题目（题面、标题、选项，守护进程已脱敏）。
 func requestHasRedacted(r store.Request) bool {
-	return strings.Contains(r.Title, redactedMark) || payloadHasRedacted(r.Payload)
+	return strings.Contains(r.Title, redactedMark) || payloadHasRedacted(r.Payload) || askHasRedacted(r.Ask)
+}
+
+// askHasRedacted 报告题目的哪段文字里有脱敏占位符；nil 为否。
+func askHasRedacted(a *proto.Ask) bool {
+	found := false
+	a.MapText(func(s string) string {
+		found = found || strings.Contains(s, redactedMark)
+		return s
+	})
+	return found
 }
 
 // views 给请求配上 CLI（每个会话只查一次）、机器名（每台机器只查一次；查不到时留空，读库出错记日志）、项目名与 has_redacted。
@@ -179,7 +193,7 @@ func (s *Server) handlePause(w http.ResponseWriter, paused bool) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleInbox 返回 {"pending":[…],"questions":[…]}，都是请求视图、按创建时间倒序：pending 是全部待审批（至多 500 条），
+// handleInbox 返回 {"pending":[…],"questions":[…]}，都是请求视图、按创建时间倒序：pending 是全部待处理的审批与提问（至多 500 条），
 // questions 是最近 24 小时还在等回答的 question（至多 100 条，见 store.OpenQuestions）。没有时是空数组，不是 null。
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	pending, err := s.store.ListRequests("pending", inboxLimit)
@@ -258,6 +272,32 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.view(req))
 }
 
+// handleAnswer 是网页的答题入口：{"answers":{"<题面>":"<答案>"},"passthrough":false}，请求体至多 64 KiB。题面是请求视图里 ask 的
+// question 原样（逐字节）；passthrough 为 true 时让 agent 在终端问，answers 不看。
+// 200 返回作答后的请求（state answered 或 passthrough）；坏请求体（不是 JSON、超 64 KiB、答案不是字符串）、答案不合规
+// （缺题、去掉首尾空白后为空、超过 1000 字符、多余的键）、不是提问 400；其余错误同 decide（见 writeDecideErr）。
+func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Answers     map[string]string `json:"answers"`
+		Passthrough bool              `json:"passthrough"`
+	}
+	if err := decodeJSON(w, r, answerBodyMax, &body); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeErr(w, http.StatusBadRequest, "请求体至多 64 KiB")
+			return
+		}
+		writeErr(w, http.StatusBadRequest, "请求体不是 JSON")
+		return
+	}
+	req, err := s.Answer(AnswerInput{RequestID: r.PathValue("id"), Answers: body.Answers, Passthrough: body.Passthrough})
+	if err != nil {
+		s.writeDecideErr(w, "作答", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.view(req))
+}
+
 // handlePropose 只计算“记住”会生成的规则，不入库、不审计、不改请求：网页在保存前展示草案并让用户选范围。
 // 请求体 {"action":"allow|deny","scope":"project|global"}，scope 缺省时有项目根为 project、没有为 global。
 // 200 返回 {"rule_id","scope","yaml","summary":{"action","payload","anchor"}}，scope 是草案实际的范围，yaml 与入库后
@@ -290,12 +330,15 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 		"summary": map[string]string{"action": string(rule.Action), "payload": string(rule.Match.Payload), "anchor": ruleAnchor(rule)}})
 }
 
-// writeDecideErr 把 Decide 与 propose 的错误写成 HTTP 回应：坏 action、坏 scope 400；没有这条请求 404；
-// 机器已吊销、已过期、已处理 409；记不住 422（文案以“不能记住：”开头）；其余记日志回 500（what 说明在做什么）。
+// writeDecideErr 把 Decide、propose 与 Answer 的错误写成 HTTP 回应：坏 action、坏 scope、答案不合规、接口与种类不符
+// （对提问 decide 或 propose、对不是提问的作答，文案说明该怎么办）400；没有这条请求 404；机器已吊销、已过期、已处理 409；
+// 记不住 422（文案以“不能记住：”开头）；其余记日志回 500（what 说明在做什么）。
 func (s *Server) writeDecideErr(w http.ResponseWriter, what string, err error) {
 	switch {
-	case errors.Is(err, errBadAction), errors.Is(err, errBadScope):
+	case errors.Is(err, errBadAction), errors.Is(err, errBadScope), errors.Is(err, errBadAnswer):
 		writeErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, store.ErrNotAsk):
+		writeErr(w, http.StatusBadRequest, errNotAsk.Error()) // 与 onlyAsk 的“不是提问”同口径
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "没有这条请求")
 	case errors.Is(err, errRevoked):

@@ -395,3 +395,39 @@ describe('explainRequest：next', () => {
     expect(explainRequest(req({ kind: 'webhook', title: 'w' })).next).toEqual(['批准或拒绝会回调给发起它的工作流。'])
   })
 })
+
+describe('explainRequest：提问（AskUserQuestion）', () => {
+  const ask = (over: Partial<RequestView> = {}) =>
+    req({
+      kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', engine_reason: '',
+      ask: { questions: [{ question: '你更喜欢苹果还是香蕉？', header: '水果', options: [{ label: 'Apple' }, { label: 'Banana' }] }, { question: '第二题' }] },
+      ...over,
+    })
+
+  it('headline“<CLI> 在问你”，what 带第一题（截到 60 字），where 照旧是项目与机器', () => {
+    const e = explainRequest(ask())
+    expect(e.headline).toBe('Claude Code 在问你')
+    expect(e.what).toBe('在问你：你更喜欢苹果还是香蕉？')
+    expect(e.where).toBe('项目 blog，机器 mac')
+    expect(e.why).toBe('')
+    expect(explainRequest(ask({ cli: '' })).headline).toBe('Agent 在问你')
+    expect(explainRequest(ask({ project: '' })).where).toBe('机器 mac')
+    const long = explainRequest(ask({ ask: { questions: [{ question: '问'.repeat(70), options: [] }] } })).what
+    expect(long).toBe('在问你：' + '问'.repeat(60) + '…')
+  })
+
+  it('题目里的 <redacted> 照常显示；没有题目时只说在问你', () => {
+    expect(explainRequest(ask({ has_redacted: true, ask: { questions: [{ question: 'token=<redacted> 还能用吗？', options: null }] } })).what).toBe('在问你：token=<redacted> 还能用吗？')
+    expect(explainRequest(ask({ ask: undefined })).what).toBe('在问你')
+    expect(explainRequest(ask({ ask: { questions: [] } })).what).toBe('在问你')
+  })
+
+  it('待答时 next 三行；答了、交回终端、过期等都没有 next', () => {
+    expect(explainRequest(ask()).next).toEqual(['选一个答案，agent 立刻继续。', '也可以自己填一句。', '「让它在终端问我」会把问题交回终端。'])
+    for (const state of ['answered', 'passthrough', 'expired', 'cancelled'] as const) {
+      const e = explainRequest(ask({ state, decided_by: 'user' }))
+      expect(e.next, state).toEqual([])
+      expect(e.why, state).toBe('')
+    }
+  })
+})

@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xufei547/railse-opc/internal/adapter"
 	"github.com/xufei547/railse-opc/internal/policy"
 	"github.com/xufei547/railse-opc/internal/proto"
 	"github.com/xufei547/railse-opc/internal/redact"
@@ -231,7 +232,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 	switch kind {
-	case "permission":
+	case "permission", "ask":
 		var req proto.Request
 		if err := proto.Decode(line, &req); err != nil {
 			s.reply(conn, kind, proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误: " + err.Error()})
@@ -245,7 +246,11 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			_, _ = conn.Read(b[:]) // 读到什么都不要，只等它返回
 			cancel(errHookGone)
 		}()
-		resp := s.handlePermission(cctx, req)
+		handle := s.handlePermission
+		if kind == "ask" {
+			handle = s.handleAsk
+		}
+		resp := handle(cctx, req)
 		cancel(nil)
 		if resp.Decision != "" { // 钩子已消失时 resp 为空，不写回
 			s.reply(conn, kind, resp)
@@ -299,19 +304,25 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	}
 	cwd = clean
 	p.Cwd = cwd
-	// 相对路径（含空 cwd 清理后的 "."）会按守护进程自己的工作目录解析，不能拿来找项目根。
-	var root string
-	if filepath.IsAbs(cwd) {
-		var kind RootKind
-		switch root, kind = ResolveProjectRoot(cwd); kind {
-		case RootCwd:
-			s.noteRoot(root, kind)
-		case RootNotPlain, RootSystem:
-			s.noteRoot(cwd, kind)
-		}
-	}
+	root := s.projectRootFor(cwd)
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID}
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx
+}
+
+// projectRootFor 从清理后的 cwd 算项目根（审批与提问共用）：相对路径（含空 cwd 清理后的 "."）会按守护进程自己的工作目录解析，
+// 不能拿来找项目根，返回空；绝对路径按 ResolveProjectRoot 定，并按各类别用 noteRoot 在日志里说明一次。只算路径，不跑引擎、不看规则。
+func (s *Server) projectRootFor(cwd string) string {
+	if !filepath.IsAbs(cwd) {
+		return ""
+	}
+	root, kind := ResolveProjectRoot(cwd)
+	switch kind {
+	case RootCwd:
+		s.noteRoot(root, kind)
+	case RootNotPlain, RootSystem:
+		s.noteRoot(cwd, kind)
+	}
+	return root
 }
 
 // noteRoot 在日志里说明目录 dir 的项目根怎么定：不在 git 仓库里时 RootCwd 按当前目录当项目根，RootNotPlain 不当项目根；
@@ -359,6 +370,7 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 	default:
 		if s.rules.Paused() {
 			// 总开关打开：用户 deny 仍由引擎处理，其余一律交回终端，不去打扰 hub。
+			// 只管审批：答题（handleAsk）不走这里，不看暂停开关，照样送 hub。
 			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "paused", "自动审批已暂停，交回终端处理"
 			resp.Decision, resp.Reason = "passthrough", entry.Reason
 			break
@@ -369,59 +381,125 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 	return resp
 }
 
-// waitDecision 登记未完成请求并等 Decider，期限取配置与请求两者中较短的。
+// waitDecision 登记审批请求并等 Decider（见 await），把结论映射成 allow、deny 或交回终端。
 // projectRoot、redacted 与引擎理由随请求登记，hub 客户端上报时只用脱敏后的载荷。
 func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request, d policy.Decision, projectRoot string, redacted policy.Payload, entry AuditEntry) proto.Response {
-	wait := s.cfg.Deadline
-	if req.DeadlineSeconds > 0 && time.Duration(req.DeadlineSeconds)*time.Second < wait {
-		wait = time.Duration(req.DeadlineSeconds) * time.Second
+	pr := &PendingRequest{ID: id, Kind: "permission", Req: req, Risk: d.Risk, ProjectRoot: projectRoot, Redacted: redacted, EngineReason: d.Reason}
+	out, resp, ok := s.await(ctx, pr, entry, proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String()})
+	if !ok {
+		return resp
 	}
-	now := time.Now()
-	pr := &PendingRequest{ID: id, Req: req, Risk: d.Risk, ProjectRoot: projectRoot, Redacted: redacted, EngineReason: d.Reason, Created: now, Deadline: now.Add(wait)}
-	s.pending.Add(pr)
-	defer s.pending.Remove(id)
-	dctx, cancel := context.WithDeadline(ctx, pr.Deadline)
-	defer cancel()
-	out, err := s.decider.Decide(dctx, *pr)
-	resp := proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String()}
-	switch {
-	case err != nil && errors.Is(context.Cause(ctx), errHookGone):
-		entry.State, entry.DecidedBy, entry.Reason = "cancelled", "terminal", "钩子进程在决定前退出"
+	applyOutcome(out, out.Action == "allow" || out.Action == "deny", &resp, &entry)
+	s.writeAudit(entry)
+	return resp
+}
+
+// handleAsk 是答题主路径：不跑引擎、不看规则与暂停开关（答题不是审批，也不能记住）。题目脱敏后登记、交给 Decider 等手机上作答；
+// hub 与手机只见到脱敏后的题面，答案按题目序号换回原题面写给钩子。请求不合规、脱敏后题面重复或超出上限、答案不完整都交回终端。
+func (s *Server) handleAsk(ctx context.Context, req proto.Request) proto.Response {
+	if err := adapter.ValidateAsk(req.Ask); err != nil {
+		s.log.Printf("答题请求不合规，交回终端: %v", err)
+		return proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误: " + err.Error()}
+	}
+	id := NewID()
+	red := redactAsk(req.Ask)
+	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "ask", Session: req.Session, ToolName: proto.AskToolName, Ask: red}
+	resp := proto.Response{V: proto.Version, RequestID: id}
+	if !distinctQuestions(red) {
+		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "error", "脱敏后有题面相同的题，分不清答的是哪道，交回终端处理"
+		resp.Decision, resp.Reason = "passthrough", entry.Reason
 		s.writeAudit(entry)
-		return proto.Response{} // 对方已不在，不写回
-	case err != nil && ctx.Err() != nil:
-		// 守护进程正在停止，钩子还在等：明确交回终端。
-		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "shutdown", "守护进程正在停止，交回终端处理"
+		return resp
+	}
+	// 脱敏会让短值变长（token=x 变成 token=<redacted>）：贴着上限的题脱敏后 hub 会拒收（它按同一套上限校验收到的题），在本机就交回终端
+	if err := adapter.ValidateAsk(red); err != nil {
+		s.log.Printf("答题请求 %q 脱敏后题目超出上限，交回终端: %v", id, err)
+		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "error", "脱敏后题目超出上限（"+err.Error()+"），交回终端处理"
 		resp.Decision, resp.Reason = "passthrough", entry.Reason
-	case err != nil && errors.Is(dctx.Err(), context.DeadlineExceeded):
-		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "expired", "timeout", "等待过期，交回终端处理"
-		resp.Decision, resp.Reason = "passthrough", entry.Reason
-	case err != nil:
-		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "error", err.Error()
-		resp.Decision, resp.Reason = "passthrough", "决定来源出错，交回终端处理"
-	default:
-		action := out.Action
-		unreachable := out.DecidedBy == hubUnreachable
-		if (action != "allow" && action != "deny") || unreachable {
-			// 空的或不认识的结论按不作决定处理，钩子总能收到答复；hub 不可达时不可能有决定，只能交回终端。
-			action = "passthrough"
-		}
-		// 备注只进审计，不写进 resp：钩子与模型看不到手机上的自由文本。
-		resp.Decision, resp.Reason, resp.RuleID = action, out.Reason, out.RuleID
-		entry.Action, entry.DecidedBy, entry.Reason, entry.RuleID, entry.Note = action, out.DecidedBy, out.Reason, out.RuleID, out.Note
-		switch {
-		case unreachable:
-			entry.State = "expired"
-		case action == "allow":
-			entry.State = "approved"
-		case action == "deny":
-			entry.State = "denied"
-		default:
-			entry.State = "passthrough"
+		s.writeAudit(entry)
+		return resp
+	}
+	// 载荷没有 cwd，取会话的 cwd；项目根随上报帧带给 hub，推送标题与收件箱靠它显示项目名
+	pr := &PendingRequest{ID: id, Kind: "ask", Ask: red, Req: req, ProjectRoot: s.projectRootFor(CleanCwd(req.Session.Cwd))}
+	out, resp, ok := s.await(ctx, pr, entry, resp)
+	if !ok {
+		return resp
+	}
+	if applyOutcome(out, out.Action == "answer", &resp, &entry) == "answer" {
+		answers, err := originalAnswers(req.Ask, red, out.Answers)
+		if err != nil {
+			s.log.Printf("答题请求 %q 的答案不合规（%v），交回终端", id, err)
+			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "error", "答案不合规: "+err.Error()
+			resp.Decision, resp.Reason = "passthrough", "决定来源给的答案不完整，交回终端处理"
+		} else {
+			resp.Answers, entry.Answers = answers, auditAnswers(red, out.Answers)
 		}
 	}
 	s.writeAudit(entry)
 	return resp
+}
+
+// await 登记未完成请求 pr 并等 Decider，期限取配置与请求两者中较短的（pr 的 Created、Deadline 由这里填）。
+// Decider 给出结论时返回它、resp 与 true，由调用方按请求种类映射并写审计。没给出结论时（钩子消失、守护进程停止、等待过期、出错）
+// 按审批与答题共用的口径写好审计 entry，返回填好的 resp（交回终端）与 false；钩子已消失时返回空答复，不写回。
+func (s *Server) await(ctx context.Context, pr *PendingRequest, entry AuditEntry, resp proto.Response) (Outcome, proto.Response, bool) {
+	wait := s.cfg.Deadline
+	if pr.Req.DeadlineSeconds > 0 && time.Duration(pr.Req.DeadlineSeconds)*time.Second < wait {
+		wait = time.Duration(pr.Req.DeadlineSeconds) * time.Second
+	}
+	now := time.Now()
+	pr.Created, pr.Deadline = now, now.Add(wait)
+	s.pending.Add(pr)
+	defer s.pending.Remove(pr.ID)
+	dctx, cancel := context.WithDeadline(ctx, pr.Deadline)
+	defer cancel()
+	out, err := s.decider.Decide(dctx, *pr)
+	switch {
+	case err == nil:
+		return out, resp, true
+	case errors.Is(context.Cause(ctx), errHookGone):
+		entry.State, entry.DecidedBy, entry.Reason = "cancelled", "terminal", "钩子进程在决定前退出"
+		s.writeAudit(entry)
+		return Outcome{}, proto.Response{}, false // 对方已不在，不写回
+	case ctx.Err() != nil:
+		// 守护进程正在停止，钩子还在等：明确交回终端。
+		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "shutdown", "守护进程正在停止，交回终端处理"
+		resp.Decision, resp.Reason = "passthrough", entry.Reason
+	case errors.Is(dctx.Err(), context.DeadlineExceeded):
+		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "expired", "timeout", "等待过期，交回终端处理"
+		resp.Decision, resp.Reason = "passthrough", entry.Reason
+	default:
+		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "error", err.Error()
+		resp.Decision, resp.Reason = "passthrough", "决定来源出错，交回终端处理"
+	}
+	s.writeAudit(entry)
+	return Outcome{}, resp, false
+}
+
+// applyOutcome 把 Decider 的结论 out 写进答复与审计，返回最终动作。valid 报告 out.Action 对这类请求是否有效：
+// 空的或不认识的结论按不作决定处理，钩子总能收到答复；hub 不可达时不可能有决定，只能交回终端，审计记 expired。
+// 备注只进审计，不写进 resp：钩子与模型看不到手机上的自由文本。答案由调用方处理。
+func applyOutcome(out Outcome, valid bool, resp *proto.Response, entry *AuditEntry) string {
+	action := out.Action
+	unreachable := out.DecidedBy == hubUnreachable
+	if !valid || unreachable {
+		action = "passthrough"
+	}
+	resp.Decision, resp.Reason, resp.RuleID = action, out.Reason, out.RuleID
+	entry.Action, entry.DecidedBy, entry.Reason, entry.RuleID, entry.Note = action, out.DecidedBy, out.Reason, out.RuleID, out.Note
+	switch {
+	case unreachable:
+		entry.State = "expired"
+	case action == "allow":
+		entry.State = "approved"
+	case action == "deny":
+		entry.State = "denied"
+	case action == "answer":
+		entry.State = "answered"
+	default:
+		entry.State = "passthrough"
+	}
+	return action
 }
 
 // writeAudit 写本地审计，再把副本交给转发目标（若有）。本地写失败也照样转发。
@@ -434,7 +512,7 @@ func (s *Server) writeAudit(e AuditEntry) {
 	}
 }
 
-// handleEvent 记录只展示的事件。同一会话有未完成审批时压掉 question，避免一件事进两条。
+// handleEvent 记录只展示的事件。同一会话有未完成的审批或答题时压掉 question，避免一件事进两条。
 // 消息先按文本语境脱敏再写审计：Gemini 的 ToolPermission 通知会拼进完整命令，
 // last_assistant_message、prompt_response 也可能原样带出凭据。
 func (s *Server) handleEvent(ev proto.Event) proto.EventAck {

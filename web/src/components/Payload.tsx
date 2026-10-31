@@ -1,5 +1,6 @@
 import { engineReasonLabel, riskLabel, riskTone } from '../format'
 import type { Payload as PayloadT, RequestView } from '../types'
+import { AskAnswers } from './AskForm'
 
 // 载荷、标题都按纯文本渲染（React 转义），从不用 dangerouslySetInnerHTML；长内容在 pre 里折行，不撑破手机布局。
 
@@ -92,8 +93,12 @@ export function Payload({ payload: p }: { payload: PayloadT }) {
   }
 }
 
-/** 详情页的主体内容：按种类展示载荷、webhook 的标题与描述、问题文本。告警由 RequestSummary 放在说明卡之前。 */
+/**
+ * 详情页的主体内容：按种类展示载荷、webhook 的标题与描述、问题文本；提问结束后是题目与答案（待答时题目在答题表单里，这里不重复）。
+ * 告警由 RequestSummary 放在说明卡之前。
+ */
 export function RequestContent({ request: r }: { request: RequestView }) {
+  if (r.kind === 'ask') return r.state === 'pending' ? null : <AskAnswers request={r} />
   return (
     <>
       {r.kind === 'permission' ? (

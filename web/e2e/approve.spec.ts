@@ -1,16 +1,6 @@
-import { test as base, type Page } from '@playwright/test'
-import { behavior, expect, test, watchPage } from './fixtures'
-import { readEnv, type E2EEnv } from './env'
-
-async function login(page: Page, env: E2EEnv) {
-  const resp = await page.goto(env.baseURL + '/')
-  // 网页由 hub 同源托管，HTML 带 CSP：下面“没有违规”的断言才有意义
-  expect(resp?.headers()['content-security-policy']).toContain("script-src 'self'")
-  await expect(page).toHaveURL(/\/login/)
-  await page.getByLabel('密码').fill(env.password)
-  await page.getByRole('button', { name: '登录', exact: true }).click()
-  await expect(page.getByText('没有等你处理的事')).toBeVisible()
-}
+import { test as base } from '@playwright/test'
+import { behavior, expect, login, test, watchPage } from './fixtures'
+import { readEnv } from './env'
 
 test('登录、看到请求、批准并记住、规则多一条；再拒绝一条', async ({ page, env, hook }) => {
   await login(page, env)

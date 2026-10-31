@@ -199,6 +199,41 @@ describe('groupByProject', () => {
   })
 })
 
+describe('提问（ask）与审批一样待决', () => {
+  const ask = (over: Partial<RequestView>) =>
+    req({ kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', ask: { questions: [{ question: '用 A 还是 B？', options: [{ label: 'A' }] }] }, ...over })
+
+  it('全量拉取与 request_new：待答的提问进待决列表，按创建时间与审批排在一起', () => {
+    let s = reduce(initialState, { type: 'loaded', inbox: { pending: [ask({ id: 'k1', created_at: '2026-10-23T10:00:03Z' }), req({ id: 'a', created_at: '2026-10-23T10:00:01Z' })], questions: [] }, status })
+    expect(s.pending.map((r) => r.id)).toEqual(['a', 'k1'])
+    s = reduce(s, frame({ type: 'request_new', data: ask({ id: 'k2', created_at: '2026-10-23T10:00:02Z' }) }))
+    expect(s.pending.map((r) => r.id)).toEqual(['a', 'k2', 'k1'])
+    expect(waitingIDs(s)?.sort()).toEqual(['a', 'k1', 'k2'])
+  })
+
+  it('同一会话来了提问：之前在终端等回答的问题不再等', () => {
+    let s = loaded([req({ id: 'q1', kind: 'question', state: 'recorded', session_id: 's1' })])
+    s = reduce(s, frame({ type: 'request_new', data: ask({ id: 'k', session_id: 's1' }) }))
+    expect(s.questions).toEqual([])
+    expect(s.pending.map((r) => r.id)).toContain('k')
+  })
+
+  it('答了、交回终端、过期：移出待决（收件箱、角标、收旧通知都跟着变）', () => {
+    for (const state of ['answered', 'passthrough', 'expired'] as const) {
+      let s = reduce(loaded(), frame({ type: 'request_new', data: ask({ id: 'k', created_at: '2026-10-23T10:00:03Z' }) }))
+      expect(waitingIDs(s)).toContain('k')
+      s = reduce(s, frame({ type: 'request_updated', data: ask({ id: 'k', state, decided_by: 'user' }) }))
+      expect(s.pending.map((r) => r.id), state).toEqual(['a', 'b'])
+      expect(waitingIDs(s), state).not.toContain('k')
+    }
+  })
+
+  it('已结束的提问作为 request_new 到来时（补的历史行）不进待决', () => {
+    const s = reduce(loaded(), frame({ type: 'request_new', data: ask({ id: 'k', state: 'passthrough', decided_by: 'error' }) }))
+    expect(s.pending.map((r) => r.id)).toEqual(['a', 'b'])
+  })
+})
+
 describe('waitingIDs', () => {
   it('还没加载过时为 null（空列表不代表没有待决）', () => {
     expect(waitingIDs(initialState)).toBeNull()

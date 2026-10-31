@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from './api'
-import { elevatedEnabled, failure, fileSize, formatUptime, hitsLabel, importMax, machineSeen, onlineCount, sortMachines, sourceLabel } from './manage'
+import { elevatedEnabled, failure, fileSize, formatUptime, hitsLabel, importMax, machineSeen, onlineCount, pauseCopy, sortMachines, sourceLabel } from './manage'
 import type { Machine, Rule, Status } from './types'
 
 const now = new Date('2026-10-23T12:00:00Z')
@@ -126,5 +126,16 @@ describe('fileSize 与 importMax', () => {
 
   it('与 hub 的导入上限一致（1 MiB）', () => {
     expect(importMax).toBe(1 << 20)
+  })
+})
+
+describe('pauseCopy', () => {
+  it('暂停只管审批：开关、确认框、暂停后的提示与收件箱横幅都说选择题照样送到这里，不说“所有请求”', () => {
+    for (const [k, s] of Object.entries(pauseCopy)) {
+      expect(s, k).toContain('选择题')
+      expect(s, k).not.toContain('所有请求')
+    }
+    expect(pauseCopy.confirm).toContain('Claude Code 的选择题不受暂停影响，照样送到这里')
+    expect(pauseCopy.confirm).toContain('railse agent pause')
   })
 })

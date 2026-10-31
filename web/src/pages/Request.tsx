@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router'
 import { ApiError, hub } from '../api'
 import { coalesce } from '../coalesce'
+import { AskForm } from '../components/AskForm'
 import { Banner } from '../components/Banner'
 import { DecideSheet } from '../components/DecideSheet'
 import { RequestSummary, StatusLine } from '../components/Explain'
 import { RequestDetails } from '../components/RequestAttrs'
 import { ResultToast } from '../components/ResultToast'
-import { keepDecided, outcomeView, type Detail, type Outcome, type Verdict } from '../decide'
+import { keepDecided, outcomeView, type Attempt, type Detail, type Outcome, type Verdict } from '../decide'
 import { kindLabel, riskLabel, riskTone } from '../format'
 import { useStore } from '../StoreProvider'
 import type { RequestView } from '../types'
@@ -69,7 +70,7 @@ function RequestDetail({ id }: { id: string }) {
   }, [outcome])
 
   const r = data?.request
-  const canDecide = !!r && r.state === 'pending' && (r.kind === 'permission' || r.kind === 'webhook')
+  const canDecide = !!r && decidable(r)
 
   function back() {
     // 直接打开（通知、书签、刷新）时没有上一页：回收件箱，而不是退出应用
@@ -82,14 +83,15 @@ function RequestDetail({ id }: { id: string }) {
     setAction(a)
   }
 
-  function onDone(updated: RequestView | null, message?: string) {
+  // 决定面板与答题表单共用：attempted 是这次做的事（面板不带，取正在做的批准或拒绝）
+  function onDone(updated: RequestView | null, message?: string, attempted: Attempt | undefined = action ?? undefined, sent?: Record<string, string>) {
     setAction(null)
     if (updated) {
       setData((d) => (d ? { ...d, request: updated } : d))
       setOutcome({ kind: 'done', request: updated })
     } else {
       // 已处理、已过期、机器已吊销（409），没有这条（404），或面板开着时有了结果：告诉用户为什么，并重新加载
-      setOutcome({ kind: 'gone', message: message || '这条请求已经决定不了', attempted: action ?? undefined })
+      setOutcome({ kind: 'gone', message: message || '这条请求已经决定不了', attempted, sent })
     }
     void load()
     void reload()
@@ -100,13 +102,7 @@ function RequestDetail({ id }: { id: string }) {
 
   return (
     <>
-      <header className="topbar">
-        <button type="button" className="back" onClick={back} aria-label="返回">
-          ‹
-        </button>
-        <h1>{r ? kindLabel(r.kind) : '请求'}</h1>
-        {r?.kind === 'permission' && <span className={`tag ${riskTone(r.risk)}`}>{riskLabel(r.risk)}</span>}
-      </header>
+      <RequestHead request={r} onBack={back} />
       <div className={view ? 'page has-toast' : 'page'}>
         {error && (
           <Banner tone="warn">
@@ -122,27 +118,63 @@ function RequestDetail({ id }: { id: string }) {
             <Link to="/">回收件箱</Link>
           </div>
         )}
-        {r && data && (
-          <>
-            <RequestSummary request={r} />
-            <StatusLine request={r} audit={data.audit} />
-            <RequestDetails request={r} audit={data.audit} />
-            {canDecide && (
-              <div className="decide-bar">
-                <button type="button" className="btn danger" onClick={() => open('deny')}>
-                  拒绝
-                </button>
-                <button type="button" className="btn primary" onClick={() => open('allow')}>
-                  批准
-                </button>
-              </div>
-            )}
-          </>
-        )}
+        {data && <RequestBody data={data} onOpen={open} onDone={onDone} />}
         {!data && !missing && !error && <div className="empty">加载中…</div>}
       </div>
       {view && <ResultToast view={view} onClose={() => setOutcome(null)} raised={canDecide} ref={toast} />}
       {r && action && <DecideSheet key={action} request={r} action={action} onClose={() => setAction(null)} onDone={onDone} />}
+    </>
+  )
+}
+
+/** 还能批准、拒绝：待决的审批与 webhook（提问用答题表单，不在这里）。 */
+function decidable(r: RequestView): boolean {
+  return r.state === 'pending' && (r.kind === 'permission' || r.kind === 'webhook')
+}
+
+/** 详情页顶栏：返回、种类（审批、提问……），审批另带风险标签。 */
+export function RequestHead({ request: r, onBack }: { request?: RequestView; onBack: () => void }) {
+  return (
+    <header className="topbar">
+      <button type="button" className="back" onClick={onBack} aria-label="返回">
+        ‹
+      </button>
+      <h1>{r ? kindLabel(r.kind) : '请求'}</h1>
+      {r?.kind === 'permission' && <span className={`tag ${riskTone(r.risk)}`}>{riskLabel(r.risk)}</span>}
+    </header>
+  )
+}
+
+/**
+ * 详情页的主体（数据到了之后）：说明卡与内容、处理后的状态行；待答的提问接着是答题表单；默认折叠的详情；
+ * 还能决定的审批与 webhook 最后是吸底的拒绝、批准栏。
+ */
+export function RequestBody({
+  data,
+  onOpen,
+  onDone,
+}: {
+  data: Detail
+  onOpen: (a: Verdict) => void
+  onDone: (updated: RequestView | null, message: string | undefined, attempted: Attempt, sent?: Record<string, string>) => void
+}) {
+  const r = data.request
+  return (
+    <>
+      <RequestSummary request={r} />
+      <StatusLine request={r} audit={data.audit} />
+      {r.kind === 'ask' && r.state === 'pending' && <AskForm request={r} onDone={onDone} />}
+      <RequestDetails request={r} audit={data.audit} />
+      {decidable(r) && (
+        <div className="decide-bar">
+          <button type="button" className="btn danger" onClick={() => onOpen('deny')}>
+            拒绝
+          </button>
+          <button type="button" className="btn primary" onClick={() => onOpen('allow')}>
+            批准
+          </button>
+        </div>
+      )}
     </>
   )
 }

@@ -98,7 +98,7 @@ export function StoreProvider({ children, onUnauthorized }: { children: ReactNod
     }
   }, [reloader])
 
-  // 每次拿到收件箱状态（首次加载、实时帧带来的变化、自己批准或拒绝之后的重拉）都收掉已处理请求的通知，同一秒内至多一次
+  // 每次拿到收件箱状态（首次加载、实时帧带来的变化、自己批准、拒绝或回答之后的重拉）都收掉已处理请求的通知，同一秒内至多一次
   const { loaded, pending, questions } = state
   useEffect(() => {
     const ids = waitingIDs({ loaded, pending, questions })

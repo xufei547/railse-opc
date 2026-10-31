@@ -1,4 +1,4 @@
-import type { AuditEvent, DecideBody, Draft, Inbox, Machine, RequestView, Rule, Status, VapidInfo } from './types'
+import type { AnswerBody, AuditEvent, DecideBody, Draft, Inbox, Machine, RequestView, Rule, Status, VapidInfo } from './types'
 
 /** hub 回了非 2xx（status 为 HTTP 状态码），或根本连不上（status 为 0）。message 是给人看的中文文案。 */
 export class ApiError extends Error {
@@ -92,6 +92,8 @@ export const hub = {
   request: (id: string) => get<{ request: RequestView; audit: AuditEvent[] }>(`/api/requests/${enc(id)}`),
   decide: (id: string, body: DecideBody) => post<RequestView>(`/api/requests/${enc(id)}/decide`, body),
   propose: (id: string, body: { action: 'allow' | 'deny'; scope?: 'project' | 'global' }) => post<Draft>(`/api/requests/${enc(id)}/propose`, body),
+  /** 回答提问，或把它交回终端（{ passthrough: true }）。 */
+  answer: (id: string, body: AnswerBody) => post<RequestView>(`/api/requests/${enc(id)}/answer`, body),
   rules: () => get<Rule[]>('/api/rules'),
   setRuleEnabled: (id: string, enabled: boolean) => patch<void>(`/api/rules/${enc(id)}`, { enabled }),
   deleteRule: (id: string) => del<void>(`/api/rules/${enc(id)}`),

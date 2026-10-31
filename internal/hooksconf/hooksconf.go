@@ -63,9 +63,11 @@ func Plan(cli, bin, socket string) map[string][]Group {
 	case "claude":
 		return map[string][]Group{
 			"PermissionRequest": {{Matcher: strp(""), Hooks: []Entry{{Type: "command", Command: cmd, Timeout: 86400}}}},
-			"Notification":      one("", 0),
-			"Stop":              one("", 0),
-			"SessionEnd":        one("", 0),
+			// 选择题（AskUserQuestion）不走 PermissionRequest，只能在 PreToolUse 里代答；matcher 只匹配这一个工具
+			"PreToolUse":   {{Matcher: strp("AskUserQuestion"), Hooks: []Entry{{Type: "command", Command: cmd, Timeout: 86400}}}},
+			"Notification": one("", 0),
+			"Stop":         one("", 0),
+			"SessionEnd":   one("", 0),
 		}
 	case "codex":
 		return map[string][]Group{
@@ -307,7 +309,7 @@ func Merge(existing []byte, bin string, entries map[string][]Group) ([]byte, err
 func Expected(cli string) map[string]int {
 	switch cli {
 	case "claude":
-		return map[string]int{"PermissionRequest": 86400, "Notification": 0, "Stop": 0, "SessionEnd": 0}
+		return map[string]int{"PermissionRequest": 86400, "PreToolUse": 86400, "Notification": 0, "Stop": 0, "SessionEnd": 0}
 	case "codex":
 		return map[string]int{"PermissionRequest": 86400, "Stop": 0, "SessionEnd": 0}
 	case "gemini":

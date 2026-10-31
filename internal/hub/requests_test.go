@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1364,5 +1367,499 @@ func TestPendingAgainRepliesOnlyToSender(t *testing.T) {
 		if len(cur.out) != 1 || wire.Unmarshal(<-cur.out, &e) != nil || e.T != wire.TError || e.RequestID != tc.id {
 			t.Fatalf("%s: 应只给送来的连接回 Error: %+v", tc.id, e)
 		}
+	}
+}
+
+// askFrame 是守护进程送来的答题请求（kind ask，题目已脱敏），每道题两个选项。
+func askFrame(id, session, turn string, questions ...string) wire.PendingRequest {
+	return wire.PendingRequest{T: wire.TPending, RequestID: id, Kind: "ask", Ask: testAsk(questions...),
+		Session: proto.Session{Tool: "claude", CLISessionID: session, TurnID: turn, Cwd: "/p"}, ToolName: "AskUserQuestion",
+		DeadlineSeconds: 86390, CreatedAt: time.Now().UTC()}
+}
+
+// testAsk 给每道题配“方案”标题与 A、B 两个选项。
+func testAsk(questions ...string) *proto.Ask {
+	a := &proto.Ask{}
+	for _, q := range questions {
+		a.Questions = append(a.Questions, proto.Question{Question: q, Header: "方案", Options: []proto.Option{{Label: "A", Description: "快"}, {Label: "B"}}})
+	}
+	return a
+}
+
+// insertAsk 直接往库里插一条属于 machineID、仍 pending 的提问（会话 s1），返回它的题目。
+func insertAsk(t *testing.T, st *store.Store, id, machineID string, questions ...string) *proto.Ask {
+	t.Helper()
+	a := testAsk(questions...)
+	insertReq(t, st, store.Request{ID: id, MachineID: machineID, Kind: "ask", ToolName: "AskUserQuestion", Ask: a, State: "pending", CLISessionID: "s1"})
+	return a
+}
+
+// answersFor 给每道题一个答案。
+func answersFor(a *proto.Ask, ans ...string) map[string]string {
+	out := map[string]string{}
+	for i, q := range a.Questions {
+		out[q.Question] = ans[i]
+	}
+	return out
+}
+
+// recvDecision 读守护进程收到的下一帧，要求是 id 的决定。
+func recvDecision(t *testing.T, c *agentClient, id string) wire.Decision {
+	t.Helper()
+	kind, b := c.recv(5 * time.Second)
+	var d wire.Decision
+	if err := wire.Unmarshal(b, &d); err != nil || kind != wire.TDecision || d.RequestID != id {
+		t.Fatalf("应收到 %s 的决定: %s %s", id, kind, b)
+	}
+	return d
+}
+
+// 重发去重按题目认：同一回合两道不同的题都保持 pending；同一道题换了 id 在窗口内重发，顶掉旧的（cancelled/resend）。
+func TestAskResendDedup(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	c.send(askFrame("a1", "s1", "t1", "用 A 还是 B？"))
+	c.send(askFrame("a2", "s1", "t1", "要不要写测试？"))
+	waitFor(t, "两道题都登记", func() bool { n, _ := h.st.CountPending(); return n == 2 })
+	if a1 := getReq(t, h.st, "a1"); a1.State != "pending" {
+		t.Fatalf("同一回合另一道题不应顶掉 a1: %+v", a1)
+	}
+	c.send(askFrame("a3", "s1", "t1", "用 A 还是 B？"))
+	waitFor(t, "a3 登记", func() bool { r, err := h.st.GetRequest("a3"); return err == nil && r.State == "pending" })
+	if a1 := getReq(t, h.st, "a1"); a1.State != "cancelled" || a1.DecidedBy != store.DecidedByResend {
+		t.Fatalf("同一道题重发应顶掉 a1: %+v", a1)
+	}
+	if a2 := getReq(t, h.st, "a2"); a2.State != "pending" {
+		t.Fatalf("a2 不受影响: %+v", a2)
+	}
+	if acts := auditActions(t, h.st, "a1"); countOf(acts, "cancelled_resend") != 1 {
+		t.Fatalf("a1 应记 cancelled_resend: %v", acts)
+	}
+}
+
+// 端到端：守护进程送来 ask → 答题接口 → 守护进程收到 answer 决定（键是 hub 收到的题面，decided_by user）→ delivered →
+// 库里记下送达时间。库里的答案是原文；hub 自己的审计里答案脱敏。
+func TestAnswerDeliversToAgent(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	f := askFrame("a1", "s1", "t1", "  用 A 还是 B？ ", "要不要写测试？")
+	c.send(f)
+	waitBroadcast(t, sub, "request_new", "a1", nil)
+	token := "ghp_" + strings.Repeat("A", 36)
+	answers := answersFor(f.Ask, "B", "要，token "+token)
+	resp := apiPost(t, h, ck, "/api/requests/a1/answer", map[string]any{"answers": answers, "passthrough": false})
+	var view map[string]any
+	decodeBody(t, resp, &view)
+	if resp.StatusCode != http.StatusOK || view["state"] != "answered" || view["kind"] != "ask" || view["decided_by"] != "user" || view["ask"] == nil {
+		t.Fatalf("作答 = %d %+v", resp.StatusCode, view)
+	}
+	wantView(t, "答题的返回", view, "mac")
+	d := recvDecision(t, c, "a1")
+	if d.Action != "answer" || d.DecidedBy != "user" || !reflect.DeepEqual(d.Answers, answers) {
+		t.Fatalf("守护进程应收到以收到的题面为键的答案: %+v", d)
+	}
+	if u := waitBroadcast(t, sub, "request_updated", "a1", nil); u["state"] != "answered" {
+		t.Fatalf("应广播作答后的请求: %+v", u)
+	}
+	c.send(wire.Delivered{T: wire.TDelivered, RequestID: "a1"})
+	waitDelivered(t, sub, "a1")
+	r := getReq(t, h.st, "a1")
+	if r.DeliveredAt == nil || !reflect.DeepEqual(r.Answers, answers) {
+		t.Fatalf("库里应记送达、存答案原文: %+v", r)
+	}
+	ev, ok := lastAudit(t, h.st, "answer")
+	if !ok || ev.Actor != "user" || ev.RequestID != "a1" || strings.Contains(ev.Detail, token) || !strings.Contains(ev.Detail, "redacted") ||
+		!strings.Contains(ev.Detail, "要不要写测试？") {
+		t.Fatalf("审计 answer 应带脱敏的答案: %+v %v", ev, ok)
+	}
+}
+
+// 断线期间作答：重连时守护进程仍持有就补发 answer 决定（带答案），不再持有的记 undeliverable。交回终端的不补发，
+// 它的 delivered 回执 hub 端无事可做；守护进程再送它的 pending 回“请求已结束”。
+func TestAnswerResentAfterReconnect(t *testing.T) {
+	h, _ := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	c.recv(5 * time.Second)
+	frames := map[string]wire.PendingRequest{"a1": askFrame("a1", "s1", "t1", "用 A 还是 B？"), "a2": askFrame("a2", "s2", "t1", "要不要写测试？"),
+		"a3": askFrame("a3", "s3", "t1", "部署到哪？")}
+	for _, f := range frames {
+		c.send(f)
+	}
+	waitFor(t, "三道题登记", func() bool { n, _ := h.st.CountPending(); return n == 3 })
+	c.close()
+	waitFor(t, "断开", func() bool { return !h.srv.agents.connected(id) })
+	a1 := answersFor(frames["a1"].Ask, "A")
+	if _, err := h.srv.Answer(AnswerInput{RequestID: "a1", Answers: a1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.srv.Answer(AnswerInput{RequestID: "a2", Passthrough: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.srv.Answer(AnswerInput{RequestID: "a3", Answers: answersFor(frames["a3"].Ask, "测试环境")}); err != nil {
+		t.Fatal(err)
+	}
+	c2 := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id, Pending: []wire.PendingSummary{{RequestID: "a1"}, {RequestID: "a2"}}})
+	defer c2.close()
+	c2.recv(5 * time.Second) // welcome
+	if d := recvDecision(t, c2, "a1"); d.Action != "answer" || d.DecidedBy != "user" || !reflect.DeepEqual(d.Answers, a1) {
+		t.Fatalf("重连应补发 a1 的答案: %+v", d)
+	}
+	// a2 交回终端，不补发：守护进程重发它的 pending，下一帧就是“请求已结束”
+	c2.send(frames["a2"])
+	kind, b := c2.recv(5 * time.Second)
+	var e wire.Error
+	wire.Unmarshal(b, &e)
+	if kind != wire.TError || e.RequestID != "a2" || e.Message != "请求已结束" {
+		t.Fatalf("交回终端的不补发、重发回请求已结束: %s %s", kind, b)
+	}
+	if n := systemUndeliverable(t, h.st, id, "a3"); n != 1 {
+		t.Fatalf("不再持有的 a3 应记 undeliverable, 得到 %d", n)
+	}
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
+	c2.send(wire.Delivered{T: wire.TDelivered, RequestID: "a2"})
+	c2.send(wire.Delivered{T: wire.TDelivered, RequestID: "a1"})
+	// 同一连接按序处理：a1 的送达广播到了，a2 的回执也处理完了；交回终端的回执不记送达，所以不该有 a2 的 request_updated
+	waitBroadcast(t, sub, "request_updated", "a1", func(f clientFrame) {
+		if f.Type == "request_updated" && f.Data["id"] == "a2" {
+			t.Errorf("交回终端的回执不应广播 a2 的更新: %+v", f)
+		}
+	})
+	waitFor(t, "a1 送达", func() bool { r, _ := h.st.GetRequest("a1"); return r.DeliveredAt != nil })
+	if a2 := getReq(t, h.st, "a2"); a2.State != "passthrough" || a2.DecidedBy != "user" || a2.DeliveredAt != nil {
+		t.Fatalf("交回终端的回执不记: %+v", a2)
+	}
+}
+
+// 重发已登记的 ask：内容一致时 pending 只广播、answered 再发决定（带答案）；题目不同或种类不同回“请求内容不符”；
+// 交回终端的回“请求已结束”。
+func TestAskPendingAgain(t *testing.T) {
+	h, _ := quietHub(t)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	insertAsk(t, h.st, "p1", m.ID, "用 A 还是 B？")
+	ans := insertAsk(t, h.st, "d1", m.ID, "要不要写测试？")
+	insertAsk(t, h.st, "x1", m.ID, "部署到哪？")
+	if _, err := h.st.AnswerRequest("d1", answersFor(ans, "要"), false, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.AnswerRequest("x1", nil, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	c := newFakeConn(m.ID, 8)
+	h.srv.agents.register(c)
+	again := func(f wire.PendingRequest) []byte {
+		t.Helper()
+		h.srv.pendingAgain(c, getReq(t, h.st, f.RequestID), f)
+		switch len(c.out) {
+		case 0:
+			return nil
+		case 1:
+			return <-c.out
+		}
+		t.Fatalf("%s: 应至多回一帧, 得到 %d", f.RequestID, len(c.out))
+		return nil
+	}
+	if b := again(askFrame("p1", "s1", "t1", "用 A 还是 B？")); b != nil {
+		t.Fatalf("内容一致的 pending 只广播: %s", b)
+	}
+	perm := pendingFrame("p1", "s1", "t1", "echo p1")
+	perm.ToolName = "AskUserQuestion"
+	for _, f := range []wire.PendingRequest{askFrame("p1", "s1", "t1", "用 B 还是 C？"), perm} {
+		var e wire.Error
+		if b := again(f); wire.Unmarshal(b, &e) != nil || e.RequestID != "p1" || e.Message != "请求内容不符" {
+			t.Fatalf("内容不符应回 Error: %s", b)
+		}
+	}
+	var d wire.Decision
+	if b := again(askFrame("d1", "s1", "t1", "要不要写测试？")); wire.Unmarshal(b, &d) != nil || d.T != wire.TDecision || d.Action != "answer" ||
+		!reflect.DeepEqual(d.Answers, answersFor(ans, "要")) {
+		t.Fatalf("已回答的应再发答案: %s", b)
+	}
+	var e wire.Error
+	if b := again(askFrame("x1", "s1", "t1", "部署到哪？")); wire.Unmarshal(b, &e) != nil || e.RequestID != "x1" || e.Message != "请求已结束" {
+		t.Fatalf("交回终端的回请求已结束: %s", b)
+	}
+}
+
+// 提问不能用决定接口，也不能“记住”：Decide 与 propose 回 errBadAction（“这是提问，用答题接口”），不学规则、不改状态、不审计。
+func TestDecideRejectsAsk(t *testing.T) {
+	h := newTestHub(t)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	insertAsk(t, h.st, "a1", m.ID, "用 A 还是 B？")
+	rulesBefore, _ := h.st.ListRules()
+	for _, in := range []DecideInput{{RequestID: "a1", Action: "allow"}, {RequestID: "a1", Action: "deny", Remember: true}, {RequestID: "a1", Action: "allow", Remember: true, Scope: "global"}} {
+		if _, err := h.srv.Decide(in); !errors.Is(err, errBadAction) || err.Error() != "这是提问，用答题接口" {
+			t.Fatalf("Decide(%+v) 应拒绝提问: %v", in, err)
+		}
+	}
+	if _, err := h.srv.propose("a1", "allow", ""); !errors.Is(err, errBadAction) || err.Error() != "这是提问，用答题接口" {
+		t.Fatalf("propose 应拒绝提问: %v", err)
+	}
+	if a1 := getReq(t, h.st, "a1"); a1.State != "pending" {
+		t.Fatalf("不应改状态: %+v", a1)
+	}
+	if rules, _ := h.st.ListRules(); len(rules) != len(rulesBefore) {
+		t.Fatalf("不应学规则: %+v", rules)
+	}
+	if acts := auditActions(t, h.st, "a1"); len(acts) != 0 {
+		t.Fatalf("不应审计: %v", acts)
+	}
+}
+
+// Answer 的拒绝：不是提问 errBadAction（“这不是提问…”）；没有这条 ErrNotFound；答案不合规 errBadAnswer（缺题、空、纯空白、超长、多余键）；
+// 已回答 ErrNotPending；已过期 errExpired（改成 expired、通知守护进程）；机器已吊销 errRevoked（改成 cancelled/machine_revoked）。
+// 交回终端时忽略答案（有也不校验）；1000 字符的答案接受。
+func TestAnswerRefusals(t *testing.T) {
+	h := newTestHub(t)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	c := newFakeConn(m.ID, 8)
+	h.srv.agents.register(c)
+	a := insertAsk(t, h.st, "a1", m.ID, "用 A 还是 B？", "要不要写测试？")
+	insertReq(t, h.st, store.Request{ID: "p1", MachineID: m.ID, State: "pending"})
+	if _, err := h.srv.Answer(AnswerInput{RequestID: "p1", Answers: map[string]string{"x": "y"}}); !errors.Is(err, errBadAction) || !strings.Contains(err.Error(), "不是提问") {
+		t.Fatalf("审批不能作答: %v", err)
+	}
+	if _, err := h.srv.Answer(AnswerInput{RequestID: "nope", Answers: answersFor(a, "A", "要")}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("不存在: %v", err)
+	}
+	q1, q2 := a.Questions[0].Question, a.Questions[1].Question
+	for name, ans := range map[string]map[string]string{
+		"没有答案": nil,
+		"缺题":   {q1: "A"},
+		"空值":   {q1: "A", q2: ""},
+		"纯空白":  {q1: "A", q2: " \t\n　"},
+		"超长":   {q1: "A", q2: strings.Repeat("长", 1001)},
+		"多余键":  {q1: "A", q2: "要", "别的题": "x"},
+	} {
+		if _, err := h.srv.Answer(AnswerInput{RequestID: "a1", Answers: ans}); !errors.Is(err, errBadAnswer) {
+			t.Fatalf("%s: 应 errBadAnswer: %v", name, err)
+		}
+	}
+	if a1 := getReq(t, h.st, "a1"); a1.State != "pending" || len(c.out) != 0 {
+		t.Fatalf("不合规的答案不改状态、不下发: %+v", a1)
+	}
+	long := strings.Repeat("长", proto.AnswerMax)
+	got, err := h.srv.Answer(AnswerInput{RequestID: "a1", Answers: map[string]string{q1: " A ", q2: long}})
+	if err != nil || got.State != "answered" || got.Answers[q1] != " A " || got.Answers[q2] != long {
+		t.Fatalf("1000 字符的答案应接受、答案不改写: %+v, %v", got, err)
+	}
+	if _, err := h.srv.Answer(AnswerInput{RequestID: "a1", Answers: map[string]string{q1: "B", q2: "不要"}}); !errors.Is(err, store.ErrNotPending) {
+		t.Fatalf("已回答应 ErrNotPending: %v", err)
+	}
+	<-c.out // a1 的 answer 决定
+	// 交回终端：答案有也不校验
+	insertAsk(t, h.st, "a2", m.ID, "部署到哪？")
+	if got, err := h.srv.Answer(AnswerInput{RequestID: "a2", Answers: map[string]string{"乱": ""}, Passthrough: true}); err != nil ||
+		got.State != "passthrough" || got.Answers != nil {
+		t.Fatalf("交回终端 = %+v, %v", got, err)
+	}
+	var d wire.Decision
+	if err := wire.Unmarshal(<-c.out, &d); err != nil || d.RequestID != "a2" || d.Action != "passthrough" || d.DecidedBy != "user" || d.Answers != nil {
+		t.Fatalf("应下发 passthrough: %+v, %v", d, err)
+	}
+	if ev, ok := lastAudit(t, h.st, "passthrough"); !ok || ev.Actor != "user" || ev.RequestID != "a2" {
+		t.Fatalf("应审计 passthrough: %+v", ev)
+	}
+	// 已过期
+	past := store.FormatTime(time.Now().Add(-time.Minute))
+	insertReq(t, h.st, store.Request{ID: "e1", MachineID: m.ID, Kind: "ask", ToolName: "AskUserQuestion", Ask: testAsk("过期的题"), State: "pending", ExpiresAt: &past})
+	if _, err := h.srv.Answer(AnswerInput{RequestID: "e1", Answers: map[string]string{"过期的题": "A"}}); !errors.Is(err, errExpired) {
+		t.Fatalf("已过期: %v", err)
+	}
+	if e1 := getReq(t, h.st, "e1"); e1.State != "expired" || e1.DecidedBy != "timeout" {
+		t.Fatalf("过期的应改 expired: %+v", e1)
+	}
+	var ended wire.Error
+	if err := wire.Unmarshal(<-c.out, &ended); err != nil || ended.RequestID != "e1" {
+		t.Fatalf("过期应通知守护进程: %+v, %v", ended, err)
+	}
+	// 机器已吊销
+	insertAsk(t, h.st, "r1", m.ID, "吊销后的题")
+	if err := h.st.RevokeMachine(m.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.srv.Answer(AnswerInput{RequestID: "r1", Answers: map[string]string{"吊销后的题": "A"}}); !errors.Is(err, errRevoked) {
+		t.Fatalf("机器已吊销: %v", err)
+	}
+	if r1 := getReq(t, h.st, "r1"); r1.State != "cancelled" || r1.DecidedBy != decidedByRevoked {
+		t.Fatalf("吊销的应改 cancelled: %+v", r1)
+	}
+}
+
+// 两次并发作答只有一次成功，另一次 ErrNotPending；只有一条作答审计、一个下发的决定。
+func TestAnswerConcurrent(t *testing.T) {
+	h := newTestHub(t)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	c := newFakeConn(m.ID, 8)
+	h.srv.agents.register(c)
+	a := insertAsk(t, h.st, "a1", m.ID, "用 A 还是 B？")
+	errs := make(chan error, 2)
+	for _, in := range []AnswerInput{{RequestID: "a1", Answers: answersFor(a, "A")}, {RequestID: "a1", Passthrough: true}} {
+		go func() {
+			_, err := h.srv.Answer(in)
+			errs <- err
+		}()
+	}
+	var ok, notPending int
+	for range 2 {
+		switch err := <-errs; {
+		case err == nil:
+			ok++
+		case errors.Is(err, store.ErrNotPending):
+			notPending++
+		default:
+			t.Fatalf("意外的错误: %v", err)
+		}
+	}
+	if ok != 1 || notPending != 1 {
+		t.Fatalf("应一次成功一次 ErrNotPending: ok=%d notPending=%d", ok, notPending)
+	}
+	if acts := auditActions(t, h.st, "a1"); countOf(acts, "answer")+countOf(acts, "passthrough") != 1 || len(c.out) != 1 {
+		t.Fatalf("只应有一次作答审计与一个决定: %v, %d 帧", acts, len(c.out))
+	}
+}
+
+// 守护进程审计里的 ask 条目同口径对账：answered 补记送达；expired、cancelled、passthrough 覆盖仍 pending 的行；hub 没有的补
+// kind ask 的历史行（题目再脱敏、载荷 {}）；auto_* 与 hub 没有的 answered 不补行。审计 detail 里的题目与答案再脱敏。
+func TestAuditAskEntries(t *testing.T) {
+	h := newTestHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	f1, f2 := askFrame("a1", "s1", "t1", "用 A 还是 B？"), askFrame("a2", "s2", "t1", "要不要写测试？")
+	c.send(f1)
+	c.send(f2)
+	waitFor(t, "两道题登记", func() bool { n, _ := h.st.CountPending(); return n == 2 })
+	if _, err := h.srv.Answer(AnswerInput{RequestID: "a1", Answers: answersFor(f1.Ask, "A")}); err != nil {
+		t.Fatal(err)
+	}
+	recvDecision(t, c, "a1")
+	leak := "mysql --password hunter22"
+	sess := proto.Session{Tool: "claude", CLISessionID: "s3", Cwd: "/p"}
+	raw := testAsk("连库用 " + leak + " 吗？")
+	c.send(auditFrame(t,
+		agent.AuditEntry{TS: time.Now(), RequestID: "a1", Kind: "ask", Session: sess, ToolName: "AskUserQuestion", Ask: f1.Ask, Action: "answer", State: "answered",
+			DecidedBy: "user", Answers: map[string]string{"用 A 还是 B？": "A " + leak}},
+		agent.AuditEntry{TS: time.Now(), RequestID: "a2", Kind: "ask", Session: sess, ToolName: "AskUserQuestion", State: "expired", DecidedBy: "timeout", Reason: "本机等待过期"},
+		agent.AuditEntry{TS: time.Now(), RequestID: "a3", Kind: "ask", Session: sess, ToolName: "AskUserQuestion", Ask: raw, Action: "passthrough", State: "passthrough",
+			DecidedBy: "error", Reason: "脱敏后有题面相同的题，分不清答的是哪道，交回终端处理"},
+		agent.AuditEntry{TS: time.Now(), RequestID: "a4", Kind: "ask", Session: sess, ToolName: "AskUserQuestion", State: "auto_allowed", RuleID: "builtin-readonly"},
+		agent.AuditEntry{TS: time.Now(), RequestID: "a5", Kind: "ask", Session: sess, ToolName: "AskUserQuestion", State: "answered", DecidedBy: "user"},
+	))
+	waitFor(t, "a3 补历史行", func() bool { _, err := h.st.GetRequest("a3"); return err == nil })
+	waitFor(t, "a1 补记送达", func() bool { r, _ := h.st.GetRequest("a1"); return r.DeliveredAt != nil })
+	if a2 := getReq(t, h.st, "a2"); a2.State != "expired" || a2.DecidedBy != "timeout" {
+		t.Fatalf("a2 应被本机终态覆盖: %+v", a2)
+	}
+	a3 := getReq(t, h.st, "a3")
+	if a3.Kind != "ask" || a3.State != "passthrough" || a3.DecidedBy != "error" || a3.ToolName != "AskUserQuestion" || a3.Ask == nil || len(a3.Ask.Questions) != 1 ||
+		strings.Contains(a3.Ask.Questions[0].Question, "hunter22") || !strings.Contains(a3.Ask.Questions[0].Question, "<redacted>") || a3.Risk != "" ||
+		a3.SessionID == "" || a3.DecidedAt == nil {
+		t.Fatalf("a3 历史行: %+v", a3)
+	}
+	if got := queryDB(t, h, "SELECT payload FROM requests WHERE id = 'a3'"); got != "{}" {
+		t.Fatalf("a3 的载荷列应为 {}: %q", got)
+	}
+	for _, rid := range []string{"a4", "a5"} {
+		if _, err := h.st.GetRequest(rid); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("%s 不应补行: %v", rid, err)
+		}
+	}
+	if hits := ruleHits(t, h.st, "builtin-readonly"); hits != 0 {
+		t.Fatalf("ask 不记规则命中, 得到 %d", hits)
+	}
+	for _, rid := range []string{"a1", "a3"} {
+		events, _ := h.st.ListAudit(10, rid)
+		for _, e := range events {
+			if e.Actor == "agent" && strings.Contains(e.Detail, "hunter22") {
+				t.Fatalf("%s 的审计 detail 应再脱敏: %s", rid, e.Detail)
+			}
+		}
+	}
+}
+
+// 过期扫描与吊销取消对 ask 一视同仁：过期的改 expired/timeout 并通知守护进程；吊销机器时仍 pending 的改 cancelled/machine_revoked。
+func TestAskExpiryAndRevoke(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/h")
+	c := newFakeConn(m.ID, 8)
+	h.srv.agents.register(c)
+	past := store.FormatTime(time.Now().Add(-time.Minute))
+	insertReq(t, h.st, store.Request{ID: "e1", MachineID: m.ID, Kind: "ask", ToolName: "AskUserQuestion", Ask: testAsk("过期的题"), State: "pending", ExpiresAt: &past})
+	insertAsk(t, h.st, "r1", m.ID, "还在等的题")
+	h.srv.expireDue(context.Background(), time.Now())
+	if e1 := getReq(t, h.st, "e1"); e1.State != "expired" || e1.DecidedBy != "timeout" {
+		t.Fatalf("过期扫描应改 e1: %+v", e1)
+	}
+	var e wire.Error
+	if err := wire.Unmarshal(<-c.out, &e); err != nil || e.RequestID != "e1" {
+		t.Fatalf("应通知守护进程: %+v, %v", e, err)
+	}
+	if resp := doReq(t, "DELETE", h.http.URL+"/api/machines/"+m.ID, nil, "", ck); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("吊销 = %d", resp.StatusCode)
+	}
+	if r1 := getReq(t, h.st, "r1"); r1.State != "cancelled" || r1.DecidedBy != decidedByRevoked {
+		t.Fatalf("吊销应取消 r1: %+v", r1)
+	}
+}
+
+// queryDB 用另一条连接查 hub 的库，返回一个文本值。
+func queryDB(t *testing.T, h *testHub, q string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(h.dir, "hub.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var s string
+	if err := db.QueryRow(q).Scan(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// ask 的工具名恒为 AskUserQuestion，不照收帧里的；题目的 options 为 null 时规整成空数组，视图 JSON 里总是数组。
+func TestAskToolNameFixedAndOptionsNormalized(t *testing.T) {
+	h, _ := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	f := askFrame("a1", "s1", "t1", "自由回答？")
+	f.ToolName = "别的名字"
+	f.Ask.Questions[0].Options = nil
+	c.send(f)
+	waitFor(t, "ask 登记", func() bool { n, _ := h.st.CountPending(); return n == 1 })
+	r := getReq(t, h.st, "a1")
+	if r.ToolName != "AskUserQuestion" {
+		t.Fatalf("工具名 = %q", r.ToolName)
+	}
+	b, err := json.Marshal(h.srv.view(r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"options":[]`) || strings.Contains(string(b), `"options":null`) {
+		t.Fatalf("视图里 options 应是空数组: %s", b)
+	}
+}
+
+// 对不是提问的请求作答在存储层报 ErrNotAsk 时，接口回 400 与“不是提问”同口径，不落到 500。
+func TestWriteDecideErrNotAsk(t *testing.T) {
+	h, _ := quietHub(t)
+	w := httptest.NewRecorder()
+	h.srv.writeDecideErr(w, "作答", fmt.Errorf("包一层: %w", store.ErrNotAsk))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), errNotAsk.Error()) {
+		t.Fatalf("ErrNotAsk 应回 400 与不是提问: %d %s", w.Code, w.Body)
 	}
 }

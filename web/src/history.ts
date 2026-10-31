@@ -8,6 +8,7 @@ export const historyFilters: readonly (readonly [string, string])[] = [
   ['', '全部'],
   ['approved', '已批准'],
   ['denied', '已拒绝'],
+  ['answered', '已回答'],
   ['auto_allowed', '自动放行'],
   ['auto_denied', '自动拒绝'],
   ['passthrough', '交回终端'],
@@ -31,13 +32,14 @@ export type Tone = 'low' | 'mid' | 'high' | 'plain'
 
 const stateTones: Record<string, Tone> = {
   approved: 'low',
+  answered: 'low',
   auto_allowed: 'low',
   denied: 'high',
   auto_denied: 'high',
   pending: 'mid',
 }
 
-/** 卡片上的标签：审批与 webhook 显示状态（放行绿、拒绝红、等待琥珀、其余灰）；问题与完成不是决定，显示种类。 */
+/** 卡片上的标签：审批、webhook 与提问显示状态（放行与已回答绿、拒绝红、等待琥珀、其余灰）；问题与完成不是决定，显示种类。 */
 export function historyTag(r: Pick<RequestView, 'kind' | 'state'>): { label: string; tone: Tone } {
   if (r.kind === 'question') return { label: '问题', tone: 'plain' }
   if (r.kind === 'done') return { label: '完成', tone: 'plain' }

@@ -6,6 +6,8 @@ import type { AuditEvent, DecideBody, Draft, RequestView } from './types'
 
 export type Verdict = 'allow' | 'deny'
 export type Scope = 'project' | 'global'
+/** 这次要做的事：审批的批准、拒绝，或提问的回答、交回终端（AskVerb）。结果提示据此认出“正是你这次做的”。 */
+export type Attempt = Verdict | 'answer' | 'passthrough'
 
 export interface SheetState {
   action: Verdict
@@ -170,8 +172,12 @@ export function scopeOptions(r: RequestView): ScopeOption[] {
   ]
 }
 
-/** 决定成功后的提示。 */
+/** 决定（或作答）成功后的提示。 */
 export function doneMessage(r: RequestView): string {
+  if (r.kind === 'ask') {
+    if (r.state === 'answered') return `已回答，${r.delivered_at ? '已送达 agent' : '答案正在送回 agent'}`
+    if (r.state === 'passthrough') return '已交回终端，agent 会在终端里问你'
+  }
   const verb = r.state === 'approved' ? '已批准' : r.state === 'denied' ? '已拒绝' : stateLabel(r.state)
   const learned = r.rule_id ? `，并记住为规则 ${r.rule_id}；` : '，'
   let tail: string
@@ -180,22 +186,34 @@ export function doneMessage(r: RequestView): string {
   return verb + learned + tail
 }
 
+/** 每种要做的事成功后请求的状态。 */
+const attemptStates: Record<Attempt, RequestView['state']> = { allow: 'approved', deny: 'denied', answer: 'answered', passthrough: 'passthrough' }
+
+/** 两份答案（题面 → 答案）逐题相同。 */
+function sameAnswers(a: Record<string, string> | undefined, b: Record<string, string> | undefined): boolean {
+  if (!a || !b) return false
+  const keys = Object.keys(a)
+  return keys.length === Object.keys(b).length && keys.every((k) => Object.prototype.hasOwnProperty.call(b, k) && a[k] === b[k])
+}
+
 /**
- * r 是不是用户在手机上做的、与这次要做的（attempted）同样的批准或拒绝：多半就是这次（上次提交超时，其实已经生效）。
+ * r 是不是用户在手机上做的、与这次要做的（attempted）同样的批准、拒绝、回答或交回终端：多半就是这次（上次提交超时，其实已经生效）。
+ * 批准、拒绝、交回终端，同一个动作就是同一结果；回答还要答案与这次提交的（sent）完全相同——另一台设备可能答了不同内容。
  * 不知道这次要做什么时不认。
  */
-function sameUserDecision(r: RequestView, attempted?: Verdict): boolean {
+function sameUserDecision(r: RequestView, attempted?: Attempt, sent?: Record<string, string>): boolean {
   if (r.decided_by !== 'user' || !attempted) return false
-  return (r.state === 'approved' && attempted === 'allow') || (r.state === 'denied' && attempted === 'deny')
+  if (r.state !== attemptStates[attempted]) return false
+  return attempted !== 'answer' || sameAnswers(r.answers, sent)
 }
 
 /**
  * 面板开着时请求有了结果（终端里处理了、过期、机器吊销……）。正是用户这次要做的决定时说“你的决定已生效”，不说成“别处”；
  * 另一个页面做了相反的决定时仍是“别处”的结果（括号里是 outcomeText 的一句人话，如“你批准了”）。
  */
-export function goneMessage(r: RequestView, attempted?: Verdict): string {
+export function goneMessage(r: RequestView, attempted?: Attempt, sent?: Record<string, string>): string {
   const state = stateLabel(r.state)
-  if (sameUserDecision(r, attempted)) return `你的决定已生效：${state}`
+  if (sameUserDecision(r, attempted, sent)) return `你的决定已生效：${state}`
   const outcome = outcomeText(r)
   return `这条请求在别处有了结果：${state}${outcome ? `（${outcome}）` : ''}`
 }
@@ -204,7 +222,10 @@ export function goneMessage(r: RequestView, attempted?: Verdict): string {
  * 一次决定的结果：成功（带 decide 的返回），或决定不了（409、404、面板开着时有了结果）。决定不了时带要告诉用户的文案，
  * 以及这次要做的动作（不知道时不带）。
  */
-export type Outcome = { kind: 'done'; request: RequestView } | { kind: 'gone'; message: string; attempted?: Verdict }
+export type Outcome =
+  | { kind: 'done'; request: RequestView }
+  /** sent：这次回答提交的答案（只有回答带），用来认出“其实是我答的”与“别的设备答了不同内容”。 */
+  | { kind: 'gone'; message: string; attempted?: Attempt; sent?: Record<string, string> }
 
 export interface OutcomeView {
   tone: 'ok' | 'warn'
@@ -224,9 +245,9 @@ export function outcomeView(o: Outcome, current: RequestView | null): OutcomeVie
     const r = current && current.id === o.request.id && current.state !== 'pending' ? current : o.request
     return { tone: 'ok', title: '已生效', text: doneMessage(r) }
   }
-  if (current && sameUserDecision(current, o.attempted)) return { tone: 'ok', title: '你的决定已生效', text: doneMessage(current) }
+  if (current && sameUserDecision(current, o.attempted, o.sent)) return { tone: 'ok', title: '你的决定已生效', text: doneMessage(current) }
   if (current && o.attempted && current.decided_by === 'user' && current.state !== 'pending') {
-    return { tone: 'warn', title: '没有生效', text: goneMessage(current, o.attempted) }
+    return { tone: 'warn', title: '没有生效', text: goneMessage(current, o.attempted, o.sent) }
   }
   return { tone: 'warn', title: '没有生效', text: o.message }
 }

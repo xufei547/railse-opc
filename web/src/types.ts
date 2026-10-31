@@ -1,9 +1,26 @@
 // hub 接口的数据形状，以 internal/hub 的处理函数与 docs/hub.md 为准。
 
-export type Kind = 'permission' | 'question' | 'done' | 'webhook'
+export type Kind = 'permission' | 'question' | 'done' | 'webhook' | 'ask'
 export type RequestState =
   | 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
-  | 'auto_allowed' | 'auto_denied' | 'passthrough' | 'recorded'
+  | 'auto_allowed' | 'auto_denied' | 'passthrough' | 'recorded' | 'answered'
+
+/** 提问的一个选项（已脱敏）。 */
+export interface Option {
+  label: string
+  description?: string
+}
+
+/**
+ * 提问（AskUserQuestion）的一道题（已脱敏）。question 也是答案的键：作答时逐字节原样带回，不 trim、不改写。
+ * hub 给的 options 总是数组（可为空），header、description 可省，multiSelect 只在为 true 时出现；网页仍容忍 options 为 null 或缺失。
+ */
+export interface Question {
+  question: string
+  header?: string
+  options?: Option[] | null
+  multiSelect?: boolean
+}
 
 /** 已脱敏的载荷（policy.Payload）。按 type 只有部分字段有值。 */
 export interface Payload {
@@ -47,6 +64,10 @@ export interface RequestView {
   project: string
   /** 载荷里有被脱敏抹掉的部分：展示的不是原文，必须醒目告警。 */
   has_redacted: boolean
+  /** 提问（kind 为 ask）的题目；别的种类没有这个键。 */
+  ask?: { questions: Question[] }
+  /** 提问作答后的答案：题面 → 用户答的原文；没答时没有这个键。 */
+  answers?: Record<string, string>
 }
 
 export interface AuditEvent {
@@ -94,7 +115,7 @@ export interface Status {
 }
 
 export interface Inbox {
-  /** 全部待审批，hub 按创建时间倒序给出。 */
+  /** 全部待决（待审批与待答的提问），hub 按创建时间倒序给出。 */
   pending: RequestView[]
   /** 最近 24 小时还在等回答的 question，按创建时间倒序。 */
   questions: RequestView[]
@@ -114,6 +135,12 @@ export interface DecideBody {
   note?: string
   remember?: boolean
   scope?: 'project' | 'global'
+}
+
+/** POST /api/requests/{id}/answer 的请求体：answers 的键是题面原样；交回终端只带 passthrough。 */
+export interface AnswerBody {
+  answers?: Record<string, string>
+  passthrough?: boolean
 }
 
 export interface VapidInfo {

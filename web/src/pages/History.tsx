@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { hub } from '../api'
+import { askQuestions } from '../ask'
 import { coalesce } from '../coalesce'
 import { Banner } from '../components/Banner'
 import { absoluteTime, clip, isRedacted, outcomeText, payloadSummary, relativeTime } from '../format'
@@ -12,10 +13,17 @@ import type { RequestView } from '../types'
 /** 卡片摘要至多这么多字符（CSS 再按行数收起）：500 条长命令也不撑出一大块 DOM。 */
 const summaryMax = 300
 
+/** 历史卡片的摘要：审批是命令或路径，提问是第一题，其余是标题。 */
+function historyMain(r: RequestView): string {
+  if (r.kind === 'permission') return payloadSummary(r.payload)
+  if (r.kind === 'ask') return askQuestions(r)[0]?.question ?? ''
+  return r.title
+}
+
 /** 历史里的一条：链接到详情；机器 · 项目、状态（或种类）、相对时间、摘要与一句人话的结果（outcomeText，与审批页状态行同一个函数）。 */
 export function HistoryCard({ request: r }: { request: RequestView }) {
   const where = r.kind === 'webhook' ? 'webhook' : [r.machine_name, r.project].filter(Boolean).join(' · ')
-  const main = r.kind === 'permission' ? payloadSummary(r.payload) : r.title
+  const main = historyMain(r)
   const tag = historyTag(r)
   const outcome = outcomeText(r)
   return (

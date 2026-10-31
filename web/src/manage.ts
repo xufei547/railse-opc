@@ -31,6 +31,20 @@ export function machineSeen(m: Pick<Machine, 'online' | 'last_seen' | 'revoked'>
   return m.last_seen ? `最近在线 ${relativeTime(m.last_seen, now)}` : '从未连上'
 }
 
+/**
+ * 暂停自动审批的文案：设置页开关下的说明、确认框正文、暂停后的结果提示与收件箱横幅。暂停只管审批：
+ * Claude Code 的选择题不看暂停开关（hub 的与本机的都不看），照样送到 hub，所以这里不能说“所有请求都交回终端”。
+ */
+export const pauseCopy = {
+  sub: '打开后审批请求交回终端处理；手写的拒绝规则仍然生效，Claude Code 的选择题不受影响',
+  confirm:
+    '暂停后各机器不再自动放行，也不再把审批请求送到这里：除了手写的拒绝规则照常生效，审批请求都交回终端处理。' +
+    'Claude Code 的选择题不受暂停影响，照样送到这里。\n' +
+    '机器上用 railse agent pause 设的本机暂停不受这里影响。',
+  done: '审批请求交回终端处理，Claude Code 的选择题照样送到这里；关掉这个开关即可恢复',
+  banner: '自动审批已暂停，审批请求都交回终端处理（Claude Code 的选择题照样送到这里）。',
+} as const
+
 /** 在线机器数与机器总数，都不算已吊销的。 */
 export function onlineCount(status: Pick<Status, 'machines'> | null): { online: number; total: number } {
   const active = status?.machines.filter((m) => !m.revoked) ?? []

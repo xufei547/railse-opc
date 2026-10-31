@@ -134,8 +134,14 @@ func defaultRulesYAML() string {
 	return string(b)
 }
 
+// welcome 发当前 hub 的 welcome（声明认得提问）。
 func (f *fakeHub) welcome(conn *websocket.Conn, version int, yaml string, paused bool) {
-	f.send(conn, wire.Welcome{T: wire.TWelcome, RulesVersion: version, RulesYAML: yaml, Paused: paused, ServerTime: time.Now().UTC()})
+	f.send(conn, wire.Welcome{T: wire.TWelcome, RulesVersion: version, RulesYAML: yaml, Paused: paused, ServerTime: time.Now().UTC(), Features: []string{wire.FeatureAsk}})
+}
+
+// oldWelcome 发 0.1.4 及以前的 hub 的 welcome：没有 features 键，不认得提问。
+func (f *fakeHub) oldWelcome(conn *websocket.Conn) {
+	f.send(conn, wire.Welcome{T: wire.TWelcome, RulesVersion: 1, RulesYAML: defaultRulesYAML(), ServerTime: time.Now().UTC()})
 }
 
 // record 读帧并记下，直到连接断开。
@@ -175,6 +181,13 @@ func welcomeThenRecord(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
 // welcomeThenHandOver：发 welcome，把连接交给测试，自己读帧直到断开。
 func welcomeThenHandOver(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
 	f.welcome(conn, 1, defaultRulesYAML(), false)
+	f.conns <- conn
+	f.record(conn)
+}
+
+// oldWelcomeThenHandOver：同 welcomeThenHandOver，但发的是旧 hub 的 welcome（不声明认得提问）。
+func oldWelcomeThenHandOver(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
+	f.oldWelcome(conn)
 	f.conns <- conn
 	f.record(conn)
 }

@@ -348,7 +348,7 @@ func rulesFitFrame(rs policy.RuleSet) bool {
 	if err != nil {
 		return false
 	}
-	b, err := wire.Marshal(wire.Welcome{T: wire.TWelcome, RulesVersion: math.MaxInt, RulesYAML: string(y), Paused: true, ServerTime: time.Now().UTC()})
+	b, err := wire.Marshal(wire.Welcome{T: wire.TWelcome, RulesVersion: math.MaxInt, RulesYAML: string(y), Paused: true, ServerTime: time.Now().UTC(), Features: hubFeatures()})
 	return err == nil && len(b) <= wire.MaxFrame-frameHeadroom
 }
 

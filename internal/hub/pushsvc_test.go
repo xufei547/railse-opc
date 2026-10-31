@@ -1236,3 +1236,70 @@ func TestPushDeliverStopsOnCancel(t *testing.T) {
 		t.Fatalf("取消不应删订阅: %d", n2)
 	}
 }
+
+// ask：标题“<CLI> 在问你”（同样追加项目与多机时的机器名）；正文两行：第一道题的题面（并成一行、截到摘要上限），题数大于 1 时加“ 等 N 题”，
+// 第二行“点开回答”。
+func TestPushMessageAsk(t *testing.T) {
+	decode := decodePush(t)
+	one := store.Request{ID: "a1", Kind: "ask", ToolName: "AskUserQuestion", Ask: testAsk("用方案\nA 还是 B？")}
+	m := decode(pushMessage(one, pushWho{Tool: "claude", Project: "blog", Machine: "mac.local", Many: true}))
+	if m.Kind != "ask" || m.Title != "Claude Code 在问你 · blog · mac" || m.Body != "用方案 A 还是 B？\n点开回答" || m.URL != "/r/a1" {
+		t.Fatalf("一道题: %+v", m)
+	}
+	if m := decode(pushMessage(one, pushWho{})); m.Title != "Agent 在问你" {
+		t.Fatalf("查不到会话: %+v", m)
+	}
+	three := one
+	three.Ask = testAsk("用方案 A 还是 B？", "要不要写测试？", "部署到哪？")
+	if m := decode(pushMessage(three, pushWho{Tool: "claude"})); m.Title != "Claude Code 在问你" || m.Body != "用方案 A 还是 B？ 等 3 题\n点开回答" {
+		t.Fatalf("三道题: %+v", m)
+	}
+	long := one
+	long.Ask = testAsk(strings.Repeat("问", 500), "第二题")
+	m = decode(pushMessage(long, pushWho{Tool: "claude"}))
+	if first, second, ok := strings.Cut(m.Body, "\n"); !ok || first != strings.Repeat("问", pushSummaryLen)+" 等 2 题" || second != "点开回答" {
+		t.Fatalf("题面应截到 %d 个字符、仍带题数与第二行: %q", pushSummaryLen, m.Body)
+	}
+	if !pushWorthy(one, time.Now()) {
+		t.Fatal("ask 应推送")
+	}
+}
+
+// 守护进程送来的 ask 触发推送，Topic 是请求 id。
+func TestPushOnAsk(t *testing.T) {
+	f := newFakePushEndpoint(t)
+	h, ck := pushHub(t, f)
+	body, _ := subscribeJSON(t, f.srv.URL+"/p/one")
+	subscribe(t, h, ck, body)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{MachineID: id, Proto: wire.Proto, HomeDir: "/home/u"})
+	defer c.close()
+	c.send(askFrame("a1", "s1", "t1", "用 A 还是 B？"))
+	waitFor(t, "ask 推送", func() bool { return f.count() == 1 })
+	if f.header(0).Get("Topic") != "a1" {
+		t.Fatalf("ask 的 Topic: %v", f.header(0))
+	}
+	waitFor(t, "审计 push_sent", func() bool { return hasAuditFor(h, "a1", "push_sent") })
+}
+
+// 走真 ask 帧登记（不手塞 pushWho）：帧里的项目根进库，请求视图的 project 是项目目录名，推送标题带项目名。
+func TestAskProjectInViewAndPushTitle(t *testing.T) {
+	h, _ := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{MachineID: id, Proto: wire.Proto, HomeDir: "/home/u"})
+	defer c.close()
+	f := askFrame("a1", "s1", "t1", "用 A 还是 B？")
+	f.ProjectRoot = "/home/u/blog"
+	c.send(f)
+	waitFor(t, "ask 登记", func() bool { n, _ := h.st.CountPending(); return n == 1 })
+	r := getReq(t, h.st, "a1")
+	if r.ProjectRoot != "/home/u/blog" {
+		t.Fatalf("ask 应存项目根: %+v", r)
+	}
+	if v := h.srv.view(r); v.Project != "blog" {
+		t.Fatalf("请求视图的 project = %q，应为 blog", v.Project)
+	}
+	if m := decodePush(t)(h.srv.push.message(r)); m.Title != "Claude Code 在问你 · blog" {
+		t.Fatalf("推送标题 = %q", m.Title)
+	}
+}

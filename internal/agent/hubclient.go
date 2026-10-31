@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/xufei547/railse-opc/internal/hub/wire"
 	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // ErrHubDisconnected 表示此刻没有到 hub 的连接。
@@ -27,6 +29,10 @@ var ErrHubDisabled = errors.New("hub 拒绝了本机密钥，已停止连接 hub
 
 // ErrGeminiNotForHub 表示试图把 Gemini 会话的请求送去 hub 等待（Gemini 只作审计上报）。
 var ErrGeminiNotForHub = errors.New("gemini 请求不进 hub 等待")
+
+// ErrHubNoAsk 表示连着的 hub 没在 welcome 里声明认得提问（wire.FeatureAsk，0.1.4 及以前的 hub）：提问不送给它，
+// 否则它会把提问当作空载荷的审批登记、推送，终端一直卡到有人在手机上点。
+var ErrHubNoAsk = errors.New("hub 版本太旧，不认识提问")
 
 // 以下是包级变量只为测试能调；NewHubClient 时复制进客户端。
 var (
@@ -75,7 +81,7 @@ type auditItem struct {
 }
 
 // HubClient 维护到 hub 的一条 WebSocket 长连接：只向外连 hub 的 /ws/agent，用 Bearer 机器密钥认证。
-// hub 只能经它下发规则、总开关与对请求的 allow/deny 决定，没有让本机执行任何东西的帧。
+// hub 只能经它下发规则、总开关与对请求的决定（审批的 allow/deny、答题的答案），没有让本机执行任何东西的帧。
 type HubClient struct {
 	cfg          Config
 	machine      MachineConfig
@@ -94,6 +100,7 @@ type HubClient struct {
 
 	mu       sync.Mutex
 	conn     *websocket.Conn
+	features []string      // 最近一次握手的 welcome 声明的能力，与 conn 一起换上；断线时保留（见 HasFeature）
 	changed  chan struct{} // 下一次状态变化（连上、断开、停用）时关闭，随即换新的
 	disabled bool
 	waiters  map[string]chan wire.Decision
@@ -190,6 +197,15 @@ func (h *HubClient) State() string {
 	return "connecting"
 }
 
+// HasFeature 报告最近一次握手成功的 hub 是否在 welcome 里声明了能力 f（见 wire.Feature*）。能力与连接在同一把锁下换上，
+// 重连后以新 welcome 为准；断线时保留断线前那条连接的（是否连着看 ConnState），从没连上过时为假。
+// 先 ConnState 再 HasFeature 读到的，一定是那次看到的连接或其后重连上的连接的能力。
+func (h *HubClient) HasFeature(f string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Contains(h.features, f)
+}
+
 // WaitConnected 等到连上或 ctx 结束；客户端已停用时立即返回 ErrHubDisabled。
 func (h *HubClient) WaitConnected(ctx context.Context) error {
 	for {
@@ -209,11 +225,15 @@ func (h *HubClient) WaitConnected(ctx context.Context) error {
 	}
 }
 
-// setConn 换连接状态并通知等状态变化的人。调用方不持 mu。
-func (h *HubClient) setConn(c *websocket.Conn) {
+// setConn 换连接状态并通知等状态变化的人。c 非 nil 时 features 是这条连接 welcome 里声明的能力，与连接一起换上；
+// c 为 nil（断线）时不动能力，见 HasFeature。调用方不持 mu。
+func (h *HubClient) setConn(c *websocket.Conn, features []string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.conn = c
+	if c != nil {
+		h.features = slices.Clone(features)
+	}
 	close(h.changed)
 	h.changed = make(chan struct{})
 }
@@ -330,20 +350,25 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 	}
 	h.applyWelcome(welcome)
 
-	h.setConn(conn)
-	defer h.setConn(nil)
+	h.setConn(conn, welcome.Features)
+	defer h.setConn(nil, nil)
 	h.log.Printf("已连接 hub %s，规则版本 %d", h.addr, welcome.RulesVersion)
+	askOK := welcome.Has(wire.FeatureAsk)
+	if !askOK {
+		h.log.Printf("hub %s 没有声明认得提问（版本太旧）：Claude Code 的选择题都交回终端；升级并重启 hub 后才会送到手机", h.addr)
+	}
 	connectedAt, pinged := time.Now(), false
 	// setConn 之后的每条返回路径都经 ended，都算握手成功过
 	ended := func(err error) sessionEnd {
 		return sessionEnd{welcomed: true, stable: pinged || time.Since(connectedAt) >= h.stableAfter, err: err}
 	}
 
-	// 重发本机全部 pending（Gemini 除外）；hub 对已知 id 不重复登记，已决定的再发一次决定。
+	// 重发本机全部 pending（Gemini 除外；hub 不认得提问时提问也除外，它的等待者见到连上的 hub 没声明这项能力就交回终端，
+	// 见 HubDecider.wait）；hub 对已知 id 不重复登记，已决定的再发一次决定。
 	// 编不进一帧的请求（大 heredoc、大 MCP 参数）跳过并让它的等待者立即交回终端，不当作连接错误：
 	// 否则每次重连都在这里断开，后面的 pending 与审计永远发不出去。
 	for _, pr := range h.pending.List() {
-		if isGemini(pr) {
+		if isGemini(pr) || (pr.Kind == "ask" && !askOK) {
 			continue
 		}
 		b, err := wire.Marshal(toWire(pr))
@@ -570,19 +595,23 @@ func (h *HubClient) sendNotice(ctx context.Context, v any) error {
 	if err != nil {
 		return err
 	}
-	return h.sendRaw(ctx, b, false)
+	return h.sendRaw(ctx, b, false, false)
 }
 
-// sendRaw 发出编好的一帧。未连接返回 ErrHubDisconnected。closeOnFail 为真时写失败就关掉这条连接并返回包着
+// sendRaw 发出编好的一帧。未连接返回 ErrHubDisconnected；ask 为真（提问帧）而这条连接的 hub 没声明认得提问时返回 ErrHubNoAsk，
+// 不写（能力与连接在同一把锁下读出，刚重连到旧 hub 也不会送过去）。closeOnFail 为真时写失败就关掉这条连接并返回包着
 // ErrHubDisconnected 的错误：等写锁超时时库不会自己关，连接还会被当作连着；关掉后读循环随之结束、状态变为断开，
 // 调用方按 ErrHubDisconnected 等重连才成立（重连后 pending 会随对齐重发）。closeOnFail 为假时（回执）只返回写错误，
 // 不关连接；文案不说连接是否还在：写帧中途超时时库已自己关了连接。
-func (h *HubClient) sendRaw(ctx context.Context, b []byte, closeOnFail bool) error {
+func (h *HubClient) sendRaw(ctx context.Context, b []byte, closeOnFail, ask bool) error {
 	h.mu.Lock()
-	conn := h.conn
+	conn, askOK := h.conn, slices.Contains(h.features, wire.FeatureAsk)
 	h.mu.Unlock()
 	if conn == nil {
 		return ErrHubDisconnected
+	}
+	if ask && !askOK {
+		return ErrHubNoAsk
 	}
 	if err := writeRaw(ctx, conn, b); err != nil {
 		if !closeOnFail {
@@ -594,17 +623,25 @@ func (h *HubClient) sendRaw(ctx context.Context, b []byte, closeOnFail bool) err
 	return nil
 }
 
-// toWire 把未完成请求编成 pending 帧。载荷只用脱敏后的 Redacted，永远不用 Req 里的原始载荷；
+// toWire 把未完成请求编成 pending 帧。载荷只用脱敏后的 Redacted，题目只用脱敏后的 Ask，永远不用 Req 里的原始载荷与题目；
 // DeadlineSeconds 是从 CreatedAt 起算的总时长（hub 按 CreatedAt+DeadlineSeconds 算过期），不是剩余秒数。
+// 答题帧 kind 为 ask，工具名固定为 AskUserQuestion，载荷为零值、风险为空（Risk 零值的 String 是 read，不能用），项目根照带；
+// 审批帧不带 kind（空当审批），与以前逐字段相同。
 func toWire(pr PendingRequest) wire.PendingRequest {
-	return wire.PendingRequest{T: wire.TPending, RequestID: pr.ID, Session: pr.Req.Session, ToolName: pr.Req.ToolName, Payload: pr.Redacted,
-		Risk: pr.Risk.String(), ProjectRoot: pr.ProjectRoot, EngineReason: pr.EngineReason,
+	w := wire.PendingRequest{T: wire.TPending, RequestID: pr.ID, Session: pr.Req.Session,
 		DeadlineSeconds: int(pr.Deadline.Sub(pr.Created).Seconds()), CreatedAt: pr.Created.UTC()}
+	if pr.Kind == "ask" {
+		w.Kind, w.Ask, w.ToolName, w.ProjectRoot = "ask", pr.Ask, proto.AskToolName, pr.ProjectRoot
+		return w
+	}
+	w.ToolName, w.Payload, w.Risk, w.ProjectRoot, w.EngineReason = pr.Req.ToolName, pr.Redacted, pr.Risk.String(), pr.ProjectRoot, pr.EngineReason
+	return w
 }
 
 // SendPending 送一条待决请求。返回满足 errors.Is(err, ErrHubDisconnected) 的错误（未连接，或写连接失败）时，
 // 调用方可以在宽限期内等重连（请求仍在未完成表里，重连后随对齐重发）；非 ErrHubDisconnected 的错误一律交回终端：
-// Gemini 会话的请求（ErrGeminiNotForHub）、编码后超过单帧上限（errors.Is(err, wire.ErrFrameTooLarge)）等。
+// Gemini 会话的请求（ErrGeminiNotForHub）、连着的 hub 不认得提问（ErrHubNoAsk）、编码后超过单帧上限
+// （errors.Is(err, wire.ErrFrameTooLarge)）等。
 func (h *HubClient) SendPending(pr PendingRequest) error {
 	if isGemini(pr) {
 		return ErrGeminiNotForHub
@@ -613,7 +650,7 @@ func (h *HubClient) SendPending(pr PendingRequest) error {
 	if err != nil {
 		return fmt.Errorf("请求 %q 无法送往 hub: %w", pr.ID, err)
 	}
-	return h.sendRaw(context.Background(), b, true)
+	return h.sendRaw(context.Background(), b, true, pr.Kind == "ask")
 }
 
 // SendCancel 告诉 hub 钩子已消失。写的上限取 ctx 与 hubWriteTimeout 中较早的；写不出去不关连接（见 sendNotice，下同）。

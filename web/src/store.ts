@@ -4,7 +4,7 @@ import type { Inbox, Machine, RequestView, Rule, Status } from './types'
 export interface State {
   loaded: boolean
   connected: boolean
-  /** 待审批，按创建时间升序（等得最久的在前）。 */
+  /** 待决：待审批与待答的提问（kind ask），按创建时间升序（等得最久的在前）。 */
   pending: RequestView[]
   /** 还在等回答的问题，按创建时间倒序（与 hub 一致）。 */
   questions: RequestView[]
@@ -98,7 +98,7 @@ function applyFrame(state: State, frame: Frame): State {
       const r = frame.data
       const tick = state.tick + 1
       const next = { ...state, tick, touched: touch(state.touched, r.id, tick) }
-      // 同一会话来了任何新事件（question、done、permission），之前的问题就不再等了
+      // 同一会话来了任何新事件（question、done、permission、ask），之前的问题就不再等了
       const questions = state.questions.filter((q) => !sameSession(q, r))
       if (r.kind === 'question') return { ...next, questions: [r, ...questions.filter((q) => q.id !== r.id)] }
       if (r.kind === 'done' || r.state !== 'pending') return { ...next, questions }
@@ -156,7 +156,7 @@ export function reduce(state: State, action: Action): State {
 }
 
 /**
- * 待决的请求 id：待审批与还在等回答的问题。通知栏里 tag 不在其中的通知已经处理过，可以收掉。
+ * 待决的请求 id：待审批、待答的提问与还在等回答的问题（角标数的也是这些）。通知栏里 tag 不在其中的通知已经处理过，可以收掉。
  * 还没加载过收件箱时回 null（这时的空列表不代表没有待决，不能拿它收通知）。
  */
 export function waitingIDs(state: Pick<State, 'loaded' | 'pending' | 'questions'>): string[] | null {

@@ -1,9 +1,11 @@
 package hooksconf
 
 import (
+	"bytes"
 	"encoding/json"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -72,6 +74,7 @@ func TestSameOurs(t *testing.T) {
 		merge(`{"model":"opus","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"my-guard"}]}]}}`, bin, ""),
 		`{"hooks":{"Stop":[{"hooks":[{"command":"/opt/railse hook claude","type":"command"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}],` +
 			`"Notification":[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]},{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}],` +
+			`"PreToolUse":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":"AskUserQuestion"}],` +
 			`"PermissionRequest":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":""}]}}`,
 	}
 	for _, b := range same {
@@ -245,7 +248,7 @@ func TestPlanSocketAndParseCommand(t *testing.T) {
 	if st := ins.Events["PermissionRequest"]; !st.Present || st.Program != "/opt/railse" || st.Socket != sock {
 		t.Fatalf("Inspect 应报出 socket: %+v\n%s", st, doc)
 	}
-	if strings.Count(string(doc), "hook claude") != 4 {
+	if strings.Count(string(doc), "hook claude") != 5 {
 		t.Fatalf("重装后每个事件只应有一条: %s", doc)
 	}
 }
@@ -292,7 +295,7 @@ func TestPlan(t *testing.T) {
 	quoted := `'/my apps/railse'`
 	claude := Plan("claude", bin, "")
 	pr := claude["PermissionRequest"]
-	if len(claude) != 4 || len(pr) != 1 || pr[0].Matcher == nil || *pr[0].Matcher != "" ||
+	if len(claude) != 5 || len(pr) != 1 || pr[0].Matcher == nil || *pr[0].Matcher != "" ||
 		pr[0].Hooks[0].Command != quoted+" hook claude" || pr[0].Hooks[0].Timeout != 86400 || pr[0].Hooks[0].Type != "command" {
 		t.Fatalf("Claude: %+v", claude)
 	}
@@ -317,6 +320,123 @@ func TestPlan(t *testing.T) {
 	b, _ = json.Marshal(Plan("claude", "/opt/railse", "")["PermissionRequest"])
 	if string(b) != `[{"matcher":"","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}]` {
 		t.Fatalf("PermissionRequest 的 JSON: %s", b)
+	}
+}
+
+func TestPlanClaudePreToolUse(t *testing.T) {
+	// Claude 的 AskUserQuestion 靠 PreToolUse 钩子推到手机：matcher 只匹配这个工具，超时同 PermissionRequest
+	b, _ := json.Marshal(Plan("claude", "/opt/railse", "")["PreToolUse"])
+	want := `[{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}]`
+	if string(b) != want {
+		t.Fatalf("PreToolUse 的 JSON: %s", b)
+	}
+	if Expected("claude")["PreToolUse"] != 86400 {
+		t.Fatalf("Expected: %v", Expected("claude"))
+	}
+	// Codex、Gemini 没有这个口子，不装 PreToolUse
+	for _, cli := range []string{"codex", "gemini"} {
+		if _, ok := Plan(cli, "/opt/railse", "")["PreToolUse"]; ok {
+			t.Errorf("%s 不应有 PreToolUse", cli)
+		}
+		if _, ok := Expected(cli)["PreToolUse"]; ok {
+			t.Errorf("%s 的 Expected 不应有 PreToolUse", cli)
+		}
+	}
+}
+
+func TestMergePreToolUse(t *testing.T) {
+	plan := Plan("claude", "/opt/railse", "")
+	theirs := `{"matcher":"Bash","hooks":[{"type":"command","command":"my-bash-guard"}]}`
+	otherEvent := `"Stop":[{"hooks":[{"type":"command","command":"my-stop"}]}]`
+	// 规范化成键排序的紧凑 JSON（Group 结构体与别人的 map 键序不同）
+	norm := func(raw string) string {
+		var v any
+		if err := json.Unmarshal([]byte(raw), &v); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+	// 取出 PreToolUse 数组里的各组
+	groups := func(out []byte) []string {
+		var doc struct {
+			Hooks map[string][]json.RawMessage `json:"hooks"`
+		}
+		if err := json.Unmarshal(out, &doc); err != nil {
+			t.Fatal(err)
+		}
+		var gs []string
+		for _, g := range doc.Hooks["PreToolUse"] {
+			gs = append(gs, norm(string(g)))
+		}
+		return gs
+	}
+	ours := norm(`{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}`)
+	theirsN := norm(theirs)
+	for name, tc := range map[string]struct {
+		existing string
+		want     []string
+	}{
+		"旧配置完全没有 PreToolUse": {
+			`{"hooks":{"PermissionRequest":[{"matcher":"","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}],` + otherEvent + `}}`,
+			[]string{ours},
+		},
+		"用户自己有别的 PreToolUse 组": {
+			`{"hooks":{"PreToolUse":[` + theirs + `],` + otherEvent + `}}`,
+			[]string{theirsN, ours},
+		},
+		"我们的条目在 matcher 不同的组里（旧路径、空 matcher）": {
+			`{"hooks":{"PreToolUse":[` + theirs + `,{"matcher":"","hooks":[{"type":"command","command":"/old/railse hook claude","timeout":86400}]}]}}`,
+			[]string{theirsN, ours},
+		},
+		"我们的条目和别人的挤在同一个组里": {
+			`{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/old/railse hook claude"},{"type":"command","command":"my-bash-guard"}]}]}}`,
+			[]string{theirsN, ours},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			first, err := Merge([]byte(tc.existing), "/opt/railse", plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := groups(first); !slices.Equal(got, tc.want) {
+				t.Fatalf("PreToolUse 各组:\n got %v\nwant %v\n%s", got, tc.want, first)
+			}
+			if strings.Contains(tc.existing, "my-stop") && !strings.Contains(string(first), "my-stop") {
+				t.Fatalf("其他事件里别人的条目丢了:\n%s", first)
+			}
+			second, err := Merge(first, "/opt/railse", plan)
+			if err != nil || !bytes.Equal(first, second) {
+				t.Fatalf("重跑应幂等 (err=%v):\n%s\n---\n%s", err, first, second)
+			}
+		})
+	}
+}
+
+func TestMergeRemovesOurPreToolUseKeepsTheirs(t *testing.T) {
+	theirs := `{"matcher":"Bash","hooks":[{"type":"command","command":"my-bash-guard"}]}`
+	plan := Plan("claude", "/opt/railse", "")
+	// 装上再只删不加（entries 为 nil）：我们的 PreToolUse 组走掉，别人的留下
+	installed, err := Merge([]byte(`{"hooks":{"PreToolUse":[`+theirs+`]}}`), "/opt/railse", plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Merge(installed, "/opt/railse", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]map[string][]json.RawMessage
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc["hooks"]) != 1 || len(doc["hooks"]["PreToolUse"]) != 1 || strings.Contains(string(out), "railse") || !strings.Contains(string(out), "my-bash-guard") {
+		t.Fatalf("只应剩别人的 PreToolUse 组:\n%s", out)
+	}
+	// 只有我们的 PreToolUse 时，删完整个事件键也去掉
+	only, _ := Merge(nil, "/opt/railse", plan)
+	out, _ = Merge(only, "/opt/railse", nil)
+	if strings.Contains(string(out), "PreToolUse") {
+		t.Fatalf("我们的 PreToolUse 应被删掉:\n%s", out)
 	}
 }
 

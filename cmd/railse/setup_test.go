@@ -47,6 +47,11 @@ func TestSetupHooksWritesAllThree(t *testing.T) {
 			t.Fatalf("Claude 缺 %s", ev)
 		}
 	}
+	ask := claude["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)
+	askHook := ask["hooks"].([]any)[0].(map[string]any)
+	if ask["matcher"] != "AskUserQuestion" || askHook["command"] != "/opt/railse hook claude" || askHook["timeout"] != float64(86400) {
+		t.Fatalf("Claude PreToolUse: %+v", ask)
+	}
 	codex := readJSON(t, codexFile)
 	se := codex["hooks"].(map[string]any)["SessionEnd"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)
 	if se["timeout"] != float64(3) || se["command"] != "/opt/railse hook codex" {
@@ -94,8 +99,12 @@ func TestSetupHooksIsIdempotentAndPreservesOthers(t *testing.T) {
 	if len(hooks["PermissionRequest"].([]any)) != 2 {
 		t.Fatalf("别人的 PermissionRequest 钩子应保留且只加一组: %+v", hooks["PermissionRequest"])
 	}
-	if _, ok := hooks["PreToolUse"]; !ok {
-		t.Fatal("别人的 PreToolUse 应保留")
+	pre := hooks["PreToolUse"].([]any)
+	if len(pre) != 2 || !strings.Contains(string(first), "echo hi") {
+		t.Fatalf("别人的 PreToolUse 应保留且只加一组: %+v", pre)
+	}
+	if pre[1].(map[string]any)["matcher"] != "AskUserQuestion" {
+		t.Fatalf("新增的应是 AskUserQuestion 组: %+v", pre)
 	}
 	if _, err := os.Stat(filepath.Join(project, ".gemini", "settings.json")); err == nil {
 		t.Fatal("只选 --claude 时不应写 Gemini")
@@ -116,6 +125,33 @@ func TestSetupHooksDryRunWritesNothing(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "PermissionRequest") {
 		t.Fatalf("dry-run 应打印将写入的内容: %s", out.String())
+	}
+	if !strings.Contains(out.String(), `"PreToolUse"`) || !strings.Contains(out.String(), `"matcher": "AskUserQuestion"`) {
+		t.Fatalf("dry-run 应打印新的 PreToolUse 组: %s", out.String())
+	}
+}
+
+// Codex、Gemini 没有这个口子：它们的文件里不该出现 PreToolUse。
+func TestSetupHooksOnlyClaudeGetsPreToolUse(t *testing.T) {
+	dir := t.TempDir()
+	project := filepath.Join(dir, "proj")
+	os.MkdirAll(project, 0o755)
+	codexFile := filepath.Join(dir, "codex", "hooks.json")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--project", project, "--codex-file", codexFile, "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
+		t.Fatal(errOut.String())
+	}
+	for _, f := range []string{codexFile, filepath.Join(project, ".gemini", "settings.json")} {
+		b, err := os.ReadFile(f)
+		if err != nil || strings.Contains(string(b), "PreToolUse") {
+			t.Fatalf("%s 不该有 PreToolUse (err=%v):\n%s", f, err, b)
+		}
+	}
+}
+
+func TestSetupUsageMentionsPhoneQuestions(t *testing.T) {
+	if !strings.Contains(setupUsage, "Claude 的选择题（AskUserQuestion）也能在手机上答") {
+		t.Fatalf("用法说明应提到选择题能在手机上答:\n%s", setupUsage)
 	}
 }
 
@@ -335,17 +371,33 @@ func TestSetupHooksKeepsNonArrayValuesWeDoNotTouch(t *testing.T) {
 	project := t.TempDir()
 	path := filepath.Join(project, ".claude", "settings.local.json")
 	os.MkdirAll(filepath.Dir(path), 0o755)
-	os.WriteFile(path, []byte(`{"hooks":{"enabled":true,"PreToolUse":"x"}}`), 0o644)
+	os.WriteFile(path, []byte(`{"hooks":{"enabled":true,"SubagentStop":"x"}}`), 0o644)
 	var out, errOut bytes.Buffer
 	if code := run([]string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, errOut.String())
 	}
 	hooks := readJSON(t, path)["hooks"].(map[string]any)
-	if hooks["enabled"] != true || hooks["PreToolUse"] != "x" {
-		t.Fatalf("enabled 与 PreToolUse 应原样保留: %+v", hooks)
+	if hooks["enabled"] != true || hooks["SubagentStop"] != "x" {
+		t.Fatalf("enabled 与 SubagentStop 应原样保留: %+v", hooks)
 	}
 	if _, ok := hooks["PermissionRequest"]; !ok {
 		t.Fatal("应写入 PermissionRequest")
+	}
+}
+
+func TestSetupHooksRejectsNonArrayPreToolUse(t *testing.T) {
+	// PreToolUse 现在也是我们要写的事件：它不是数组时视为损坏，不覆盖
+	project := t.TempDir()
+	path := filepath.Join(project, ".claude", "settings.local.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	const orig = `{"hooks":{"PreToolUse":"x"}}`
+	os.WriteFile(path, []byte(orig), 0o644)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse"}, &out, &errOut); code == 0 || !strings.Contains(errOut.String(), "hooks.PreToolUse") {
+		t.Fatalf("应报 PreToolUse 不是数组: code=%d stderr=%s", code, errOut.String())
+	}
+	if b, _ := os.ReadFile(path); string(b) != orig {
+		t.Fatalf("出错时不该改文件: %s", b)
 	}
 }
 

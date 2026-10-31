@@ -2,7 +2,7 @@
 
 安装与接入（一行安装、`railse setup all`、开机自启、`railse doctor`）见 [setup.md](setup.md)。本文讲守护进程与钩子本身。
 
-没有 hub 时，Railse 在本机这样工作：CLI 的钩子把审批请求经 Unix socket 交给守护进程，守护进程用规则引擎自动放行或拒绝，判不了的交回终端，每一步都写本地审计。
+没有 hub 时，Railse 在本机这样工作：CLI 的钩子把审批请求经 Unix socket 交给守护进程，守护进程用规则引擎自动放行或拒绝，判不了的交回终端，每一步都写本地审计。Claude Code 的选择题（`AskUserQuestion`）是另一条路，见下面“手机上答选择题”。
 
 ## 起守护进程
 
@@ -24,6 +24,18 @@ railse setup hooks [--project <目录>] [--claude] [--codex] [--gemini] [--dir �
 
 不带 CLI 开关时三个都装，默认都是用户级（对所有项目生效）：Claude 写 `~/.claude/settings.json`，Gemini 写 `~/.gemini/settings.json`，Codex 写 `~/.codex/hooks.json`（`--codex-file` 可改）。`~/.claude/settings.json`、`~/.gemini/settings.json` 里多是你自己的设置：第一次改它们之前各备份一次到同目录的 `<文件>.railse-bak-<时间>`（0600，是链接时备份链接指向的内容；原来不存在、是空的、内容没变或已有备份时不备份），打印“已备份 … 到 …”。给了 `--project <目录>` 时 Claude 改写项目级的 `<目录>/.claude/settings.local.json`，Gemini 改写 `<目录>/.gemini/settings.json`（不备份；项目里的文件就是用户级那份时，如 `--project ~` 的 Gemini，照样按用户级备份），Codex 照旧是用户级。用户级与项目级都装了：Gemini 的钩子会触发两次；Claude Code 对写在多个配置文件里的相同处理器只跑一次，两处的命令、超时等完全相同时不重复，不同（如程序路径、`--socket` 不同）时也会触发两次；装用户级时当前目录的项目级文件里有 Railse 的条目，会在 stderr 逐个提醒（见 [setup.md](setup.md)）。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dir` 是守护进程的数据目录（默认 `$RAILSE_HOME` 或 `~/.railse`），不是 `~/.railse` 时钩子命令变成 `<railse> hook <cli> --socket <目录>/agent.sock`；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
 
+Claude Code 装的钩子有五个事件：
+
+| 事件 | matcher | 用途 | 超时 |
+| --- | --- | --- | --- |
+| `PermissionRequest` | 全部 | 审批 | 86400 秒 |
+| `PreToolUse` | `AskUserQuestion` | 手机上答选择题（0.1.5 起） | 86400 秒 |
+| `Notification` | 全部 | 映射为 `question` 事件 | 默认 |
+| `Stop` | 全部 | 映射为 `done` 事件 | 默认 |
+| `SessionEnd` | 全部 | 会话结束 | 默认 |
+
+0.1.5 之前装过钩子的，重跑一次 `railse setup hooks --claude` 补上 `PreToolUse`；不补不影响别的功能，`railse doctor` 的 `hooks.claude` 会报 warn“缺 PreToolUse：Claude Code 的选择题进不了手机”。
+
 Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（不是 hooks.json），Codex 只认一条，所以另用 `railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]`（`setup all` 装完钩子会自动做这一步，单独跑 `setup hooks` 装 Codex 时会提示）：它在数据目录生成 `codex-notify.sh`，依次调用原来的 `notify`（有的话，原样保留）与 `railse hook codex-notify`（数据目录不是 `~/.railse` 时带 `--socket`），再把 `notify` 换成 `["<数据目录>/codex-notify.sh"]`，改之前备份到 `config.toml.railse-bak-<时间>`。重跑不会重复串接，详见 [setup.md](setup.md) 的 Codex 一条。
 
 装项目级时 Claude 的钩子放在 `settings.local.json`，因为钩子命令里是本机的 railse 路径，不该随项目入库；按 Claude Code 的约定这个文件不入库，若 `git status` 里看到它，把它加进 `.gitignore`。旧版写在 `.claude/settings.json` 的 Railse 钩子会在装 Claude 钩子时迁走：只删 Railse 自己的条目（`hooks` 删空了连键一起去掉），别人的钩子与其他设置保留，打印“已从 … 迁走 Railse 钩子”；`--dry-run` 两份都打印。`settings.json` 里没有 Railse 条目时不碰它；它（解开链接后）就是用户级的 `~/.claude/settings.json` 时（`--project` 是家目录，或项目的 `settings.json` 链到它）也不迁，只警告：那里的钩子对所有项目生效，要迁请手动删；它不是合法 JSON 时只警告、不迁移，照样装好 `settings.local.json`，这时请手动删掉里面旧的 Railse 钩子，否则同一个事件会触发两次。
@@ -35,10 +47,11 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | 字段 | 含义 |
 | --- | --- |
 | `ts`、`request_id` | 时间；审批请求的 ID（事件没有） |
-| `kind` | `permission`、`question`、`done`、`session_end`、`control` |
+| `kind` | `permission`、`ask`、`question`、`done`、`session_end`、`control` |
 | `session` | `tool`、`cli_session_id`、`turn_id`、`cwd` |
-| `tool_name`、`payload`、`risk` | 工具名；脱敏后的统一载荷；风险档（`read` 到 `destructive`） |
-| `action` | `allow`、`deny`、`passthrough` |
+| `tool_name`、`payload`、`risk` | 工具名；脱敏后的统一载荷；风险档（`read` 到 `destructive`）。`ask` 不适用：它的 `tool_name` 固定是 `AskUserQuestion`，没有 `payload` 与风险档 |
+| `ask`、`answers` | 仅 `ask`：脱敏后的题目；`answers` 仅手机上答了的，脱敏后的题面 → 脱敏后的答案 |
+| `action` | `allow`、`deny`、`passthrough`、`answer`（`ask` 在手机上答了） |
 | `state` | 见下表 |
 | `rule_id`、`reason`、`decided_by` | 命中的规则与理由；谁定的：`rule:<id>`、`no_hub`、`paused`、`timeout`、`terminal`、`shutdown`、`error` |
 | `message` | 事件文本，如最后一条回复 |
@@ -50,6 +63,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | `cancelled` | 决定前钩子进程已退出（多半是终端里先处理了） |
 | `expired` | 等待过期，交回终端 |
 | `approved` / `denied` | 由 hub 批准 / 拒绝，接入 hub 后才会出现 |
+| `answered` | `ask` 在手机上答了，接入 hub 后才会出现；审计里的题目和答案已脱敏（答案本身原样交给 Claude Code） |
 | `recorded` | 事件或管理命令已记录 |
 | `suppressed` | 同一会话有待决审批时来的 `question`，不重复提醒 |
 
@@ -85,7 +99,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 
 ## 暂停与恢复
 
-`railse agent pause` 后，除命中用户 deny 规则的请求外一律交回终端；`railse agent resume` 恢复。暂停状态存在 `state.json`，重启守护进程后保持。
+`railse agent pause` 后，除命中用户 deny 规则的请求外一律交回终端（Claude Code 的选择题不受暂停影响）；`railse agent resume` 恢复。暂停状态存在 `state.json`，重启守护进程后保持。
 
 ## 三家 CLI 的差异
 
@@ -94,8 +108,20 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | 自动放行 | 能 | 能 | 不能，放行一律渲染为不作决定 |
 | 自动拒绝 | 能 | 能 | 能 |
 | 事件 | question、done、session_end | done、session_end | question、done、session_end |
+| 手机上答问题 | 能（`AskUserQuestion`，需要 `PreToolUse` 钩子和 hub） | 不能 | 不能 |
 | 钩子配置 | 用户级 `~/.claude/settings.json`（`--project` 时项目级 `.claude/settings.local.json`） | 用户级 `~/.codex/hooks.json` | 用户级 `~/.gemini/settings.json`（`--project` 时项目级 `.gemini/settings.json`） |
-| 注意 | 全功能 | 只在交互会话里审批（`codex exec` 不触发）；首次使用在 Codex 里用 `/hooks` 审核；notify 用 `railse setup codex-notify` 写进 `~/.codex/config.toml`（串接脚本，保留已有的 notify；`setup all` 会自动做） | 需要 0.65.0 以上；不要开 yolo 模式 |
+| 注意 | 全功能；agent 停下来等你说下一句话（`question`）仍只提醒，要回终端 | 只在交互会话里审批（`codex exec` 不触发）；首次使用在 Codex 里用 `/hooks` 审核；notify 用 `railse setup codex-notify` 写进 `~/.codex/config.toml`（串接脚本，保留已有的 notify；`setup all` 会自动做） | 需要 0.65.0 以上；不要开 yolo 模式 |
+
+## 手机上答选择题
+
+Claude Code 用 `AskUserQuestion` 问你选哪个方案时，`PreToolUse` 钩子把题目交给守护进程，守护进程作为 `ask` 请求送 hub，手机上选答案或自己填一句，答案回到钩子，钩子按 Claude Code 的格式把原来的 `questions` 连同 `answers` 交回（`permissionDecision: allow` 加 `updatedInput`），agent 立刻继续，终端不再弹选项。用法和网页见 [web.md](web.md)，接口见 [hub.md](hub.md)。
+
+- **不过引擎，不看暂停。** 题目不是命令，没有风险档，不匹配规则；`railse agent pause` 与 hub 的暂停开关都不影响它，也不能“记住”。
+- **题目在本机先脱敏。** 题面、标题、选项文字过一遍 `redact.Text` 再上报、写审计；答案是你自己打的字，原样交给 Claude Code，审计里再脱敏。
+- **没有 hub 就不进手机。** 没接 hub 时直接交回终端，审计 `passthrough`、`decided_by: no_hub`。
+- **任何一环不通，终端照常问。** hub 连不上超过 30 秒或等满期限（审计 `expired`，`hub_unreachable` 或 `timeout`）、hub 太旧不认识提问（0.1.4 及更早，welcome 没声明；不送、立即交回，审计 `expired`、`hub_unreachable`）、手机上选了“让它在终端问我”（`passthrough`，`decided_by: user`）、脱敏后有题面相同的题或超出上限（脱敏会让短值变长），或决定来源给的答案不合规（`passthrough`，`decided_by: error`）、钩子在决定前退出（`cancelled`，`terminal`），钩子都不输出，Claude Code 在终端里问，agent 不会因此卡住。题目本身不合规（钩子解析就不过，或守护进程校验不过）时不写审计：前者钩子往 stderr 写一句、根本不发给守护进程，后者守护进程只记日志并回 `passthrough`，终端照常问。
+- **`PermissionRequest` 对 `AskUserQuestion` 一律交回终端**：Claude Code 的文档明示这条路上回 allow 无效，答案只能走 `PreToolUse`。
+- 手机上答了的，本机审计是 `kind: ask`、`action: answer`、`state: answered`、`decided_by: user`。同一会话有选择题在等时，同会话的 `question` 提醒会被压成 `suppressed`。Codex、Gemini 没有这个口子，问题照旧只提醒。
 
 ## 交回终端的两种情况
 
