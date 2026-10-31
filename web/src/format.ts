@@ -54,7 +54,7 @@ export function payloadSummary(p: Payload): string {
     case 'mcp':
       return [p.server, p.tool].filter(Boolean).join('/')
     default:
-      return p.type
+      return p.tool || p.type
   }
 }
 

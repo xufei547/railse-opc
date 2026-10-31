@@ -10,9 +10,9 @@ export interface Explanation {
   what: string
   /** “项目 x，机器 y”，缺哪个省哪个，都没有为空串。 */
   where: string
-  /** 为什么要你决定；question、webhook、done 为空串。 */
+  /** 为什么要你决定；只在还等你决定的审批上有，question、webhook、done 与已处理的为空串。 */
   why: string
-  /** 批了、拒了、记住会怎样；已处理的与 done 为空数组。 */
+  /** 批了、拒了、记住会怎样；只在还能决定时（待决的审批与 webhook、question）有，其余为空数组。 */
   next: string[]
 }
 
@@ -33,15 +33,20 @@ export function machineLabel(name: string): string {
 }
 
 /**
- * 把命令按不在引号里的 &&、||、;、|、&、换行切成段，每段再切成词（去引号），去掉前导的环境变量赋值。
+ * 把命令按不在引号里的 &&、||、;、|、&、换行切成段，每段再切成词（去引号），去掉前导的环境变量赋值与 env、time、nohup、nice、caffeinate 这类包装
+ * （照 internal/policy 的 stripWrappers：只剩一个词时不再剥，也不跳它们的选项）。
+ * 重定向与它的目标、行尾反斜杠续行、heredoc（<<WORD、<<-WORD）的正文与结束行都不产生词，正文也不产生段。
  * 只为写一句人话，不求完全符合 shell 语法：单引号里原样；双引号里与引号外的反斜杠转义下一个字符；$(…) 与反引号不展开。
  */
+const wrappers = new Set(['env', 'time', 'nohup', 'nice', 'caffeinate'])
+
 function segments(command: string): string[][] {
   const segs: string[][] = []
   let words: string[] = []
   let cur = ''
   let has = false
   let dropNext = false // 刚见到重定向符，下一个词是它的目标，不算词
+  const heredocs: { word: string; strip: boolean }[] = [] // 本行已见到、正文从下一行开始的 heredoc，按出现顺序
   const endWord = () => {
     if (has) {
       if (!dropNext) words.push(cur)
@@ -90,6 +95,29 @@ function segments(command: string): string[][] {
         endWord()
       }
       const n = command.charAt(i + 1)
+      if (c === '<' && n === '<' && command.charAt(i + 2) !== '<') {
+        // heredoc：分隔词紧接着读完（引号与反斜杠只用来去掉，取字面）；正文留到本行结束后跳过
+        let j = i + 2
+        const strip = command.charAt(j) === '-'
+        if (strip) j++
+        while (command.charAt(j) === ' ' || command.charAt(j) === '\t') j++
+        let word = ''
+        let q = ''
+        for (; j < command.length; j++) {
+          const d = command.charAt(j)
+          if (q) {
+            if (d === q) q = ''
+            else if (q === '"' && d === '\\' && j + 1 < command.length) word += command.charAt(++j)
+            else word += d
+          } else if (d === "'" || d === '"') q = d
+          else if (d === '\\' && j + 1 < command.length) word += command.charAt(++j)
+          else if (/[\s;&|<>()]/.test(d)) break
+          else word += d
+        }
+        heredocs.push({ word, strip })
+        i = j - 1
+        continue
+      }
       if (c === '>' ? n === '>' || n === '|' || n === '&' : n === '<' || n === '>' || n === '&') {
         i++
         if (c === '<' && n === '<' && command.charAt(i + 1) === '<') i++
@@ -102,6 +130,21 @@ function segments(command: string): string[][] {
       endSeg()
     } else if (c === ';' || c === '\n') {
       endSeg()
+      if (c === '\n' && heredocs.length > 0) {
+        // 跳过各个 heredoc 的正文，直到恰好等于分隔词的一行（<<- 先去掉行首制表符），分隔行也跳过；没有结束行就吃到末尾
+        let pos = i + 1
+        for (const h of heredocs) {
+          while (pos < command.length) {
+            let nl = command.indexOf('\n', pos)
+            if (nl < 0) nl = command.length
+            const line = command.slice(pos, nl)
+            pos = nl + 1
+            if ((h.strip ? line.replace(/^\t+/, '') : line) === h.word) break
+          }
+        }
+        heredocs.length = 0
+        i = Math.min(pos, command.length) - 1
+      }
     } else if (/\s/.test(c)) {
       endWord()
     } else {
@@ -112,13 +155,14 @@ function segments(command: string): string[][] {
   endSeg()
   return segs.map((ws) => {
     let k = 0
-    while (k < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k] ?? '')) k++
+    while (k < ws.length - 1 && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k] ?? '') || wrappers.has(ws[k] ?? ''))) k++
     return ws.slice(k)
   })
 }
 
+/** rank 0 是兜底（一段都没认出来）；1 联网、2 对外、3 不可逆，与 hub 的风险档对应。 */
 interface Match {
-  rank: 1 | 2 | 3
+  rank: 0 | 1 | 2 | 3
   text: string
 }
 
@@ -132,6 +176,9 @@ function installText(pkgs: string[]): Match {
 
 const positional = (ws: string[]) => ws.filter((w) => !w.startsWith('-'))
 
+// git push 里带值的选项（值是下一个词）：值不能当成 remote 或分支。写成 --opt=value 的是一个词。
+const pushValueOpts = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec'])
+
 function matchGit(args: string[]): Match | null {
   let i = 0
   while (i < args.length && args.at(i)?.startsWith('-')) i += args[i] === '-C' || args[i] === '-c' ? 2 : 1
@@ -141,17 +188,50 @@ function matchGit(args: string[]): Match | null {
     return rest.includes('--hard') ? { rank: 3, text: '丢弃工作区的改动，不可恢复' } : null
   }
   if (sub !== 'push') return null
-  let force = rest.some((w) => w === '--force' || w.startsWith('--force-with-lease') || /^-[A-Za-z]*f[A-Za-z]*$/.test(w))
-  const pos = positional(rest)
+  const opts: string[] = []
+  const pos: string[] = []
+  for (let j = 0; j < rest.length; j++) {
+    const w = rest[j] ?? ''
+    if (!w.startsWith('-')) pos.push(w)
+    else {
+      opts.push(w)
+      if (pushValueOpts.has(w)) j++
+    }
+  }
+  const short = (re: RegExp) => opts.some((w) => !w.startsWith('--') && re.test(w))
   const remote = pos[0] ?? ''
-  let ref = pos[1] ?? ''
+  const refs = pos.slice(1)
+  // 源为空的 refspec（:main、+:main）是删除远程分支
+  const delRef = refs.find((w) => w.replace(/^\+/, '').startsWith(':'))
+  const suffix = (ref: string) => (remote && ref ? `（${remote} 的 ${ref}）` : remote ? `（${remote}）` : '')
+  if (opts.includes('--delete') || short(/^-[A-Za-z]*d/) || delRef !== undefined) {
+    const ref = delRef !== undefined ? delRef.replace(/^\+/, '').slice(1) : (refs[0] ?? '')
+    return { rank: 3, text: `删除远程分支${suffix(ref)}` }
+  }
+  if (opts.includes('--mirror') || opts.includes('--prune')) {
+    return { rank: 3, text: `让远程和本地完全一致，可能删掉远程的分支${suffix('')}` }
+  }
+  let force = opts.some((w) => w === '--force' || w.startsWith('--force-with-lease')) || short(/^-[A-Za-z]*f/)
+  let ref = refs[0] ?? ''
   if (ref.startsWith('+')) {
     force = true
     ref = ref.slice(1)
   }
   if (ref.includes(':')) ref = ref.slice(ref.lastIndexOf(':') + 1)
-  const where = remote && ref ? `（${remote} 的 ${ref}）` : remote ? `（${remote}）` : ''
-  return force ? { rank: 3, text: `强制推送，会覆盖远程历史${where}` } : { rank: 2, text: `把代码推到远程仓库${where}` }
+  return force ? { rank: 3, text: `强制推送，会覆盖远程历史${suffix(ref)}` } : { rank: 2, text: `把代码推到远程仓库${suffix(ref)}` }
+}
+
+// 照 internal/policy/commands.go：curl 的短选项簇含 X d T F 之一（-d@file、-sd 也算），或这些长选项；wget 的这三个长选项。
+// 长选项另认 --opt=value 的连写（wget 的写法）。
+const curlSendLong = ['--request', '--data', '--data-raw', '--data-binary', '--data-urlencode', '--data-ascii', '--json', '--form', '--form-string', '--upload-file']
+const wgetSendLong = ['--post-data', '--post-file', '--method']
+
+function sendsData(name: string, args: string[]): boolean {
+  const longs = name === 'curl' ? curlSendLong : wgetSendLong
+  return args.some((a) => {
+    if (a.startsWith('--')) return longs.some((o) => a === o || a.startsWith(o + '='))
+    return name === 'curl' && /^-[^-]*[XdTF]/.test(a)
+  })
 }
 
 function matchSegment(words: string[]): Match | null {
@@ -192,16 +272,17 @@ function matchSegment(words: string[]): Match | null {
     }
     case 'curl':
     case 'wget': {
+      const send = sendsData(name, args)
       const url = args.find((w) => /^[a-z][a-z0-9+.-]*:\/\//i.test(w))
       if (url) {
         try {
           const host = new URL(url).hostname
-          if (host) return { rank: 1, text: `访问网址 ${host}` }
+          if (host) return send ? { rank: 2, text: `向 ${host} 发送数据` } : { rank: 1, text: `访问网址 ${host}` }
         } catch {
           // 网址解析不了，按没有网址
         }
       }
-      return { rank: 1, text: `用 ${name} 访问网络` }
+      return send ? { rank: 2, text: `用 ${name} 发送数据` } : { rank: 1, text: `用 ${name} 访问网络` }
     }
     case 'vercel':
       return deploy()
@@ -236,23 +317,38 @@ function matchSegment(words: string[]): Match | null {
   }
 }
 
-/** 一条 shell 命令“做什么”：各段里取最要紧的一段（不可逆 > 对外 > 联网，一样高取靠前的）；都认不出时原样说运行命令。 */
-export function shellAction(command: string): string {
+/** 兜底：原样说运行命令（空白并成一个空格，超长截断）；空命令说运行一条命令。 */
+function fallbackAction(command: string): string {
+  const c = command.trim()
+  return c ? `运行命令：${clip(c.replace(/\s+/g, ' '), 80)}` : '运行一条命令'
+}
+
+/** 各段里取最要紧的一段（不可逆 > 对外 > 联网，一样高取靠前的）；都认不出时 rank 0，说运行命令。 */
+function shellMatch(command: string): Match {
   let best: Match | null = null
   for (const seg of segments(command)) {
     const m = matchSegment(seg)
     if (m && (!best || m.rank > best.rank)) best = m
   }
-  if (best) return best.text
-  const c = command.trim()
-  return c ? `运行命令：${clip(c.replace(/\s+/g, ' '), 80)}` : '运行一条命令'
+  return best ?? { rank: 0, text: fallbackAction(command) }
 }
+
+/** 一条 shell 命令“做什么”：各段里取最要紧的一段（不可逆 > 对外 > 联网，一样高取靠前的）；都认不出时原样说运行命令。不看 hub 的风险。 */
+export function shellAction(command: string): string {
+  return shellMatch(command).text
+}
+
+// hub 的风险档对应的最低 rank：认出的那段比 hub 定的风险轻时，说明句不能比 hub 说得轻，退回原命令。
+const riskFloor: Record<string, number> = { destructive: 3, outward: 2, network: 1 }
 
 function permissionWhat(r: RequestView): string {
   const p = r.payload
   switch (p.type) {
-    case 'shell':
-      return shellAction(p.command ?? '')
+    case 'shell': {
+      const command = p.command ?? ''
+      const m = shellMatch(command)
+      return m.rank < (riskFloor[r.risk] ?? 0) ? fallbackAction(command) : m.text
+    }
     case 'file_write': {
       const path = p.path ?? ''
       if (!path) return '修改文件'
@@ -318,7 +414,15 @@ function permissionWhy(r: RequestView): string {
 /** 把一条请求说成人话：整句、做什么、在哪、为什么要你决定、批了拒了会怎样。 */
 export function explainRequest(r: RequestView): Explanation {
   const cli = cliLabel(r.cli)
-  const where = [r.project && `项目 ${r.project}`, r.machine_name && `机器 ${machineLabel(r.machine_name)}`].filter(Boolean).join('，')
+  // 命令的目录不是项目根时也说出来（项目根就是项目名，不重复）
+  const cwd = r.payload.type === 'shell' ? (r.payload.cwd ?? '') : ''
+  const where = [
+    r.project && `项目 ${r.project}`,
+    r.machine_name && `机器 ${machineLabel(r.machine_name)}`,
+    cwd && cwd !== r.project_root && `目录 ${cwd}`,
+  ]
+    .filter(Boolean)
+    .join('，')
   switch (r.kind) {
     case 'question':
       return { headline: `${cli} 在终端等你回答`, what: '在终端等你回答', where, why: '', next: ['去那台机器的终端回答，这里只是提醒。'] }
@@ -337,9 +441,18 @@ export function explainRequest(r: RequestView): Explanation {
   }
   const what = permissionWhat(r)
   const next: string[] = []
-  if (r.state === 'pending') {
+  const pending = r.state === 'pending'
+  if (pending) {
     next.push('批准：agent 执行这一条，只这一次。', '拒绝：agent 收到拒绝，会换个做法或停下来。')
-    if (!isRedacted(r)) next.push('勾「记住」可以存成规则，下次同类的不再问。')
+    if (!isRedacted(r)) next.push(rememberLine(r))
   }
-  return { headline: `${cli} 想${what}`, what, where, why: permissionWhy(r), next }
+  return { headline: `${cli} 想${what}`, what, where, why: pending ? permissionWhy(r) : '', next }
+}
+
+/** “记住”那行：这类操作只能存成拒绝规则（对外、不可逆、未知、项目外，或命令、文件写入没有项目根）时别许诺“不再问”。 */
+function rememberLine(r: RequestView): string {
+  const denyOnly =
+    ['outward', 'destructive', 'unknown', 'write_outside'].includes(r.risk) ||
+    ((r.payload.type === 'shell' || r.payload.type === 'file_write') && r.project_root === '')
+  return denyOnly ? '勾「记住」只能存成拒绝规则，下次同类的直接拒绝；这类操作不能记成放行。' : '勾「记住」可以存成规则，下次同类的不再问。'
 }

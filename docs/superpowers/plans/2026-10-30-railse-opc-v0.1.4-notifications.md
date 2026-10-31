@@ -27,7 +27,7 @@
 - **待决集合 = 待审批（`state.pending`）∪ 还在等回答的问题（`state.questions`）。** question 也推通知（tag 是问题的请求 id），问题还在等时它的通知要留着；问题不再等（同一会话来了新事件）时收掉。
 - **取注册用 `navigator.serviceWorker.getRegistration()`，不用 `ready`。** 没有注册（注册失败、还没注册）时 `ready` 永远不 resolve（`pwa.ts` 的 `getSubscription` 已为此改用 `getRegistration`）；`getNotifications()` 在注册对象上就能调，不需要 worker 已激活。
 - **节流是“先收一次、间隔末尾用最新集合补一次”。** 空闲时立即收；一秒内再来的只记下最新的待决集合，一秒到时补收一次。只丢不补的话，间隔里被批掉的那条要等下一次状态变化才收。
-- **已知竞态（接受）。** 网页加载收件箱的那一刻正好来了新请求的推送、而这次快照里还没有它，它的通知会被当成已处理收掉。窗口只有一次 `/api/inbox` 往返那么长；hub 先经 `/ws/client` 广播再推送，实时连接在线时网页总是先知道新请求；而且只在网页开着时发生，收件箱随后会显示这条。不为它引入时间戳比对。
+- **已知竞态（接受）。** 网页加载收件箱的那一刻正好来了新请求的推送、而这次快照里还没有它，它的通知会被当成已处理收掉。窗口只有一次 `/api/inbox` 往返那么长；hub 先经 `/ws/client` 广播再推送，实时连接在线时网页总是先知道新请求；而且只在网页开着时发生，收件箱随后会显示这条。不为它引入时间戳比对。另一种情形是回到前台、重拉收件箱还没完成时先到一帧：同样只在网页开着时发生，收件箱随后会显示，接受。
 - **`sw.js` 不改代码。** `notificationclick` 已经第一句就 `event.notification.close()`，再 `openTarget`；Task 2 只补一条先后顺序的测试，以及两行正文原样弹出的测试。
 
 ---
@@ -857,6 +857,23 @@ git commit -m "web: 拿到收件箱状态时收掉已处理请求的通知（同
 - **处理后的状态行。** 已处理的 permission、webhook 在命令框下面显示一行：状态标签（`historyTag` 的文案与色调）、依据（`decidedByLabel`，与状态文案相同时不重复）、决定时间（`absoluteTime`）、送达（`deliveryLabel`），用“ · ”连起来。question、done 没有状态行。
 - **卡片里的机器名去 `.local`**（与说明卡、推送一致）。历史卡片不在本项范围，不动。
 - **说明卡用的 CSS 变量只用已有的**（`--fg`、`--muted`、`--card`、`--line`），`contrast.test.ts` 不用改；页面仍不许内联样式。
+
+#### 终审修复（2026-10-31）
+
+整条分支终审后补的修改，逐条一句：
+
+- **I-1 删远程分支单独说。** `git push` 的 `--delete`、含 `d` 的短选项簇、源为空的 refspec（`:main`、`+:main`）说成“删除远程分支”，`--mirror`、`--prune` 说成“让远程和本地完全一致，可能删掉远程的分支”，都按不可逆；优先级删除 > mirror/prune > 强制 > 普通；`-o`、`--push-option`、`--repo`、`--receive-pack`、`--exec` 连值一起跳过，不当成 remote。
+- **I-2 说明句以 hub 的风险为下限。** `explainRequest` 对 shell 载荷取 `{ destructive: 3, outward: 2, network: 1 }` 为下限，认出的那段比它轻（含一段都没认出）时退回“运行命令：<原命令>”；`shellAction` 不看风险，签名不变。另照 `internal/policy/commands.go` 认 curl（短选项含 `X d T F`，与那些长选项）、wget（`--post-data`、`--post-file`、`--method`，含 `=` 连写）往外发数据，说“向 <主机名> 发送数据”。hub 把 `curl … | sh` 定为 network（只看到 curl），网页与它一致，仍说“访问网址”，更高的风险档才退回原命令。
+- **I-3 已处理的请求不再说“要你决定”。** `why` 只在待决的审批上有，`next` 只在待决的审批与 webhook、question 上有；`RequestSummary` 删掉自己的判断，非空就显示。
+- **M-1 历史卡片边距。** 第三行的样式改成 `.card > .where`，不再落到历史卡片 `.row` 里的 `span.where`。
+- **C-1 卡片第一行至多两行。** `.card .what` 由单行省略改为两行截断，窄屏不再把“（origin 的 main）”截掉。
+- **M-2 heredoc。** 分词时跳过 `<<WORD`、`<<-WORD` 的正文与结束行（`<<<` 是 here-string，不算），同一行多个按顺序排队，没有结束行就吃到末尾；正文不产生词也不产生段。
+- **M-3 “记住”那行按能不能记成放行说。** 对外、不可逆、未知、项目外，或 shell 与文件写入没有项目根时，说“只能存成拒绝规则”；其余仍说可以存成规则。
+- **M-6 认不出的载荷。** 网页 `payloadSummary` 的默认分支与 hub 一致，取工具名，没有再取类型。
+- **M-7 目录。** shell 的 `cwd` 不是项目根时，说明卡的 where 末尾追加“目录 <cwd>”；README 的说法改成与现状一致。
+- **M-9 包装命令。** 每段去掉前导赋值时，同样去掉 `env`、`time`、`nohup`、`nice`、`caffeinate`（照 `stripWrappers`，只剩一个词时不剥，不跳它们的选项）。
+- **不改 M-4。** outward、destructive 的 why 说“规则永远不会自动放行”是作者在需求里给的原文；导入的 elevated 手写规则其实能放行，交作者决定。
+- **不改 M-5。** 推送写“<CLI> 要…”、页面写“<CLI> 想…”，标签“对外”、推送“往外发”，各自是作者给的文案。
 
 ### Task 3: 审批页说人话（一）：hub 给 CLI 名、网页 `explain.ts`
 

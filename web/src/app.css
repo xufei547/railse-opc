@@ -58,8 +58,8 @@ button { font: inherit; }
 .nav .badge { position: absolute; top: 6px; right: calc(50% - 22px); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--high); color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
 .card { display: block; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; text-decoration: none; color: inherit; }
 .card .row { display: flex; align-items: center; gap: 8px; }
-.card .what { font-size: 15px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card .where { color: var(--muted); font-size: 13px; margin-top: 4px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .what { font-size: 15px; font-weight: 600; min-width: 0; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.card > .where { color: var(--muted); font-size: 13px; margin-top: 4px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card .tag { flex: none; }
 .card .time { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .card .cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }

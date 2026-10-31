@@ -61,6 +61,7 @@ describe('labels', () => {
     expect(payloadSummary({ type: 'network', url: 'https://x' })).toBe('https://x')
     expect(payloadSummary({ type: 'mcp', server: 'fs', tool: 'write' })).toBe('fs/write')
     expect(payloadSummary({ type: 'other' })).toBe('other')
+    expect(payloadSummary({ type: 'other', tool: 'read_file' })).toBe('read_file')
   })
   it('状态与种类', () => {
     expect(stateLabel('auto_allowed')).toBe('自动放行')

@@ -6,11 +6,11 @@ import { RedactedWarning, RequestContent } from './Payload'
 
 /**
  * 审批页最上面：含隐藏部分时先是醒目告警（说明卡那一句也是从脱敏后的内容推出来的），
- * 然后是说明卡（谁想做什么、在哪、为什么要你决定），原样的命令或路径，最后是批了、拒了、记住会怎样（还能决定时才有）。
+ * 然后是说明卡（谁想做什么、在哪、为什么要你决定），原样的命令或路径，最后是批了、拒了、记住会怎样；
+ * 为什么与后续只在还等你决定时有（explain.ts 按状态给空），这里不再自己判断。
  */
 export function RequestSummary({ request: r }: { request: RequestView }) {
   const e = explainRequest(r)
-  const decidable = (r.state === 'pending' && (r.kind === 'permission' || r.kind === 'webhook')) || r.kind === 'question'
   return (
     <>
       {isRedacted(r) && <RedactedWarning request={r} />}
@@ -20,7 +20,7 @@ export function RequestSummary({ request: r }: { request: RequestView }) {
         {e.why && <p className="why">{e.why}</p>}
       </section>
       <RequestContent request={r} />
-      {decidable && e.next.length > 0 && (
+      {e.next.length > 0 && (
         <ul className="next">
           {e.next.map((line) => (
             <li key={line}>{line}</li>

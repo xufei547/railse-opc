@@ -544,7 +544,7 @@ func TestPushMessagePermissionVerbs(t *testing.T) {
 	}
 }
 
-// 有项目时标题追加项目；机器多于一台时再追加机器名（去掉结尾的 .local，不分大小写）。正文两行：摘要、“点开批准或拒绝”，
+// 有项目时标题追加项目；接入且未吊销的机器不止一个名字时再追加机器名（去掉结尾的 .local，不分大小写）。正文两行：摘要、“点开批准或拒绝”，
 // 不再有“风险 network”与工具名。
 func TestPushMessagePermissionWhereAndBody(t *testing.T) {
 	decode := decodePush(t)

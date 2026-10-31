@@ -134,7 +134,7 @@ describe('RequestSummary', () => {
     expect(head).toBeGreaterThan(-1)
     expect(head).toBeLessThan(cmd)
     expect(cmd).toBeLessThan(next)
-    for (const s of ['批准：agent 执行这一条，只这一次。', '拒绝：agent 收到拒绝，会换个做法或停下来。', '勾「记住」可以存成规则，下次同类的不再问。']) {
+    for (const s of ['批准：agent 执行这一条，只这一次。', '拒绝：agent 收到拒绝，会换个做法或停下来。', '勾「记住」只能存成拒绝规则，下次同类的直接拒绝；这类操作不能记成放行。']) {
       expect(html).toContain(`<li>${s}</li>`)
     }
     expect(html).not.toMatch(/outward|write_in_project|destructive/)
@@ -164,6 +164,20 @@ describe('RequestSummary', () => {
     expect(html).toContain('<li>批准或拒绝会回调给发起它的工作流。</li>')
     expect(html).not.toContain('class="where"')
     expect(html).not.toContain('class="why"')
+  })
+
+  it('标题里有占位符（has_redacted 为 false）时同样告警，且在 headline 之前', () => {
+    const html = summary(webhook({ title: '用 <redacted> 部署' }))
+    expect(html).toContain('不是原文')
+    expect(html.indexOf('不是原文')).toBeLessThan(html.indexOf('class="headline"'))
+  })
+
+  it('已自动处理的请求没有“为什么”和 next；还等你决定的有', () => {
+    const done = summary(req({ state: 'auto_allowed', risk: 'read', engine_reason: '命中规则 builtin-read', decided_by: 'rule' }))
+    expect(done).not.toContain('class="why"')
+    expect(done).not.toContain('class="next"')
+    expect(summary(req())).toContain('class="why"')
+    expect(summary(req({ risk: 'outward' }))).toContain('勾「记住」只能存成拒绝规则')
   })
 
   it('question：去终端回答的提醒；已处理的审批没有 next', () => {
