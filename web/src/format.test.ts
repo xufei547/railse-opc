@@ -242,5 +242,10 @@ describe('outcomeText', () => {
       const text = outcomeText(r({ state: state as R['state'], decided_by, rule_id })).replace(/（规则 [^）]+）|规则 \S+ 自动/g, '')
       expect(text).not.toMatch(jargon)
     }
+    // 以后新增的、不认识的来源：任何状态下都不露原始值
+    const states: R['state'][] = ['approved', 'denied', 'cancelled', 'expired', 'auto_allowed', 'auto_denied', 'passthrough']
+    for (const decided_by of ['future_source', 'hub_restart', 'rule_engine_v2', 'Terminal']) {
+      for (const state of states) expect(outcomeText(r({ state, decided_by }))).not.toContain(decided_by)
+    }
   })
 })

@@ -44,7 +44,6 @@ export function historyTag(r: Pick<RequestView, 'kind' | 'state'>): { label: str
   return { label: stateLabel(r.state), tone: stateTones[r.state] ?? 'plain' }
 }
 
-
 export type More = 'more' | 'loading' | 'capped' | 'none'
 
 /**
