@@ -22,6 +22,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hookclient"
 	"github.com/xufei547/railse-opc/internal/hub"
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -45,31 +46,31 @@ var agentFlags = map[string][]string{
 // runAgent 处理 agent 子命令：run 跑守护进程，enroll 接入 hub，其余经 socket 发本机管理命令。
 func runAgent(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, agentUsage)
+		fmt.Fprintln(stderr, i18n.T(agentUsage))
 		return 2
 	}
 	allowed, ok := agentFlags[args[0]]
 	if !ok {
-		fmt.Fprintf(stderr, "未知的 agent 子命令 %q\n\n%s\n", args[0], agentUsage)
+		fmt.Fprintf(stderr, i18n.T("未知的 agent 子命令 %q\n\n%s\n"), args[0], i18n.T(agentUsage))
 		return 2
 	}
 	fs := flag.NewFlagSet("agent "+args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	dir := fs.String("dir", "", "配置目录，默认 $RAILSE_HOME 或 ~/.railse")
-	foreground := fs.Bool("foreground", false, "日志同时写到 stderr")
-	hubURL := fs.String("hub", "", "hub 地址，如 https://hub.example.com")
-	token := fs.String("token", "", "railse hub token 生成的接入码")
-	name := fs.String("name", "", "本机在 hub 里的名字，默认主机名")
-	force := fs.Bool("force", false, "覆盖已有的 machine.json")
+	dir := fs.String("dir", "", i18n.T("配置目录，默认 $RAILSE_HOME 或 ~/.railse"))
+	foreground := fs.Bool("foreground", false, i18n.T("日志同时写到 stderr"))
+	hubURL := fs.String("hub", "", i18n.T("hub 地址，如 https://hub.example.com"))
+	token := fs.String("token", "", i18n.T("railse hub token 生成的接入码"))
+	name := fs.String("name", "", i18n.T("本机在 hub 里的名字，默认主机名"))
+	force := fs.Bool("force", false, i18n.T("覆盖已有的 machine.json"))
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintf(stderr, "多余的参数 %q\n%s\n", fs.Args(), agentUsage)
+		fmt.Fprintf(stderr, i18n.T("多余的参数 %q\n%s\n"), fs.Args(), i18n.T(agentUsage))
 		return 2
 	}
 	if bad := foreignFlags(fs, allowed); bad != "" {
-		fmt.Fprintf(stderr, "railse agent %s 不认 %s\n%s\n", args[0], bad, agentUsage)
+		fmt.Fprintf(stderr, i18n.T("railse agent %s 不认 %s\n%s\n"), args[0], bad, i18n.T(agentUsage))
 		return 2
 	}
 	cfg, err := agentConfigFor(*dir)
@@ -93,7 +94,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		if !reply.OK {
-			fmt.Fprintln(stderr, "失败:", reply.Error)
+			fmt.Fprintln(stderr, i18n.T("失败:"), reply.Error)
 			return 1
 		}
 		if args[0] == "status" && reply.Status != nil {
@@ -104,7 +105,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "ok")
 		// pause/resume 的回复带状态：本机已恢复但 hub 仍暂停时，自动审批仍未生效，要说清楚。
 		if args[0] == "resume" && reply.Status != nil && reply.Status.HubPaused {
-			fmt.Fprintln(stdout, "本机已恢复，hub 仍暂停：自动审批仍未生效，需在 hub 上恢复")
+			fmt.Fprintln(stdout, i18n.T("本机已恢复，hub 仍暂停：自动审批仍未生效，需在 hub 上恢复"))
 		}
 		return 0
 	case "enroll":
@@ -130,11 +131,11 @@ func agentConfigFor(dir string) (agent.Config, error) {
 func hubLine(st *proto.Status) string {
 	switch st.Hub {
 	case "":
-		return "hub: 未知（守护进程版本较旧？重启它）"
+		return i18n.T("hub: 未知（守护进程版本较旧？重启它）")
 	case "none":
 		return "hub: none"
 	case "disabled":
-		return fmt.Sprintf("hub: disabled %s（本机密钥被拒，请 railse agent enroll --force 后重启守护进程）", st.HubURL)
+		return fmt.Sprintf(i18n.T("hub: disabled %s（本机密钥被拒，请 railse agent enroll --force 后重启守护进程）"), st.HubURL)
 	}
 	return fmt.Sprintf("hub: %s %s", st.Hub, st.HubURL)
 }
@@ -165,7 +166,7 @@ const (
 // 接入码只放在请求体里发给 --hub 指定的地址（不跟随重定向），任何输出都不带接入码与密钥。
 func agentEnroll(cfg agent.Config, hubURL, token, name string, force bool, stdout, stderr io.Writer) error {
 	if hubURL == "" || token == "" {
-		return errors.New("需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）")
+		return errors.New(i18n.T("需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）"))
 	}
 	u, base, err := parseHubURL(hubURL)
 	if err != nil {
@@ -179,10 +180,10 @@ func agentEnroll(cfg agent.Config, hubURL, token, name string, force bool, stdou
 		return err
 	}
 	if plaintextHub(u) {
-		fmt.Fprintln(stderr, "警告: "+plaintextHubNote)
+		fmt.Fprintln(stderr, i18n.T("警告: ")+i18n.T(plaintextHubNote))
 	}
 	if _, err := os.Lstat(cfg.MachinePath); err == nil && !force {
-		return fmt.Errorf("%s 已存在，本机已接入过；要换 hub 或重新接入请加 --force", cfg.MachinePath)
+		return fmt.Errorf(i18n.T("%s 已存在，本机已接入过；要换 hub 或重新接入请加 --force"), cfg.MachinePath)
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -197,35 +198,33 @@ func agentEnroll(cfg agent.Config, hubURL, token, name string, force bool, stdou
 		if errors.As(err, &ue) {
 			err = ue.Err // 去掉 *url.Error 带的完整地址，只留原因
 		}
-		return fmt.Errorf("连接 hub %s 失败: %w", origin, err)
+		return fmt.Errorf(i18n.T("连接 hub %s 失败: %w"), origin, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, enrollReplyMax+1))
 	if err != nil {
-		return fmt.Errorf("读 hub %s 的答复: %w", origin, err)
+		return fmt.Errorf(i18n.T("读 hub %s 的答复: %w"), origin, err)
 	}
 	switch {
 	case resp.StatusCode >= 300 && resp.StatusCode < 400:
-		return fmt.Errorf("hub 返回重定向（HTTP %d），不跟随：接入码与密钥只发给 --hub 指定的地址，请把 --hub 改成最终地址", resp.StatusCode)
+		return fmt.Errorf(i18n.T("hub 返回重定向（HTTP %d），不跟随：接入码与密钥只发给 --hub 指定的地址，请把 --hub 改成最终地址"), resp.StatusCode)
 	case resp.StatusCode != http.StatusOK:
-		return fmt.Errorf("hub 拒绝接入（HTTP %d）%s", resp.StatusCode, hubErrorText(data, token))
+		return fmt.Errorf(i18n.T("hub 拒绝接入（HTTP %d）%s"), resp.StatusCode, hubErrorText(data, token))
 	}
 	var out struct {
 		MachineID string `json:"machine_id"`
 		Secret    string `json:"secret"`
 	}
 	if len(data) > enrollReplyMax || json.Unmarshal(data, &out) != nil || out.MachineID == "" || out.Secret == "" || checkDisplayName(out.MachineID) != nil {
-		return errors.New("hub 的答复不完整或不合规，没有写 machine.json")
+		return errors.New(i18n.T("hub 的答复不完整或不合规，没有写 machine.json"))
 	}
 	m := agent.MachineConfig{HubURL: base, MachineID: out.MachineID, Secret: out.Secret, Name: name}
 	if err := agent.SaveMachine(cfg.MachinePath, m); err != nil {
-		return fmt.Errorf("写 %s: %w", cfg.MachinePath, err)
+		return fmt.Errorf(i18n.T("写 %s: %w"), cfg.MachinePath, err)
 	}
-	fmt.Fprintf(stdout, "已接入 hub %s，机器 id %s，名字 %s\n已写入 %s；重启 railse agent run 后生效\n", origin, out.MachineID, name, cfg.MachinePath)
+	fmt.Fprintf(stdout, i18n.T("已接入 hub %s，机器 id %s，名字 %s\n已写入 %s；重启 railse agent run 后生效\n"), origin, out.MachineID, name, cfg.MachinePath)
 	if agent.HasLocalRules(cfg.RulesPath) {
-		fmt.Fprintf(stdout, "注意：首次连上 hub 时本机 rules.yaml 会被 hub 规则覆盖（会自动备份），如有手写规则请先导入。\n"+
-			"  本机规则 %s，备份为同目录的 rules.local-<时间>.yaml；覆盖后其中手写的规则（例如 deny）不再生效\n"+
-			"  导入：POST %s/api/rules/import（整套替换 hub 的规则，见 docs/hub.md）\n", cfg.RulesPath, origin)
+		fmt.Fprintf(stdout, i18n.T("注意：首次连上 hub 时本机 rules.yaml 会被 hub 规则覆盖（会自动备份），如有手写规则请先导入。\n  本机规则 %s，备份为同目录的 rules.local-<时间>.yaml；覆盖后其中手写的规则（例如 deny）不再生效\n  导入：POST %s/api/rules/import（整套替换 hub 的规则，见 docs/hub.md）\n"), cfg.RulesPath, origin)
 	}
 	return nil
 }
@@ -245,13 +244,13 @@ func parseHubURL(raw string) (*url.URL, string, error) {
 func parseHubAddr(raw string) (*url.URL, string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" || u.Hostname() == "" {
-		return nil, "", errors.New("必须是 http:// 或 https:// 开头、带主机名的地址")
+		return nil, "", errors.New(i18n.T("必须是 http:// 或 https:// 开头、带主机名的地址"))
 	}
 	if u.User != nil {
-		return nil, "", errors.New("不能带用户名或密码")
+		return nil, "", errors.New(i18n.T("不能带用户名或密码"))
 	}
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return nil, "", errors.New("不能带 ? 查询或 # 片段")
+		return nil, "", errors.New(i18n.T("不能带 ? 查询或 # 片段"))
 	}
 	return u, u.Scheme + "://" + u.Host + strings.TrimRight(u.EscapedPath(), "/"), nil
 }
@@ -277,10 +276,10 @@ func isLoopbackHost(host string) bool {
 // checkDisplayName 按 hub 接入时的口径检查名字（机器名、hub 发来的机器 id）：至多 hub.MaxNameLen 字节，且 hub.ValidName。
 func checkDisplayName(s string) error {
 	if len(s) > hub.MaxNameLen {
-		return fmt.Errorf("至多 %d 字节", hub.MaxNameLen)
+		return fmt.Errorf(i18n.T("至多 %d 字节"), hub.MaxNameLen)
 	}
 	if !hub.ValidName(s) {
-		return errors.New("必须是合法 UTF-8，且不能含控制字符或不可见的格式字符")
+		return errors.New(i18n.T("必须是合法 UTF-8，且不能含控制字符或不可见的格式字符"))
 	}
 	return nil
 }
@@ -288,7 +287,7 @@ func checkDisplayName(s string) error {
 // checkNameFlag 按 checkDisplayName 检查本机名字（--name，没给时是主机名），错误说明带上怎么改。
 func checkNameFlag(name string) error {
 	if err := checkDisplayName(name); err != nil {
-		return fmt.Errorf("名字 %w（用 --name 另取一个）", err)
+		return fmt.Errorf(i18n.T("名字 %w（用 --name 另取一个）"), err)
 	}
 	return nil
 }
@@ -308,7 +307,7 @@ func hubErrorText(data []byte, token string) string {
 		}
 		return c
 	}, strings.ToValidUTF8(e.Error, ""))
-	msg = strings.ReplaceAll(msg, token, "<接入码>")
+	msg = strings.ReplaceAll(msg, token, i18n.T("<接入码>"))
 	if r := []rune(msg); len(r) > hubTextMax {
 		msg = string(r[:hubTextMax]) + "…"
 	}
@@ -329,7 +328,7 @@ func hubOrigin(raw string) string {
 func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stderr io.Writer) error {
 	// 家目录为空时 ~/ 开头的敏感路径规则会被跳过（fail open），宁可不启动。
 	if cfg.HomeDir == "" {
-		return errors.New("找不到家目录，拒绝启动：家目录为空会让 ~/ 开头的敏感路径规则失效")
+		return errors.New(i18n.T("找不到家目录，拒绝启动：家目录为空会让 ~/ 开头的敏感路径规则失效"))
 	}
 	if err := cfg.EnsureDirs(); err != nil {
 		return err
@@ -342,7 +341,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 	defer logFile.Close()
 	// O_CREATE 的 0600 只对新建文件生效，已有日志文件在这里收紧。
 	if err := logFile.Chmod(0o600); err != nil {
-		return fmt.Errorf("收紧日志文件权限: %w", err)
+		return fmt.Errorf(i18n.T("收紧日志文件权限: %w"), err)
 	}
 	var w io.Writer = logFile
 	if foreground {
@@ -366,7 +365,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 		logger.Printf("未接入 hub（没有 %s），引擎定不了的请求交回终端", cfg.MachinePath)
 	case err != nil:
 		logger.Printf("读 machine.json 失败，拒绝启动: %v", err)
-		return fmt.Errorf("读 machine.json 失败，拒绝启动（修好它、删掉它改回本地模式，或 railse agent enroll --force 重新接入）: %w", err)
+		return fmt.Errorf(i18n.T("读 machine.json 失败，拒绝启动（修好它、删掉它改回本地模式，或 railse agent enroll --force 重新接入）: %w"), err)
 	default:
 		machine = &m
 		cfg.MachineID = m.MachineID // hub 学到的 scope: machine 规则用 hub 的机器 id，本机引擎必须一致

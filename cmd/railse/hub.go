@@ -18,6 +18,7 @@ import (
 
 	"github.com/xufei547/railse-opc/internal/hub"
 	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 const hubUsage = `用法:
@@ -37,7 +38,7 @@ const hubUsage = `用法:
   --acme-domain：域名先解析到这台机器，443 与 80 对公网开放；对外源默认 https://<域名>（--public-url 的主机名须与它一致），
     cookie 一律 Secure；账户与证书私钥明文存在数据目录的 acme/（0700）。--acme-http 是 HTTP-01 挑战与 http→https 跳转的
     监听地址，none 不监听（只靠 443 上的 TLS-ALPN-01 签发）。Linux 上监听 443/80 需要 CAP_NET_BIND_SERVICE
-    （` + sudoSystemHubCmd + ` 会加）；macOS 不需要特权。hub 不要以 root 运行`
+    （sudo "$(command -v railse)" setup autostart --hub --system 会加）；macOS 不需要特权。hub 不要以 root 运行`
 
 // 以下是变量只为测试能替换：hub run 的运行期（SIGINT、SIGTERM 时取消）、跑 hub 的那一步、hub run 打开数据库的那一步，
 // 与判断是否以 root 运行用的有效用户 id。
@@ -51,8 +52,7 @@ var (
 )
 
 // hubRootWarning 是 hub 以 root 运行时的警告：不拒绝（容器里常以 root 起），但 hub 不需要 root。
-const hubRootWarning = "警告：hub 正以 root 运行。hub 不需要 root：Linux 上用 " + sudoSystemHubCmd + " 装成系统服务" +
-	"（以普通用户运行，只给绑定 443/80 的 CAP_NET_BIND_SERVICE）；macOS 绑定 443/80 不需要特权"
+const hubRootWarning = "警告：hub 正以 root 运行。hub 不需要 root：Linux 上用 %s 装成系统服务（以普通用户运行，只给绑定 443/80 的 CAP_NET_BIND_SERVICE）；macOS 绑定 443/80 不需要特权"
 
 // hubFlags 是各 hub 子命令认的标志。
 var hubFlags = map[string][]string{
@@ -76,7 +76,7 @@ func defaultHubDir() (string, error) {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("找不到家目录: %w", err)
+		return "", fmt.Errorf(i18n.T("找不到家目录: %w"), err)
 	}
 	return filepath.Join(home, ".railse-hub"), nil
 }
@@ -118,19 +118,19 @@ func (p *proxyFlag) Set(v string) error {
 // （/0，以及 IPv4-mapped 的 /96 及更短）：信任所有来源等于谁都能伪造 X-Forwarded-For，按来源的登录限速随之失效。
 func parseTrustedProxy(s string) (netip.Prefix, error) {
 	if s == "" {
-		return netip.Prefix{}, errors.New("可信代理地址为空")
+		return netip.Prefix{}, errors.New(i18n.T("可信代理地址为空"))
 	}
 	var p netip.Prefix
 	if strings.Contains(s, "/") {
 		pp, err := netip.ParsePrefix(s)
 		if err != nil {
-			return netip.Prefix{}, fmt.Errorf("可信代理 %q 不是合法的 CIDR", s)
+			return netip.Prefix{}, fmt.Errorf(i18n.T("可信代理 %q 不是合法的 CIDR"), s)
 		}
 		p = pp
 	} else {
 		a, err := netip.ParseAddr(s)
 		if err != nil || a.Zone() != "" {
-			return netip.Prefix{}, fmt.Errorf("可信代理 %q 不是合法的 IP 或 CIDR", s)
+			return netip.Prefix{}, fmt.Errorf(i18n.T("可信代理 %q 不是合法的 IP 或 CIDR"), s)
 		}
 		p = netip.PrefixFrom(a, a.BitLen())
 	}
@@ -139,7 +139,7 @@ func parseTrustedProxy(s string) (netip.Prefix, error) {
 		bits -= 96
 	}
 	if bits <= 0 {
-		return netip.Prefix{}, fmt.Errorf("可信代理 %q 覆盖全部地址，太宽；请写具体的代理地址", s)
+		return netip.Prefix{}, fmt.Errorf(i18n.T("可信代理 %q 覆盖全部地址，太宽；请写具体的代理地址"), s)
 	}
 	return p, nil
 }
@@ -157,42 +157,42 @@ type hubArgs struct {
 // 用法错时向 stderr 说明并返回 2；找不到家目录返回 1。只算数据目录的路径，不建目录、不碰文件：被拒的命令不留下目录。
 func hubConfigFromArgs(args []string, stderr io.Writer) (hubArgs, int) {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, hubUsage)
+		fmt.Fprintln(stderr, i18n.T(hubUsage))
 		return hubArgs{}, 2
 	}
 	sub := args[0]
 	allowed, ok := hubFlags[sub]
 	if !ok {
-		fmt.Fprintf(stderr, "未知的 hub 子命令 %q\n\n%s\n", sub, hubUsage)
+		fmt.Fprintf(stderr, i18n.T("未知的 hub 子命令 %q\n\n%s\n"), sub, i18n.T(hubUsage))
 		return hubArgs{}, 2
 	}
 	fs := flag.NewFlagSet("hub "+sub, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	dir := fs.String("dir", "", "数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub")
-	listen := fs.String("listen", "", "监听地址，默认 127.0.0.1:8787（给了 --acme-domain 时默认 :443）")
-	secure := fs.Bool("secure-cookies", false, "cookie 加 Secure（hub 在 TLS 反向代理后面而没设 --public-url 时打开；设了 https 的 --public-url 已自动加）")
-	foreground := fs.Bool("foreground", false, "日志同时写到 stderr")
-	ttl := fs.Duration("ttl", 10*time.Minute, "接入码有效期")
-	publicURL := fs.String("public-url", "", "hub 对外的 https 源，如 https://hub.example.com；不设则停用推送")
-	rotate := fs.Bool("rotate", false, "换新的 VAPID 密钥并删除全部推送订阅")
-	acmeDomain := fs.String("acme-domain", "", "hub 自己向 Let's Encrypt 申请证书并直出 TLS 的域名（要 443/80 端口）")
-	acmeEmail := fs.String("acme-email", "", "给 Let's Encrypt 的联系邮箱（可选）")
-	acmeHTTP := fs.String("acme-http", ":80", "HTTP-01 挑战与 http→https 跳转的监听地址；none 不监听")
+	dir := fs.String("dir", "", i18n.T("数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub"))
+	listen := fs.String("listen", "", i18n.T("监听地址，默认 127.0.0.1:8787（给了 --acme-domain 时默认 :443）"))
+	secure := fs.Bool("secure-cookies", false, i18n.T("cookie 加 Secure（hub 在 TLS 反向代理后面而没设 --public-url 时打开；设了 https 的 --public-url 已自动加）"))
+	foreground := fs.Bool("foreground", false, i18n.T("日志同时写到 stderr"))
+	ttl := fs.Duration("ttl", 10*time.Minute, i18n.T("接入码有效期"))
+	publicURL := fs.String("public-url", "", i18n.T("hub 对外的 https 源，如 https://hub.example.com；不设则停用推送"))
+	rotate := fs.Bool("rotate", false, i18n.T("换新的 VAPID 密钥并删除全部推送订阅"))
+	acmeDomain := fs.String("acme-domain", "", i18n.T("hub 自己向 Let's Encrypt 申请证书并直出 TLS 的域名（要 443/80 端口）"))
+	acmeEmail := fs.String("acme-email", "", i18n.T("给 Let's Encrypt 的联系邮箱（可选）"))
+	acmeHTTP := fs.String("acme-http", ":80", i18n.T("HTTP-01 挑战与 http→https 跳转的监听地址；none 不监听"))
 	var proxies proxyFlag
-	fs.Var(&proxies, "trusted-proxy", "可信反向代理的地址（CIDR 或单个 IP），可重复或逗号分隔")
+	fs.Var(&proxies, "trusted-proxy", i18n.T("可信反向代理的地址（CIDR 或单个 IP），可重复或逗号分隔"))
 	if err := fs.Parse(args[1:]); err != nil {
 		return hubArgs{}, 2
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintf(stderr, "多余的参数 %q\n%s\n", fs.Args(), hubUsage)
+		fmt.Fprintf(stderr, i18n.T("多余的参数 %q\n%s\n"), fs.Args(), i18n.T(hubUsage))
 		return hubArgs{}, 2
 	}
 	if bad := foreignFlags(fs, allowed); bad != "" {
-		fmt.Fprintf(stderr, "railse hub %s 不认 %s\n%s\n", sub, bad, hubUsage)
+		fmt.Fprintf(stderr, i18n.T("railse hub %s 不认 %s\n%s\n"), sub, bad, i18n.T(hubUsage))
 		return hubArgs{}, 2
 	}
 	if *ttl <= 0 || *ttl > maxEnrollTTL {
-		fmt.Fprintf(stderr, "--ttl 应在 0 到 %s 之间（不含 0），得到 %s\n", maxEnrollTTL, *ttl)
+		fmt.Fprintf(stderr, i18n.T("--ttl 应在 0 到 %s 之间（不含 0），得到 %s\n"), maxEnrollTTL, *ttl)
 		return hubArgs{}, 2
 	}
 	if *acmeDomain == "" {
@@ -203,7 +203,7 @@ func hubConfigFromArgs(args []string, stderr io.Writer) (hubArgs, int) {
 			}
 		})
 		if orphan != "" {
-			fmt.Fprintf(stderr, "%s 要和 --acme-domain 一起用\n", orphan)
+			fmt.Fprintf(stderr, i18n.T("%s 要和 --acme-domain 一起用\n"), orphan)
 			return hubArgs{}, 2
 		}
 	}
@@ -277,9 +277,9 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintln(stdout, "密码已设置（已登录的网页需要重新登录）")
+		fmt.Fprintln(stdout, i18n.T("密码已设置（已登录的网页需要重新登录）"))
 		if ch.PushSubscriptions > 0 {
-			fmt.Fprintf(stdout, "删除了 %d 条推送订阅：各设备重新登录后，要在网页设置里重新开启通知。\n", ch.PushSubscriptions)
+			fmt.Fprintf(stdout, i18n.T("删除了 %d 条推送订阅：各设备重新登录后，要在网页设置里重新开启通知。\n"), ch.PushSubscriptions)
 		}
 	case "token":
 		tok, err := st.CreateEnrollToken(a.ttl)
@@ -287,15 +287,14 @@ func runHub(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "接入码: %s\n有效期: %s（只能用一次）\n在要接入的机器上、项目目录里运行（接入、装钩子、开机自启、体检一次做完）:\n"+
-			"  railse setup all --hub https://<hub 地址> --token %s\n只接入（钩子与开机自启自己装）:\n  railse agent enroll --hub https://<hub 地址> --token %s\n", tok, a.ttl, tok, tok)
+		fmt.Fprintf(stdout, i18n.T("接入码: %s\n有效期: %s（只能用一次）\n在要接入的机器上、项目目录里运行（接入、装钩子、开机自启、体检一次做完）:\n  railse setup all --hub https://<hub 地址> --token %s\n只接入（钩子与开机自启自己装）:\n  railse agent enroll --hub https://<hub 地址> --token %s\n"), tok, a.ttl, tok, tok)
 	case "webhook-token":
 		tok := store.RandomToken()
 		if err := st.SetSetting("webhook_token_hash", store.HashToken(tok)); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "令牌: %s\n来源调用 POST /api/webhook/approvals 时带 Authorization: Bearer <令牌>；hub 只存哈希，丢了就重新生成（旧令牌随之失效）。\n", tok)
+		fmt.Fprintf(stdout, i18n.T("令牌: %s\n来源调用 POST /api/webhook/approvals 时带 Authorization: Bearer <令牌>；hub 只存哈希，丢了就重新生成（旧令牌随之失效）。\n"), tok)
 	case "vapid":
 		return runHubVapid(st, a.rotate, stdout, stderr)
 	}
@@ -311,7 +310,7 @@ func runHubVapid(st *store.Store, rotate bool, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "公钥: %s\n", v.PublicKeyB64())
+		fmt.Fprintf(stdout, i18n.T("公钥: %s\n"), v.PublicKeyB64())
 		return 0
 	}
 	v, removed, err := hub.RotateVAPID(st)
@@ -319,7 +318,7 @@ func runHubVapid(st *store.Store, rotate bool, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "公钥: %s\n已换新密钥，删除了 %d 条推送订阅；所有手机要在网页设置里重新开启通知。在跑的 hub 不用重启，下一次推送起用新密钥。\n", v.PublicKeyB64(), removed)
+	fmt.Fprintf(stdout, i18n.T("公钥: %s\n已换新密钥，删除了 %d 条推送订阅；所有手机要在网页设置里重新开启通知。在跑的 hub 不用重启，下一次推送起用新密钥。\n"), v.PublicKeyB64(), removed)
 	return 0
 }
 
@@ -327,7 +326,7 @@ func runHubVapid(st *store.Store, rotate bool, stdout, stderr io.Writer) int {
 func readPassword(stdin io.Reader, stderr io.Writer) (string, error) {
 	if f, ok := stdin.(*os.File); ok {
 		if fi, err := f.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-			fmt.Fprint(stderr, "输入新密码后回车（屏幕会回显；要避免回显可用 read -s 读进变量再通过管道传入）: ")
+			fmt.Fprint(stderr, i18n.T("输入新密码后回车（屏幕会回显；要避免回显可用 read -s 读进变量再通过管道传入）: "))
 		}
 	}
 	return readPasswordLine(stdin)
@@ -337,18 +336,18 @@ func readPassword(stdin io.Reader, stderr io.Writer) (string, error) {
 // 长度下限由 SetPassword 检查；这里只挡超过 maxPasswordBytes 的（登录时请求体放不下）。错误信息不含密码。
 func readPasswordLine(stdin io.Reader) (string, error) {
 	if stdin == nil {
-		return "", errors.New("没有读到密码")
+		return "", errors.New(i18n.T("没有读到密码"))
 	}
 	line, err := bufio.NewReader(io.LimitReader(stdin, maxPasswordBytes+2)).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("读密码: %w", err)
+		return "", fmt.Errorf(i18n.T("读密码: %w"), err)
 	}
 	if line == "" {
-		return "", errors.New("没有读到密码")
+		return "", errors.New(i18n.T("没有读到密码"))
 	}
 	pw := strings.TrimRight(line, "\r\n")
 	if len(pw) > maxPasswordBytes {
-		return "", fmt.Errorf("密码至多 %d 字节", maxPasswordBytes)
+		return "", fmt.Errorf(i18n.T("密码至多 %d 字节"), maxPasswordBytes)
 	}
 	return pw, nil
 }
@@ -365,7 +364,7 @@ func runHubServe(ctx context.Context, cfg hub.Config, foreground bool, stderr io
 	defer logFile.Close()
 	// O_CREATE 的 0600 只对新建文件生效，已有日志文件在这里收紧。
 	if err := logFile.Chmod(0o600); err != nil {
-		return fmt.Errorf("收紧日志文件权限: %w", err)
+		return fmt.Errorf(i18n.T("收紧日志文件权限: %w"), err)
 	}
 	var w io.Writer = logFile
 	if foreground {
@@ -373,9 +372,10 @@ func runHubServe(ctx context.Context, cfg hub.Config, foreground bool, stderr io
 	}
 	logger := log.New(w, "railse-hub ", log.LstdFlags)
 	if hubEuid() == 0 {
-		logger.Print(hubRootWarning)
+		warning := fmt.Sprintf(i18n.T(hubRootWarning), sudoSystemHubCmd)
+		logger.Print(warning)
 		if !foreground { // --foreground 时日志已经写到 stderr
-			fmt.Fprintln(stderr, hubRootWarning)
+			fmt.Fprintln(stderr, warning)
 		}
 	}
 	st, err := openHubStore(cfg.DBPath)

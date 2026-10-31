@@ -633,4 +633,258 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"从本机访问 %s 失败：%s": "couldn't reach %s from this machine: %s",
 	"对外地址没转到本机 hub：确认它转到 127.0.0.1:%d（那里的 hub 看 hub.reachable）；也可能是本机代理拦截了，用手机 4G 打开验证": "The public address doesn't lead to the local hub. Check that it forwards to 127.0.0.1:%d (hub.reachable covers the hub there). A proxy on this machine may also be blocking it; check by opening it on your phone over cellular",
 	"（从本机经 tailnet 访问到，没经过 Funnel 的公网入口；公网上打不打得开用手机 4G 验证）":                             " (reached from this machine over the tailnet, not through Funnel's public entry; check on your phone over cellular whether it opens from the internet)",
+
+	// cmd/railse/autostart.go、autostart_other.go
+	"Railse agent（审批守护进程）": "Railse agent (approval daemon)",
+	"Railse hub（审批中心）":     "Railse hub (approval hub)",
+	"托管 hub 而不是守护进程":       "manage the hub instead of the daemon",
+	"停止并移除托管（数据目录保留）":      "stop and remove the managed service (the data directory is kept)",
+	"只查看是否在跑":              "only show whether it is running",
+	"数据目录，默认 $RAILSE_HOME 或 ~/.railse；--hub 时 $RAILSE_HUB_HOME 或 ~/.railse-hub；--system 时 /var/lib/railse-hub": "data directory; default $RAILSE_HOME or ~/.railse; with --hub $RAILSE_HUB_HOME or ~/.railse-hub; with --system /var/lib/railse-hub",
+	"Linux：hub 用系统单元（须 root，hub 以 --user 运行）":                                                                  "Linux: run the hub as a system unit (needs root; the hub runs as --user)",
+	"系统单元以哪个用户运行，默认 $SUDO_USER；不能是 root":                                                                       "user the system unit runs as; default $SUDO_USER; can't be root",
+	"只打印要写的文件与要跑的命令，不写不跑":                                                                                      "only print the files it would write and the commands it would run; write and run nothing",
+	"多余的参数 %q（给 hub run 的参数放在 -- 之后）":                                                                          "Unexpected argument %q (put arguments for hub run after --)",
+	"开机自启只支持 macOS（launchd）与 Linux（systemd）":                                                                   "Autostart only works on macOS (launchd) and Linux (systemd)",
+	"--status 与 --uninstall 只能选一个":                                                                             "Use only one of --status and --uninstall",
+	"-- 之后的额外参数只给 hub（--hub）；守护进程不收":                                                                           "Extra arguments after -- are only for the hub (--hub); the daemon takes none",
+	"--system 只给 hub（--hub）用；守护进程用用户级托管：railse setup autostart":                                                "--system is only for the hub (--hub); the daemon uses the user-level service: railse setup autostart",
+	"--system 只在 Linux 上有效":                                                                                    "--system only works on Linux",
+	"--user 只和 --system 一起用":                                                                                   "--user only goes with --system",
+	"数据目录用 setup autostart 自己的 --dir 指定，不要放在 -- 之后（托管文件里的环境变量、日志与可写目录都按它算）":                      "Set the data directory with setup autostart's own --dir, not after -- (the environment variable, log and writable directory in the service file all follow it)",
+	"路径与参数里不能有换行等控制字符（包括 RAILSE_HOME、RAILSE_HUB_HOME 给的默认值）: %q":                                 "Paths and arguments can't contain newlines or other control characters (this includes the defaults from RAILSE_HOME and RAILSE_HUB_HOME): %q",
+	"macOS 上不要用 sudo 跑：launchd 用户代理装在当前登录用户下，直接 railse setup autostart":                          "Don't run this with sudo on macOS: the launchd user agent is installed for the logged-in user. Just run railse setup autostart",
+	"不要以 root 管用户级托管：守护进程与 hub 都以普通用户运行，请用普通用户跑本命令；hub 要直出 443/80 用 %s --user 名字（只给绑定特权端口的权限）\n": "Don't manage the user-level service as root: the daemon and the hub both run as a normal user, so run this command as a normal user. To serve the hub directly on 443/80, use %s --user NAME (it only grants the right to bind privileged ports)\n",
+	"--system 要写 /etc/systemd/system，需要 root：%s …\n":                                             "--system writes to /etc/systemd/system and needs root: %s ...\n",
+	"警告：%v\n": "Warning: %v\n",
+	"警告：托管文件会指向临时路径 %s，之后它可能就没了（go run 的产物？）；用 --bin 指定装好的 railse\n":                                                                                  "Warning: the service file would point at the temporary path %s, which may disappear later (a go run build?). Use --bin to point at an installed railse\n",
+	"注意：Tailscale Funnel 可能还开着（tailscale funnel status 看），%s 可能仍转到 127.0.0.1:%d；不用就 tailscale funnel --https=443 off（会关掉 443 上的整个 Funnel，有别的配置先核对）\n": "Note: Tailscale Funnel may still be on (check with tailscale funnel status), so %s may still forward to 127.0.0.1:%d. If you don't need it, run tailscale funnel --https=443 off (this turns off all of Funnel on 443, so check any other setup first)\n",
+	`
+!!! 警告：Linux 的用户单元以你的身份运行，没有绑定 1024 以下端口的权限，hub 绑不了 %s，会起不来并被 systemd 反复拉起。
+    照样装了；要直出 443/80 改用系统单元（只多给 CAP_NET_BIND_SERVICE，hub 不以 root 运行），先卸掉这个用户单元：
+      railse setup autostart --hub --uninstall
+      %s -- %s
+    用反向代理时改成 --listen 127.0.0.1:8787（不要 --acme-domain），见 docs/setup.md。
+
+`: `
+Warning: a Linux user unit runs as you and has no permission to bind ports below 1024, so the hub can't bind %s. It will fail to start and systemd will keep restarting it.
+    It was installed anyway. To serve directly on 443/80, use a system unit instead (it only adds CAP_NET_BIND_SERVICE; the hub does not run as root). First remove this user unit:
+      railse setup autostart --hub --uninstall
+      %s -- %s
+    Behind a reverse proxy, use --listen 127.0.0.1:8787 instead (and no --acme-domain); see docs/setup.md.
+
+`,
+	"--system 要指定 hub 的运行用户：--user 名字（默认取 $SUDO_USER，现在没有）": "--system needs the user the hub runs as: --user NAME (default $SUDO_USER, which is not set)",
+	"用户名 %q 不合法": "Invalid user name %q",
+	"用户名 %s 全是数字：systemd 会把 User=%s 当成 uid，请用用户名": "The user name %s is all digits: systemd would read User=%s as a uid. Use the user name",
+	"找不到用户 %s: %v":           "Can't find user %s: %v",
+	"用户 %s 的 uid %q 不是合法的数字": "User %s has an invalid uid %q",
+	"hub 不以 root 运行（用户 %s 的 uid 是 0）：用 --user 指定一个普通用户":           "The hub doesn't run as root (user %s has uid 0). Use --user to name a normal user",
+	"用户 %s 的 gid %q 不是合法的数字":                                      "User %s has an invalid gid %q",
+	"railse 可执行文件 %s 不存在：用 --bin 指定装好的 railse":                    "The railse executable %s doesn't exist. Use --bin to point at an installed railse",
+	"railse 可执行文件 %s 用不了：%v":                                      "The railse executable %s can't be used: %v",
+	"%s 不是可执行文件：用 --bin 指定装好的 railse":                             "%s is not an executable file. Use --bin to point at an installed railse",
+	"会建数据目录 %s（0700）\n":                                           "Would create the data directory %s (0700)\n",
+	"会准备数据目录 %s（已有的须已属于 %s；没有的新建为 0700 并交给 %s）\n":                 "Would prepare the data directory %s (an existing one must already belong to %s; a missing one is created as 0700 and handed to %s)\n",
+	"（--dry-run：以上没有写文件，也没有跑命令）":                                  "(--dry-run: nothing above was written or run)",
+	"登录后由 launchd 启动、退出后自动拉起":                                     "started by launchd at login and restarted if it exits",
+	"开机由 systemd 启动、以 %s 运行、退出后自动拉起":                              "started by systemd at boot, runs as %s, and is restarted if it exits",
+	"由 systemd 用户实例启动、退出后自动拉起":                                    "started by the systemd user instance and restarted if it exits",
+	"已托管 %s：%s；日志：%s；查看状态：%s\n":                                   "Now managing %s: %s; log: %s; check status: %s\n",
+	"提示：要在没人登录时也跑（开机即起、退出登录不停），执行一次 loginctl enable-linger $USER": "Tip: to keep it running when nobody is logged in (start at boot, survive logout), run loginctl enable-linger $USER once",
+	"%s 是符号链接：--dir 要给真实的目录":                                      "%s is a symbolic link. Give --dir a real directory",
+	"%s 已存在但不属于 %s，不替它 chown：换一个以 %s 身份建好的目录（sudo -u %s mkdir -p -m 700 <目录>）用 --dir 指向它，或不给 --dir 用默认的 %s": "%s already exists but doesn't belong to %s, so it won't be chowned. Create a directory as %s (sudo -u %s mkdir -p -m 700 <dir>) and point --dir at it, or leave out --dir to use the default %s",
+	"不替你新建 %s：%v（运行用户可能在 root 建目录与 chown 之间把路径换掉）；先以 %s 身份建好再重跑：sudo -u %s mkdir -p -m 700 %s":              "Not creating %s for you: %v (the run-as user could swap the path between root creating the directory and the chown). Create it as %s first, then rerun: sudo -u %s mkdir -p -m 700 %s",
+	"%s 不是刚建的目录（属主不对），不 chown": "%s is not the directory just created (wrong owner), so it won't be chowned",
+	"%s 不属于 root": "%s isn't owned by root",
+	"%s 别人也能写":    "%s is writable by others",
+	"停止 %s 失败，托管文件 %s 没删：\n%v\n": `Failed to stop %s; the service file %s was not removed:
+%v
+`,
+	"会删除 %s\n": "Would delete %s\n",
+	"（--dry-run：以上没有删文件，也没有跑命令）":     "(--dry-run: no file above was deleted and no command was run)",
+	"已停止并移除 %s 的托管（删除了 %s）；数据目录保留\n": "Stopped and removed the managed %s (deleted %s); the data directory is kept\n",
+	"没有找到 %s：%s 本来就没托管\n":            "Did not find %s: %s was not being managed\n",
+	"launchd 里没有加载 %s":               "%s is not loaded in launchd",
+	"%s 已托管并在跑（%s）\n":                "%s is managed and running (%s)\n",
+	"%s 没有托管（没有 %s）；托管：%s\n":         "%s is not managed (no %s); to manage it: %s\n",
+	"%s 有托管文件 %s，但没在跑（%s）；日志：%s\n":   "%s has a service file %s but is not running (%s); log: %s\n",
+	"开机自启只支持 macOS 与 Linux":          "Autostart only works on macOS and Linux",
+	`用法:
+  railse setup autostart [--hub] [--uninstall] [--status] [--dir 目录] [--bin 路径] [--system] [--user 名字] [--dry-run] [-- hub run 的额外参数]
+    开机自启并在退出后自动拉起。默认托管守护进程（agent run）；--hub 托管 hub（hub run），-- 之后的参数原样追加到 hub run 后面，例如：
+      railse setup autostart --hub -- --public-url https://hub.example.com
+    macOS 写 ~/Library/LaunchAgents/dev.railse.<agent|hub>.plist（launchd 用户代理，日志在数据目录的 launchd.log）；
+    Linux 写 ~/.config/systemd/user/railse-<agent|hub>.service（用户单元，日志：journalctl --user -u railse-<agent|hub>）。
+    hub 要直出 443/80 时在 Linux 上用系统单元（只给绑定特权端口的权限，hub 不以 root 运行）：
+      sudo "$(command -v railse)" setup autostart --hub --system [--user 名字] -- --acme-domain hub.example.com --acme-email me@example.com
+      写 /etc/systemd/system/railse-hub.service，以 --user（默认 $SUDO_USER）运行，数据目录默认 /var/lib/railse-hub。
+    --uninstall 停止并移除托管（数据目录保留）；--status 看是否在跑；--dry-run 只打印要写的文件与要跑的命令。`: `Usage:
+  railse setup autostart [--hub] [--uninstall] [--status] [--dir DIR] [--bin PATH] [--system] [--user NAME] [--dry-run] [-- extra hub run args]
+    Starts at login or boot and restarts after it exits. By default it manages the daemon (agent run); --hub manages the hub (hub run). Arguments after -- are appended to hub run as they are, for example:
+      railse setup autostart --hub -- --public-url https://hub.example.com
+    On macOS this writes ~/Library/LaunchAgents/dev.railse.<agent|hub>.plist (a launchd user agent; the log is launchd.log in the data directory).
+    On Linux it writes ~/.config/systemd/user/railse-<agent|hub>.service (a user unit; logs: journalctl --user -u railse-<agent|hub>).
+    To serve the hub directly on 443/80 on Linux, use a system unit (it only grants the right to bind privileged ports; the hub does not run as root):
+      sudo "$(command -v railse)" setup autostart --hub --system [--user NAME] -- --acme-domain hub.example.com --acme-email me@example.com
+      This writes /etc/systemd/system/railse-hub.service, runs as --user (default $SUDO_USER), and uses /var/lib/railse-hub as the data directory by default.
+    --uninstall stops and removes the managed service (the data directory is kept); --status shows whether it is running; --dry-run only prints the files it would write and the commands it would run.`,
+
+	// cmd/railse/agent.go（含 hub 与 setup 共用的校验报错）
+	"未知的 agent 子命令 %q\n\n%s\n": `Unknown agent command %q
+
+%s
+`,
+	"配置目录，默认 $RAILSE_HOME 或 ~/.railse": "config directory; default $RAILSE_HOME or ~/.railse",
+	"日志同时写到 stderr":                    "also write the log to stderr",
+	"覆盖已有的 machine.json":               "overwrite an existing machine.json",
+	"railse agent %s 不认 %s\n%s\n": `railse agent %s doesn't take %s
+%s
+`,
+	"失败:": "Failed:",
+	"本机已恢复，hub 仍暂停：自动审批仍未生效，需在 hub 上恢复":                              "This machine is resumed, but the hub is still paused: auto-approval is still off. Resume it on the hub",
+	"hub: 未知（守护进程版本较旧？重启它）":                                          "hub: unknown (older daemon version? restart it)",
+	"hub: disabled %s（本机密钥被拒，请 railse agent enroll --force 后重启守护进程）": "hub: disabled %s (this machine's key was rejected; run railse agent enroll --force, then restart the daemon)",
+	"警告: ": "Warning: ",
+	"%s 已存在，本机已接入过；要换 hub 或重新接入请加 --force": "%s already exists, so this machine is already enrolled. To switch hubs or enroll again, add --force",
+	"连接 hub %s 失败: %w": "Can't connect to hub %s: %w",
+	"读 hub %s 的答复: %w": "Can't read the reply from hub %s: %w",
+	"hub 返回重定向（HTTP %d），不跟随：接入码与密钥只发给 --hub 指定的地址，请把 --hub 改成最终地址": "The hub returned a redirect (HTTP %d) and it was not followed: the enroll token and key are only sent to the address given in --hub. Change --hub to the final address",
+	"hub 拒绝接入（HTTP %d）%s":             "The hub refused the enrollment (HTTP %d)%s",
+	"hub 的答复不完整或不合规，没有写 machine.json": "The hub's reply was incomplete or invalid, so machine.json was not written",
+	"写 %s: %w": "Can't write %s: %w",
+	"已接入 hub %s，机器 id %s，名字 %s\n已写入 %s；重启 railse agent run 后生效\n": `Enrolled with hub %s. Machine id %s, name %s
+Wrote %s; restart railse agent run for it to take effect
+`,
+	"注意：首次连上 hub 时本机 rules.yaml 会被 hub 规则覆盖（会自动备份），如有手写规则请先导入。\n  本机规则 %s，备份为同目录的 rules.local-<时间>.yaml；覆盖后其中手写的规则（例如 deny）不再生效\n  导入：POST %s/api/rules/import（整套替换 hub 的规则，见 docs/hub.md）\n": `Note: the first time this machine connects to the hub, its rules.yaml is overwritten by the hub's rules (with an automatic backup). Import any hand-written rules first.
+  Local rules: %s, backed up as rules.local-<time>.yaml in the same directory; hand-written rules in it (deny, for example) stop applying after the overwrite
+  Import: POST %s/api/rules/import (this replaces the hub's whole rule set; see docs/hub.md)
+`,
+	"必须是 http:// 或 https:// 开头、带主机名的地址": "must be an address that starts with http:// or https:// and has a host name",
+	"不能带用户名或密码":                         "can't include a user name or password",
+	"不能带 ? 查询或 # 片段":                    "can't include a ? query or a # fragment",
+	"至多 %d 字节":                          "must be at most %d bytes",
+	"必须是合法 UTF-8，且不能含控制字符或不可见的格式字符":     "must be valid UTF-8 and can't contain control or invisible formatting characters",
+	"名字 %w（用 --name 另取一个）":              "name %w (pick another with --name)",
+	"<接入码>":                             "<enroll token>",
+	"找不到家目录，拒绝启动：家目录为空会让 ~/ 开头的敏感路径规则失效": "Can't find your home directory, so it won't start: with an empty home directory, the sensitive-path rules that start with ~/ would not apply",
+	"收紧日志文件权限: %w": "Can't tighten the log file permissions: %w",
+	"读 machine.json 失败，拒绝启动（修好它、删掉它改回本地模式，或 railse agent enroll --force 重新接入）: %w": "Can't read machine.json, so it won't start (fix it, delete it to go back to local mode, or enroll again with railse agent enroll --force): %w",
+	`用法:
+  railse agent run [--dir 目录] [--foreground]   启动守护进程（前台运行；有 machine.json 时接 hub；开机自启用 railse setup autostart）
+  railse agent status|pause|resume|reload [--dir 目录]
+  railse agent enroll --hub URL --token 接入码 [--name 名字] [--dir 目录] [--force]   接入 hub，写 machine.json`: `Usage:
+  railse agent run [--dir DIR] [--foreground]   start the daemon (runs in the foreground; connects to the hub when machine.json exists; for autostart use railse setup autostart)
+  railse agent status|pause|resume|reload [--dir DIR]
+  railse agent enroll --hub URL --token TOKEN [--name NAME] [--dir DIR] [--force]   enroll with a hub and write machine.json`,
+
+	// cmd/railse/hub.go
+	"警告：hub 正以 root 运行。hub 不需要 root：Linux 上用 %s 装成系统服务（以普通用户运行，只给绑定 443/80 的 CAP_NET_BIND_SERVICE）；macOS 绑定 443/80 不需要特权": "Warning: the hub is running as root. It doesn't need root: on Linux, install it as a system service with %s (it runs as a normal user and is only given CAP_NET_BIND_SERVICE to bind 443/80); macOS needs no privilege to bind 443/80",
+	"可信代理地址为空":                    "the trusted proxy address is empty",
+	"可信代理 %q 不是合法的 CIDR":          "trusted proxy %q is not a valid CIDR",
+	"可信代理 %q 不是合法的 IP 或 CIDR":     "trusted proxy %q is not a valid IP or CIDR",
+	"可信代理 %q 覆盖全部地址，太宽；请写具体的代理地址": "trusted proxy %q covers every address, which is too wide; give a specific proxy address",
+	"未知的 hub 子命令 %q\n\n%s\n": `Unknown hub command %q
+
+%s
+`,
+	"数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub":                                           "data directory; default $RAILSE_HUB_HOME or ~/.railse-hub",
+	"监听地址，默认 127.0.0.1:8787（给了 --acme-domain 时默认 :443）":                                  "listen address; default 127.0.0.1:8787 (:443 when --acme-domain is given)",
+	"cookie 加 Secure（hub 在 TLS 反向代理后面而没设 --public-url 时打开；设了 https 的 --public-url 已自动加）": "add Secure to cookies (turn on when the hub is behind a TLS reverse proxy and --public-url is not set; an https --public-url already adds it)",
+	"接入码有效期": "how long the enroll token is valid",
+	"hub 对外的 https 源，如 https://hub.example.com；不设则停用推送":  "the hub's public https origin, e.g. https://hub.example.com; push is disabled if not set",
+	"换新的 VAPID 密钥并删除全部推送订阅":                              "switch to a new VAPID key and delete all push subscriptions",
+	"hub 自己向 Let's Encrypt 申请证书并直出 TLS 的域名（要 443/80 端口）": "domain the hub gets a Let's Encrypt certificate for and serves TLS on directly (needs ports 443/80)",
+	"给 Let's Encrypt 的联系邮箱（可选）":                          "contact email for Let's Encrypt (optional)",
+	"HTTP-01 挑战与 http→https 跳转的监听地址；none 不监听":            "listen address for the HTTP-01 challenge and the http-to-https redirect; none does not listen",
+	"可信反向代理的地址（CIDR 或单个 IP），可重复或逗号分隔":                    "address of a trusted reverse proxy (CIDR or a single IP); repeat the flag or separate with commas",
+	"railse hub %s 不认 %s\n%s\n": `railse hub %s doesn't take %s
+%s
+`,
+	"--ttl 应在 0 到 %s 之间（不含 0），得到 %s\n":       "--ttl must be between 0 and %s (not including 0), got %s\n",
+	"%s 要和 --acme-domain 一起用\n":              "%s goes with --acme-domain\n",
+	"密码已设置（已登录的网页需要重新登录）":                    "Password set (web sessions that are already logged in have to log in again)",
+	"删除了 %d 条推送订阅：各设备重新登录后，要在网页设置里重新开启通知。\n": "Deleted %d push subscriptions: after logging in again, each device has to turn notifications back on in the web settings.\n",
+	"接入码: %s\n有效期: %s（只能用一次）\n在要接入的机器上、项目目录里运行（接入、装钩子、开机自启、体检一次做完）:\n  railse setup all --hub https://<hub 地址> --token %s\n只接入（钩子与开机自启自己装）:\n  railse agent enroll --hub https://<hub 地址> --token %s\n": `Enroll token: %s
+Valid for: %s (one use only)
+On the machine you want to enroll, run this in the project directory (it enrolls, installs hooks and autostart, and runs the health check):
+  railse setup all --hub https://<hub address> --token %s
+To only enroll (you install hooks and autostart yourself):
+  railse agent enroll --hub https://<hub address> --token %s
+`,
+	"令牌: %s\n来源调用 POST /api/webhook/approvals 时带 Authorization: Bearer <令牌>；hub 只存哈希，丢了就重新生成（旧令牌随之失效）。\n": `Token: %s
+When a source calls POST /api/webhook/approvals, it sends Authorization: Bearer <token>. The hub stores only a hash; if you lose it, create a new one (the old token stops working).
+`,
+	"公钥: %s\n": "Public key: %s\n",
+	"公钥: %s\n已换新密钥，删除了 %d 条推送订阅；所有手机要在网页设置里重新开启通知。在跑的 hub 不用重启，下一次推送起用新密钥。\n": `Public key: %s
+Switched to a new key and deleted %d push subscriptions. Every phone has to turn notifications on again in the web settings. A running hub needs no restart; it uses the new key from the next push.
+`,
+	"输入新密码后回车（屏幕会回显；要避免回显可用 read -s 读进变量再通过管道传入）: ": "Type the new password and press Enter (the screen will show it; to avoid that, read it with read -s into a variable and pipe it in): ",
+	"没有读到密码":     "No password was read",
+	"读密码: %w":    "Can't read the password: %w",
+	"密码至多 %d 字节": "The password can be at most %d bytes",
+	`用法:
+  railse hub run [--dir 目录] [--listen 地址] [--secure-cookies] [--trusted-proxy 地址] [--public-url https://hub.example.com] [--foreground]
+                                              启动 hub（前台运行）
+  railse hub run --acme-domain hub.example.com [--acme-email me@example.com] [--acme-http :80] [其余标志同上]
+                                              直出 TLS（Let's Encrypt 自动签发与续期），--listen 默认 :443
+  railse hub password [--dir 目录]            从标准输入读一行设为网页登录密码（至少 8 个字符）
+  railse hub token [--dir 目录] [--ttl 10m]   生成一次性接入码，给 railse setup all（或 railse agent enroll）用
+  railse hub webhook-token [--dir 目录]       生成 webhook 来源令牌（明文只显示这一次）
+  railse hub vapid [--dir 目录] [--rotate]    打印推送公钥；--rotate 换新密钥并删除全部推送订阅（所有手机要重新开启通知）
+  目录默认 $RAILSE_HUB_HOME，否则 ~/.railse-hub
+  --public-url 是 hub 对外的 https 源（不带路径），设了才启用手机推送（Web Push）；域名定下后不要再换
+  --trusted-proxy 可重复或逗号分隔（CIDR 或单个 IP）：只有来自这些地址的连接才看 X-Forwarded-For。
+  反向代理须追加 X-Forwarded-For（nginx: proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for）
+  并传原 Host（proxy_set_header Host $host）
+  --acme-domain：域名先解析到这台机器，443 与 80 对公网开放；对外源默认 https://<域名>（--public-url 的主机名须与它一致），
+    cookie 一律 Secure；账户与证书私钥明文存在数据目录的 acme/（0700）。--acme-http 是 HTTP-01 挑战与 http→https 跳转的
+    监听地址，none 不监听（只靠 443 上的 TLS-ALPN-01 签发）。Linux 上监听 443/80 需要 CAP_NET_BIND_SERVICE
+    （sudo "$(command -v railse)" setup autostart --hub --system 会加）；macOS 不需要特权。hub 不要以 root 运行`: `Usage:
+  railse hub run [--dir DIR] [--listen ADDR] [--secure-cookies] [--trusted-proxy ADDR] [--public-url https://hub.example.com] [--foreground]
+                                              start the hub (runs in the foreground)
+  railse hub run --acme-domain hub.example.com [--acme-email me@example.com] [--acme-http :80] [other flags as above]
+                                              serve TLS directly (Let's Encrypt issues and renews the certificate); --listen defaults to :443
+  railse hub password [--dir DIR]             read one line from stdin and set it as the web login password (at least 8 characters)
+  railse hub token [--dir DIR] [--ttl 10m]    create a one-time enroll token, for railse setup all (or railse agent enroll)
+  railse hub webhook-token [--dir DIR]        create a webhook source token (the plain text is shown only once)
+  railse hub vapid [--dir DIR] [--rotate]     print the push public key; --rotate switches to a new key and deletes all push subscriptions (every phone has to turn notifications on again)
+  DIR defaults to $RAILSE_HUB_HOME, otherwise ~/.railse-hub
+  --public-url is the hub's public https origin (no path). Phone push (Web Push) is only enabled when it is set; don't change the domain once it is chosen
+  --trusted-proxy can be repeated or comma-separated (CIDR or a single IP): only connections from these addresses are trusted for X-Forwarded-For.
+  The reverse proxy must append X-Forwarded-For (nginx: proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for)
+  and pass the original Host (proxy_set_header Host $host)
+  --acme-domain: point the domain at this machine first and open 443 and 80 to the internet; the public origin defaults to https://<domain> (the host name of --public-url must match it),
+    cookies are always Secure; the account and certificate private key are stored in plain text in acme/ in the data directory (0700). --acme-http is the
+    listen address for the HTTP-01 challenge and the http-to-https redirect; none does not listen (issuance then relies on TLS-ALPN-01 on 443 only). On Linux, listening on 443/80 needs CAP_NET_BIND_SERVICE
+    (sudo "$(command -v railse)" setup autostart --hub --system adds it); macOS needs no privilege. Don't run the hub as root`,
+
+	// cmd/railse/policy.go
+	"未知的 policy 子命令 %q\n\n%s\n": `Unknown policy command %q
+
+%s
+`,
+	"规则 YAML 文件，不给则用内置规则包": "rules YAML file; the built-in rule pack if omitted",
+	"命令的工作目录":              "working directory of the command",
+	"项目根目录，不给则用 cwd":       "project root; cwd if omitted",
+	"载荷类型":                 "payload type",
+	"mcp 的参数应为 服务/工具，得到 %q\n\n%s\n": `The mcp argument should be server/tool, got %q
+
+%s
+`,
+	"未知类型 %q\n\n%s\n": `Unknown type %q
+
+%s
+`,
+	"用法: railse policy check <规则文件>": "Usage: railse policy check <rules file>",
+	"无效:":         "Invalid:",
+	"有效，%d 条规则\n": "Valid. Rules: %d\n",
+	`用法:
+  railse policy eval [--rules 文件] [--cwd 目录] [--project 目录] [--type shell|file_write|mcp|network] <命令|路径|服务/工具|URL>
+  railse policy check <规则文件>`: `Usage:
+  railse policy eval [--rules FILE] [--cwd DIR] [--project DIR] [--type shell|file_write|mcp|network] <command|path|server/tool|URL>
+  railse policy check <rules file>`,
+
+	// cmd/railse/localhub.go（与 internal/hub/auth.go 的 SetPassword 同步）
+	"密码至少 8 个字符": "The password must be at least 8 characters",
 }

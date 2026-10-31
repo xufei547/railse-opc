@@ -16,6 +16,7 @@ import (
 
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hub"
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -732,6 +733,74 @@ func TestAgentRunWithoutHubClearsStaleHubPause(t *testing.T) {
 		}
 		if err := stop(); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// 英文下 agent status 的输出、hub 行与各条用法/报错里没有中文。
+func TestAgentStatusEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	dir, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(dir)
+	cfgDir := filepath.Join(dir, "h")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runAgentServe(ctx, agent.ConfigIn(cfgDir), false, os.Stderr) }()
+	sock := filepath.Join(cfgDir, "agent.sock")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("socket 未出现")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"agent", "status", "--dir", cfgDir}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "\nhub: none\n") || hasCJK(out.String()+errOut.String()) {
+		t.Fatalf("英文 status 要有 hub 行且无中文: %d %q %q", code, out.String(), errOut.String())
+	}
+	cancel()
+	<-done
+
+	for _, st := range []proto.Status{{Hub: ""}, {Hub: "disabled", HubURL: "https://h.example.com"}, {Hub: "connected", HubURL: "https://h.example.com"}} {
+		if got := hubLine(&st); hasCJK(got) || !strings.HasPrefix(got, "hub: ") {
+			t.Errorf("英文 hub 行: %q", got)
+		}
+	}
+	if got := hubLine(&proto.Status{Hub: "disabled", HubURL: "https://h"}); !strings.Contains(got, "enroll --force") {
+		t.Errorf("disabled 要说怎么恢复: %q", got)
+	}
+
+	// 用法与报错
+	for _, args := range [][]string{{"agent"}, {"agent", "bogus"}, {"agent", "enroll"}, {"agent", "status", "--hub", "x"}, {"agent", "run", "extra"}, {"agent", "enroll", "--hub", "ftp://x", "--token", "t", "--dir", filepath.Join(dir, "e")}} {
+		out.Reset()
+		errOut.Reset()
+		run(args, &out, &errOut)
+		if got := out.String() + errOut.String(); got == "" || hasCJK(got) {
+			t.Errorf("%v 英文输出要非空且无中文: %q", args, got)
+		}
+	}
+	if code := run([]string{"agent", "status", "--dir", filepath.Join(dir, "none")}, &out, &errOut); code != 1 || hasCJK(errOut.String()) {
+		t.Errorf("没有守护进程时的英文报错: %d %q", code, errOut.String())
+	}
+}
+
+// 校验类报错在英文下是能拼进向导前缀的小写片段。
+func TestHubAddrAndNameErrorsEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	for _, raw := range []string{"ftp://x", "https://u:p@h.example.com", "https://h.example.com/?q=1"} {
+		if _, _, err := parseHubAddr(raw); err == nil || hasCJK(err.Error()) {
+			t.Errorf("parseHubAddr(%q) 英文报错: %v", raw, err)
+		}
+	}
+	long := strings.Repeat("a", hub.MaxNameLen+1)
+	for _, err := range []error{checkDisplayName(long), checkDisplayName("a\x00b"), checkNameFlag(long)} {
+		if err == nil || hasCJK(err.Error()) {
+			t.Errorf("名字校验英文报错: %v", err)
 		}
 	}
 }

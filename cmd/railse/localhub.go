@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xufei547/railse-opc/internal/hooksconf"
 	"github.com/xufei547/railse-opc/internal/hub"
@@ -146,8 +147,16 @@ func waitHub(port int, wait time.Duration) (string, bool) {
 	}
 }
 
+// minPasswordRunes 是网页密码的最少字符数，与 internal/hub/auth.go 的 SetPassword 同步。
+const minPasswordRunes = 8
+
 // setHubPassword 把 pw 设为网页密码（railse hub password 与 setup 共用；长度等规则由 SetPassword 查），返回变更（删了多少订阅）。
 func setHubPassword(cfg hub.Config, st *store.Store, pw string) (store.PasswordChange, error) {
+	// 密码至少 8 个字符（按 rune 计）：规则与 internal/hub/auth.go 的 SetPassword 同步。hub 包里的报错只有中文，
+	// 所以先在这里按同样的规则查一遍，英文界面才不会看到中文；中文句子与 hub 的原句逐字相同。
+	if utf8.RuneCountInString(pw) < minPasswordRunes {
+		return store.PasswordChange{}, errors.New(i18n.T("密码至少 8 个字符"))
+	}
 	srv, err := hub.New(cfg, st, log.New(io.Discard, "", 0))
 	if err != nil {
 		return store.PasswordChange{}, err
