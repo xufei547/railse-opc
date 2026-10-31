@@ -4,7 +4,18 @@
 
 [中文](README.md)
 
-An approval tool for one person running several AI coding agents at once. Claude Code, Codex CLI and Gemini CLI stop and ask "allow this?" every time they want to run a command or edit a file. Railse takes over that step: what the rules can decide is approved or denied on the spot, what they can't goes to your phone, you tap once, and the agent carries on. The same goes for Claude Code's multiple-choice questions ("use approach A or B?"): the question goes to your phone, you pick an option or type a line, and it continues right away.
+A self-hosted approval inbox for people running Claude Code, Codex CLI and Gemini CLI at once. Rules auto-allow the boring stuff; everything else goes to your phone.
+
+- **Rules first.** Seven risk levels. Reads and in-project edits are allowed automatically, network asks, and pushes or destructive commands can never be auto-allowed, whatever you "remember".
+- **Three CLIs, one inbox.** Approvals, Claude Code's multiple-choice questions, "waiting for you" and "finished" from every agent on every machine, in one place.
+- **One machine is enough.** `railse setup all --local-hub` runs the hub on your laptop and exposes it with Tailscale Funnel. No cloud account, no relay through anyone else's servers.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | sh
+railse setup all --local-hub
+```
+
+The CLIs stop and ask "allow this?" every time they want to run a command or edit a file. Railse takes over that step: what the rules can decide is approved or denied on the spot, what they can't goes to your phone, you tap once, and the agent carries on. The same goes for Claude Code's multiple-choice questions ("use approach A or B?"): you pick an option or type a line on the phone, and it continues right away.
 
 OPC stands for "one-person company".
 
@@ -46,6 +57,20 @@ Besides approvals and these questions, the inbox also shows when an agent stops 
 <p align="center"><img src="assets/demo.gif" width="390" alt="Demo: log in to the phone web app; Claude Code wants to run curl, no rule decides it, and the request shows up in the inbox; approve it with remember turned on; the rules page now has a learned rule"></p>
 
 The demo shows the phone web app, whose UI is in Chinese. Claude Code wants to run `curl`, no rule decides it, so it goes to the phone. Approving it with 记住 (remember) turned on adds a learned rule.
+
+## Why not Claude Code's Remote Control?
+
+Remote Control is great if Claude Code is the only agent you run and you don't mind the relay. Railse is for the rest of us.
+
+| | Claude Code Remote Control | Railse |
+|---|---|---|
+| CLIs covered | Claude Code | Claude Code, Codex CLI, Gemini CLI |
+| Where it runs | Relays through Anthropic's servers; the transcript is stored there; execution stays on your machine | Your own hub: a laptop with Tailscale Funnel, a VPS, or Fly |
+| Rules | Claude Code's own allow/deny lists; nothing risk-based, nothing you can teach from the phone | Seven risk levels, auto-allow for low risk, "remember" from the phone, and a hard floor: destructive and outward actions are never auto-allowed |
+| Questions on the phone | Yes | Yes for Claude Code's `AskUserQuestion`; Codex and Gemini questions are shown, not answered |
+| Account needed | Pro, Max, Ultra, Team or Enterprise plan; API keys not supported | None beyond your own hub password |
+
+Codex has its own phone approvals through the ChatGPT desktop and mobile apps; the standalone Codex CLI has none, and nothing official that I know of covers Gemini CLI. Railse hooks into all three at the CLI level, with one set of rules.
 
 ## How it works
 
