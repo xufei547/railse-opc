@@ -488,7 +488,7 @@ func TestPushBrokenSubscriptionRemoved(t *testing.T) {
 	body, _ := subscribeJSON(t, f.srv.URL+"/p/good")
 	subscribe(t, h, ck, body)
 	// 库里的 keys 是可解析的 JSON，但不是合法的 P-256 点
-	if _, err := h.st.UpsertPushSubscription(f.srv.URL+"/p/bad", "AAAA", "AAAA", ""); err != nil {
+	if _, err := h.st.UpsertPushSubscription(f.srv.URL+"/p/bad", "AAAA", "AAAA", "", "zh"); err != nil {
 		t.Fatal(err)
 	}
 	h.srv.announceNew(store.Request{ID: "b1", Kind: "webhook", Title: "x", CreatedAt: store.Now()})
@@ -1301,5 +1301,64 @@ func TestAskProjectInViewAndPushTitle(t *testing.T) {
 	}
 	if m := decodePush(t)(h.srv.push.message(r)); m.Title != "Claude Code 在问你 · blog" {
 		t.Fatalf("推送标题 = %q", m.Title)
+	}
+}
+
+func TestNormalizeLang(t *testing.T) {
+	for in, want := range map[string]string{"": "zh", "zh": "zh", "zh-CN": "zh", "ZH-tw": "zh", "en": "en", "en-US": "en", "fr": "en", " en ": "en"} {
+		if got := normalizeLang(in); got != want {
+			t.Errorf("normalizeLang(%q) = %q，想要 %q", in, got, want)
+		}
+	}
+}
+
+func TestTestPushMessageByLang(t *testing.T) {
+	decode := decodePush(t)
+	zh := decode(testPushMessage("zh"), nil)
+	en := decode(testPushMessage("en"), nil)
+	if zh.Body != "通知正常" || en.Body != "Notifications are working" || zh.Title != "Railse" || en.Title != "Railse" {
+		t.Fatalf("zh=%+v en=%+v", zh, en)
+	}
+}
+
+// 订阅接口的 lang 入库前收成 zh / en（缺省与 zh* 为 zh），测试推送按订阅语言发出。
+func TestPushSubscribeLang(t *testing.T) {
+	f := newFakePushEndpoint(t)
+	h, ck := pushHub(t, f)
+	for i, c := range []struct {
+		name string
+		lang any // nil 表示不带 lang 字段
+		want string
+	}{{"en", "en", "en"}, {"缺省", nil, "zh"}, {"zh-CN", "zh-CN", "zh"}} {
+		ep := f.srv.URL + "/p/lang" + string(rune('a'+i))
+		body, _ := subscribeJSON(t, ep)
+		var m map[string]any
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatal(err)
+		}
+		if c.lang != nil {
+			m["lang"] = c.lang
+		}
+		subscribe(t, h, ck, mustJSON(t, m))
+		sub, err := h.st.GetPushSubscription(ep)
+		if err != nil || sub.Lang != c.want {
+			t.Fatalf("%s: Lang=%q err=%v，应为 %q", c.name, sub.Lang, err, c.want)
+		}
+		if c.want == "en" { // 英文订阅的测试推送：端点收到一条，正文是英文
+			chk := mustJSON(t, map[string]string{"endpoint": ep})
+			if resp := doReq(t, "POST", h.http.URL+"/api/push/test", chk, "application/json", ck); resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("test push: %d", resp.StatusCode)
+			}
+			if f.count() != 1 {
+				t.Fatalf("端点收到 %d 次", f.count())
+			}
+		}
+	}
+	// 端点收到的是加密载荷，正文只能在组装处验：按订阅语言选文案
+	if m := decodePush(t)(testPushMessage("en"), nil); m.Body != "Notifications are working" {
+		t.Fatalf("en 正文: %q", m.Body)
+	}
+	if m := decodePush(t)(testPushMessage("zh"), nil); m.Body != "通知正常" {
+		t.Fatalf("zh 正文: %q", m.Body)
 	}
 }

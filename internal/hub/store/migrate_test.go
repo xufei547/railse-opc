@@ -126,7 +126,7 @@ func TestMigrateFailureRollsBack(t *testing.T) {
 func TestFreshDBIsLatest(t *testing.T) {
 	s := openTemp(t)
 	var v int
-	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != 3 || SchemaVersion != 3 {
+	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != 4 || SchemaVersion != 4 {
 		t.Fatalf("新库版本 = %d, %v（程序 %d）", v, err, SchemaVersion)
 	}
 	for _, c := range []struct{ table, col string }{{"push_subscriptions", "failures"}, {"requests", "ask"}, {"requests", "answers"}} {
@@ -298,7 +298,7 @@ func TestMigrateV2ToV3KeepsData(t *testing.T) {
 	}
 	defer s.Close()
 	var v int
-	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != 3 {
+	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != SchemaVersion {
 		t.Fatalf("版本 = %d, %v", v, err)
 	}
 	after, _ := dumpTables(t, s.db, cols)
@@ -346,5 +346,24 @@ func TestMigratedRequestsSchemaMatchesFresh(t *testing.T) {
 		if !slices.ContainsFunc(a, func(s string) bool { return strings.Contains(s, col) }) {
 			t.Fatalf("应有列%s:\n%s", col, strings.Join(a, "\n"))
 		}
+	}
+}
+
+// 旧库（v2 固定快照）里已有的订阅升到最新后 lang 是 zh：作者手机那条不受影响。
+func TestMigrateKeepsOldSubscriptionsChinese(t *testing.T) {
+	path := filepath.Join(tempDir(t), "hub.db")
+	writeRaw(t, path, schemaV2(t)+"INSERT INTO schema_version(v) VALUES(2);\n"+
+		`INSERT INTO push_subscriptions(id, endpoint, keys, user_agent, created_at) VALUES('s1','https://p.example/1','{"p256dh":"a","auth":"b"}','ua','2026-01-01T00:00:00Z');`)
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	sub, err := st.GetPushSubscription("https://p.example/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub.Lang != "zh" {
+		t.Fatalf("旧订阅升级后 lang = %q，想要 zh", sub.Lang)
 	}
 }

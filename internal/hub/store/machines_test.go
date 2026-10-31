@@ -375,7 +375,7 @@ func TestSetPasswordHashRemovesPushSubscriptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, ep := range []string{"https://web.push.apple.com/secret-path-1", "https://fcm.googleapis.com/fcm/send/secret-path-2"} {
-		if _, err := s.UpsertPushSubscription(ep, "p256dh-secret", "auth-secret", "ua"); err != nil {
+		if _, err := s.UpsertPushSubscription(ep, "p256dh-secret", "auth-secret", "ua", "zh"); err != nil {
 			t.Fatal(err)
 		}
 	}

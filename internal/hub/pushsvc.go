@@ -451,6 +451,15 @@ func redactURL(err error) error {
 	return &redactedErr{msg: msg, err: err}
 }
 
+// normalizeLang 把订阅时网页或 Service Worker 给的语言标签收成 zh / en：空（旧网页、旧 SW）与 zh* 为 zh，其余 en。
+func normalizeLang(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" || strings.HasPrefix(s, "zh") {
+		return "zh"
+	}
+	return "en"
+}
+
 // pushPayload 是推送的明文：网页的 service worker 拿它 showNotification，点开去 url。
 type pushPayload struct {
 	ID    string `json:"id"`

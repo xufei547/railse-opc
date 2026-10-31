@@ -10,7 +10,7 @@ import (
 
 func TestPushSubscriptionLifecycle(t *testing.T) {
 	s := openTemp(t)
-	sub, err := s.UpsertPushSubscription("https://web.push.apple.com/abc", "p1", "a1", "Mozilla/5.0 iPhone")
+	sub, err := s.UpsertPushSubscription("https://web.push.apple.com/abc", "p1", "a1", "Mozilla/5.0 iPhone", "zh")
 	if err != nil || sub.ID == "" || sub.Endpoint != "https://web.push.apple.com/abc" || sub.Failures != 0 {
 		t.Fatalf("upsert: %+v %v", sub, err)
 	}
@@ -21,7 +21,7 @@ func TestPushSubscriptionLifecycle(t *testing.T) {
 		t.Fatalf("failures = %d removed=%v", n, removed)
 	}
 	// 同一端点重新订阅：换 keys、failures 归零、id 不变
-	again, err := s.UpsertPushSubscription(sub.Endpoint, "p2", "a2", "ua2")
+	again, err := s.UpsertPushSubscription(sub.Endpoint, "p2", "a2", "ua2", "zh")
 	if err != nil || again.ID != sub.ID || again.P256dh != "p2" || again.Auth != "a2" || again.Failures != 0 || again.UserAgent != "ua2" {
 		t.Fatalf("重新订阅: %+v %v", again, err)
 	}
@@ -33,7 +33,7 @@ func TestPushSubscriptionLifecycle(t *testing.T) {
 	if err != nil || got.Failures != 0 || got.LastOkAt == nil {
 		t.Fatalf("MarkPushOK 后: %+v %v", got, err)
 	}
-	s.UpsertPushSubscription("https://fcm.example/2", "p", "a", "")
+	s.UpsertPushSubscription("https://fcm.example/2", "p", "a", "", "zh")
 	if n, _ := s.CountPushSubscriptions(); n != 2 {
 		t.Fatalf("count = %d", n)
 	}
@@ -53,10 +53,10 @@ func TestPushSubscriptionLifecycle(t *testing.T) {
 	if n, removed, err := s.MarkPushFailure(sub.Endpoint, time.Now(), testRule); err != nil || n != 0 || removed {
 		t.Fatalf("不存在的端点 MarkPushFailure = %d, %v, %v", n, removed, err)
 	}
-	if _, err := s.UpsertPushSubscription("", "p", "a", ""); err == nil {
+	if _, err := s.UpsertPushSubscription("", "p", "a", "", "zh"); err == nil {
 		t.Fatal("空端点应报错")
 	}
-	if _, err := s.UpsertPushSubscription("https://x", "", "a", ""); err == nil {
+	if _, err := s.UpsertPushSubscription("https://x", "", "a", "", "zh"); err == nil {
 		t.Fatal("空 keys 应报错")
 	}
 }
@@ -64,7 +64,7 @@ func TestPushSubscriptionLifecycle(t *testing.T) {
 // Upsert 是一条语句：返回的就是写进去的那一行；重新订阅保留 id、created_at 与 last_ok_at，换 keys、UA，failures 归零。
 func TestUpsertPushSubscriptionReturnsRow(t *testing.T) {
 	s := openTemp(t)
-	first, err := s.UpsertPushSubscription("https://push.example/a", "p1", "a1", "ua1")
+	first, err := s.UpsertPushSubscription("https://push.example/a", "p1", "a1", "ua1", "zh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestUpsertPushSubscriptionReturnsRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.MarkPushFailure(first.Endpoint, time.Now(), testRule)
-	again, err := s.UpsertPushSubscription(first.Endpoint, "p2", "a2", "ua2")
+	again, err := s.UpsertPushSubscription(first.Endpoint, "p2", "a2", "ua2", "zh")
 	if err != nil || again.ID != first.ID || again.CreatedAt != first.CreatedAt || again.LastOkAt == nil ||
 		again.P256dh != "p2" || again.Auth != "a2" || again.UserAgent != "ua2" || again.Failures != 0 || again.Broken {
 		t.Fatalf("重新订阅: %+v %v", again, err)
@@ -95,7 +95,7 @@ var testRule = PushFailureRule{Count: 5, Span: 24 * time.Hour}
 func TestMarkPushFailureNeedsCountAndSpan(t *testing.T) {
 	s := openTemp(t)
 	t0 := time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)
-	sub, _ := s.UpsertPushSubscription("https://push.example/a", "p", "a", "")
+	sub, _ := s.UpsertPushSubscription("https://push.example/a", "p", "a", "", "zh")
 	first := func() string {
 		t.Helper()
 		got, err := s.GetPushSubscription(sub.Endpoint)
@@ -130,7 +130,7 @@ func TestMarkPushFailureNeedsCountAndSpan(t *testing.T) {
 	}
 
 	// 正好第 5 次时跨度满 24 小时：删
-	sub, _ = s.UpsertPushSubscription("https://push.example/b", "p", "a", "")
+	sub, _ = s.UpsertPushSubscription("https://push.example/b", "p", "a", "", "zh")
 	for i, at := range []time.Duration{0, time.Hour, 2 * time.Hour, 3 * time.Hour} {
 		if _, removed, _ := s.MarkPushFailure(sub.Endpoint, t0.Add(at), testRule); removed {
 			t.Fatalf("第 %d 次不应删", i+1)
@@ -141,7 +141,7 @@ func TestMarkPushFailureNeedsCountAndSpan(t *testing.T) {
 	}
 
 	// 跨度够但次数不足 5：不删
-	sub, _ = s.UpsertPushSubscription("https://push.example/c", "p", "a", "")
+	sub, _ = s.UpsertPushSubscription("https://push.example/c", "p", "a", "", "zh")
 	for i := 0; i < 4; i++ {
 		if _, removed, _ := s.MarkPushFailure(sub.Endpoint, t0.Add(time.Duration(i)*16*time.Hour), testRule); removed {
 			t.Fatal("不足 5 次不应删")
@@ -166,7 +166,7 @@ func TestMarkPushFailureNeedsCountAndSpan(t *testing.T) {
 	}
 
 	// 重新订阅同样归零：之前数到的次数与时刻不会把刚登记的订阅删掉
-	if _, err := s.UpsertPushSubscription(sub.Endpoint, "p2", "a2", ""); err != nil {
+	if _, err := s.UpsertPushSubscription(sub.Endpoint, "p2", "a2", "", "zh"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := s.GetPushSubscription(sub.Endpoint); got.Failures != 0 || got.FirstFailedAt != nil {
@@ -177,7 +177,7 @@ func TestMarkPushFailureNeedsCountAndSpan(t *testing.T) {
 	}
 
 	// Count ≤ 0：只计数不删
-	sub, _ = s.UpsertPushSubscription("https://push.example/d", "p", "a", "")
+	sub, _ = s.UpsertPushSubscription("https://push.example/d", "p", "a", "", "zh")
 	for i := 0; i < 7; i++ {
 		if _, removed, _ := s.MarkPushFailure(sub.Endpoint, t0.Add(time.Duration(i)*24*time.Hour), PushFailureRule{}); removed {
 			t.Fatal("Count 0 不应删")
@@ -188,11 +188,11 @@ func TestMarkPushFailureNeedsCountAndSpan(t *testing.T) {
 // keys 列坏掉的一行不让列表整体失败：照样列出，Broken 为 true、密钥为空，其他行正常；Get 同样不报错。
 func TestListPushSubscriptionsToleratesBrokenKeys(t *testing.T) {
 	s := openTemp(t)
-	s.UpsertPushSubscription("https://push.example/good1", "p1", "a1", "")
+	s.UpsertPushSubscription("https://push.example/good1", "p1", "a1", "", "zh")
 	if _, err := s.db.Exec(`INSERT INTO push_subscriptions(id, endpoint, keys, created_at) VALUES('bad', 'https://push.example/bad', 'not json', ?)`, Now()); err != nil {
 		t.Fatal(err)
 	}
-	s.UpsertPushSubscription("https://push.example/good2", "p2", "a2", "")
+	s.UpsertPushSubscription("https://push.example/good2", "p2", "a2", "", "zh")
 	list, err := s.ListPushSubscriptions()
 	if err != nil || len(list) != 3 {
 		t.Fatalf("list: %d %v", len(list), err)
@@ -215,8 +215,8 @@ func TestListPushSubscriptionsToleratesBrokenKeys(t *testing.T) {
 func TestReplacePushKey(t *testing.T) {
 	s := openTemp(t)
 	s.SetSetting("vapid_private", "old")
-	s.UpsertPushSubscription("https://push.example/a", "p", "a", "")
-	s.UpsertPushSubscription("https://push.example/b", "p", "a", "")
+	s.UpsertPushSubscription("https://push.example/a", "p", "a", "", "zh")
+	s.UpsertPushSubscription("https://push.example/b", "p", "a", "", "zh")
 	n, err := s.ReplacePushKey("vapid_private", "new")
 	if err != nil || n != 2 {
 		t.Fatalf("ReplacePushKey = %d, %v", n, err)
@@ -278,5 +278,17 @@ func TestSetSettingIfAbsent(t *testing.T) {
 		if v, ok, _ := st.GetSetting("k"); !ok || v != winner {
 			t.Fatalf("读回 %q，应为 %q", v, winner)
 		}
+	}
+}
+
+func TestUpsertPushSubscriptionLang(t *testing.T) {
+	st := openTemp(t)
+	s1, err := st.UpsertPushSubscription("https://p.example/1", "p", "a", "ua", "en")
+	if err != nil || s1.Lang != "en" {
+		t.Fatalf("lang = %q, %v", s1.Lang, err)
+	}
+	s2, err := st.UpsertPushSubscription("https://p.example/1", "p", "a", "ua", "zh")
+	if err != nil || s2.Lang != "zh" || s2.ID != s1.ID {
+		t.Fatalf("同一 endpoint 重登记要改 lang 且不换 id：%+v, %v", s2, err)
 	}
 }
