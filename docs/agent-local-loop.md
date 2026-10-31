@@ -119,7 +119,7 @@ Claude Code 用 `AskUserQuestion` 问你选哪个方案时，`PreToolUse` 钩子
 - **不过引擎，不看暂停。** 题目不是命令，没有风险档，不匹配规则；`railse agent pause` 与 hub 的暂停开关都不影响它，也不能“记住”。
 - **题目在本机先脱敏。** 题面、标题、选项文字过一遍 `redact.Text` 再上报、写审计；答案是你自己打的字，原样交给 Claude Code，审计里再脱敏。
 - **没有 hub 就不进手机。** 没接 hub 时直接交回终端，审计 `passthrough`、`decided_by: no_hub`。
-- **任何一环不通，终端照常问。** hub 连不上超过 30 秒或等满期限（审计 `expired`，`hub_unreachable` 或 `timeout`）、手机上选了“让它在终端问我”（`passthrough`，`decided_by: user`）、脱敏后有题面相同的题，或决定来源给的答案不合规（`passthrough`，`decided_by: error`）、钩子在决定前退出（`cancelled`，`terminal`），钩子都不输出，Claude Code 在终端里问，agent 不会因此卡住。题目本身不合规（钩子解析就不过，或守护进程校验不过）时不写审计：前者钩子往 stderr 写一句、根本不发给守护进程，后者守护进程只记日志并回 `passthrough`，终端照常问。
+- **任何一环不通，终端照常问。** hub 连不上超过 30 秒或等满期限（审计 `expired`，`hub_unreachable` 或 `timeout`）、hub 太旧不认识提问（0.1.4 及更早，welcome 没声明；不送、立即交回，审计 `expired`、`hub_unreachable`）、手机上选了“让它在终端问我”（`passthrough`，`decided_by: user`）、脱敏后有题面相同的题或超出上限（脱敏会让短值变长），或决定来源给的答案不合规（`passthrough`，`decided_by: error`）、钩子在决定前退出（`cancelled`，`terminal`），钩子都不输出，Claude Code 在终端里问，agent 不会因此卡住。题目本身不合规（钩子解析就不过，或守护进程校验不过）时不写审计：前者钩子往 stderr 写一句、根本不发给守护进程，后者守护进程只记日志并回 `passthrough`，终端照常问。
 - **`PermissionRequest` 对 `AskUserQuestion` 一律交回终端**：Claude Code 的文档明示这条路上回 allow 无效，答案只能走 `PreToolUse`。
 - 手机上答了的，本机审计是 `kind: ask`、`action: answer`、`state: answered`、`decided_by: user`。同一会话有选择题在等时，同会话的 `question` 提醒会被压成 `suppressed`。Codex、Gemini 没有这个口子，问题照旧只提醒。
 

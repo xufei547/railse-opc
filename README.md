@@ -95,7 +95,7 @@ railse setup all --local-hub
 
 ## 数据怎么走
 
-- **守护进程只向外连 hub。** hub 对审批只能答批准或拒绝，对 Claude Code 的选择题只能给出答案（填进选项的文字，不是命令）或交回终端，没有向机器下命令的通道。
+- **守护进程只向外连 hub。** hub 对审批只能答批准或拒绝，对 Claude Code 的选择题只能给出答案（填进选项的文字，不是命令）或交回终端，没有向机器下命令的通道。不过自己填的答案是自由文本，Claude 会把它当作你的回答照着做，所以能登进 hub 网页的人可以借答题引导 agent：这与「hub 密码等于全部审批权」是同一个信任边界。
 - **载荷在本机先脱敏。** 命令里规则认得出的令牌、密码在本机就换成 `<redacted>` 再上报；认不出的会原样进 hub 和手机，见 [SECURITY.md](SECURITY.md)。
 - **hub 只存哈希。** 机器密钥和登录会话在 hub 里只存哈希；推送签名密钥、webhook 回调令牌这几样不得不明文的例外，在 SECURITY.md 里列了。
 - **hub 自己部署。** 手机网页由 hub 托管，一个密码登录，数据在你自己的服务器上。
@@ -118,7 +118,7 @@ railse setup all --local-hub
 - v0.1.2，第一版，作者自用中。
 - Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。
 - 手机上只能答 Claude Code 的选择题（`AskUserQuestion`）。Codex、Gemini 的提问，以及 agent 停下来等你说下一句话的，仍只提醒，要回终端。
-- 从 0.1.5 之前升级的：已经装过钩子的机器要重跑一次 `railse setup hooks --claude`，补上选择题用的 `PreToolUse` 钩子（`railse doctor` 的 `hooks.claude` 会提示）；hub 要先于或与守护进程同时升级，本机 hub 不受影响。
+- 从 0.1.5 之前升级的：已经装过钩子的机器要重跑一次 `railse setup hooks --claude`，补上选择题用的 `PreToolUse` 钩子（`railse doctor` 的 `hooks.claude` 会提示）；hub 要先于或与守护进程同时升级，hub 还是旧版时选择题直接交回终端。本机 hub 与守护进程是分别托管的两个进程，重跑 `railse setup` 不会重启已在跑的本机 hub，升级后要自己重启它（macOS `launchctl kickstart -k gui/$(id -u)/dev.railse.hub`，Linux `systemctl --user restart railse-hub`），见 [docs/setup.md](docs/setup.md) 的「升级」。
 - Codex 的钩子只在交互会话里生效，`codex exec` 不触发；第一次使用前在 Codex 里跑 `/hooks` 审核一遍。
 - hub 单机单库（SQLite），不能多实例部署。
 - 项目在 `/opt`、`/usr`、`/var` 这类系统目录里时没有项目根（`/opt/homebrew` 是 git 仓库也一样），所有写入都要审批；家目录、`/tmp` 和 macOS 的 `$TMPDIR` 下的项目不受影响。

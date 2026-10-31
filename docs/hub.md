@@ -2,7 +2,7 @@
 
 ## 是什么
 
-`railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（PWA，由 hub 同源托管，见“网页”与 [web.md](web.md)）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对审批只能回答放行（allow）或拒绝（deny）；对 Claude Code 的选择题只能给出答案（填进选项的文字，不是命令）或交回终端；仍然没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、ping、pong、error 七种。
+`railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（PWA，由 hub 同源托管，见“网页”与 [web.md](web.md)）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对审批只能回答放行（allow）或拒绝（deny）；对 Claude Code 的选择题只能给出答案（填进选项的文字，不是命令）或交回终端；仍然没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、ping、pong、error 七种。自己填的答案是自由文本，Claude 会把它当作你的回答照着做：能登进网页的人可以借答题引导 agent，这与 hub 密码等于全部审批权是同一个信任边界（见“安全要点”）。
 
 hub 还托管手机网页（见“网页”），并能把新请求推到手机（Web Push，见“手机推送”）；TLS 可由 hub 内置的 ACME（Let's Encrypt）直出，也可交给反向代理（见“部署与反向代理”）；开机自启用 `railse setup autostart --hub`，安装、托管与体检的完整步骤见 [setup.md](setup.md)。
 
@@ -59,7 +59,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 
 - **规则以 hub 为准。** 每次连上，welcome 里的规则快照一律替换本机规则（不比版本：hub 重建库后版本可能变小）；连接期间的 `rules` 帧只收比本机新的版本。本机 `rules.yaml` 只是缓存，文件头写着“# 由 hub 下发，版本 N。本机修改会在下次下发时被覆盖。”；第一次覆盖本机原有的规则文件前先备份为 `rules.local-<UTC 时间>.yaml`（见“接入一台机器”第 2 步）。`railse agent reload`（或 SIGHUP）仍可临时加载本机改动，下一次下发或重连时被覆盖。
 - **引擎定不了的请求进 hub 等手机决定**（`outward`、`network`、`unknown` 等没有规则命中的 Claude、Codex 请求）。钩子一直等到手机上的决定、本机期限（约 24 小时）或下面的交回终端。规则能定的照旧在本机立即放行或拒绝，记录异步上报 hub。
-- **Claude Code 的选择题（`AskUserQuestion`）不过引擎，直接送 hub 等手机回答。** 守护进程把题目（题面、标题、选项文字先在本机脱敏）作为 `kind: "ask"` 的请求上报，也带项目根；不看规则、不看暂停开关，不能“记住”，不计入自动审批。手机上回答或选“让它在终端问我”之前，钩子一直等（期限同审批）。答案经 hub 下发给守护进程，钩子按 Claude Code 的格式把原 `questions` 连同 `answers` 交回，agent 立刻继续，终端不再弹选项；选“让它在终端问我”、没接 hub、连不上 hub、等过期、答案不合规，钩子都不输出，Claude Code 照旧在终端问。Codex、Gemini 没有这个口子，不进 hub。
+- **Claude Code 的选择题（`AskUserQuestion`）不过引擎，直接送 hub 等手机回答。** 守护进程把题目（题面、标题、选项文字先在本机脱敏）作为 `kind: "ask"` 的请求上报，也带项目根；不看规则、不看暂停开关，不能“记住”，不计入自动审批。手机上回答或选“让它在终端问我”之前，钩子一直等（期限同审批）。答案经 hub 下发给守护进程，钩子按 Claude Code 的格式把原 `questions` 连同 `answers` 交回，agent 立刻继续，终端不再弹选项；选“让它在终端问我”、没接 hub、连不上 hub、hub 太旧（0.1.4 及更早，welcome 里没有 `"features":["ask"]`：守护进程不把提问送给它，等待中重连到它也立即交回）、题目脱敏后超出上限、等过期、答案不合规，钩子都不输出，Claude Code 照旧在终端问。Codex、Gemini 没有这个口子，不进 hub。
 - **手机上的备注不会给到 agent。** 钩子只看到固定文案：放行“已在手机上批准”，拒绝时 Claude、Codex 看到“Railse：已在手机上拒绝”。备注只进本机审计的 `note` 字段与 hub 的 `decision_note`、审计。
 - **总开关：生效值 = 本机 || hub。** 两边分开存在 `state.json`（`paused`、`hub_paused`）。`railse agent pause`/`resume` 只改本机这一侧，不会被 hub 覆盖，也不反向同步到 hub；hub 的暂停（`POST /api/pause`，下发 paused 帧、写进 welcome）只改 hub 那一侧。`railse agent status` 显示 `paused: true (local)`、`(hub)` 或 `(local+hub)`；本机 resume 后 hub 仍暂停会提示。暂停时只有用户 deny 规则照常生效，其余一律交回终端，不送 hub（选择题不在此列：它不看暂停开关，照样送 hub）。
 - **连不上 hub 时最多等 HubGrace（30 秒）就交回终端。** 送出之前没连上，等 30 秒仍连不上就交回；已送到 hub 后断线，同样起 30 秒计时，期间重连上就接着等（hub 会补发已做的决定），超时交回。两种情况钩子都是“不作决定”，CLI 弹原生审批框（选择题则是在终端里照常问），本机审计记 `state: expired`、`decided_by: hub_unreachable`，随后上报的这条审计让 hub 里的请求也变成 expired。
@@ -147,7 +147,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
   2. 再 `railse hub vapid --rotate` 换推送密钥：旧公钥作废，并再删一次订阅（两步之间若有设备重新登记，也一并删掉）；
   3. 每台还在用的手机用新密码重新登录，到设置里重新开启通知。
 - **跨站。** 写接口、`/api/logout` 与 `/ws/client` 校验同源 Origin，是 SameSite 之外的第二道防线。
-- **hub 的权力被限死。** 对审批只能回 allow 或 deny，对 Claude Code 的提问只能给出答案（填进选择题的文字，不是命令）或交回终端（`passthrough`），没有向机器下发命令的通道。“记住”永远不会生成放行 `outward`、`destructive`（以及 `unknown`、`write_outside`）的规则，`learned` 来源的这类放行在导入时也被拒绝。网页导入的 `user` 规则可以放行 `outward`、`destructive`（用户决定 B）：这类规则在 `/api/rules` 标 `elevated: true`，导入时审计 `rules_imported` 带上它们的 id，从停用改为启用时审计 `rule_enabled_elevated`。
+- **hub 的权力被限死。** 对审批只能回 allow 或 deny，对 Claude Code 的提问只能给出答案（填进选择题的文字，不是命令）或交回终端（`passthrough`），没有向机器下发命令的通道。但自己填的答案是自由文本，Claude 会把它当作你的回答照着做，能登进网页的人可以借答题引导 agent：与网页密码等于全部审批权是同一个信任边界，不另设防线。“记住”永远不会生成放行 `outward`、`destructive`（以及 `unknown`、`write_outside`）的规则，`learned` 来源的这类放行在导入时也被拒绝。网页导入的 `user` 规则可以放行 `outward`、`destructive`（用户决定 B）：这类规则在 `/api/rules` 标 `elevated: true`，导入时审计 `rules_imported` 带上它们的 id，从停用改为启用时审计 `rule_enabled_elevated`。
 - **数据最小化。** 守护进程上报前对载荷与事件文本脱敏，hub 收到后再脱敏一次并截断各字段；hub 不信任守护进程送来的路径与命令，只存储与展示。审计里不含钩子进程的环境变量。
 - **明文接入会警告。** `railse agent enroll --hub http://…`（非本机地址）提示明文传输密钥。
 - **ACME 私钥明文存盘（设计 5.3 例外）。** 直出 TLS 时 Let's Encrypt 的账户私钥与证书私钥（autocert 的格式）明文存在数据目录的 `acme/`：目录 0700（hub 启动时建好并收紧），文件 0600（写临时文件再改名），`railse doctor` 检查两者的权限。它们只给 TLS 握手与 ACME 请求用，不经任何接口、日志或审计出现。拿到证书私钥就能冒充 hub：备份数据目录时把它当私密数据保管；疑似泄露时停掉 hub、删掉 `acme/` 再启动，重新签发（注意频率限制）。
@@ -245,6 +245,7 @@ fly ssh console -a <应用名> -C "railse hub token"             # 接入码，�
 | 守护进程日志“以 HTTP 401 拒绝了本机密钥”，`railse agent status` 显示 `hub: disabled` | 机器被吊销或密钥不对：`railse agent enroll --force` 后重启守护进程。停用前 hub 若处于暂停，本机会一直按 hub 暂停，重新接入后由 welcome 更新 |
 | 守护进程日志“拒绝了握手…协议版本不一致” | 升级守护进程与 hub 中较旧的一方 |
 | 请求不进收件箱、立即交回终端 | 看 `railse agent status` 是否暂停；看 `agent.log` 是否连着 hub；Gemini 的请求本来就不进 |
+| 审批照常进手机，Claude Code 的选择题却立即交回终端 | hub 是 0.1.4 及更早的（welcome 里没声明认得提问），`agent.log` 有“hub … 没有声明认得提问（版本太旧）”：升级 hub；本机 hub 升级后要重启（`railse setup` 不会重启已在跑的本机 hub），见 [setup.md](setup.md) 的“升级” |
 | `railse hub password` 回显密码 | 用 `read -s PW; printf '%s\n' "$PW" \| railse hub password` |
 | hub 退出码 1、日志“不关数据库” | 关停时有在途请求、长连接处理或回调没在时限内退出，或服务出错结束；直接重启即可 |
 | `railse hub run` 启动即退出 1、日志“监听失败” | 端口被占或 `--listen` 地址无效，换个地址。用 `--acme-domain` 时还可能是 80 端口被占（`--acme-http` 换地址或 `none`）、证书目录建不了，或 Linux 上没有 `CAP_NET_BIND_SERVICE`（`permission denied`，见“部署与反向代理”的 A） |

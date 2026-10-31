@@ -24,7 +24,7 @@
   - 规则没认出的密钥会原样进 hub 和手机。请求的 `has_redacted`（网页上「含被隐藏的部分」的提示）只表示认出了一些，不表示抹干净了。
   - 抹掉的部分可能比密钥长，连带盖住紧跟着的一截命令。只要有抹掉的部分，网页就醒目提示，hub 也不让「记住」。
   - 本机审计 `~/.railse/audit.jsonl` 存的是脱敏后的载荷与消息，不存原文。
-- **hub 不能让机器执行命令**：hub 发给守护进程的只有对审批的放行或拒绝、对 Claude Code 提问的答案（填进选择题的文字，不是命令）或交回终端、规则和暂停开关，没有下发命令的通道。但登进 hub 网页的人能放行送上来的任何请求，也能导入规则，导入的规则可以放行 `git push`、递归删除这类「记住」记不成放行的操作。所以 hub 的密码和数据目录要保管好。
+- **hub 不能让机器执行命令**：hub 发给守护进程的只有对审批的放行或拒绝、对 Claude Code 提问的答案（填进选择题的文字，不是命令）或交回终端、规则和暂停开关，没有下发命令的通道。但登进 hub 网页的人能放行送上来的任何请求，也能导入规则，导入的规则可以放行 `git push`、递归删除这类「记住」记不成放行的操作。自己填的答案是自由文本，Claude 会把它当作你的回答照着做，所以登进网页的人也能借答题引导 agent，这与「hub 密码等于全部审批权」是同一个信任边界。所以 hub 的密码和数据目录要保管好。
 
 # Security
 
@@ -50,4 +50,4 @@ These are deliberate. The details are in the "安全要点" (security) section o
   - A secret the rules don't recognize reaches the hub and the phone unchanged. A request's `has_redacted` (the "含被隐藏的部分" warning in the web app) only means something was caught, not that everything was.
   - The hidden part can be longer than the secret and cover part of the command right after it. Whenever anything was redacted, the web app shows a prominent warning and the hub won't let you remember the request.
   - The local audit log, `~/.railse/audit.jsonl`, stores the redacted versions of payloads and messages, not the originals.
-- **The hub can't make a machine run commands.** All it sends to a daemon is allow or deny for an approval, an answer to a Claude Code question (text filled into the multiple-choice question, not a command) or a hand-back to the terminal, rules, and the pause switch. There's no channel for commands. But anyone who can log in to the hub's web app can approve any request that reaches it, and import rules, including ones that allow `git push` or recursive deletes. Remembering a decision never creates rules like that. So protect the hub's password and data directory.
+- **The hub can't make a machine run commands.** All it sends to a daemon is allow or deny for an approval, an answer to a Claude Code question (text filled into the multiple-choice question, not a command) or a hand-back to the terminal, rules, and the pause switch. There's no channel for commands. But anyone who can log in to the hub's web app can approve any request that reaches it, and import rules, including ones that allow `git push` or recursive deletes. Remembering a decision never creates rules like that. A typed-in answer is free text that Claude acts on as your reply, so the same person can also steer the agent by answering its questions; that's the same trust boundary as the hub password already granting every approval. So protect the hub's password and data directory.
