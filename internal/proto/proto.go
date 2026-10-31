@@ -49,6 +49,10 @@ type Ask struct {
 	Questions []Question `json:"questions"`
 }
 
+// AskToolName 是 Claude Code 问人的工具名。守护进程（上报帧、审计）与 hub（入库、比对重发）的答题请求一律用它，
+// 不照收钩子或上报帧里的名字。
+const AskToolName = "AskUserQuestion"
+
 // AnswerMax 是一道题答案的字符上限（按 rune 计）：hub 的答题接口与守护进程收 hub 的答案都按它校验。
 const AnswerMax = 1000
 

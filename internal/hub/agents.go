@@ -406,7 +406,10 @@ type welcomeSource interface {
 	GetSetting(key string) (string, bool, error)
 }
 
-// welcomeFrame 组装 welcome：规则快照（规则与版本号同一事务读出）与全局暂停状态。任一读失败都返回错误，
+// hubFeatures 是本 hub 在 welcome 里声明的能力（wire.Welcome.Features）：认得提问。守护进程只把提问送给声明了它的 hub。
+func hubFeatures() []string { return []string{wire.FeatureAsk} }
+
+// welcomeFrame 组装 welcome：规则快照（规则与版本号同一事务读出）、全局暂停状态与本 hub 的能力（hubFeatures）。任一读失败都返回错误，
 // 握手随之以 InternalError 关闭：宁可不连，也不把读不出的暂停当成未暂停。
 func welcomeFrame(src welcomeSource) ([]byte, error) {
 	rs, version, err := src.RuleSet()
@@ -421,7 +424,7 @@ func welcomeFrame(src welcomeSource) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return wire.Marshal(wire.Welcome{T: wire.TWelcome, RulesVersion: version, RulesYAML: string(y), Paused: paused, ServerTime: time.Now().UTC()})
+	return wire.Marshal(wire.Welcome{T: wire.TWelcome, RulesVersion: version, RulesYAML: string(y), Paused: paused, ServerTime: time.Now().UTC(), Features: hubFeatures()})
 }
 
 // pausedSetting 读全局总开关：settings 的 paused 为 "1" 是暂停，"0" 或没有是未暂停；读失败或别的值返回错误。

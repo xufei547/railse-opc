@@ -129,3 +129,39 @@ func TestDecisionAnswersRoundTrip(t *testing.T) {
 		t.Fatalf("没有答案时应省略 answers: %s, %v", b, err)
 	}
 }
+
+// welcome 的能力声明可选：新 hub 发 features，旧守护进程（Welcome 没有这个字段）照常解码；旧 hub 不发这个键，
+// 新守护进程解码出空的 Features，Has 一律为假。没有能力时省略 features 键（与旧 hub 的帧一样）。
+func TestWelcomeFeaturesCompat(t *testing.T) {
+	b, err := Marshal(Welcome{T: TWelcome, RulesVersion: 2, RulesYAML: "rules: []\n", Features: []string{FeatureAsk}, ServerTime: time.Unix(1, 0).UTC()})
+	if err != nil || !strings.Contains(string(b), `"features":["ask"]`) {
+		t.Fatalf("新 hub 的 welcome 应带 features: %s, %v", b, err)
+	}
+	var w Welcome
+	if err := Unmarshal(b, &w); err != nil || !w.Has(FeatureAsk) || w.Has("other") {
+		t.Fatalf("往返不一致: %+v, %v", w, err)
+	}
+	// 旧守护进程的 Welcome（没有 Features 字段）解码新 hub 的帧
+	var old struct {
+		T            string    `json:"t"`
+		RulesVersion int       `json:"rules_version"`
+		RulesYAML    string    `json:"rules_yaml"`
+		Paused       bool      `json:"paused"`
+		ServerTime   time.Time `json:"server_time"`
+	}
+	if err := Unmarshal(b, &old); err != nil || old.T != TWelcome || old.RulesVersion != 2 {
+		t.Fatalf("旧守护进程应能解码新 hub 的 welcome: %+v, %v", old, err)
+	}
+	// 旧 hub 的帧没有 features 键
+	b, err = Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = Welcome{}
+	if err := Unmarshal(b, &w); err != nil || w.Features != nil || w.Has(FeatureAsk) {
+		t.Fatalf("旧 hub 的 welcome 应解码出空能力: %+v, %v", w, err)
+	}
+	if b, err := Marshal(Welcome{T: TWelcome}); err != nil || strings.Contains(string(b), "features") {
+		t.Fatalf("没有能力时应省略 features: %s, %v", b, err)
+	}
+}

@@ -9,9 +9,6 @@ import (
 	"github.com/xufei547/railse-opc/internal/redact"
 )
 
-// askToolName 是 Claude Code 问人的工具名；答题请求的上报帧与审计都用它，不用钩子送来的名字。
-const askToolName = "AskUserQuestion"
-
 // cloneAsk 返回题目的深拷贝（没有选项的题得到空切片，上报帧里是 []，不是 null）。
 func cloneAsk(a *proto.Ask) *proto.Ask { return a.MapText(func(s string) string { return s }) }
 
@@ -31,6 +28,8 @@ func distinctQuestions(a *proto.Ask) bool {
 }
 
 // checkAnswers 校验以题面为键的答案：a 的每道题都要有答案，非空且不超过 proto.AnswerMax 字符；多余的键不管。没有题目也算不合规。
+// 口径比 hub 的 checkAnswers（internal/hub/requests.go）宽，是有意的：hub 是答案的入口，在那里把关（去掉首尾空白后非空、
+// 不收多余的键），更严是安全的一边；这里只兜底保证交给钩子的每题都有答案、不超长，多余的键换回原题面时丢掉，不为此把答案退回终端。
 func checkAnswers(a *proto.Ask, answers map[string]string) error {
 	if a == nil || len(a.Questions) == 0 {
 		return errors.New("没有题目")

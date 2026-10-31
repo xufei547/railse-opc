@@ -36,7 +36,7 @@ func (claude) Parse(stdin []byte) (Input, error) {
 	in := Input{Session: proto.Session{Tool: "claude", CLISessionID: h.SessionID, TurnID: h.PromptID, Cwd: h.Cwd}}
 	switch h.HookEventName {
 	case "PermissionRequest":
-		if h.ToolName == "AskUserQuestion" {
+		if h.ToolName == proto.AskToolName {
 			in.Kind = KindIgnore // 在这里放行不会让 Claude 跳过提问，答题走 PreToolUse
 			break
 		}
@@ -49,7 +49,7 @@ func (claude) Parse(stdin []byte) (Input, error) {
 		}
 		in.Kind, in.ToolName, in.Payload = KindPermission, h.ToolName, p
 	case "PreToolUse":
-		if h.ToolName != "AskUserQuestion" {
+		if h.ToolName != proto.AskToolName {
 			in.Kind = KindIgnore
 			break
 		}

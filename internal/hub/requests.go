@@ -185,7 +185,7 @@ func cleanEntry(e agent.AuditEntry) agent.AuditEntry {
 }
 
 func (s *Server) audit(machineID, actor, requestID, action string, detail any) {
-	b, _ := json.Marshal(detail) // 调用方只传字符串、数字、布尔与字符串切片组成的 map，编码不会失败
+	b, _ := json.Marshal(detail) // 调用方只传 nil，或值为字符串、数字、布尔、字符串切片、map[string]string（answer 的答案）的 map，编码不会失败
 	if err := s.store.InsertAudit(store.AuditEvent{MachineID: machineID, Actor: actor, RequestID: requestID, Action: action, Detail: string(b)}); err != nil {
 		s.log.Printf("写审计 %q: %v", action, err)
 	}
@@ -269,7 +269,7 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 	sess := cleanSession(p.Session)
 	toolName := truncate(p.ToolName, maxFieldLen)
 	if body.Kind == "ask" {
-		toolName = askToolName // 提问只有这一个工具，不照收帧里的（sameRequest 同口径）
+		toolName = proto.AskToolName // 提问只有这一个工具，不照收帧里的（sameRequest 同口径）
 	}
 	// 去重查询必须在插入新请求之前（否则会查到新请求自己）；旧请求等新请求登记成功后才标 cancelled/resend，
 	// 新请求插不进去时旧请求仍是 pending
@@ -348,7 +348,7 @@ func sameRequest(r store.Request, p wire.PendingRequest) bool {
 	body, err := readPending(p)
 	toolName := truncate(p.ToolName, maxFieldLen)
 	if err == nil && body.Kind == "ask" {
-		toolName = askToolName
+		toolName = proto.AskToolName
 	}
 	return err == nil && body.Kind == r.Kind && body.Hash == r.PayloadHash && toolName == r.ToolName &&
 		truncate(p.Session.CLISessionID, maxFieldLen) == r.CLISessionID
@@ -387,9 +387,6 @@ func readPending(p wire.PendingRequest) (pendingBody, error) {
 	}
 	return pendingBody{}, fmt.Errorf("不认识的请求种类 %q", truncate(p.Kind, maxFieldLen))
 }
-
-// askToolName 是提问的工具名（Claude Code 的 AskUserQuestion）。
-const askToolName = "AskUserQuestion"
 
 // errAskUnredacted 表示守护进程送来的题目里还有该脱敏的内容。
 var errAskUnredacted = errors.New("题目未脱敏干净")
@@ -790,6 +787,8 @@ func (s *Server) commitAnswer(in AnswerInput) (store.Request, error) {
 
 // checkAnswers 校验作答：a 的每道题（按题面逐字节）都要有答案，答案去掉首尾空白后非空、不超过 proto.AnswerMax 个字符；
 // 不属于这些题的键不收（网页拿着对不上的题面在答）。答案本身不改写，原样存、原样下发。错误都包 errBadAnswer，说明是第几题。
+// 口径比守护进程的 checkAnswers（internal/agent/ask.go，空白答案与多余的键都放过）严，是有意的：这里是答案的入口，
+// 宁可让网页重答也不下发空白答案或对不上的键，更严是安全的一边；守护进程只兜底。
 func checkAnswers(a *proto.Ask, answers map[string]string) error {
 	if a == nil {
 		return fmt.Errorf("%w：请求没有题目", errBadAnswer)

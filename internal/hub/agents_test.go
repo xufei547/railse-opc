@@ -194,6 +194,10 @@ func TestAgentWSHelloWelcome(t *testing.T) {
 	if w.RulesVersion != 1 || !strings.Contains(w.RulesYAML, "builtin-readonly") || w.Paused {
 		t.Fatalf("welcome = %+v", w)
 	}
+	// 声明认得提问：守护进程据此才把 AskUserQuestion 送来（旧 hub 不发 features，提问交回终端）
+	if !reflect.DeepEqual(w.Features, []string{wire.FeatureAsk}) || !strings.Contains(string(b), `"features":["ask"]`) {
+		t.Fatalf("welcome 应声明 features [ask]: %s", b)
+	}
 	if !h.srv.agents.connected(id) {
 		t.Fatal("应登记为已连接")
 	}

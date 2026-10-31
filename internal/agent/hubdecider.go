@@ -22,6 +22,7 @@ const (
 	reasonSendFailed  = "无法送往 hub，交回终端处理"
 	reasonLost        = "与 hub 断线超过宽限，交回终端处理"
 	reasonNoDecision  = "hub 没有给出有效决定，交回终端处理"
+	reasonOldHub      = "hub 版本太旧，不认识提问，交回终端处理"
 	reasonAllowed     = "已在手机上批准"
 	reasonDenied      = "已在手机上拒绝"
 	reasonAnswered    = "已在手机上回答"
@@ -58,7 +59,8 @@ func hubDecidedBy(s string) string {
 
 // HubDecider 把引擎答 ask 的审批请求与答题请求（kind ask）经 HubClient 送到 hub，等人在手机上决定或作答。
 // 它永不让 agent 卡住：Gemini 直接交回原生确认框；连不上 hub、hub 停用本机、送不出去、hub 没给出有效决定，
-// 或送出后断线超过 Grace，都交回终端（DecidedBy hub_unreachable，钩子收 passthrough，本机审计记 expired）。
+// 送出后断线超过 Grace，或答题请求遇上不认得提问的 hub（welcome 没声明 wire.FeatureAsk：连上时就是，或等待中重连到了它），
+// 都交回终端（DecidedBy hub_unreachable，钩子收 passthrough，本机审计记 expired）。
 type HubDecider struct {
 	Client *HubClient
 	Grace  time.Duration // 等连接、断线后等重连的上限，取 Config.HubGrace（设计文档 3.2 的 30 秒）；≤0 表示不等
@@ -100,6 +102,8 @@ func (d *HubDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, er
 	defer d.Client.Forget(pr.ID)
 	if err := d.Client.SendPending(pr); errors.Is(err, ErrHubDisconnected) {
 		d.logf("请求 %q 送往 hub 时断线，等重连（宽限 %s）: %v", pr.ID, d.Grace, err)
+	} else if errors.Is(err, ErrHubNoAsk) {
+		return d.oldHub(pr.ID), nil
 	} else if err != nil {
 		d.logf("请求 %q 交回终端: %v", pr.ID, err)
 		return unreachable(reasonSendFailed, ""), nil
@@ -109,7 +113,8 @@ func (d *HubDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, er
 }
 
 // wait 等 hub 的决定。断线时起 Grace 计时，期间重连上就停表接着等（重连对齐会补发决定，重发的 pending 也会让
-// hub 再发）；到期仍未连上，或客户端被 401 停用，交回终端。
+// hub 再发）；到期仍未连上，或客户端被 401 停用，交回终端。答题请求重连到不认得提问的 hub 时立即交回终端：
+// 重连对齐不会把提问重发给它，等下去只会等满期限。
 func (d *HubDecider) wait(ctx context.Context, pr PendingRequest, ch <-chan wire.Decision) (Outcome, error) {
 	id := pr.ID
 	var grace *time.Timer
@@ -123,6 +128,9 @@ func (d *HubDecider) wait(ctx context.Context, pr PendingRequest, ch <-chan wire
 		connected, changed := d.Client.ConnState()
 		if d.Client.Disabled() {
 			return unreachable(reasonHubDisabled, ""), nil
+		}
+		if connected && pr.Kind == "ask" && !d.Client.HasFeature(wire.FeatureAsk) {
+			return d.oldHub(id), nil
 		}
 		switch {
 		case connected && grace != nil:
@@ -198,6 +206,13 @@ func hubOutcome(pr PendingRequest, dec wire.Decision) (Outcome, error) {
 		return Outcome{Action: dec.Action, Reason: reason, RuleID: clipText(dec.RuleID, ruleIDMax), DecidedBy: by, Note: clipText(dec.Reason, noteMax)}, nil
 	}
 	return Outcome{}, fmt.Errorf("action %q，decided_by %q", clipText(dec.Action, hubLogFieldMax), clipText(dec.DecidedBy, hubLogFieldMax))
+}
+
+// oldHub 是答题请求遇上不认得提问的 hub（welcome 没声明 wire.FeatureAsk，0.1.4 及以前）时的结论：不送、不等，交回终端，
+// 日志说一句怎么办。旧 hub 没收到过这条提问，不必通知它。
+func (d *HubDecider) oldHub(id string) Outcome {
+	d.logf("hub 版本太旧，不认识提问，请求 %q 交回终端；升级并重启 hub 后提问才会送到手机", id)
+	return unreachable(reasonOldHub, "")
 }
 
 // abandon 在 ctx 结束时告诉 hub：钩子消失发 cancel(terminal)，等待到期发 expired，其余（守护进程停止）发

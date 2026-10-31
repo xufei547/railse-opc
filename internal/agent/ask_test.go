@@ -4,15 +4,20 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"os"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
+	"github.com/xufei547/railse-opc/internal/adapter"
 	"github.com/xufei547/railse-opc/internal/hub/wire"
 	"github.com/xufei547/railse-opc/internal/policy"
 	"github.com/xufei547/railse-opc/internal/proto"
@@ -465,5 +470,150 @@ func TestAskProjectRoot(t *testing.T) {
 		if g := d2.seen(); len(g) != 1 || g[0].ProjectRoot != "" {
 			t.Fatalf("cwd %q 时项目根应为空: %+v", cwd, g)
 		}
+	}
+}
+
+// askPendingFor 造一条登记好的 ask 未完成请求（题目已脱敏），期限 10 分钟。
+func askPendingFor(id string) *PendingRequest {
+	req := askReq("用 A 还是 B？")
+	now := time.Now()
+	return &PendingRequest{ID: id, Kind: "ask", Ask: redactAsk(req.Ask), Req: req, Created: now, Deadline: now.Add(10 * time.Minute)}
+}
+
+// 旧 hub（0.1.4 及以前，welcome 不带 features）不认得提问：会把提问帧当作空载荷的审批登记、推送，终端一直卡到有人在手机上点。
+// 所以守护进程不把提问送给它：立即交回终端（钩子收 passthrough，本机审计 expired/hub_unreachable，理由说 hub 太旧），
+// 没有发出 pending 帧，日志说一句；SendPending 对提问也拒绝（ErrHubNoAsk）。审批照常送 hub。
+func TestAskOldHubPassthrough(t *testing.T) {
+	f := newFakeHub(t, 0, oldWelcomeThenHandOver)
+	tc := startTestClient(t, f)
+	tc.waitConnected(t)
+	conn := <-f.conns
+	if tc.c.HasFeature(wire.FeatureAsk) {
+		t.Fatal("旧 hub 没有声明认得提问")
+	}
+	d := &HubDecider{Client: tc.c, Grace: time.Minute, Log: log.New(tc.logs, "decider ", 0)}
+	t.Cleanup(d.Wait)
+	env := startServer(t, d, nil)
+	env.srv.SetAuditSink(tc.c)
+	var resp proto.Response
+	select {
+	case resp = <-askAsync(env.cfg.SocketPath, askReq("q")):
+	case <-time.After(5 * time.Second):
+		t.Fatal("旧 hub 时提问应立即交回终端，不该等")
+	}
+	if resp.Decision != "passthrough" || len(resp.Answers) != 0 || resp.Reason != reasonOldHub {
+		t.Fatalf("应交回终端并说明 hub 太旧: %+v", resp)
+	}
+	if e := onlyAudit(t, env); e.Kind != "ask" || e.Action != "passthrough" || e.State != "expired" || e.DecidedBy != hubUnreachable || e.Reason != reasonOldHub {
+		t.Fatalf("审计应记 expired/hub_unreachable: %+v", e)
+	}
+	if !strings.Contains(tc.logs.String(), "太旧") {
+		t.Fatalf("日志应说明 hub 太旧:\n%s", tc.logs.String())
+	}
+	if err := tc.c.SendPending(*askPendingFor("a2")); !errors.Is(err, ErrHubNoAsk) {
+		t.Fatalf("SendPending 对提问应报 ErrHubNoAsk: %v", err)
+	}
+	// 审批照常送 hub、等手机上的决定
+	res := decideInBackground(d, *pendingFor("p1", "claude", time.Now()))
+	waitFor(t, func() bool { return f.hasFrameFor(wire.TPending, "p1") })
+	f.send(conn, wire.Decision{T: wire.TDecision, RequestID: "p1", Action: "allow", DecidedBy: "user"})
+	select {
+	case r := <-res:
+		if r.err != nil || r.out.Action != "allow" {
+			t.Fatalf("审批应照常拿到决定: %+v %v", r.out, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("审批的 Decide 没有返回")
+	}
+	f.pingAndWaitPong(t, conn)
+	if n := f.count(wire.TPending); n != 1 {
+		t.Fatalf("只应发出审批的 pending 帧，提问的一帧都不该发: %d", n)
+	}
+}
+
+// 等提问的答案时断线、重连到的 hub 若不声明认得提问（降级到旧 hub）：重连对齐不重发这条提问，等待者立即交回终端（不等 Grace）。
+// 重连到的仍是新 hub：照常重发、接着等，答案到了交给钩子。
+func TestAskReconnectHubFeatures(t *testing.T) {
+	for _, old := range []bool{true, false} {
+		setHubTimings(t, []time.Duration{20 * time.Millisecond}, 0, 0, 0)
+		var dials atomic.Int32
+		f := newFakeHub(t, 0, func(f *fakeHub, conn *websocket.Conn, h wire.Hello) {
+			if dials.Add(1) > 1 && old {
+				oldWelcomeThenHandOver(f, conn, h)
+				return
+			}
+			welcomeThenHandOver(f, conn, h)
+		})
+		tc := startTestClient(t, f)
+		tc.waitConnected(t)
+		conn := <-f.conns
+		pr := askPendingFor("k1")
+		tc.pending.Add(pr) // 守护进程里请求在未完成表里，重连后随对齐重发
+		d := &HubDecider{Client: tc.c, Grace: time.Minute, Log: log.New(tc.logs, "decider ", 0)}
+		res := decideInBackground(d, *pr)
+		waitFor(t, func() bool { return f.hasFrameFor(wire.TPending, "k1") })
+		conn.CloseNow()
+		var conn2 *websocket.Conn
+		select {
+		case conn2 = <-f.conns:
+		case <-time.After(5 * time.Second):
+			t.Fatal("客户端没有重连")
+		}
+		if !old {
+			waitFor(t, func() bool { return f.countFor(wire.TPending, "k1") == 2 })
+			f.send(conn2, wire.Decision{T: wire.TDecision, RequestID: "k1", Action: "answer", Answers: map[string]string{"用 A 还是 B？": "A"}, DecidedBy: "user"})
+		}
+		var r decided
+		select {
+		case r = <-res:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("old=%v: Decide 没有返回", old)
+		}
+		switch {
+		case old && (r.err != nil || r.out.Action != "passthrough" || r.out.DecidedBy != hubUnreachable || r.out.Reason != reasonOldHub):
+			t.Fatalf("重连到旧 hub 应立即交回终端: %+v %v", r.out, r.err)
+		case !old && (r.err != nil || r.out.Action != "answer" || r.out.Answers["用 A 还是 B？"] != "A"):
+			t.Fatalf("重连到新 hub 应接着等到答案: %+v %v", r.out, r.err)
+		}
+		d.Wait()
+		// pong 在读循环里回，读循环在重连对齐之后才开始：pong 到了说明对齐已发完
+		f.pingAndWaitPong(t, conn2)
+		want := 2
+		if old {
+			want = 1
+		}
+		if n := f.countFor(wire.TPending, "k1"); n != want {
+			t.Fatalf("old=%v: 提问的 pending 帧 %d 条，应为 %d（旧 hub 不重发）", old, n, want)
+		}
+	}
+}
+
+// 脱敏会让短值变长（token=x 变成 token=<redacted>）：原题合规、脱敏后超出上限的题 hub 会拒收，守护进程在本机就交回终端，
+// 不交给 Decider，审计 passthrough/error，理由说清是脱敏后超限。
+func TestAskRedactedOverLimit(t *testing.T) {
+	d := &askDecider{answer: answerAll("A")}
+	logs := &logBuf{}
+	env := startServerLog(t, d, nil, logs)
+	req := askReq("q")
+	req.Ask.Questions[0].Header = strings.Repeat("长", 52) + " token=x" // 正好 60 字符
+	if err := adapter.ValidateAsk(req.Ask); err != nil {
+		t.Fatalf("原题应合规: %v", err)
+	}
+	if err := adapter.ValidateAsk(redactAsk(req.Ask)); err == nil {
+		t.Fatal("前提：脱敏后的标题应超出上限")
+	}
+	resp := askOnce(t, env, req)
+	if resp.Decision != "passthrough" || !strings.Contains(resp.Reason, "脱敏后题目超出上限") {
+		t.Fatalf("应交回终端并说明脱敏后超限: %+v", resp)
+	}
+	if n := len(d.seen()); n != 0 {
+		t.Fatalf("脱敏后超限的题不应交给 Decider: %d", n)
+	}
+	if e := onlyAudit(t, env); e.Kind != "ask" || e.Action != "passthrough" || e.State != "passthrough" || e.DecidedBy != "error" ||
+		!strings.Contains(e.Reason, "脱敏后题目超出上限") || e.Ask == nil {
+		t.Fatalf("审计应记 passthrough/error: %+v", e)
+	}
+	if !strings.Contains(logs.String(), "脱敏后") {
+		t.Fatalf("日志应说一句:\n%s", logs.String())
 	}
 }

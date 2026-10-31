@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/xufei547/railse-opc/internal/policy"
@@ -58,14 +59,26 @@ type Hello struct {
 	Pending      []PendingSummary `json:"pending"`
 }
 
-// Welcome 是 hub 的回应。
+// hub 在 welcome 里可声明的能力（Welcome.Features）。
+const (
+	// FeatureAsk：hub 认得提问（kind ask 的 pending 帧，答案经 action answer 的决定下发）。不声明的 hub（0.1.4 及以前）
+	// 会把提问帧当作空载荷的审批登记，守护进程对它一律不送提问，交回终端。
+	FeatureAsk = "ask"
+)
+
+// Welcome 是 hub 的回应。Features 是可选的能力声明（见 Feature*）：旧 hub 不发这个键，守护进程按什么都没声明处理；
+// 旧守护进程不认这个键，解码时忽略。加能力不提协议版本，握手两边互相兼容。
 type Welcome struct {
 	T            string    `json:"t"`
 	RulesVersion int       `json:"rules_version"`
 	RulesYAML    string    `json:"rules_yaml"`
 	Paused       bool      `json:"paused"`
 	ServerTime   time.Time `json:"server_time"`
+	Features     []string  `json:"features,omitempty"`
 }
+
+// Has 报告 welcome 是否声明了能力 f。
+func (w Welcome) Has(f string) bool { return slices.Contains(w.Features, f) }
 
 // PendingRequest 是送到 hub 等人决定的请求，载荷已脱敏。
 // Kind 为空表示审批（旧守护进程不发这个键）；为 ask 时是要人答的题：带 Ask（已脱敏），ToolName 为 AskUserQuestion，

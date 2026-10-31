@@ -370,6 +370,7 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 	default:
 		if s.rules.Paused() {
 			// 总开关打开：用户 deny 仍由引擎处理，其余一律交回终端，不去打扰 hub。
+			// 只管审批：答题（handleAsk）不走这里，不看暂停开关，照样送 hub。
 			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "paused", "自动审批已暂停，交回终端处理"
 			resp.Decision, resp.Reason = "passthrough", entry.Reason
 			break
@@ -394,7 +395,7 @@ func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request,
 }
 
 // handleAsk 是答题主路径：不跑引擎、不看规则与暂停开关（答题不是审批，也不能记住）。题目脱敏后登记、交给 Decider 等手机上作答；
-// hub 与手机只见到脱敏后的题面，答案按题目序号换回原题面写给钩子。请求不合规、脱敏后题面重复、答案不完整都交回终端。
+// hub 与手机只见到脱敏后的题面，答案按题目序号换回原题面写给钩子。请求不合规、脱敏后题面重复或超出上限、答案不完整都交回终端。
 func (s *Server) handleAsk(ctx context.Context, req proto.Request) proto.Response {
 	if err := adapter.ValidateAsk(req.Ask); err != nil {
 		s.log.Printf("答题请求不合规，交回终端: %v", err)
@@ -402,10 +403,18 @@ func (s *Server) handleAsk(ctx context.Context, req proto.Request) proto.Respons
 	}
 	id := NewID()
 	red := redactAsk(req.Ask)
-	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "ask", Session: req.Session, ToolName: askToolName, Ask: red}
+	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "ask", Session: req.Session, ToolName: proto.AskToolName, Ask: red}
 	resp := proto.Response{V: proto.Version, RequestID: id}
 	if !distinctQuestions(red) {
 		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "error", "脱敏后有题面相同的题，分不清答的是哪道，交回终端处理"
+		resp.Decision, resp.Reason = "passthrough", entry.Reason
+		s.writeAudit(entry)
+		return resp
+	}
+	// 脱敏会让短值变长（token=x 变成 token=<redacted>）：贴着上限的题脱敏后 hub 会拒收（它按同一套上限校验收到的题），在本机就交回终端
+	if err := adapter.ValidateAsk(red); err != nil {
+		s.log.Printf("答题请求 %q 脱敏后题目超出上限，交回终端: %v", id, err)
+		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "error", "脱敏后题目超出上限（"+err.Error()+"），交回终端处理"
 		resp.Decision, resp.Reason = "passthrough", entry.Reason
 		s.writeAudit(entry)
 		return resp

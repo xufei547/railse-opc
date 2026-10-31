@@ -170,8 +170,8 @@ func TestHubDeciderKeepsWaitingAfterSendHitsBrokenConn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn.CloseNow()    // 坏掉的连接：写一定失败
-	tc.c.setConn(conn) // 而客户端还当它连着（读循环还没发现）
+	conn.CloseNow()         // 坏掉的连接：写一定失败
+	tc.c.setConn(conn, nil) // 而客户端还当它连着（读循环还没发现）
 	d := &HubDecider{Client: tc.c, Grace: time.Minute, Log: log.New(tc.logs, "decider ", 0)}
 	res := decideInBackground(d, *pendingFor("w1", "claude", time.Now()))
 	// 等待者登记后投递决定，相当于重连后 hub 补发
