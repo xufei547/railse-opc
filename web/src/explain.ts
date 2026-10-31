@@ -41,13 +41,18 @@ function segments(command: string): string[][] {
   let words: string[] = []
   let cur = ''
   let has = false
+  let dropNext = false // 刚见到重定向符，下一个词是它的目标，不算词
   const endWord = () => {
-    if (has) words.push(cur)
+    if (has) {
+      if (!dropNext) words.push(cur)
+      dropNext = false
+    }
     cur = ''
     has = false
   }
   const endSeg = () => {
     endWord()
+    dropNext = false
     if (words.length > 0) segs.push(words)
     words = []
   }
@@ -57,6 +62,10 @@ function segments(command: string): string[][] {
     if (quote === "'") {
       if (c === "'") quote = ''
       else cur += c
+      continue
+    }
+    if (quote === '' && c === '\\' && command.charAt(i + 1) === '\n') {
+      i++ // 行尾反斜杠续行：两个字符都不算
       continue
     }
     if (c === '\\' && i + 1 < command.length) {
@@ -72,6 +81,22 @@ function segments(command: string): string[][] {
     if (c === "'" || c === '"') {
       quote = c
       has = true
+    } else if (c === '>' || c === '<') {
+      // 重定向：前面全是数字的词是文件描述符（2>），一起丢；操作符与目标（粘着或下一个词）都不算词
+      if (has && /^\d+$/.test(cur)) {
+        cur = ''
+        has = false
+      } else {
+        endWord()
+      }
+      const n = command.charAt(i + 1)
+      if (c === '>' ? n === '>' || n === '|' || n === '&' : n === '<' || n === '>' || n === '&') {
+        i++
+        if (c === '<' && n === '<' && command.charAt(i + 1) === '<') i++
+      }
+      dropNext = true
+    } else if (c === '&' && command.charAt(i + 1) === '>') {
+      endWord() // &> 与 &>> 是重定向，不是分隔符；交给下一轮的 >
     } else if (c === '&' || c === '|') {
       if (command.charAt(i + 1) === c) i++
       endSeg()

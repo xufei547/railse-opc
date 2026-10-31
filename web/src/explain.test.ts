@@ -123,6 +123,20 @@ describe('shellAction', () => {
     expect(shellAction("echo 'rm -rf /'; ls")).toBe("运行命令：echo 'rm -rf /'; ls")
   })
 
+  it('重定向与它的目标不算词；行尾反斜杠续行接上', () => {
+    expect(shellAction('git push 2>&1')).toBe('把代码推到远程仓库')
+    expect(shellAction('git push origin main 2>/dev/null')).toBe('把代码推到远程仓库（origin 的 main）')
+    expect(shellAction('npm install 2>&1 | tail -5')).toBe('安装依赖，要联网')
+    expect(shellAction('npm install &> install.log')).toBe('安装依赖，要联网')
+    expect(shellAction('rm -rf dist > /dev/null 2>&1')).toBe('删除 dist，删了不可恢复')
+    expect(shellAction('curl https://a.example.com >out.json')).toBe('访问网址 a.example.com')
+    expect(shellAction('curl -sS https://a.example.com 2>&1 >&2')).toBe('访问网址 a.example.com')
+    expect(shellAction('git push \\\n  origin main')).toBe('把代码推到远程仓库（origin 的 main）')
+    expect(shellAction('npm i react\\\n-dom')).toBe('安装依赖 react-dom，要联网')
+    expect(shellAction('echo "a > b" && ls')).toBe('运行命令：echo "a > b" && ls')
+    expect(shellAction('cat <<EOF\nhi\nEOF')).toContain('运行命令')
+  })
+
   it('空命令、超长命令', () => {
     expect(shellAction('')).toBe('运行一条命令')
     expect(shellAction('  \n ')).toBe('运行一条命令')
