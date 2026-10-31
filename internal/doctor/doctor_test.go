@@ -413,6 +413,49 @@ func TestHookChecks(t *testing.T) {
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Fail || !strings.Contains(c.Detail, "缺 Stop") {
 		t.Fatalf("缺事件: %+v", c)
 	}
+	// 旧安装（v0.1.4 以前）没有 PreToolUse：审批照常，只是选择题进不了手机，warn 而不是 fail
+	var old map[string]any
+	json.Unmarshal(doc, &old)
+	delete(old["hooks"].(map[string]any), "PreToolUse")
+	oldDoc, _ := json.Marshal(old)
+	writeFile(t, local, oldDoc)
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "缺 PreToolUse：Claude Code 的选择题进不了手机") ||
+		!strings.Contains(c.Hint, "setup hooks") || !strings.Contains(c.Hint, "--claude") {
+		t.Fatalf("缺 PreToolUse: %+v", c)
+	}
+	// 缺 PreToolUse 的同时还缺别的事件：照旧 fail，细节里两样都说
+	delete(old["hooks"].(map[string]any), "Stop")
+	both, _ := json.Marshal(old)
+	writeFile(t, local, both)
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Fail || !strings.Contains(c.Detail, "缺 PreToolUse、Stop") {
+		t.Fatalf("缺 PreToolUse 与 Stop: %+v", c)
+	}
+	// 缺 PreToolUse 又换过安装路径：路径的 warn 与选择题的提醒都在
+	o.Bin = "/opt/new/railse"
+	writeFile(t, local, oldDoc)
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "/opt/new/railse") || !strings.Contains(c.Detail, "缺 PreToolUse") {
+		t.Fatalf("缺 PreToolUse 且路径不同: %+v", c)
+	}
+	o.Bin = bin
+	// PreToolUse 超时不够：选择题等不到手机上的回答，照超时不够 fail
+	shortPre := strings.Replace(string(doc), `"matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/railse hook claude",
+            "timeout": 86400`, `"matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/railse hook claude",
+            "timeout": 60`, 1)
+	if shortPre == string(doc) {
+		t.Fatalf("没替换到 PreToolUse 的超时:\n%s", doc)
+	}
+	writeFile(t, local, []byte(shortPre))
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Fail || !strings.Contains(c.Detail, "PreToolUse（超时 60") {
+		t.Fatalf("PreToolUse 超时不够: %+v", c)
+	}
 	// 坏 JSON
 	writeFile(t, local, []byte("{bad"))
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Fail || !strings.Contains(c.Detail, "JSON") || c.Hint == "" {

@@ -48,6 +48,7 @@ const setupUsage = `用法:
     （第一次改这两个文件之前各备份一次，<文件>.railse-bak-<时间>），Codex 写 ~/.codex/hooks.json。
     --project 目录：Claude、Gemini 改写那个项目的项目级 .claude/settings.local.json（不入库；旧版写在 settings.json 的会迁走）
     与 .gemini/settings.json，Codex 照旧是用户级。
+    Claude 的选择题（AskUserQuestion）也能在手机上答（由 PreToolUse 钩子转交，不想答时手机上可交回终端）。
     --dir 是守护进程的数据目录（默认 $RAILSE_HOME 或 ~/.railse）：不是 ~/.railse 时钩子命令带 --socket 指向它。
   railse setup autostart [--hub] [--uninstall] [--status] [--dir 目录] [--bin 路径] [--system] [--user 名字] [--dry-run] [-- hub run 的额外参数]
     开机自启并在退出后自动拉起（macOS launchd、Linux systemd），默认托管守护进程，--hub 托管 hub；详见 railse setup autostart -h。
