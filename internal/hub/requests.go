@@ -268,6 +268,9 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 	}
 	sess := cleanSession(p.Session)
 	toolName := truncate(p.ToolName, maxFieldLen)
+	if body.Kind == "ask" {
+		toolName = askToolName // 提问只有这一个工具，不照收帧里的（sameRequest 同口径）
+	}
 	// 去重查询必须在插入新请求之前（否则会查到新请求自己）；旧请求等新请求登记成功后才标 cancelled/resend，
 	// 新请求插不进去时旧请求仍是 pending
 	old, err := s.store.FindResend(m.ID, sess.CLISessionID, sess.TurnID, toolName, body.Hash, s.cfg.ResendWindow)
@@ -343,7 +346,11 @@ func (s *Server) pendingAgain(c *agentConn, r store.Request, p wire.PendingReque
 // 提问是题目）相同，工具名、CLI 会话也相同。读不出（如题目不合规）的不是同一条。
 func sameRequest(r store.Request, p wire.PendingRequest) bool {
 	body, err := readPending(p)
-	return err == nil && body.Kind == r.Kind && body.Hash == r.PayloadHash && truncate(p.ToolName, maxFieldLen) == r.ToolName &&
+	toolName := truncate(p.ToolName, maxFieldLen)
+	if err == nil && body.Kind == "ask" {
+		toolName = askToolName
+	}
+	return err == nil && body.Kind == r.Kind && body.Hash == r.PayloadHash && toolName == r.ToolName &&
 		truncate(p.Session.CLISessionID, maxFieldLen) == r.CLISessionID
 }
 
@@ -370,10 +377,19 @@ func readPending(p wire.PendingRequest) (pendingBody, error) {
 		if err := checkAsk(p.Ask); err != nil {
 			return pendingBody{}, err
 		}
+		// options 为 null（JSON 里缺省）的题规整成空数组，入库、哈希、视图都一致；重发时同样规整，哈希才对得上
+		for i := range p.Ask.Questions {
+			if p.Ask.Questions[i].Options == nil {
+				p.Ask.Questions[i].Options = []proto.Option{}
+			}
+		}
 		return pendingBody{Kind: "ask", Ask: p.Ask, Hash: store.AskHash(p.Ask)}, nil
 	}
 	return pendingBody{}, fmt.Errorf("不认识的请求种类 %q", truncate(p.Kind, maxFieldLen))
 }
+
+// askToolName 是提问的工具名（Claude Code 的 AskUserQuestion）。
+const askToolName = "AskUserQuestion"
 
 // errAskUnredacted 表示守护进程送来的题目里还有该脱敏的内容。
 var errAskUnredacted = errors.New("题目未脱敏干净")

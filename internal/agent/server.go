@@ -304,19 +304,25 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	}
 	cwd = clean
 	p.Cwd = cwd
-	// 相对路径（含空 cwd 清理后的 "."）会按守护进程自己的工作目录解析，不能拿来找项目根。
-	var root string
-	if filepath.IsAbs(cwd) {
-		var kind RootKind
-		switch root, kind = ResolveProjectRoot(cwd); kind {
-		case RootCwd:
-			s.noteRoot(root, kind)
-		case RootNotPlain, RootSystem:
-			s.noteRoot(cwd, kind)
-		}
-	}
+	root := s.projectRootFor(cwd)
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID}
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx
+}
+
+// projectRootFor 从清理后的 cwd 算项目根（审批与提问共用）：相对路径（含空 cwd 清理后的 "."）会按守护进程自己的工作目录解析，
+// 不能拿来找项目根，返回空；绝对路径按 ResolveProjectRoot 定，并按各类别用 noteRoot 在日志里说明一次。只算路径，不跑引擎、不看规则。
+func (s *Server) projectRootFor(cwd string) string {
+	if !filepath.IsAbs(cwd) {
+		return ""
+	}
+	root, kind := ResolveProjectRoot(cwd)
+	switch kind {
+	case RootCwd:
+		s.noteRoot(root, kind)
+	case RootNotPlain, RootSystem:
+		s.noteRoot(cwd, kind)
+	}
+	return root
 }
 
 // noteRoot 在日志里说明目录 dir 的项目根怎么定：不在 git 仓库里时 RootCwd 按当前目录当项目根，RootNotPlain 不当项目根；
@@ -404,7 +410,8 @@ func (s *Server) handleAsk(ctx context.Context, req proto.Request) proto.Respons
 		s.writeAudit(entry)
 		return resp
 	}
-	pr := &PendingRequest{ID: id, Kind: "ask", Ask: red, Req: req}
+	// 载荷没有 cwd，取会话的 cwd；项目根随上报帧带给 hub，推送标题与收件箱靠它显示项目名
+	pr := &PendingRequest{ID: id, Kind: "ask", Ask: red, Req: req, ProjectRoot: s.projectRootFor(CleanCwd(req.Session.Cwd))}
 	out, resp, ok := s.await(ctx, pr, entry, resp)
 	if !ok {
 		return resp

@@ -321,7 +321,7 @@ func TestToWireAsk(t *testing.T) {
 	pr := PendingRequest{ID: "a1", Kind: "ask", Req: askReq("用 " + askSecret + " 吗？"), Ask: red, Created: now, Deadline: now.Add(time.Minute)}
 	pr.Req.ToolName = "别的名字"
 	w := toWire(pr)
-	if w.Kind != "ask" || w.Ask != red || w.ToolName != "AskUserQuestion" || w.Risk != "" || w.ProjectRoot != "" || w.EngineReason != "" ||
+	if w.Kind != "ask" || w.Ask != red || w.ToolName != "AskUserQuestion" || w.Risk != "" || w.EngineReason != "" ||
 		!reflect.DeepEqual(w.Payload, policy.Payload{}) || w.DeadlineSeconds != 60 || w.RequestID != "a1" || w.Session.CLISessionID != "s1" {
 		t.Fatalf("ask 帧字段不对: %+v", w)
 	}
@@ -432,5 +432,38 @@ func TestPendingListCopiesAsk(t *testing.T) {
 	again := p.List()
 	if again[0].Ask.Questions[0].Question != "q" || again[0].Req.Ask.Questions[0].Options[0].Label != "A" {
 		t.Fatalf("改 List 返回的题目不应影响表: %+v %+v", again[0].Ask, again[0].Req.Ask)
+	}
+}
+
+// ask 请求的会话 cwd 在 git 仓库里时，登记的 PendingRequest 与上报帧都带该仓库的项目根（只算路径，不看规则）；
+// cwd 为空或不是绝对路径时项目根留空。
+func TestAskProjectRoot(t *testing.T) {
+	d := &askDecider{answer: answerAll("A")}
+	env := startServer(t, d, nil)
+	req := askReq("用 A 还是 B？")
+	req.Session.Cwd = env.repo
+	if resp := askOnce(t, env, req); resp.Decision != "answer" {
+		t.Fatalf("答复: %+v", resp)
+	}
+	got := d.seen()
+	if len(got) != 1 {
+		t.Fatalf("应收到一条请求: %+v", got)
+	}
+	want := FindProjectRoot(CleanCwd(env.repo))
+	if want == "" || got[0].ProjectRoot != want {
+		t.Fatalf("ProjectRoot = %q，应为 %q", got[0].ProjectRoot, want)
+	}
+	if w := toWire(got[0]); w.ProjectRoot != want {
+		t.Fatalf("上报帧 project_root = %q，应为 %q", w.ProjectRoot, want)
+	}
+	for _, cwd := range []string{"", "rel/dir"} {
+		d2 := &askDecider{answer: answerAll("A")}
+		env2 := startServer(t, d2, nil)
+		r := askReq("用 A 还是 B？")
+		r.Session.Cwd = cwd
+		askOnce(t, env2, r)
+		if g := d2.seen(); len(g) != 1 || g[0].ProjectRoot != "" {
+			t.Fatalf("cwd %q 时项目根应为空: %+v", cwd, g)
+		}
 	}
 }

@@ -1281,3 +1281,25 @@ func TestPushOnAsk(t *testing.T) {
 	}
 	waitFor(t, "审计 push_sent", func() bool { return hasAuditFor(h, "a1", "push_sent") })
 }
+
+// 走真 ask 帧登记（不手塞 pushWho）：帧里的项目根进库，请求视图的 project 是项目目录名，推送标题带项目名。
+func TestAskProjectInViewAndPushTitle(t *testing.T) {
+	h, _ := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{MachineID: id, Proto: wire.Proto, HomeDir: "/home/u"})
+	defer c.close()
+	f := askFrame("a1", "s1", "t1", "用 A 还是 B？")
+	f.ProjectRoot = "/home/u/blog"
+	c.send(f)
+	waitFor(t, "ask 登记", func() bool { n, _ := h.st.CountPending(); return n == 1 })
+	r := getReq(t, h.st, "a1")
+	if r.ProjectRoot != "/home/u/blog" {
+		t.Fatalf("ask 应存项目根: %+v", r)
+	}
+	if v := h.srv.view(r); v.Project != "blog" {
+		t.Fatalf("请求视图的 project = %q，应为 blog", v.Project)
+	}
+	if m := decodePush(t)(h.srv.push.message(r)); m.Title != "Claude Code 在问你 · blog" {
+		t.Fatalf("推送标题 = %q", m.Title)
+	}
+}

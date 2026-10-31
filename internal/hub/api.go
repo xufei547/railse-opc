@@ -337,6 +337,8 @@ func (s *Server) writeDecideErr(w http.ResponseWriter, what string, err error) {
 	switch {
 	case errors.Is(err, errBadAction), errors.Is(err, errBadScope), errors.Is(err, errBadAnswer):
 		writeErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, store.ErrNotAsk):
+		writeErr(w, http.StatusBadRequest, errNotAsk.Error()) // 与 onlyAsk 的“不是提问”同口径
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "没有这条请求")
 	case errors.Is(err, errRevoked):

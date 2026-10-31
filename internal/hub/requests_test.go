@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1485,7 +1486,7 @@ func TestAnswerDeliversToAgent(t *testing.T) {
 // 断线期间作答：重连时守护进程仍持有就补发 answer 决定（带答案），不再持有的记 undeliverable。交回终端的不补发，
 // 它的 delivered 回执 hub 端无事可做；守护进程再送它的 pending 回“请求已结束”。
 func TestAnswerResentAfterReconnect(t *testing.T) {
-	h, logs := quietHub(t)
+	h, _ := quietHub(t)
 	id, secret := enrollMachine(t, h, "mac")
 	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
 	c.recv(5 * time.Second)
@@ -1524,14 +1525,19 @@ func TestAnswerResentAfterReconnect(t *testing.T) {
 	if n := systemUndeliverable(t, h.st, id, "a3"); n != 1 {
 		t.Fatalf("不再持有的 a3 应记 undeliverable, 得到 %d", n)
 	}
+	sub, stop := h.srv.clients.subscribe()
+	defer stop()
 	c2.send(wire.Delivered{T: wire.TDelivered, RequestID: "a2"})
 	c2.send(wire.Delivered{T: wire.TDelivered, RequestID: "a1"})
+	// 同一连接按序处理：a1 的送达广播到了，a2 的回执也处理完了；交回终端的回执不记送达，所以不该有 a2 的 request_updated
+	waitBroadcast(t, sub, "request_updated", "a1", func(f clientFrame) {
+		if f.Type == "request_updated" && f.Data["id"] == "a2" {
+			t.Errorf("交回终端的回执不应广播 a2 的更新: %+v", f)
+		}
+	})
 	waitFor(t, "a1 送达", func() bool { r, _ := h.st.GetRequest("a1"); return r.DeliveredAt != nil })
 	if a2 := getReq(t, h.st, "a2"); a2.State != "passthrough" || a2.DecidedBy != "user" || a2.DeliveredAt != nil {
 		t.Fatalf("交回终端的回执不记: %+v", a2)
-	}
-	if strings.Contains(logs.String(), "标记送达") {
-		t.Fatalf("交回终端的回执不应报错: %q", logs.String())
 	}
 }
 
@@ -1822,4 +1828,38 @@ func queryDB(t *testing.T, h *testHub, q string) string {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// ask 的工具名恒为 AskUserQuestion，不照收帧里的；题目的 options 为 null 时规整成空数组，视图 JSON 里总是数组。
+func TestAskToolNameFixedAndOptionsNormalized(t *testing.T) {
+	h, _ := quietHub(t)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	f := askFrame("a1", "s1", "t1", "自由回答？")
+	f.ToolName = "别的名字"
+	f.Ask.Questions[0].Options = nil
+	c.send(f)
+	waitFor(t, "ask 登记", func() bool { n, _ := h.st.CountPending(); return n == 1 })
+	r := getReq(t, h.st, "a1")
+	if r.ToolName != "AskUserQuestion" {
+		t.Fatalf("工具名 = %q", r.ToolName)
+	}
+	b, err := json.Marshal(h.srv.view(r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"options":[]`) || strings.Contains(string(b), `"options":null`) {
+		t.Fatalf("视图里 options 应是空数组: %s", b)
+	}
+}
+
+// 对不是提问的请求作答在存储层报 ErrNotAsk 时，接口回 400 与“不是提问”同口径，不落到 500。
+func TestWriteDecideErrNotAsk(t *testing.T) {
+	h, _ := quietHub(t)
+	w := httptest.NewRecorder()
+	h.srv.writeDecideErr(w, "作答", fmt.Errorf("包一层: %w", store.ErrNotAsk))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), errNotAsk.Error()) {
+		t.Fatalf("ErrNotAsk 应回 400 与不是提问: %d %s", w.Code, w.Body)
+	}
 }

@@ -248,7 +248,9 @@ func dumpTables(t *testing.T, db *sql.DB, cols map[string][]string) (map[string]
 			}
 			for rows.Next() {
 				var c string
-				rows.Scan(&c)
+				if err := rows.Scan(&c); err != nil {
+					t.Fatal(err)
+				}
 				cols[table] = append(cols[table], c)
 			}
 			rows.Close()

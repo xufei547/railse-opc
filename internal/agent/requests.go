@@ -25,7 +25,7 @@ type Outcome struct {
 }
 
 // PendingRequest 是等待外部决定的请求。Redacted 是脱敏后的载荷，上报 hub 用它。
-// Kind 为 ask 时是要人答的题：Ask 是脱敏后的题目（上报 hub 用它，原题在 Req.Ask），Risk、ProjectRoot、Redacted、EngineReason 都是零值。
+// Kind 为 ask 时是要人答的题：Ask 是脱敏后的题目（上报 hub 用它，原题在 Req.Ask），ProjectRoot 按会话 cwd 算（只算路径，不跑引擎），Risk、Redacted、EngineReason 都是零值。
 type PendingRequest struct {
 	ID           string
 	Kind         string // permission（空也当 permission）或 ask

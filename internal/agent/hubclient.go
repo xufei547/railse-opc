@@ -596,13 +596,13 @@ func (h *HubClient) sendRaw(ctx context.Context, b []byte, closeOnFail bool) err
 
 // toWire 把未完成请求编成 pending 帧。载荷只用脱敏后的 Redacted，题目只用脱敏后的 Ask，永远不用 Req 里的原始载荷与题目；
 // DeadlineSeconds 是从 CreatedAt 起算的总时长（hub 按 CreatedAt+DeadlineSeconds 算过期），不是剩余秒数。
-// 答题帧 kind 为 ask，工具名固定为 AskUserQuestion，载荷为零值、风险为空（Risk 零值的 String 是 read，不能用）；
+// 答题帧 kind 为 ask，工具名固定为 AskUserQuestion，载荷为零值、风险为空（Risk 零值的 String 是 read，不能用），项目根照带；
 // 审批帧不带 kind（空当审批），与以前逐字段相同。
 func toWire(pr PendingRequest) wire.PendingRequest {
 	w := wire.PendingRequest{T: wire.TPending, RequestID: pr.ID, Session: pr.Req.Session,
 		DeadlineSeconds: int(pr.Deadline.Sub(pr.Created).Seconds()), CreatedAt: pr.Created.UTC()}
 	if pr.Kind == "ask" {
-		w.Kind, w.Ask, w.ToolName = "ask", pr.Ask, askToolName
+		w.Kind, w.Ask, w.ToolName, w.ProjectRoot = "ask", pr.Ask, askToolName, pr.ProjectRoot
 		return w
 	}
 	w.ToolName, w.Payload, w.Risk, w.ProjectRoot, w.EngineReason = pr.Req.ToolName, pr.Redacted, pr.Risk.String(), pr.ProjectRoot, pr.EngineReason
