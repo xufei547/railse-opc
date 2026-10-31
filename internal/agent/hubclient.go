@@ -75,7 +75,7 @@ type auditItem struct {
 }
 
 // HubClient 维护到 hub 的一条 WebSocket 长连接：只向外连 hub 的 /ws/agent，用 Bearer 机器密钥认证。
-// hub 只能经它下发规则、总开关与对请求的 allow/deny 决定，没有让本机执行任何东西的帧。
+// hub 只能经它下发规则、总开关与对请求的决定（审批的 allow/deny、答题的答案），没有让本机执行任何东西的帧。
 type HubClient struct {
 	cfg          Config
 	machine      MachineConfig
@@ -594,12 +594,19 @@ func (h *HubClient) sendRaw(ctx context.Context, b []byte, closeOnFail bool) err
 	return nil
 }
 
-// toWire 把未完成请求编成 pending 帧。载荷只用脱敏后的 Redacted，永远不用 Req 里的原始载荷；
+// toWire 把未完成请求编成 pending 帧。载荷只用脱敏后的 Redacted，题目只用脱敏后的 Ask，永远不用 Req 里的原始载荷与题目；
 // DeadlineSeconds 是从 CreatedAt 起算的总时长（hub 按 CreatedAt+DeadlineSeconds 算过期），不是剩余秒数。
+// 答题帧 kind 为 ask，工具名固定为 AskUserQuestion，载荷为零值、风险为空（Risk 零值的 String 是 read，不能用）；
+// 审批帧不带 kind（空当审批），与以前逐字段相同。
 func toWire(pr PendingRequest) wire.PendingRequest {
-	return wire.PendingRequest{T: wire.TPending, RequestID: pr.ID, Session: pr.Req.Session, ToolName: pr.Req.ToolName, Payload: pr.Redacted,
-		Risk: pr.Risk.String(), ProjectRoot: pr.ProjectRoot, EngineReason: pr.EngineReason,
+	w := wire.PendingRequest{T: wire.TPending, RequestID: pr.ID, Session: pr.Req.Session,
 		DeadlineSeconds: int(pr.Deadline.Sub(pr.Created).Seconds()), CreatedAt: pr.Created.UTC()}
+	if pr.Kind == "ask" {
+		w.Kind, w.Ask, w.ToolName = "ask", pr.Ask, askToolName
+		return w
+	}
+	w.ToolName, w.Payload, w.Risk, w.ProjectRoot, w.EngineReason = pr.Req.ToolName, pr.Redacted, pr.Risk.String(), pr.ProjectRoot, pr.EngineReason
+	return w
 }
 
 // SendPending 送一条待决请求。返回满足 errors.Is(err, ErrHubDisconnected) 的错误（未连接，或写连接失败）时，

@@ -12,20 +12,22 @@ import (
 
 // AuditEntry 是审计日志的一行。Payload 已脱敏。
 type AuditEntry struct {
-	TS        time.Time       `json:"ts"`
-	RequestID string          `json:"request_id,omitempty"`
-	Kind      string          `json:"kind"` // permission、question、done、session_end、control
-	Session   proto.Session   `json:"session"`
-	ToolName  string          `json:"tool_name,omitempty"`
-	Payload   *policy.Payload `json:"payload,omitempty"`
-	Risk      string          `json:"risk,omitempty"`
-	Action    string          `json:"action,omitempty"` // allow、deny、passthrough
-	State     string          `json:"state"`            // auto_allowed、auto_denied、passthrough、cancelled、expired、recorded、suppressed
-	RuleID    string          `json:"rule_id,omitempty"`
-	Reason    string          `json:"reason,omitempty"`
-	Note      string          `json:"note,omitempty"` // 用户在手机上的备注，只进审计，不回给钩子
-	DecidedBy string          `json:"decided_by,omitempty"`
-	Message   string          `json:"message,omitempty"`
+	TS        time.Time         `json:"ts"`
+	RequestID string            `json:"request_id,omitempty"`
+	Kind      string            `json:"kind"` // permission、ask、question、done、session_end、control
+	Session   proto.Session     `json:"session"`
+	ToolName  string            `json:"tool_name,omitempty"`
+	Payload   *policy.Payload   `json:"payload,omitempty"`
+	Ask       *proto.Ask        `json:"ask,omitempty"` // 仅 ask：脱敏后的题目
+	Risk      string            `json:"risk,omitempty"`
+	Action    string            `json:"action,omitempty"`  // allow、deny、passthrough、answer
+	State     string            `json:"state"`             // auto_allowed、auto_denied、approved、denied、answered、passthrough、cancelled、expired、recorded、suppressed
+	Answers   map[string]string `json:"answers,omitempty"` // 仅 answered：脱敏后的题面 → 脱敏后的答案
+	RuleID    string            `json:"rule_id,omitempty"`
+	Reason    string            `json:"reason,omitempty"`
+	Note      string            `json:"note,omitempty"` // 用户在手机上的备注，只进审计，不回给钩子
+	DecidedBy string            `json:"decided_by,omitempty"`
+	Message   string            `json:"message,omitempty"`
 }
 
 // Audit 是只追加的 JSONL 文件。

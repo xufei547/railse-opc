@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,7 @@ func TestHubDeciderNormalizesDecisions(t *testing.T) {
 		{"decided_by 超长", wire.Decision{Action: "allow", DecidedBy: strings.Repeat("u", 100)},
 			Outcome{Action: "allow", Reason: "已在手机上批准", DecidedBy: strings.Repeat("u", 64)}, true},
 		{"passthrough", wire.Decision{Action: "passthrough", Reason: long, RuleID: "x", DecidedBy: "user"}, fallback(strings.Repeat("长", 200)), false},
+		{"审批收到 answer", wire.Decision{Action: "answer", Answers: map[string]string{"q": "a"}, DecidedBy: "user"}, fallback(""), false},
 		{"大写", wire.Decision{Action: "ALLOW", Reason: "r", DecidedBy: "user"}, fallback("r"), false},
 		{"带空格", wire.Decision{Action: "allow ", DecidedBy: "user"}, fallback(""), false},
 		{"空动作", wire.Decision{Action: "", Reason: "登记失败", DecidedBy: "hub_error"}, fallback("登记失败"), false},
@@ -86,7 +88,7 @@ func TestHubDeciderNormalizesDecisions(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("%s: Decide 没有返回", c.name)
 		}
-		if r.err != nil || r.out != c.want {
+		if r.err != nil || !reflect.DeepEqual(r.out, c.want) {
 			t.Fatalf("%s: 结论 = %+v %v，应为 %+v", c.name, r.out, r.err, c.want)
 		}
 		// 送达回执在 Decide 返回前已写出；pong 到了说明它之前的帧都已读到

@@ -84,7 +84,7 @@ func stepErr(ctx context.Context, step string, err error) error {
 	return fmt.Errorf("%s: %w", step, err)
 }
 
-// Permission 发审批请求并等答复，直到 ctx 结束。
+// Permission 发一条要等答复的请求并等答复，直到 ctx 结束：审批（kind permission），也包括答题（kind ask，答复带答案）。
 // 守护进程被 SIGSTOP、死锁或卡在写盘时，连接和发送都会成功（内核照收），读答复却会一直阻塞；
 // 所以等答复期间起一个看门狗，定期用新连接发 status，连续失败就以 ErrUnresponsive 取消这次请求。
 // 收到答复（或出错）后看门狗随即退出，Permission 返回前等它退出，不留 goroutine。

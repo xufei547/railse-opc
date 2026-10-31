@@ -36,7 +36,7 @@ var (
 // errParentGone 是 CLI 已退出（钩子被过继）时取消等待的原因。
 var errParentGone = errors.New("父进程（CLI）已退出")
 
-// runHook 永远以“不作决定”收场（stdout 为空、退出 0），除非守护进程明确给了 allow 或 deny。
+// runHook 永远以“不作决定”收场（stdout 为空、退出 0），除非守护进程明确给了 allow、deny 或答题的答案。
 // 这里绝不读取或打印环境变量：CLI 会往钩子环境里注入令牌。
 // 从入口起就接管 SIGTERM、SIGINT、SIGHUP：任何阶段收到信号都不作决定并退出 0，进程不会被信号杀掉。
 func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
@@ -111,9 +111,12 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 	}
 
 	switch in.Kind {
-	case adapter.KindPermission:
+	case adapter.KindPermission, adapter.KindAsk:
 		if ad == nil {
-			return passthrough(stderr, "审批请求没有对应的适配器")
+			return passthrough(stderr, "请求没有对应的适配器")
+		}
+		if in.Kind == adapter.KindAsk {
+			return hookAsk(ctx, ad, client, in, stdout, stderr)
 		}
 		return hookPermission(ctx, ad, client, in, stdout, stderr)
 	case adapter.KindQuestion, adapter.KindDone, adapter.KindSessionEnd:
@@ -150,9 +153,32 @@ func readStdin(ctx context.Context, stdin io.Reader) ([]byte, error) {
 	}
 }
 
-// hookPermission 把审批请求交给守护进程，最多等 DeadlineSeconds+10 秒；
-// ctx 因信号取消、CLI 已退出或守护进程无响应时放弃等待并关掉连接，不作决定。
+// hookPermission 把审批请求交给守护进程等答复（见 awaitReply），按答复渲染 allow、deny，其余不作决定。
 func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.Client, in adapter.Input, stdout, stderr io.Writer) int {
+	resp, err := awaitReply(ctx, ad, client, proto.Request{Kind: "permission", Session: in.Session, ToolName: in.ToolName, Payload: in.Payload})
+	if err != nil {
+		return passthrough(stderr, err.Error())
+	}
+	return writeOutput(stdout, ad.Render(adapter.Decision{Action: resp.Decision, Reason: resp.Reason}))
+}
+
+// hookAsk 把答题请求交给守护进程等答案（见 awaitReply）。只有答复是 answer 才输出：答案合进原 tool_input（questions 等字段
+// 逐字节原样）写成 PreToolUse 的 allow，Claude Code 就不再在终端弹题。其余答复（没接 hub、hub 不可达、过期、手机上选了在终端回答、
+// 不认识 ask 的旧守护进程）一律不输出，Claude Code 在终端照常问；绝不对 PreToolUse 写出审批的输出。
+func hookAsk(ctx context.Context, ad adapter.Adapter, client hookclient.Client, in adapter.Input, stdout, stderr io.Writer) int {
+	resp, err := awaitReply(ctx, ad, client, proto.Request{Kind: "ask", Session: in.Session, ToolName: in.ToolName, Ask: in.Ask})
+	if err != nil {
+		return passthrough(stderr, err.Error())
+	}
+	if resp.Decision != "answer" {
+		return 0
+	}
+	return writeOutput(stdout, ad.Render(adapter.Decision{Action: "answer", Answers: resp.Answers, RawToolInput: in.RawToolInput}))
+}
+
+// awaitReply 把请求（填上协议版本与适配器的期限）交给守护进程并等答复，最多等 DeadlineSeconds+10 秒；
+// ctx 因信号取消、CLI 已退出或守护进程无响应时放弃等待并关掉连接，返回说明原因的错误，调用方不作决定。
+func awaitReply(ctx context.Context, ad adapter.Adapter, client hookclient.Client, req proto.Request) (proto.Response, error) {
 	deadline := time.Duration(ad.DeadlineSeconds()) * time.Second
 	tctx, cancelTimeout := context.WithTimeout(ctx, deadline+10*time.Second)
 	defer cancelTimeout()
@@ -166,16 +192,15 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 		cancel(nil)
 		<-parentDone
 	}()
-	req := proto.Request{V: proto.Version, Kind: "permission", Session: in.Session, ToolName: in.ToolName, Payload: in.Payload, DeadlineSeconds: ad.DeadlineSeconds()}
-	resp, err := client.Permission(ctx, req)
-	if err != nil {
-		return passthrough(stderr, err.Error())
-	}
-	out := ad.Render(adapter.Decision{Action: resp.Decision, Reason: resp.Reason})
+	req.V, req.DeadlineSeconds = proto.Version, ad.DeadlineSeconds()
+	return client.Permission(ctx, req)
+}
+
+// writeOutput 把适配器的输出（非空时）写成一行。适配器约定只用退出码 0，决定全靠 stdout 表达；这里再兜一层，钩子进程恒以 0 退出。
+func writeOutput(stdout io.Writer, out adapter.Output) int {
 	if len(out.Stdout) > 0 {
 		stdout.Write(append(out.Stdout, '\n'))
 	}
-	// 适配器约定只用退出码 0，决定全靠 stdout 表达；这里再兜一层，钩子进程恒以 0 退出。
 	return 0
 }
 

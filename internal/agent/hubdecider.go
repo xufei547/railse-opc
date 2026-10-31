@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -23,6 +24,8 @@ const (
 	reasonNoDecision  = "hub 没有给出有效决定，交回终端处理"
 	reasonAllowed     = "已在手机上批准"
 	reasonDenied      = "已在手机上拒绝"
+	reasonAnswered    = "已在手机上回答"
+	reasonAskTerminal = "在手机上选了在终端回答"
 )
 
 // hub 决定里的字段写进 Outcome 前的字符上限（非 allow/deny 时 hub 给的原因截到 hubErrorReasonMax）。
@@ -53,9 +56,9 @@ func hubDecidedBy(s string) string {
 	return by
 }
 
-// HubDecider 把引擎答 ask 的请求经 HubClient 送到 hub，等人在手机上决定。它永不让 agent 卡住：Gemini 直接交回
-// 原生确认框；连不上 hub、hub 停用本机、送不出去、hub 没给出有效决定，或送出后断线超过 Grace，都交回终端
-// （DecidedBy hub_unreachable，钩子收 passthrough，本机审计记 expired）。
+// HubDecider 把引擎答 ask 的审批请求与答题请求（kind ask）经 HubClient 送到 hub，等人在手机上决定或作答。
+// 它永不让 agent 卡住：Gemini 直接交回原生确认框；连不上 hub、hub 停用本机、送不出去、hub 没给出有效决定，
+// 或送出后断线超过 Grace，都交回终端（DecidedBy hub_unreachable，钩子收 passthrough，本机审计记 expired）。
 type HubDecider struct {
 	Client *HubClient
 	Grace  time.Duration // 等连接、断线后等重连的上限，取 Config.HubGrace（设计文档 3.2 的 30 秒）；≤0 表示不等
@@ -102,12 +105,13 @@ func (d *HubDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, er
 		return unreachable(reasonSendFailed, ""), nil
 	}
 	// 报断线（未连接或写连接失败）视同已送出后断线：请求仍在未完成表里，重连后随对齐重发，按宽限等。
-	return d.wait(ctx, pr.ID, ch)
+	return d.wait(ctx, pr, ch)
 }
 
 // wait 等 hub 的决定。断线时起 Grace 计时，期间重连上就停表接着等（重连对齐会补发决定，重发的 pending 也会让
 // hub 再发）；到期仍未连上，或客户端被 401 停用，交回终端。
-func (d *HubDecider) wait(ctx context.Context, id string, ch <-chan wire.Decision) (Outcome, error) {
+func (d *HubDecider) wait(ctx context.Context, pr PendingRequest, ch <-chan wire.Decision) (Outcome, error) {
+	id := pr.ID
 	var grace *time.Timer
 	defer func() {
 		if grace != nil {
@@ -133,7 +137,7 @@ func (d *HubDecider) wait(ctx context.Context, id string, ch <-chan wire.Decisio
 		}
 		select {
 		case dec := <-ch:
-			return d.settle(id, dec), nil
+			return d.settle(pr, dec), nil
 		case <-ctx.Done():
 			d.abandon(ctx, id)
 			return Outcome{}, ctx.Err()
@@ -149,23 +153,16 @@ func (d *HubDecider) wait(ctx context.Context, id string, ch <-chan wire.Decisio
 	}
 }
 
-// settle 把 hub 的决定换成给钩子的结论，并在是真决定时在后台报送达（最多等 hubNoticeTimeout，报不出去只记日志）：
+// settle 把 hub 的决定换成给钩子的结论（见 hubOutcome），并在是真决定时在后台报送达（最多等 hubNoticeTimeout，报不出去只记日志）：
 // 写锁被大审计帧占着时回执可能要等，不能让钩子跟着等（完成标准 4 要求决定后 1 秒内答复）。
-// 只认 allow、deny：钩子拿固定文案，用户备注只进 Note，DecidedBy 经 hubDecidedBy 过滤。其余任何动作（含 hub 拒收
-// 这条请求时 HubClient 合成的 hub_error 决定、空串）一律交回终端，hub 给的原因只进 Note。
-func (d *HubDecider) settle(id string, dec wire.Decision) Outcome {
-	var reason string
-	switch dec.Action {
-	case "allow":
-		reason = reasonAllowed
-	case "deny":
-		reason = reasonDenied
-	default:
-		d.logf("hub 对请求 %q 的决定无效（action %q，decided_by %q），交回终端",
-			id, clipText(dec.Action, hubLogFieldMax), clipText(dec.DecidedBy, hubLogFieldMax))
+// 无效的决定一律交回终端，hub 给的原因只进 Note，不报送达。
+func (d *HubDecider) settle(pr PendingRequest, dec wire.Decision) Outcome {
+	id := pr.ID
+	out, err := hubOutcome(pr, dec)
+	if err != nil {
+		d.logf("hub 对请求 %q 的决定无效（%v），交回终端", id, err)
 		return unreachable(reasonNoDecision, clipText(dec.Reason, hubErrorReasonMax))
 	}
-	out := Outcome{Action: dec.Action, Reason: reason, RuleID: clipText(dec.RuleID, ruleIDMax), DecidedBy: hubDecidedBy(dec.DecidedBy), Note: clipText(dec.Reason, noteMax)}
 	d.notices.Add(1)
 	go func() {
 		defer d.notices.Done()
@@ -176,6 +173,31 @@ func (d *HubDecider) settle(id string, dec wire.Decision) Outcome {
 		}
 	}()
 	return out
+}
+
+// hubOutcome 把 hub 的决定换成给钩子的结论，DecidedBy 都经 hubDecidedBy 过滤。审批只认 allow、deny：钩子拿固定文案，
+// 用户备注只进 Note。答题只认 answer（每道题都答了，见 checkAnswers；键是脱敏后的题面）与 passthrough（手机上选了让它在终端问，
+// 是用户的决定）。其余任何动作（含 hub 拒收这条请求时 HubClient 合成的 hub_error 决定、空串、不认识答题的旧 hub 当审批批了的
+// allow/deny、审批收到的 answer/passthrough）返回说明原因的错误。
+func hubOutcome(pr PendingRequest, dec wire.Decision) (Outcome, error) {
+	by := hubDecidedBy(dec.DecidedBy)
+	ask := pr.Kind == "ask"
+	switch {
+	case ask && dec.Action == "answer":
+		if err := checkAnswers(pr.Ask, dec.Answers); err != nil {
+			return Outcome{}, fmt.Errorf("答案不合规: %w", err)
+		}
+		return Outcome{Action: "answer", Answers: dec.Answers, Reason: reasonAnswered, DecidedBy: by}, nil
+	case ask && dec.Action == "passthrough":
+		return Outcome{Action: "passthrough", Reason: reasonAskTerminal, DecidedBy: by}, nil
+	case !ask && (dec.Action == "allow" || dec.Action == "deny"):
+		reason := reasonAllowed
+		if dec.Action == "deny" {
+			reason = reasonDenied
+		}
+		return Outcome{Action: dec.Action, Reason: reason, RuleID: clipText(dec.RuleID, ruleIDMax), DecidedBy: by, Note: clipText(dec.Reason, noteMax)}, nil
+	}
+	return Outcome{}, fmt.Errorf("action %q，decided_by %q", clipText(dec.Action, hubLogFieldMax), clipText(dec.DecidedBy, hubLogFieldMax))
 }
 
 // abandon 在 ctx 结束时告诉 hub：钩子消失发 cancel(terminal)，等待到期发 expired，其余（守护进程停止）发

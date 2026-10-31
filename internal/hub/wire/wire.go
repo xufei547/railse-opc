@@ -21,7 +21,7 @@ const Proto = 1
 const (
 	THello     = "hello"     // 守护进程 → hub，连接后的第一帧
 	TWelcome   = "welcome"   // hub → 守护进程，带规则快照与暂停状态
-	TPending   = "pending"   // 守护进程 → hub，引擎答 ask 的请求
+	TPending   = "pending"   // 守护进程 → hub，引擎答 ask 的审批请求，或要人答的题（kind ask）
 	TCancel    = "cancel"    // 守护进程 → hub，钩子消失
 	TExpired   = "expired"   // 守护进程 → hub，等待过期
 	TDecision  = "decision"  // hub → 守护进程
@@ -68,9 +68,13 @@ type Welcome struct {
 }
 
 // PendingRequest 是送到 hub 等人决定的请求，载荷已脱敏。
+// Kind 为空表示审批（旧守护进程不发这个键）；为 ask 时是要人答的题：带 Ask（已脱敏），ToolName 为 AskUserQuestion，
+// Payload 为零值、Risk 为空。新字段都可选，不提协议版本。
 type PendingRequest struct {
 	T               string         `json:"t"`
 	RequestID       string         `json:"request_id"`
+	Kind            string         `json:"kind,omitempty"`
+	Ask             *proto.Ask     `json:"ask,omitempty"`
 	Session         proto.Session  `json:"session"`
 	ToolName        string         `json:"tool_name"`
 	Payload         policy.Payload `json:"payload"`
@@ -94,14 +98,16 @@ type Expired struct {
 	RequestID string `json:"request_id"`
 }
 
-// Decision 是 hub 下发的决定，Action 为 allow 或 deny。
+// Decision 是 hub 下发的决定。审批的 Action 为 allow 或 deny；答题（kind ask）的 Action 为 answer（带 Answers：
+// 脱敏后的题面 → 答案）或 passthrough（手机上选了让它在终端问）。
 type Decision struct {
-	T         string `json:"t"`
-	RequestID string `json:"request_id"`
-	Action    string `json:"action"`
-	Reason    string `json:"reason"`
-	RuleID    string `json:"rule_id,omitempty"`
-	DecidedBy string `json:"decided_by"`
+	T         string            `json:"t"`
+	RequestID string            `json:"request_id"`
+	Action    string            `json:"action"`
+	Reason    string            `json:"reason"`
+	RuleID    string            `json:"rule_id,omitempty"`
+	DecidedBy string            `json:"decided_by"`
+	Answers   map[string]string `json:"answers,omitempty"`
 }
 
 // Delivered 是守护进程确认决定已交给钩子。
