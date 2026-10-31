@@ -30,24 +30,47 @@ type Session struct {
 	Cwd          string `json:"cwd"`
 }
 
-// Request 是一次审批请求，Kind 固定为 permission。
+// Option 是一道题的一个备选项。
+type Option struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// Question 是 AskUserQuestion 的一道题。
+type Question struct {
+	Question    string   `json:"question"`
+	Header      string   `json:"header,omitempty"`
+	Options     []Option `json:"options"`
+	MultiSelect bool     `json:"multiSelect,omitempty"`
+}
+
+// Ask 是 Claude Code 的 AskUserQuestion 要人答的题，原样转述，不做判断。
+type Ask struct {
+	Questions []Question `json:"questions"`
+}
+
+// Request 是一次请求，Kind 为 permission（审批）或 ask（答题）。
+// Kind 为 ask 时带 Ask，Payload 为零值，ToolName 为 AskUserQuestion。
 type Request struct {
 	V               int            `json:"v"`
 	Kind            string         `json:"kind"`
 	Session         Session        `json:"session"`
 	ToolName        string         `json:"tool_name"`
 	Payload         policy.Payload `json:"payload"`
+	Ask             *Ask           `json:"ask,omitempty"`
 	DeadlineSeconds int            `json:"deadline_seconds"`
 }
 
-// Response 是守护进程对审批请求的答复。Decision 为 allow、deny 或 passthrough。
+// Response 是守护进程对请求的答复。Decision 为 allow、deny、passthrough 或 answer。
+// Decision 为 answer 时带 Answers：问题原文 → 答案（多选题的各个答案用逗号连接）。
 type Response struct {
-	V         int    `json:"v"`
-	Decision  string `json:"decision"`
-	Reason    string `json:"reason,omitempty"`
-	RuleID    string `json:"rule_id,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	Risk      string `json:"risk,omitempty"`
+	V         int               `json:"v"`
+	Decision  string            `json:"decision"`
+	Reason    string            `json:"reason,omitempty"`
+	RuleID    string            `json:"rule_id,omitempty"`
+	RequestID string            `json:"request_id,omitempty"`
+	Risk      string            `json:"risk,omitempty"`
+	Answers   map[string]string `json:"answers,omitempty"`
 }
 
 // Event 是只展示不操作的事件，Kind 为 question、done 或 session_end。
