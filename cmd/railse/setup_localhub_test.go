@@ -137,7 +137,8 @@ func (s *enrollSpy) seen() []string {
 
 // startLocalTestHub 在 127.0.0.1:<port> 起一个真 hub（数据目录 dir），模拟“托管的 hub 已在跑”。返回的 enrollSpy 记下
 // 接入请求里的接入码（请求体原样交给 hub）。
-func startLocalTestHub(t *testing.T, dir string, port int) *enrollSpy {
+// hubVersion 给了就当这个 hub 的版本（默认 dev）。
+func startLocalTestHub(t *testing.T, dir string, port int, hubVersion ...string) *enrollSpy {
 	t.Helper()
 	if err := ensureHubDir(dir); err != nil {
 		t.Fatal(err)
@@ -148,6 +149,9 @@ func startLocalTestHub(t *testing.T, dir string, port int) *enrollSpy {
 	}
 	cfg := hub.DefaultConfig(dir)
 	cfg.Listen = "127.0.0.1:" + strconv.Itoa(port)
+	if len(hubVersion) > 0 {
+		cfg.Version = hubVersion[0]
+	}
 	cfg, _ = cfg.Effective()
 	srv, err := hub.New(cfg, st, log.New(io.Discard, "", 0))
 	if err != nil {
@@ -964,4 +968,49 @@ func TestSetupLocalHubWarnsBeforeReplacingServe(t *testing.T) {
 	if strings.Contains(out.String(), "将替换") || ts.funnelCalls() != 1 {
 		t.Fatalf("指向的就是本机 hub，不该说替换:\n%s", out.String())
 	}
+}
+
+// 本机 hub 已在跑、设置没变而跳过托管时，在跑的 hub 版本与本程序不同（升级后没重启本机 hub）：多打一句，
+// 说清选择题会交回终端，并给出重启命令；不自动重启。版本一样、或本程序是开发构建（版本串 dev，没法比）时不提示。
+func TestSetupLocalHubOldRunningHubHint(t *testing.T) {
+	run := func(t *testing.T, progVersion, hubVersion string) string {
+		f := localHubEnv(t)
+		fakeTailscale(t, tsStatusOK, tsServeOn(f.port), "", 0)
+		startLocalTestHub(t, f.hubDir, f.port, hubVersion)
+		stubHubJobRunning(t, true)
+		if err := os.WriteFile(localHubPath(f.hubDir), []byte(`{"port":`+strconv.Itoa(f.port)+`,"public_url":"`+tsPublicURL+`","provider":"tailscale"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		old := version
+		version = progVersion
+		t.Cleanup(func() { version = old })
+		var o, e bytes.Buffer
+		if _, _, _, err := setupLocalHub(runtime.GOOS, f.opts(localHubTestPassword+"\n", &o, &e)); err != nil {
+			t.Fatalf("%v\n%s\n%s", err, o.String(), e.String())
+		}
+		if f.hostedHub() {
+			t.Fatalf("不该重新托管: %v", f.rec.calls)
+		}
+		return o.String()
+	}
+	t.Run("版本不同则提示", func(t *testing.T) {
+		out := run(t, "9.9.9-test", "0.1.4")
+		if !strings.Contains(out, "还是旧版本") || !strings.Contains(out, "选择题会直接交回终端") || !strings.Contains(out, localHubRestartCmd(runtime.GOOS)) {
+			t.Fatalf("应提示本机 hub 旧了并给重启命令: %s", out)
+		}
+		if !strings.Contains(out, "重启") || strings.Contains(out, "已自动重启") {
+			t.Fatalf("只提示，不自动重启: %s", out)
+		}
+	})
+	t.Run("版本一样不提示", func(t *testing.T) {
+		if out := run(t, "0.1.5", "0.1.5"); strings.Contains(out, "还是旧版本") {
+			t.Fatalf("版本一样不该提示: %s", out)
+		}
+	})
+	t.Run("开发构建不提示", func(t *testing.T) {
+		out := run(t, "dev", "0.1.4")
+		if strings.Contains(out, "还是旧版本") {
+			t.Fatalf("开发构建没法比版本，不提示: %s", out)
+		}
+	})
 }

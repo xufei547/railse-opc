@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -504,11 +505,13 @@ func TestAskOldHubPassthrough(t *testing.T) {
 	if resp.Decision != "passthrough" || len(resp.Answers) != 0 || resp.Reason != reasonOldHub {
 		t.Fatalf("应交回终端并说明 hub 太旧: %+v", resp)
 	}
-	if e := onlyAudit(t, env); e.Kind != "ask" || e.Action != "passthrough" || e.State != "expired" || e.DecidedBy != hubUnreachable || e.Reason != reasonOldHub {
+	e := onlyAudit(t, env)
+	if e.Kind != "ask" || e.Action != "passthrough" || e.State != "expired" || e.DecidedBy != hubUnreachable || e.Reason != reasonOldHub {
 		t.Fatalf("审计应记 expired/hub_unreachable: %+v", e)
 	}
-	if !strings.Contains(tc.logs.String(), "太旧") {
-		t.Fatalf("日志应说明 hub 太旧:\n%s", tc.logs.String())
+	// 认准 HubDecider.oldHub 自己那一行（带 decider 前缀与该请求 id）：HubClient 连上时那行日志也含“太旧”，不能拿它充数
+	if want := fmt.Sprintf("decider hub 版本太旧，不认识提问，请求 %q 交回终端", e.RequestID); e.RequestID == "" || !strings.Contains(tc.logs.String(), want) {
+		t.Fatalf("日志应有 decider 的一行 %q:\n%s", want, tc.logs.String())
 	}
 	if err := tc.c.SendPending(*askPendingFor("a2")); !errors.Is(err, ErrHubNoAsk) {
 		t.Fatalf("SendPending 对提问应报 ErrHubNoAsk: %v", err)

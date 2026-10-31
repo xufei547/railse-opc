@@ -99,7 +99,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 
 ## 暂停与恢复
 
-`railse agent pause` 后，除命中用户 deny 规则的请求外一律交回终端；`railse agent resume` 恢复。暂停状态存在 `state.json`，重启守护进程后保持。
+`railse agent pause` 后，除命中用户 deny 规则的请求外一律交回终端（Claude Code 的选择题不受暂停影响）；`railse agent resume` 恢复。暂停状态存在 `state.json`，重启守护进程后保持。
 
 ## 三家 CLI 的差异
 
