@@ -336,6 +336,84 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"没有 hub 数据目录（查过 %s）":      "no hub data directory (looked in %s)",
 	"没有 hub 数据目录（查过 %s 与 %s）": "no hub data directory (looked in %s and %s)",
 
+	// cmd/railse/hook.go（钩子留在用户终端 stderr 里的句子；都接在 "railse hook: " 后面，所以小写开头）
+	`用法:
+  railse hook claude|codex|gemini [--socket 路径]      读 stdin 的钩子 JSON
+  railse hook codex-notify [--socket 路径] <json>      Codex notify 的最后一个参数`: `Usage:
+  railse hook claude|codex|gemini [--socket path]      reads the hook JSON from stdin
+  railse hook codex-notify [--socket path] <json>      the last argument Codex notify passes`,
+	"父进程（CLI）已退出":               "the parent process (the CLI) has exited",
+	"内部错误: %v":                  "internal error: %v",
+	"收到信号 %v":                   "got signal %v",
+	"守护进程 socket 路径":            "daemon socket path",
+	"参数错误: %v":                  "bad arguments: %v",
+	"codex-notify 需要一个 JSON 参数": "codex-notify needs a JSON argument",
+	"不认识的 CLI %s":               "unknown CLI %s",
+	"请求没有对应的适配器":                "no adapter for this request",
+	"读 stdin: %w":               "reading stdin: %w",
+	"，交回终端处理":                   "; handed back to the terminal",
+	"命中规则 %s":                   "Matched rule %s",
+
+	// cmd/railse/hook.go 的 localizeReason：守护进程回传的固定理由，用 i18n.Lookup 查（完整性测试查不到，TestLocalizeReasonFixedSentences 核对）。
+	// 原文逐字抄自 internal/agent/hubdecider.go 的 reason* 常量、internal/agent/server.go 与 requests.go 写进答复的固定句子、
+	// internal/policy/engine.go 的暂停理由；那边改了这里要一起改。只有拒绝理由会显示（接在 "Railse: " 后面，所以大写开头）。
+	"已在手机上批准":                    "Approved on your phone",
+	"已在手机上拒绝":                    "Denied on your phone",
+	"已在手机上回答":                    "Answered on your phone",
+	"在手机上选了在终端回答":                "You chose on your phone to answer in the terminal",
+	"Gemini 只能拒绝不能放行，交回原生确认框":    "Gemini hooks can deny but not approve; handed back to Gemini's own prompt",
+	"没有配置 hub，交回终端处理":            "No hub is set up; handed back to the terminal",
+	"连不上 hub，交回终端处理":             "Can't reach the hub; handed back to the terminal",
+	"hub 拒绝了本机密钥，交回终端处理":         "The hub rejected this machine's key; handed back to the terminal",
+	"无法送往 hub，交回终端处理":            "Couldn't send it to the hub; handed back to the terminal",
+	"与 hub 断线超过宽限，交回终端处理":        "Lost the hub connection for too long; handed back to the terminal",
+	"hub 没有给出有效决定，交回终端处理":        "The hub didn't give a valid decision; handed back to the terminal",
+	"hub 版本太旧，不认识提问，交回终端处理":      "The hub is too old to handle questions; handed back to the terminal",
+	"请求格式错误":                     "Malformed request",
+	"自动审批已暂停，交回终端处理":             "Auto-approval is paused; handed back to the terminal",
+	"自动审批已暂停":                    "Auto-approval is paused",
+	"本机没有连接 hub，交回终端处理":          "This machine isn't connected to a hub; handed back to the terminal",
+	"等待过期，交回终端处理":                "Timed out waiting; handed back to the terminal",
+	"守护进程正在停止，交回终端处理":            "The daemon is stopping; handed back to the terminal",
+	"决定来源出错，交回终端处理":              "The decider failed; handed back to the terminal",
+	"决定来源给的答案不完整，交回终端处理":         "The decider returned an incomplete answer; handed back to the terminal",
+	"脱敏后有题面相同的题，分不清答的是哪道，交回终端处理": "Two questions read the same after redaction, so answers can't be matched; handed back to the terminal",
+
+	// internal/hookclient/client.go
+	"守护进程无响应":      "the daemon isn't responding",
+	"连接守护进程: %w":   "can't connect to the daemon: %w",
+	"发送请求":         "sending the request",
+	"等待答复":         "waiting for the reply",
+	"守护进程拒绝事件: %s": "the daemon rejected the event: %s",
+
+	// internal/adapter/adapter.go（ValidateAsk 也被守护进程与 hub 调用，那里随各自进程的语言）
+	"Railse：已拒绝": "Railse: denied",
+	"Railse：":    "Railse: ",
+	"AskUserQuestion 的题目不合规: 没有题目":                                "invalid AskUserQuestion: no questions",
+	"AskUserQuestion 的题目不合规: 有 %d 题，最多 %d 题":                      "invalid AskUserQuestion: %d questions, at most %d",
+	"AskUserQuestion 的题目不合规: 第 %d 题 question 为空":                  "invalid AskUserQuestion: question %d is empty",
+	"AskUserQuestion 的题目不合规: 第 %d 题 question 超过 %d 字符":            "invalid AskUserQuestion: question %d is over %d characters",
+	"AskUserQuestion 的题目不合规: 第 %d 题与第 %d 题的 question 相同":          "invalid AskUserQuestion: question %d is the same as question %d",
+	"AskUserQuestion 的题目不合规: 第 %d 题 header 超过 %d 字符":              "invalid AskUserQuestion: question %d header is over %d characters",
+	"AskUserQuestion 的题目不合规: 第 %d 题有 %d 个选项，最多 %d 个":              "invalid AskUserQuestion: question %d has %d options, at most %d",
+	"AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 label 为空":             "invalid AskUserQuestion: question %d option %d has an empty label",
+	"AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 label 超过 %d 字符":       "invalid AskUserQuestion: question %d option %d label is over %d characters",
+	"AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 description 超过 %d 字符": "invalid AskUserQuestion: question %d option %d description is over %d characters",
+	"解析 tool_input: %w": "can't parse tool_input: %w",
+
+	// internal/adapter/claude.go、codex.go、gemini.go
+	"解析 Claude 钩子输入: %w":                          "can't parse the Claude hook input: %w",
+	"PermissionRequest 缺少 session_id 或 tool_name": "PermissionRequest is missing session_id or tool_name",
+	"PreToolUse 缺少 session_id":                    "PreToolUse is missing session_id",
+	"AskUserQuestion 的题目不合规: 解析 tool_input: %w":   "invalid AskUserQuestion: can't parse tool_input: %w",
+	"解析 Codex 钩子输入: %w":                           "can't parse the Codex hook input: %w",
+	"解析 Codex notify 参数: %w":                      "can't parse the Codex notify argument: %w",
+	"解析 Gemini 钩子输入: %w":                          "can't parse the Gemini hook input: %w",
+	"BeforeTool 缺少 session_id 或 tool_name":        "BeforeTool is missing session_id or tool_name",
+
+	// internal/agent/config.go
+	"找不到家目录: %w": "can't find your home directory: %w",
+
 	// internal/doctor/report.go
 	"：%s":             ": %s",
 	"        修复：%s\n": "        Fix: %s\n",

@@ -2,8 +2,10 @@ package adapter
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -29,13 +31,13 @@ type codexHook struct {
 func (codex) Parse(stdin []byte) (Input, error) {
 	var h codexHook
 	if err := json.Unmarshal(stdin, &h); err != nil {
-		return Input{}, fmt.Errorf("解析 Codex 钩子输入: %w", err)
+		return Input{}, fmt.Errorf(i18n.T("解析 Codex 钩子输入: %w"), err)
 	}
 	in := Input{Session: proto.Session{Tool: "codex", CLISessionID: h.SessionID, TurnID: h.TurnID, Cwd: h.Cwd}}
 	switch h.HookEventName {
 	case "PermissionRequest":
 		if h.SessionID == "" || h.ToolName == "" {
-			return Input{}, fmt.Errorf("PermissionRequest 缺少 session_id 或 tool_name")
+			return Input{}, errors.New(i18n.T("PermissionRequest 缺少 session_id 或 tool_name"))
 		}
 		p, err := mapTool("codex", h.ToolName, h.ToolInput, h.Cwd)
 		if err != nil {
@@ -65,7 +67,7 @@ func ParseCodexNotify(arg []byte) (Input, error) {
 		LastMessage string `json:"last-assistant-message"`
 	}
 	if err := json.Unmarshal(arg, &n); err != nil {
-		return Input{}, fmt.Errorf("解析 Codex notify 参数: %w", err)
+		return Input{}, fmt.Errorf(i18n.T("解析 Codex notify 参数: %w"), err)
 	}
 	in := Input{Session: proto.Session{Tool: "codex", CLISessionID: n.ThreadID, TurnID: n.TurnID, Cwd: n.Cwd}}
 	if n.Type != "agent-turn-complete" {

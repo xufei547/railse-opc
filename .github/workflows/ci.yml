@@ -9,6 +9,9 @@ jobs:
   go:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Go 测试的断言是中文：钉死界面语言，免得按 runner 的 LANG 跑成英文
+    env:
+      RAILSE_LANG: zh
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7

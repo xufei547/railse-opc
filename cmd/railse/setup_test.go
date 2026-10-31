@@ -23,7 +23,6 @@ import (
 	"github.com/xufei547/railse-opc/internal/hooksconf"
 	"github.com/xufei547/railse-opc/internal/hub/store"
 	"github.com/xufei547/railse-opc/internal/i18n"
-	"github.com/xufei547/railse-opc/internal/proto"
 	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
@@ -2945,8 +2944,8 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 
 // setup all 的英文：已接入的机器重跑（跳过接入、装钩子、--no-autostart、体检、下一步），整段输出（含 doctor 打印的体检）都不带中文。
 // 成功后数据目录里写 lang 文件（当前语言 en）；已有的 lang 文件不改。不出网：同 TestSetupAllRerunBoxShowsEnrolledHub。
-// 体检的细节里会原样带出两处不归 doctor 翻的报错，这里换成英文的假报错：拦请求的 RoundTripper 的报错（测试自己的），
-// 与问守护进程状态的报错（internal/hookclient 的“连接守护进程: …”，由钩子那一步的任务翻）。
+// 体检的细节里会原样带出拦请求的 RoundTripper 的报错（测试自己的），这里换成英文的假报错；问守护进程状态走真的
+// internal/hookclient（临时目录里没有守护进程），它的“连接守护进程: …”在英文下也是英文。
 func TestSetupAllEnglish(t *testing.T) {
 	i18n.Set(i18n.EN)
 	t.Cleanup(func() { i18n.Set(i18n.ZH) })
@@ -2961,7 +2960,6 @@ func TestSetupAllEnglish(t *testing.T) {
 			doctorHosts = append(doctorHosts, r.URL.Hostname())
 			return nil, errors.New("offline in tests")
 		})}
-		o.AgentStatus = func(string) (proto.Status, error) { return proto.Status{}, errors.New("no daemon in tests") }
 	})
 	oldDefault := http.DefaultTransport
 	http.DefaultTransport = failingTransport(&otherHosts)
@@ -2980,7 +2978,7 @@ func TestSetupAllEnglish(t *testing.T) {
 		}
 	}
 	// 体检那一段是 doctor 打印的英文
-	for _, want := range []string{"[fail]  Hub reachable: ", "        Fix: ", " passed, ", "Some health checks failed"} {
+	for _, want := range []string{"[fail]  Hub reachable: ", "        Fix: ", " passed, ", "Some health checks failed", "can't connect to the daemon: "} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("体检那一段缺 %q:\n%s", want, s)
 		}

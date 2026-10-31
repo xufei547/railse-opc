@@ -15,9 +15,10 @@ build: web
 	go build -o railse ./cmd/railse
 
 # gofmt（见下）、lint（见下）、vet、Go 测试（-race）、网页检查（tsc 与 vitest）
+# Go 测试钉死中文界面（RAILSE_LANG=zh）：现有断言都是中文，不钉的话没有 LANG 的终端会按英文跑
 test: gofmt lint
 	go vet ./...
-	go test ./... -race
+	RAILSE_LANG=zh go test ./... -race
 	cd web && npm ci && npm run check
 
 # gofmt 查入库的与新建还没 git add 的 Go 文件（git ls-files -co --exclude-standard），不查 .gitignore 里的：

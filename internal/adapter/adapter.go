@@ -5,12 +5,14 @@ package adapter
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/policy"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
@@ -127,41 +129,42 @@ const (
 // ValidateAsk 校验 AskUserQuestion 的题目：1 到 4 题；每题 question 非空且不超过 2000 字符，各题 question 互不相同
 // （答案以 question 为键，重复了会互相覆盖）；options 0 到 8 个，label 非空且不超过 200 字符，description 不超过 2000 字符；
 // header 不超过 60 字符。不合规返回说明原因的错误，调用方当作不认识这条请求，让终端照常问。
+// 报错过 i18n.T，随调用它的进程的语言：钩子里是用户终端的语言，守护进程与 hub 里是各自进程解析到的语言（只进它们的日志与审计）。
 func ValidateAsk(a *proto.Ask) error {
 	if a == nil || len(a.Questions) == 0 {
-		return fmt.Errorf("AskUserQuestion 的题目不合规: 没有题目")
+		return errors.New(i18n.T("AskUserQuestion 的题目不合规: 没有题目"))
 	}
 	if len(a.Questions) > askMaxQuestions {
-		return fmt.Errorf("AskUserQuestion 的题目不合规: 有 %d 题，最多 %d 题", len(a.Questions), askMaxQuestions)
+		return fmt.Errorf(i18n.T("AskUserQuestion 的题目不合规: 有 %d 题，最多 %d 题"), len(a.Questions), askMaxQuestions)
 	}
 	for i, q := range a.Questions {
 		n := i + 1
 		if q.Question == "" {
-			return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题 question 为空", n)
+			return fmt.Errorf(i18n.T("AskUserQuestion 的题目不合规: 第 %d 题 question 为空"), n)
 		}
 		if utf8.RuneCountInString(q.Question) > askMaxQuestionLen {
-			return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题 question 超过 %d 字符", n, askMaxQuestionLen)
+			return fmt.Errorf(i18n.T("AskUserQuestion 的题目不合规: 第 %d 题 question 超过 %d 字符"), n, askMaxQuestionLen)
 		}
 		for j := range i {
 			if a.Questions[j].Question == q.Question {
-				return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题与第 %d 题的 question 相同", n, j+1)
+				return fmt.Errorf(i18n.T("AskUserQuestion 的题目不合规: 第 %d 题与第 %d 题的 question 相同"), n, j+1)
 			}
 		}
 		if utf8.RuneCountInString(q.Header) > askMaxHeaderLen {
-			return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题 header 超过 %d 字符", n, askMaxHeaderLen)
+			return fmt.Errorf(i18n.T("AskUserQuestion 的题目不合规: 第 %d 题 header 超过 %d 字符"), n, askMaxHeaderLen)
 		}
 		if len(q.Options) > askMaxOptions {
-			return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题有 %d 个选项，最多 %d 个", n, len(q.Options), askMaxOptions)
+			return fmt.Errorf(i18n.T("AskUserQuestion 的题目不合规: 第 %d 题有 %d 个选项，最多 %d 个"), n, len(q.Options), askMaxOptions)
 		}
 		for j, o := range q.Options {
 			if o.Label == "" {
-				return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 label 为空", n, j+1)
+				return fmt.Errorf(i18n.T("AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 label 为空"), n, j+1)
 			}
 			if utf8.RuneCountInString(o.Label) > askMaxLabelLen {
-				return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 label 超过 %d 字符", n, j+1, askMaxLabelLen)
+				return fmt.Errorf(i18n.T("AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 label 超过 %d 字符"), n, j+1, askMaxLabelLen)
 			}
 			if utf8.RuneCountInString(o.Description) > askMaxDescLen {
-				return fmt.Errorf("AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 description 超过 %d 字符", n, j+1, askMaxDescLen)
+				return fmt.Errorf(i18n.T("AskUserQuestion 的题目不合规: 第 %d 题第 %d 个选项 description 超过 %d 字符"), n, j+1, askMaxDescLen)
 			}
 		}
 	}
@@ -219,12 +222,12 @@ func marshalNoEscape(v any) ([]byte, error) {
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
-// denyMessage 是拒绝时给 agent 看的理由，带 Railse 前缀；理由为空时用固定文案。
+// denyMessage 是拒绝时给 agent 看的理由，带 Railse 前缀；理由为空时用固定文案。reason 由钩子按终端语言翻好（见 cmd/railse 的 localizeReason）。
 func denyMessage(reason string) string {
 	if reason == "" {
-		return "Railse：已拒绝"
+		return i18n.T("Railse：已拒绝")
 	}
-	return "Railse：" + reason
+	return i18n.T("Railse：") + reason
 }
 
 // clip 把 s 截到不超过 n 字节，并退到字符边界，不切开多字节字符。
@@ -319,7 +322,7 @@ func decodeToolInput(raw json.RawMessage) (toolInput, error) {
 	var ti toolInput
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &ti); err != nil {
-			return toolInput{}, fmt.Errorf("解析 tool_input: %w", err)
+			return toolInput{}, fmt.Errorf(i18n.T("解析 tool_input: %w"), err)
 		}
 	}
 	return ti, nil
