@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './api'
 import {
   answerFor,
+  answerLabel,
   answers,
   askQuestions,
   askReducer,
@@ -293,5 +294,31 @@ describe('sendAsk 的英文兜底', () => {
     setLang('en')
     expect(await sendAsk(() => Promise.reject(new TypeError('boom')))).toEqual({ failed: "Couldn't submit" })
     expect(await sendAsk(() => Promise.reject(new ApiError(400, '答案不合规：第 1 题没有答案')))).toEqual({ failed: '答案不合规：第 1 题没有答案' })
+  })
+})
+
+describe('answerLabel', () => {
+  const fruit: Question = { question: '苹果还是香蕉？', options: [{ label: 'Apple' }, { label: 'Banana' }] }
+  const many: Question = { question: '要哪些？', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] }
+  const free: Question = { question: '还有什么？', options: [] }
+  it('没答全只写“回答”；答全了带上答案；多题用；连；自己填的裁到 20 字', () => {
+    expect(answerLabel([fruit], initAsk([fruit]))).toBe('回答')
+    expect(answerLabel([fruit], { ...initAsk([fruit]), picked: [[1]] })).toBe('回答：Banana')
+    const long = 'x'.repeat(30)
+    expect(answerLabel([fruit, free], { ...initAsk([fruit, free]), picked: [[1], []], custom: ['', long] })).toBe(`回答：Banana；${'x'.repeat(20)}…`)
+  })
+  it('多选列出所选标签；自己填的里带逗号也不被改写', () => {
+    expect(answerLabel([many], { ...initAsk([many]), picked: [[0, 2]] })).toBe('回答：A、C')
+    expect(answerLabel([free], { ...initAsk([free]), custom: ['a, b'] })).toBe('回答：a, b')
+  })
+  it('英文', () => {
+    setLang('en')
+    try {
+      expect(answerLabel([fruit], initAsk([fruit]))).toBe('Answer')
+      expect(answerLabel([fruit], { ...initAsk([fruit]), picked: [[1]] })).toBe('Answer: Banana')
+      expect(answerLabel([fruit, many], { ...initAsk([fruit, many]), picked: [[1], [0, 2]] })).toBe('Answer: Banana; A, C')
+    } finally {
+      setLang('zh')
+    }
   })
 })

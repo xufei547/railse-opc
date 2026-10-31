@@ -182,6 +182,10 @@ describe('AskFormView', () => {
     expect(link(html)?.[2]).toBe('让它在终端问我')
     html = form(qs, st(qs, { picked: [[1], []], custom: ['', ' 好 '] }))
     expect(answer(html)?.[1]).not.toContain('disabled')
+    html = form(qs, st(qs, { picked: [[1], []], custom: ['', '随便'] }))
+    expect(answer(html)?.[1]).not.toContain('disabled')
+    expect(answer(html)?.[2]).toBe('回答：Banana；随便')
+    expect(html).toContain('class="ask-bar"')
     html = form(qs, st(qs, { custom: ['', '  '] }))
     expect(answer(html)?.[1]).toContain('disabled=""')
   })
@@ -554,8 +558,7 @@ describe('英文（SSR）：组件里没有中文', () => {
     expect(html).toContain('<span>Your own answer</span>')
     expect(html).toContain('3 left to answer')
     expect(html).toContain('>Ask me in the terminal instead</button>')
-    // “回答”按钮的标签由 Task 8 改（answerLabel），这里先把它剔掉再查
-    expect(html.replace('>回答</button>', '></button>')).not.toMatch(cjk)
+    expect(html).not.toMatch(cjk)
     const busy = (s: Partial<AskState>) =>
       renderToStaticMarkup(<AskFormView questions={qs} state={{ ...initAsk(qs), ...s }} dispatch={noop as (a: AskAction) => void} onAnswer={noop} onPassthrough={noop} />)
     const answering = busy({ picked: [[0], [1], []], custom: ['', '', 'no'], busy: 'answer' })
@@ -563,7 +566,7 @@ describe('英文（SSR）：组件里没有中文', () => {
     expect(answering).not.toMatch(cjk)
     const passing = busy({ busy: 'passthrough' })
     expect(passing).toContain('Handing back to the terminal…')
-    expect(passing.replace('>回答</button>', '></button>')).not.toMatch(cjk)
+    expect(passing).not.toMatch(cjk)
   })
 
   it('DecideSheet：标题按动作与载荷、记住开关、取消与确认', () => {

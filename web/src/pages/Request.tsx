@@ -122,7 +122,7 @@ function RequestDetail({ id }: { id: string }) {
         {data && <RequestBody data={data} onOpen={open} onDone={onDone} />}
         {!data && !missing && !error && <div className="empty">{t('加载中…')}</div>}
       </div>
-      {view && <ResultToast view={view} onClose={() => setOutcome(null)} raised={canDecide} ref={toast} />}
+      {view && <ResultToast view={view} onClose={() => setOutcome(null)} raised={canDecide || (r?.kind === 'ask' && r.state === 'pending')} ref={toast} />}
       {r && action && <DecideSheet key={action} request={r} action={action} onClose={() => setAction(null)} onDone={onDone} />}
     </>
   )

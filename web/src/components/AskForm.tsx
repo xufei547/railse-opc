@@ -2,6 +2,7 @@ import { useEffect, useId, useReducer, useRef, useState } from 'react'
 import { hub } from '../api'
 import {
   answerFor,
+  answerLabel,
   askQuestions,
   askReducer,
   canAnswer,
@@ -95,17 +96,19 @@ export function AskFormView({ questions, state: s, dispatch, onAnswer, onPassthr
           {s.error}
         </div>
       )}
-      {left > 0 && (
-        <p className="sub ask-hint" role="status">
-          {t('还有 {n} 题没答', { n: left })}
-        </p>
-      )}
-      <button type="button" className="btn primary block" onClick={onAnswer} disabled={!canAnswer(questions, s)}>
-        {s.busy === 'answer' ? t('正在提交…') : '回答'}
-      </button>
-      <button type="button" className="link-btn" onClick={onPassthrough} disabled={busy}>
-        {s.busy === 'passthrough' ? t('正在交回终端…') : t('让它在终端问我')}
-      </button>
+      <div className="ask-bar">
+        {left > 0 && (
+          <p className="sub ask-hint" role="status">
+            {t('还有 {n} 题没答', { n: left })}
+          </p>
+        )}
+        <button type="button" className="btn primary block" onClick={onAnswer} disabled={!canAnswer(questions, s)}>
+          {s.busy === 'answer' ? t('正在提交…') : answerLabel(questions, s)}
+        </button>
+        <button type="button" className="link-btn" onClick={onPassthrough} disabled={busy}>
+          {s.busy === 'passthrough' ? t('正在交回终端…') : t('让它在终端问我')}
+        </button>
+      </div>
     </div>
   )
 }

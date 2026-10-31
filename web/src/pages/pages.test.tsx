@@ -515,8 +515,7 @@ describe('英文（SSR）：页面里没有中文', () => {
     })
     const body = inRouter(<RequestBody data={{ request: r, audit: [] }} onOpen={noop} onDone={noop} />)
     expect(body).toContain('Apple or banana?')
-    // “回答”按钮留给 Task 8，先剔掉再断言没有中文
-    expect(body.replace('>回答</button>', '></button>')).not.toMatch(cjk)
+    expect(body).not.toMatch(cjk)
   })
 
   it('规则：卡片、首屏、高风险横幅（单复数）、没有规则', () => {

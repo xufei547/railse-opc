@@ -1,7 +1,8 @@
 // 答题表单（单选、多选、自己填、交回终端）的状态与规则。纯函数，便于不带浏览器环境测试；AskForm 只负责渲染与发请求。
 
 import { classifyError } from './decide'
-import { t } from './i18n'
+import { clip } from './format'
+import { lang, t } from './i18n'
 import type { AnswerBody, Option, Question, RequestView } from './types'
 
 /** 一道题的答法：回答（带答案），或把问题交回终端。 */
@@ -120,6 +121,21 @@ export function answers(questions: Question[], s: AskState): Record<string, stri
 /** 还有几题没答（选了选项或自己填了才算答）；全答了为 0。 */
 export function unansweredCount(questions: Question[], s: AskState): number {
   return questions.filter((_, i) => (s.picked[i] ?? []).length === 0 && !filled(s.custom[i] ?? '')).length
+}
+
+/** 底部按钮的标签：答全了带上答案，让人确认自己选了什么再发；多选列所选标签，自己填的裁到 20 字。 */
+export function answerLabel(questions: Question[], s: AskState): string {
+  const base = t('回答')
+  if (answers(questions, s) === null) return base
+  const en = lang() === 'en'
+  const parts = questions.map((q, i) => {
+    const custom = s.custom[i] ?? ''
+    if (filled(custom)) return clip(custom, 20)
+    const opts = questionOptions(q)
+    const labels = (s.picked[i] ?? []).flatMap((j) => (opts[j] ? [opts[j].label] : []))
+    return clip(labels.join(en ? ', ' : '、'), 20)
+  })
+  return `${base}${en ? ': ' : '：'}${parts.join(en ? '; ' : '；')}`
 }
 
 /** “回答”能不能点：不在提交中，且每题都有答案。 */
