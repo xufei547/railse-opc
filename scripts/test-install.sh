@@ -4,11 +4,14 @@
 # 校验和不符、checksums.txt 里只有名字相近的行、checksums.txt 或包 404、最新版流程解析出非法版本号、包里的 railse 是
 # 符号链接 / 目录 / 硬链接、没有 sha256sum 与 shasum、版本号不合法（含只有一个 v）、RAILSE_BASE_URL 不是 http(s)://、
 # 安装目录不可写或不是目录、不支持的平台（PATH 里放假 uname）、环境里继承了 install.sh 清理用的变量名（stage、tmp）。
+# 英文一轮：RAILSE_LANG=en 与 LANG 回退的语言选择；输出里不得有中日韩字符。
 # 另外验证：不给版本时从 checksums.txt 本平台那一行取版本号、版本号前带 v、覆盖安装、明文 http 且不是本机时警告、
 # /usr/local/bin 不可写时退到 ~/.local/bin（假 HOME；/usr/local/bin 可写时跳过，免得装进真目录）、
 # 每次运行后 install.sh 的临时目录都删干净了、在工作目录里没留下任何东西。
 # 用 sh 跑一遍，本机有 dash 再用 dash 跑一遍。只用 127.0.0.1 与临时目录；退出时（成功、失败或中断）停掉 HTTP 服务并删掉临时目录。
 set -euo pipefail
+# 原有断言都是中文：钉在 zh（RAILSE_LANG 优先于 LC_ALL、LC_MESSAGES、LANG）；英文用例在单次运行里用 RAILSE_LANG=en 覆盖
+export RAILSE_LANG=zh
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -50,6 +53,21 @@ esac
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
+# has_cjk <文件>：文件里有中日韩字符或全角符号就返回 0。按字节查，不依赖 locale
+# （UTF-8 首字节 E3-E9 即 U+3000-U+9FFF，EF BC/BD 即全角符号 U+FF00-U+FF7F）
+has_cjk() { LC_ALL=C grep -q -e "$(printf '[\343-\351]')" -e "$(printf '\357[\274\275]')" "$@"; }
+# 静态检查：install.sh 的 t() 里 zh:键 与 en:键 两边集合必须相同；say/str/warn/fail 用到的键都得在里面
+zh_keys="$(sed -n 's/^ *zh:\([a-z_]*\)) .*/\1/p' "$ROOT/install.sh" | sort -u)"
+en_keys="$(sed -n 's/^ *en:\([a-z_]*\)) .*/\1/p' "$ROOT/install.sh" | sort -u)"
+[ -n "$zh_keys" ] || fail "install.sh 的 t() 里一个 zh:键 都没抽到"
+if [ "$zh_keys" != "$en_keys" ]; then
+  echo "zh 与 en 键不一致：" >&2
+  diff <(printf '%s\n' "$zh_keys") <(printf '%s\n' "$en_keys") >&2 || true
+  fail "install.sh 的 zh 与 en 文案键不成对"
+fi
+used_keys="$(grep -E '(^|[^A-Za-z_])(say|str|warn|fail) [a-z_]+' "$ROOT/install.sh" | grep -v '^ *#' | grep -oE '(^|[^A-Za-z_])(say|str|warn|fail) [a-z_]+' | awk '{print $NF}' | sort -u)"
+missing="$(comm -13 <(printf '%s\n' "$zh_keys") <(printf '%s\n' "$used_keys") | tr '\n' ' ')"
+[ -z "${missing// /}" ] || fail "install.sh 用到了没有文案的键：$missing"
 sum_of() { sha256 "$1" | awk '{print $1}'; }
 
 # 假发布：当前代码编出的二进制（版本 0.0.1）打成本平台的包；checksums.txt 照 goreleaser 的格式，另两个平台的行是占位，
@@ -366,6 +384,34 @@ for shell in $shells; do
     grep -qF "不在 PATH 里" "$tmp/log/$shell-fallback.out" || { show fallback; fail "$shell fallback：没有提示加 PATH"; }
     echo "ok（$shell）：/usr/local/bin 不可写时退到 ~/.local/bin，校验失败时不建它"
   fi
+
+  # 17. 英文一轮：同一个成功路径在 RAILSE_LANG=en 下跑，输出里不得有中日韩字符，且要有英文的校验通过句
+  rm -f "$dir/railse"
+  run_install english RAILSE_LANG=en RAILSE_BASE_URL="$URL" RAILSE_VERSION="$VERSION" RAILSE_INSTALL_DIR="$dir" || { show english; fail "$shell english：install.sh 应当成功"; }
+  if has_cjk "$tmp/log/$shell-english.out" || has_cjk "$tmp/log/$shell-english.err"; then show english; fail "$shell english：英文运行打印了中文"; fi
+  grep -qF "sha256 verified" "$tmp/log/$shell-english.out" || { show english; fail "$shell english：没有英文的校验通过句"; }
+  grep -qF "Next steps" "$tmp/log/$shell-english.out" || { show english; fail "$shell english：没有英文的下一步"; }
+  check_installed "$dir/railse"
+  check_clean english
+  rm -f "$dir/railse"
+  # 英文失败路径：校验和不符，标准错误是英文、没有中日韩字符，仍然不装
+  cp "$tmp/checksums.tampered" "$rel/checksums.txt"
+  if run_install english-tampered RAILSE_LANG=en RAILSE_BASE_URL="$URL" RAILSE_VERSION="$VERSION" RAILSE_INSTALL_DIR="$dir"; then
+    show english-tampered
+    fail "$shell english-tampered：install.sh 应当失败"
+  fi
+  grep -qF "Install failed: checksum mismatch" "$tmp/log/$shell-english-tampered.err" || { show english-tampered; fail "$shell english-tampered：错误信息不是英文的校验和不符"; }
+  if has_cjk "$tmp/log/$shell-english-tampered.out" || has_cjk "$tmp/log/$shell-english-tampered.err"; then show english-tampered; fail "$shell english-tampered：英文失败路径打印了中文"; fi
+  check_nothing "$dir" english-tampered
+  check_clean english-tampered
+  # 语言选择顺序：RAILSE_LANG（为空则看下一个）-> LC_ALL -> LC_MESSAGES -> LANG；zh 开头算中文，其余包括没有一律英文
+  expect_fail lang-lcall-zh "安装失败：校验和不符" RAILSE_LANG= LC_ALL=zh_CN.UTF-8 LANG=en_US.UTF-8 RAILSE_BASE_URL="$URL" RAILSE_VERSION="$VERSION" RAILSE_INSTALL_DIR="$dir"
+  expect_fail lang-lang-zh "安装失败：校验和不符" RAILSE_LANG= LC_ALL= LC_MESSAGES= LANG=zh_TW.UTF-8 RAILSE_BASE_URL="$URL" RAILSE_VERSION="$VERSION" RAILSE_INSTALL_DIR="$dir"
+  expect_fail lang-lcall-en "Install failed: checksum mismatch" RAILSE_LANG= LC_ALL=en_US.UTF-8 LANG=zh_CN.UTF-8 RAILSE_BASE_URL="$URL" RAILSE_VERSION="$VERSION" RAILSE_INSTALL_DIR="$dir"
+  expect_fail lang-none "Install failed: checksum mismatch" RAILSE_LANG= LC_ALL= LC_MESSAGES= LANG= RAILSE_BASE_URL="$URL" RAILSE_VERSION="$VERSION" RAILSE_INSTALL_DIR="$dir"
+  expect_fail lang-c "Install failed: checksum mismatch" RAILSE_LANG= LC_ALL= LC_MESSAGES= LANG=C RAILSE_BASE_URL="$URL" RAILSE_VERSION="$VERSION" RAILSE_INSTALL_DIR="$dir"
+  cp "$tmp/checksums.good" "$rel/checksums.txt"
+  echo "ok（$shell）：英文一轮（成功与校验和不符都没有中文）与语言选择顺序"
 
   echo "ok（$shell）：正常安装、覆盖、取最新版本、明文 http 警告；校验和不符、相近文件名、继承的清理变量、404、注入的版本号、坏的包成员、没有 sha256 工具、非法版本号与地址、坏的安装目录、不支持的平台都拒装"
 done
