@@ -260,16 +260,27 @@ function urlHost(args: string[]): string {
 const shells = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish'])
 const baseName = (w: string) => w.slice(w.lastIndexOf('/') + 1)
 
-/** words 是不是一个从标准输入读脚本的 shell：没有 -c（含在 -ec 这类簇里），-- 之前没有脚本文件操作数（单独的 - 不算）。 */
+/**
+ * shell 的参数是不是从标准输入读脚本：没有 -c（含在 -ec 这类簇里，或 --command）；有 -s（含在簇里）时后面的词都是脚本的参数；
+ * 没有 -s 时，选项结束（-- 或单独的 -）之后、或第一个不以 - 开头的词是脚本文件，就不是读标准输入。
+ */
 function readsStdin(args: string[]): boolean {
-  for (const a of args) {
-    if (a === '--') return true
-    if (a === '-') continue
-    if (!a.startsWith('-')) return false
-    if (!a.startsWith('--') && a.includes('c')) return false
+  let fromStdin = false
+  for (const [k, a] of args.entries()) {
+    if (a === '--' || a === '-') return fromStdin || k === args.length - 1
+    if (!a.startsWith('-')) return fromStdin
+    if (a.startsWith('--')) {
+      if (a === '--command' || a.startsWith('--command=')) return false
+      continue
+    }
+    if (a.includes('c')) return false
+    if (a.includes('s')) fromStdin = true
   }
   return true
 }
+
+/** 往回找同一条管道里的 curl/wget 至多看这么多段：故意拼出的超长管道不让每张卡片的渲染变成平方级。 */
+const pipeLookBack = 32
 
 /**
  * 管道里的一段（不是第一段）是从标准输入读脚本的 shell（sh -s、bash -、sudo sh）：把脚本直接交给 shell 执行。
@@ -288,7 +299,7 @@ function matchPipedShell(segs: Segment[], i: number): Match | null {
   }
   if (!shells.has(baseName(args[0] ?? '')) || !readsStdin(args.slice(1))) return null
   const how = admin ? '以管理员权限直接执行' : '直接执行'
-  for (let j = i - 1; j >= 0; j--) {
+  for (let j = i - 1; j >= 0 && j >= i - pipeLookBack; j--) {
     const prev = segs[j]?.words ?? []
     const n = baseName(prev[0] ?? '')
     if (n === 'curl' || n === 'wget') {
