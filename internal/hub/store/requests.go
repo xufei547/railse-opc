@@ -19,6 +19,9 @@ var ErrNotPending = errors.New("请求已不是待处理状态")
 // ErrInvalidState 表示守护进程来源的写入给了不允许的状态（只允许 cancelled、expired、passthrough）。
 var ErrInvalidState = errors.New("目标状态不是可写入的终态")
 
+// ErrNotAsk 表示对不是提问（kind ask）的请求作答。
+var ErrNotAsk = errors.New("请求不是提问")
+
 // decided_by 的取值里由存储层判断的几个。
 const (
 	DecidedByAgentRestart = "agent_restart" // 守护进程重启或重连对齐时取消的
@@ -27,6 +30,8 @@ const (
 
 // Request 是 requests 表的一行。question/done 也存成一行：Kind 为 question|done，State 为 recorded，
 // Title 为脱敏后的消息，Payload 为空值，ExpiresAt 为 nil。
+// ask（Claude Code 的 AskUserQuestion）带 Ask（守护进程已脱敏的题目），Payload 为空值（载荷列存 {}），PayloadHash 是题目的哈希
+// （见 AskHash）；作答后 State 为 answered、Answers 为题面 → 答案（原文），交回终端时为 passthrough、没有 Answers。
 // JSON 为 snake_case，广播与 API 直接输出它；PayloadHash 与 Callback（webhook 回调，含明文回调令牌）不序列化。
 type Request struct {
 	ID           string         `json:"id"`
@@ -51,6 +56,9 @@ type Request struct {
 	ExpiresAt    *string        `json:"expires_at"`
 	DecidedAt    *string        `json:"decided_at"`
 	DeliveredAt  *string        `json:"delivered_at"`
+	// Ask 与 Answers 只有 ask 有，JSON 里没有时省略。
+	Ask     *proto.Ask        `json:"ask,omitempty"`
+	Answers map[string]string `json:"answers,omitempty"`
 }
 
 // PayloadHash 是载荷 JSON 的 SHA-256，用于去重，与 InsertRequest 存的哈希一致。
@@ -66,6 +74,19 @@ func PayloadHash(p policy.Payload) string {
 
 // payloadJSON 是载荷存库与求哈希共用的序列化。
 func payloadJSON(p policy.Payload) ([]byte, error) { return json.Marshal(p) }
+
+// AskHash 是题目 JSON 的 SHA-256，与 InsertRequest 给 ask 存的哈希一致：ask 没有载荷（载荷哈希全都一样），
+// 重发去重（FindResend）与重发比对按题目认“同一道题”。题目只含字符串、布尔与切片，序列化不会失败。
+func AskHash(a *proto.Ask) string {
+	b, _ := askJSON(a)
+	return hashJSON(b)
+}
+
+// askJSON 是题目存库与求哈希共用的序列化。
+func askJSON(a *proto.Ask) ([]byte, error) { return json.Marshal(a) }
+
+// emptyPayloadJSON 是 ask 存在载荷列里的值：它没有载荷。
+const emptyPayloadJSON = "{}"
 
 func hashJSON(b []byte) string {
 	sum := sha256.Sum256(b)
@@ -108,9 +129,9 @@ func (s *Store) SessionTool(id string) (string, error) {
 	return tool, nil
 }
 
-const requestCols = "id, machine_id, session_id, kind, tool_name, payload, payload_hash, risk, project_root, engine_reason, state, decided_by, decision_note, rule_id, turn_id, cli_session_id, title, callback, created_at, expires_at, decided_at, delivered_at"
+const requestCols = "id, machine_id, session_id, kind, tool_name, payload, payload_hash, risk, project_root, engine_reason, state, decided_by, decision_note, rule_id, turn_id, cli_session_id, title, callback, created_at, expires_at, decided_at, delivered_at, ask, answers"
 
-// InsertRequest 插入一条请求。PayloadHash 为空时按存下的载荷 JSON 计算；CreatedAt 为空时用 Now()。
+// InsertRequest 插入一条请求。PayloadHash 为空时按存下的载荷 JSON 计算（ask 按题目，见 AskHash）；CreatedAt 为空时用 Now()。
 // CreatedAt、ExpiresAt、DecidedAt、DeliveredAt 给了就必须是 FormatTime 的输出，否则返回错误。
 func (s *Store) InsertRequest(r Request) error {
 	_, err := s.insertRequest(r, "")
@@ -137,8 +158,27 @@ func (s *Store) insertRequest(r Request, suffix string) (sql.Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("序列化载荷: %w", err)
 	}
+	hashed := payload
+	var ask, answers string
+	if r.Kind == "ask" {
+		b, err := askJSON(r.Ask)
+		if err != nil {
+			return nil, fmt.Errorf("序列化题目: %w", err)
+		}
+		payload, hashed = []byte(emptyPayloadJSON), b
+		if r.Ask != nil {
+			ask = string(b)
+		}
+	}
+	if r.Answers != nil {
+		b, err := json.Marshal(r.Answers)
+		if err != nil {
+			return nil, fmt.Errorf("序列化答案: %w", err)
+		}
+		answers = string(b)
+	}
 	if r.PayloadHash == "" {
-		r.PayloadHash = hashJSON(payload)
+		r.PayloadHash = hashJSON(hashed)
 	}
 	if r.CreatedAt == "" {
 		r.CreatedAt = Now()
@@ -159,23 +199,36 @@ func (s *Store) insertRequest(r Request, suffix string) (sql.Result, error) {
 	if r.SessionID != "" {
 		sessionID = r.SessionID
 	}
-	return s.db.Exec("INSERT INTO requests("+requestCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"+suffix,
+	return s.db.Exec("INSERT INTO requests("+requestCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"+suffix,
 		r.ID, r.MachineID, sessionID, r.Kind, r.ToolName, string(payload), r.PayloadHash, r.Risk, r.ProjectRoot, r.EngineReason,
-		r.State, r.DecidedBy, r.DecisionNote, r.RuleID, r.TurnID, r.CLISessionID, r.Title, r.Callback, r.CreatedAt, r.ExpiresAt, r.DecidedAt, r.DeliveredAt)
+		r.State, r.DecidedBy, r.DecisionNote, r.RuleID, r.TurnID, r.CLISessionID, r.Title, r.Callback, r.CreatedAt, r.ExpiresAt, r.DecidedAt, r.DeliveredAt,
+		ask, answers)
 }
 
 func scanRequest(row interface{ Scan(...any) error }) (Request, error) {
 	var r Request
-	var payload string
+	var payload, ask, answers string
 	var sessionID sql.NullString
 	err := row.Scan(&r.ID, &r.MachineID, &sessionID, &r.Kind, &r.ToolName, &payload, &r.PayloadHash, &r.Risk, &r.ProjectRoot, &r.EngineReason,
-		&r.State, &r.DecidedBy, &r.DecisionNote, &r.RuleID, &r.TurnID, &r.CLISessionID, &r.Title, &r.Callback, &r.CreatedAt, &r.ExpiresAt, &r.DecidedAt, &r.DeliveredAt)
+		&r.State, &r.DecidedBy, &r.DecisionNote, &r.RuleID, &r.TurnID, &r.CLISessionID, &r.Title, &r.Callback, &r.CreatedAt, &r.ExpiresAt, &r.DecidedAt, &r.DeliveredAt,
+		&ask, &answers)
 	if err != nil {
 		return Request{}, err
 	}
 	r.SessionID = sessionID.String
 	if err := json.Unmarshal([]byte(payload), &r.Payload); err != nil {
 		return Request{}, err
+	}
+	if ask != "" {
+		r.Ask = &proto.Ask{}
+		if err := json.Unmarshal([]byte(ask), r.Ask); err != nil {
+			return Request{}, fmt.Errorf("解析题目: %w", err)
+		}
+	}
+	if answers != "" {
+		if err := json.Unmarshal([]byte(answers), &r.Answers); err != nil {
+			return Request{}, fmt.Errorf("解析答案: %w", err)
+		}
 	}
 	return r, nil
 }
@@ -215,8 +268,8 @@ func (s *Store) ListRequests(state string, limit int) ([]Request, error) {
 }
 
 // OpenQuestions 列还在等回答的 question，按创建时间倒序、至多 limit 条：state 为 recorded、不早于 since，
-// 且同一会话之后没有任何新行。hub 存的会话行只有 question、done（recorded，见 hub 的 recordEvent）与 permission
-// （待决与补的历史行）：之后来了 done、新的 permission 或新的 question，都说明 agent 已经不在等那个问题了。
+// 且同一会话之后没有任何新行。hub 存的会话行只有 question、done（recorded，见 hub 的 recordEvent）与 permission、ask
+// （待决与补的历史行）：之后来了 done、新的 permission、ask 或新的 question，都说明 agent 已经不在等那个问题了。
 // 没有会话 id 的 question 关联不到后续事件，视为仍在等（直到滑出 since）。已吊销机器的 question 不列：那台机器已断开，
 // 不会再有后续事件让它“不再等”。
 // 会话行属于一台机器，子查询加上 machine_id 走 (machine_id, created_at) 索引，不扫全表。
@@ -274,7 +327,7 @@ func (s *Store) SetMachineRequestState(machineID, id, state, decidedBy, note, ru
 }
 
 // checkAgentState 是守护进程来源写入的状态白名单：只有本机终态 cancelled、expired、passthrough。
-// 守护进程不能把请求迁回 pending、写成 recorded，也不能冒充用户或规则的决定（approved、denied、auto_*）。
+// 守护进程不能把请求迁回 pending、写成 recorded，也不能冒充用户或规则的决定（approved、denied、answered、auto_*）。
 func checkAgentState(state string) error {
 	switch state {
 	case "cancelled", "expired", "passthrough":
@@ -319,11 +372,20 @@ func (s *Store) ApplyAgentFinal(machineID, id, state, decidedBy, note, ruleID st
 	return n == 1, nil
 }
 
+// deliverableStates 是要下发给守护进程、等 delivered 回执的决定（SQL 的 IN 列表），与 Deliverable 一致。
+// passthrough（手机上选了交回终端）不在其中：它与别的 passthrough 一样是终态，不补发，回执不记。
+const deliverableStates = "'approved','denied','answered'"
+
+// Deliverable 报告 state 是否是要下发给守护进程、等送达回执的决定：approved、denied（审批）与 answered（提问）。
+func Deliverable(state string) bool {
+	return state == "approved" || state == "denied" || state == "answered"
+}
+
 // MarkDelivered 记录决定已送到 machineID 的守护进程，返回是否真的更新了这一行（调用方据此推送送达变化）。
-// 只认该机器、已决定（approved、denied）的请求：对仍 pending 的回执不记，免得之后的决定不再补发；
+// 只认该机器、已决定（approved、denied、answered，见 Deliverable）的请求：对仍 pending 的回执不记，免得之后的决定不再补发；
 // 重复送达不覆盖第一次的时间（返回 false）。
 func (s *Store) MarkDelivered(machineID, id string) (bool, error) {
-	res, err := s.db.Exec("UPDATE requests SET delivered_at = ? WHERE id = ? AND machine_id = ? AND state IN ('approved','denied') AND delivered_at IS NULL", Now(), id, machineID)
+	res, err := s.db.Exec("UPDATE requests SET delivered_at = ? WHERE id = ? AND machine_id = ? AND state IN ("+deliverableStates+") AND delivered_at IS NULL", Now(), id, machineID)
 	if err != nil {
 		return false, err
 	}
@@ -334,9 +396,51 @@ func (s *Store) MarkDelivered(machineID, id string) (bool, error) {
 	return n == 1, nil
 }
 
-// UndeliveredDecisions 列出已决定但未送达的请求，重连后补发。
+// UndeliveredDecisions 列出已决定（见 Deliverable）但未送达的请求，重连后补发；answered 的带答案。
 func (s *Store) UndeliveredDecisions(machineID string) ([]Request, error) {
-	return s.queryRequests("SELECT "+requestCols+" FROM requests WHERE machine_id = ? AND state IN ('approved','denied') AND delivered_at IS NULL ORDER BY created_at", machineID)
+	return s.queryRequests("SELECT "+requestCols+" FROM requests WHERE machine_id = ? AND state IN ("+deliverableStates+") AND delivered_at IS NULL ORDER BY created_at", machineID)
+}
+
+// AnswerRequest 用户对提问作答：仍 pending 的 ask 改成 answered（answers 存原文，重连补发要原样下发）或 passthrough
+// （交回终端，忽略 answers），decided_by 为 user，decided_at 为 now；返回改后的行。读、查、改在一个事务里。
+// 不是 ask 返回 ErrNotAsk（先于状态判断），已不是 pending 返回 ErrNotPending，没有这条请求返回 ErrNotFound。
+// 答案合不合规（每道题都有、非空、不超长）由调用方校验，这里不看。
+func (s *Store) AnswerRequest(id string, answers map[string]string, passthrough bool, now time.Time) (Request, error) {
+	state, col := "passthrough", ""
+	if !passthrough {
+		b, err := json.Marshal(answers)
+		if err != nil {
+			return Request{}, fmt.Errorf("序列化答案: %w", err)
+		}
+		state, col = "answered", string(b)
+	}
+	decided := fmtTime(now)
+	var out Request
+	err := s.Tx(func(tx *sql.Tx) error {
+		r, err := scanRequest(tx.QueryRow("SELECT "+requestCols+" FROM requests WHERE id = ?", id))
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		switch {
+		case r.Kind != "ask":
+			return ErrNotAsk
+		case r.State != "pending":
+			return ErrNotPending
+		}
+		if _, err := tx.Exec("UPDATE requests SET state = ?, answers = ?, decided_by = 'user', decided_at = ? WHERE id = ? AND state = 'pending'",
+			state, col, decided, id); err != nil {
+			return err
+		}
+		out, err = scanRequest(tx.QueryRow("SELECT "+requestCols+" FROM requests WHERE id = ?", id))
+		return err
+	})
+	if err != nil {
+		return Request{}, err
+	}
+	return out, nil
 }
 
 // CountPending 统计待处理数。

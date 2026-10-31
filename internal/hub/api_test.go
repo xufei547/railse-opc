@@ -663,6 +663,7 @@ func TestStateChangingRoutesCheckOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 	insertReq(t, h.st, store.Request{ID: "r1", MachineID: m.ID, State: "pending"})
+	insertAsk(t, h.st, "a1", m.ID, "用 A 还是 B？")
 	evil := http.Header{"Origin": {"https://evil.example"}}
 	null := http.Header{"Origin": {"null"}}
 	same := http.Header{"Origin": {h.http.URL}}
@@ -671,6 +672,7 @@ func TestStateChangingRoutesCheckOrigin(t *testing.T) {
 		{"POST", "/api/resume", "", ""},
 		{"POST", "/api/requests/r1/decide", "application/json", `{"action":"deny"}`},
 		{"POST", "/api/requests/r1/propose", "application/json", `{"action":"deny"}`},
+		{"POST", "/api/requests/a1/answer", "application/json", `{"passthrough":true}`},
 		{"PATCH", "/api/rules/builtin-readonly", "application/json", `{"enabled":false}`},
 		{"DELETE", "/api/rules/builtin-readonly", "", ""},
 		{"POST", "/api/rules/import", "application/yaml", "version: 1\nrules: []\n"},
@@ -684,8 +686,10 @@ func TestStateChangingRoutesCheckOrigin(t *testing.T) {
 			}
 		}
 	}
-	if r := getReq(t, h.st, "r1"); r.State != "pending" {
-		t.Fatalf("跨站请求不应生效: %+v", r)
+	for _, id := range []string{"r1", "a1"} {
+		if r := getReq(t, h.st, id); r.State != "pending" {
+			t.Fatalf("跨站请求不应生效: %+v", r)
+		}
 	}
 	if mm, _ := h.st.GetMachine(m.ID); mm.Revoked {
 		t.Fatal("跨站请求不应吊销机器")
@@ -1179,6 +1183,7 @@ func TestAPIRoutesRequireLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	insertReq(t, h.st, store.Request{ID: "r1", MachineID: m.ID, State: "pending"})
+	insertAsk(t, h.st, "a1", m.ID, "用 A 还是 B？")
 	routes := []struct{ method, path, ct, body string }{
 		{"GET", "/api/status", "", ""},
 		{"POST", "/api/pause", "", ""},
@@ -1188,6 +1193,7 @@ func TestAPIRoutesRequireLogin(t *testing.T) {
 		{"GET", "/api/requests/r1", "", ""},
 		{"POST", "/api/requests/r1/decide", "application/json", `{"action":"deny"}`},
 		{"POST", "/api/requests/r1/propose", "application/json", `{"action":"deny"}`},
+		{"POST", "/api/requests/a1/answer", "application/json", `{"passthrough":true}`},
 		{"GET", "/api/rules", "", ""},
 		{"PATCH", "/api/rules/builtin-readonly", "application/json", `{"enabled":false}`},
 		{"DELETE", "/api/rules/builtin-readonly", "", ""},
@@ -1205,8 +1211,10 @@ func TestAPIRoutesRequireLogin(t *testing.T) {
 			}
 		}
 	}
-	if r := getReq(t, h.st, "r1"); r.State != "pending" {
-		t.Fatalf("未登录的决定不应生效: %+v", r)
+	for _, id := range []string{"r1", "a1"} {
+		if r := getReq(t, h.st, id); r.State != "pending" {
+			t.Fatalf("未登录的决定不应生效: %+v", r)
+		}
 	}
 	if mm, _ := h.st.GetMachine(m.ID); mm.Revoked {
 		t.Fatal("未登录不应吊销机器")
@@ -2408,4 +2416,146 @@ func TestServeReadTimeout(t *testing.T) {
 	time.Sleep(3 * readTimeout)
 	c.send(pendingFrame("r1", "s1", "t1", "git push origin main"))
 	waitFor(t, "ReadTimeout 之后 WebSocket 照常收帧", func() bool { _, err := st.GetRequest("r1"); return err == nil })
+}
+
+// POST /api/requests/{id}/answer：200 返回请求视图（kind ask、state answered、answers）；400：坏 JSON、超 64 KiB、答案不是字符串、
+// 缺题、空值、纯空白、超长、多余键、不是提问；404：没有这条；409：已回答、已过期；passthrough 200（忽略答案）。
+// decide、propose 对提问 400，文案说明用答题接口。错误回应都是 {"error": …}。
+func TestAnswerHTTP(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	m, err := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := insertAsk(t, h.st, "a1", m.ID, "用 A 还是 B？", "要不要写测试？")
+	insertAsk(t, h.st, "a2", m.ID, "部署到哪？")
+	insertAsk(t, h.st, "a3", m.ID, "还在等的题")
+	past := store.FormatTime(time.Now().Add(-time.Minute))
+	insertReq(t, h.st, store.Request{ID: "e1", MachineID: m.ID, Kind: "ask", ToolName: "AskUserQuestion", Ask: testAsk("过期的题"), State: "pending", ExpiresAt: &past})
+	insertReq(t, h.st, store.Request{ID: "p1", MachineID: m.ID, State: "pending"})
+	post := func(id, action string, body []byte) (int, string) {
+		t.Helper()
+		resp := doReq(t, "POST", h.http.URL+"/api/requests/"+id+"/"+action, body, "application/json", ck)
+		var out struct {
+			Error string `json:"error"`
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		json.Unmarshal(raw, &out)
+		return resp.StatusCode, out.Error
+	}
+	q1, q2 := a.Questions[0].Question, a.Questions[1].Question
+	body := func(ans map[string]string) []byte { return mustJSON(t, map[string]any{"answers": ans}) }
+	for _, tc := range []struct {
+		name, id string
+		body     []byte
+		want     int
+	}{
+		{"坏 JSON", "a1", []byte(`{"answers":`), http.StatusBadRequest},
+		{"超 64 KiB", "a1", body(map[string]string{q1: strings.Repeat("a", 70<<10), q2: "要"}), http.StatusBadRequest},
+		{"答案不是字符串", "a1", []byte(`{"answers":{"用 A 还是 B？":1}}`), http.StatusBadRequest},
+		{"缺题", "a1", body(map[string]string{q1: "A"}), http.StatusBadRequest},
+		{"空值", "a1", body(map[string]string{q1: "A", q2: ""}), http.StatusBadRequest},
+		{"纯空白", "a1", body(map[string]string{q1: "A", q2: "  \n\t"}), http.StatusBadRequest},
+		{"超长", "a1", body(map[string]string{q1: "A", q2: strings.Repeat("长", 1001)}), http.StatusBadRequest},
+		{"多余键", "a1", body(map[string]string{q1: "A", q2: "要", "别的": "x"}), http.StatusBadRequest},
+		{"不是提问", "p1", body(map[string]string{"x": "y"}), http.StatusBadRequest},
+		{"不存在", "nope", body(map[string]string{q1: "A"}), http.StatusNotFound},
+		{"已过期", "e1", body(map[string]string{"过期的题": "A"}), http.StatusConflict},
+	} {
+		if got, msg := post(tc.id, "answer", tc.body); got != tc.want || msg == "" {
+			t.Fatalf("%s: 应 %d 带说明, 得到 %d %q", tc.name, tc.want, got, msg)
+		}
+	}
+	if r := getReq(t, h.st, "a1"); r.State != "pending" {
+		t.Fatalf("出错的作答不应改状态: %+v", r)
+	}
+	resp := doReq(t, "POST", h.http.URL+"/api/requests/a1/answer", body(map[string]string{q1: "A", q2: strings.Repeat("长", 1000)}), "application/json", ck)
+	var view map[string]any
+	decodeBody(t, resp, &view)
+	ans, _ := view["answers"].(map[string]any)
+	if resp.StatusCode != http.StatusOK || view["kind"] != "ask" || view["state"] != "answered" || view["decided_by"] != "user" || ans[q1] != "A" ||
+		view["ask"] == nil || view["machine_name"] != "m" {
+		t.Fatalf("作答 = %d %+v", resp.StatusCode, view)
+	}
+	if got, msg := post("a1", "answer", body(map[string]string{q1: "B", q2: "不要"})); got != http.StatusConflict || msg != "请求已经处理过" {
+		t.Fatalf("已回答应 409: %d %q", got, msg)
+	}
+	resp = doReq(t, "POST", h.http.URL+"/api/requests/a2/answer", []byte(`{"answers":{"乱写":""},"passthrough":true}`), "application/json", ck)
+	view = nil
+	decodeBody(t, resp, &view)
+	if _, has := view["answers"]; resp.StatusCode != http.StatusOK || view["state"] != "passthrough" || has {
+		t.Fatalf("交回终端 = %d %+v", resp.StatusCode, view)
+	}
+	for _, action := range []string{"decide", "propose"} {
+		if got, msg := post("a3", action, []byte(`{"action":"allow","remember":true}`)); got != http.StatusBadRequest || msg != "这是提问，用答题接口" {
+			t.Fatalf("%s 对提问应 400: %d %q", action, got, msg)
+		}
+	}
+	if r := getReq(t, h.st, "a3"); r.State != "pending" {
+		t.Fatalf("decide 不应改提问: %+v", r)
+	}
+}
+
+// 两个并发的作答只有一次成功，另一次 409。
+func TestAnswerHTTPConcurrent(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	m, _ := h.st.CreateMachine("m", store.RandomToken(), "/home/u")
+	a := insertAsk(t, h.st, "a1", m.ID, "用 A 还是 B？")
+	bodies := [][]byte{mustJSON(t, map[string]any{"answers": answersFor(a, "A")}), []byte(`{"passthrough":true}`)}
+	codes := make(chan int, len(bodies))
+	for _, b := range bodies {
+		go func() {
+			req, err := http.NewRequest("POST", h.http.URL+"/api/requests/a1/answer", bytes.NewReader(b))
+			if err != nil {
+				codes <- -1
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.AddCookie(ck)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				codes <- -1
+				return
+			}
+			resp.Body.Close()
+			codes <- resp.StatusCode
+		}()
+	}
+	got := []int{<-codes, <-codes}
+	slices.Sort(got)
+	if got[0] != http.StatusOK || got[1] != http.StatusConflict {
+		t.Fatalf("应一次 200 一次 409: %v", got)
+	}
+}
+
+// 收件箱的 pending 包含提问（请求视图带 ask）。
+func TestInboxIncludesAsk(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{MachineID: id, Proto: wire.Proto, HomeDir: "/home/u"})
+	defer c.close()
+	c.recv(5 * time.Second)
+	c.send(pendingFrame("r1", "s1", "t1", "git push origin main"))
+	c.send(askFrame("a1", "s2", "t1", "用 A 还是 B？"))
+	var inbox struct {
+		Pending []map[string]any `json:"pending"`
+	}
+	waitFor(t, "审批与提问都进收件箱", func() bool {
+		decodeBody(t, doReq(t, "GET", h.http.URL+"/api/inbox", nil, "", ck), &inbox)
+		return len(inbox.Pending) == 2
+	})
+	var ask map[string]any
+	for _, p := range inbox.Pending {
+		if p["id"] == "a1" {
+			ask = p
+		}
+	}
+	askObj, _ := ask["ask"].(map[string]any)
+	qs, _ := askObj["questions"].([]any)
+	if ask == nil || ask["kind"] != "ask" || ask["state"] != "pending" || ask["tool_name"] != "AskUserQuestion" || len(qs) != 1 || ask["machine_name"] != "mac" {
+		t.Fatalf("收件箱里的提问: %+v", ask)
+	}
 }

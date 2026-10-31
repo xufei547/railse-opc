@@ -18,7 +18,7 @@ import (
 var schemaSQL string
 
 // SchemaVersion 是本程序的数据库版本（schema_version 表的 v）。railse doctor 只读地拿库里的版本和它比。
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // migrations 是逐版本升级的 SQL，键是升级后的版本号。改 schema.sql 时必须同时加一条迁移并提高 SchemaVersion：
 // 已有库只跑迁移，不再执行 schema.sql。
@@ -33,6 +33,12 @@ INSERT OR IGNORE INTO push_subscriptions_v2(id, endpoint, keys, created_at, last
   SELECT id, endpoint, keys, created_at, last_ok_at FROM push_subscriptions ORDER BY created_at;
 DROP TABLE push_subscriptions;
 ALTER TABLE push_subscriptions_v2 RENAME TO push_subscriptions;
+`,
+	// 3：requests 加 ask（答题请求的题目）与 answers（答案）两列，旧行为空串。列加在表尾，与 schema.sql 的列序一致
+	// （TestMigratedRequestsSchemaMatchesFresh 核对）。
+	3: `
+ALTER TABLE requests ADD COLUMN ask TEXT NOT NULL DEFAULT '';
+ALTER TABLE requests ADD COLUMN answers TEXT NOT NULL DEFAULT '';
 `,
 }
 

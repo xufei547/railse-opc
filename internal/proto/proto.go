@@ -49,6 +49,26 @@ type Ask struct {
 	Questions []Question `json:"questions"`
 }
 
+// AnswerMax 是一道题答案的字符上限（按 rune 计）：hub 的答题接口与守护进程收 hub 的答案都按它校验。
+const AnswerMax = 1000
+
+// MapText 返回题目的深拷贝，题面、标题、选项的标签与说明都经 f 换过；没有选项的题得到空切片（编码成 []，不是 null）。
+// a 为 nil 时返回 nil。
+func (a *Ask) MapText(f func(string) string) *Ask {
+	if a == nil {
+		return nil
+	}
+	out := &Ask{Questions: make([]Question, len(a.Questions))}
+	for i, q := range a.Questions {
+		opts := make([]Option, len(q.Options))
+		for j, o := range q.Options {
+			opts[j] = Option{Label: f(o.Label), Description: f(o.Description)}
+		}
+		out.Questions[i] = Question{Question: f(q.Question), Header: f(q.Header), Options: opts, MultiSelect: q.MultiSelect}
+	}
+	return out
+}
+
 // Request 是一次请求，Kind 为 permission（审批）或 ask（答题）。
 // Kind 为 ask 时带 Ask，Payload 为零值，ToolName 为 AskUserQuestion。
 type Request struct {

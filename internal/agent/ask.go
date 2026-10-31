@@ -12,31 +12,11 @@ import (
 // askToolName 是 Claude Code 问人的工具名；答题请求的上报帧与审计都用它，不用钩子送来的名字。
 const askToolName = "AskUserQuestion"
 
-// answerMax 是一道题答案的字符上限，与 hub 答题接口的上限一致。
-const answerMax = 1000
-
-// mapAsk 返回题目的深拷贝，题面、标题、选项的标签与说明都经 f 换过；没有选项的题得到空切片（上报帧里是 []，不是 null）。
-// a 为 nil 时返回 nil。
-func mapAsk(a *proto.Ask, f func(string) string) *proto.Ask {
-	if a == nil {
-		return nil
-	}
-	out := &proto.Ask{Questions: make([]proto.Question, len(a.Questions))}
-	for i, q := range a.Questions {
-		opts := make([]proto.Option, len(q.Options))
-		for j, o := range q.Options {
-			opts[j] = proto.Option{Label: f(o.Label), Description: f(o.Description)}
-		}
-		out.Questions[i] = proto.Question{Question: f(q.Question), Header: f(q.Header), Options: opts, MultiSelect: q.MultiSelect}
-	}
-	return out
-}
-
-// cloneAsk 返回题目的深拷贝。
-func cloneAsk(a *proto.Ask) *proto.Ask { return mapAsk(a, func(s string) string { return s }) }
+// cloneAsk 返回题目的深拷贝（没有选项的题得到空切片，上报帧里是 []，不是 null）。
+func cloneAsk(a *proto.Ask) *proto.Ask { return a.MapText(func(s string) string { return s }) }
 
 // redactAsk 返回脱敏后的题目：agent 的问题里可能拼进凭据，上报 hub 与写审计都只用它。
-func redactAsk(a *proto.Ask) *proto.Ask { return mapAsk(a, redact.Text) }
+func redactAsk(a *proto.Ask) *proto.Ask { return a.MapText(redact.Text) }
 
 // distinctQuestions 报告各题题面是否互不相同。hub 与手机按（脱敏后的）题面作答，题面相同就分不清答的是哪道。
 func distinctQuestions(a *proto.Ask) bool {
@@ -50,7 +30,7 @@ func distinctQuestions(a *proto.Ask) bool {
 	return true
 }
 
-// checkAnswers 校验以题面为键的答案：a 的每道题都要有答案，非空且不超过 answerMax 字符；多余的键不管。没有题目也算不合规。
+// checkAnswers 校验以题面为键的答案：a 的每道题都要有答案，非空且不超过 proto.AnswerMax 字符；多余的键不管。没有题目也算不合规。
 func checkAnswers(a *proto.Ask, answers map[string]string) error {
 	if a == nil || len(a.Questions) == 0 {
 		return errors.New("没有题目")
@@ -62,8 +42,8 @@ func checkAnswers(a *proto.Ask, answers map[string]string) error {
 			return fmt.Errorf("第 %d 题没有答案", i+1)
 		case ans == "":
 			return fmt.Errorf("第 %d 题的答案为空", i+1)
-		case utf8.RuneCountInString(ans) > answerMax:
-			return fmt.Errorf("第 %d 题的答案超过 %d 字符", i+1, answerMax)
+		case utf8.RuneCountInString(ans) > proto.AnswerMax:
+			return fmt.Errorf("第 %d 题的答案超过 %d 字符", i+1, proto.AnswerMax)
 		}
 	}
 	return nil

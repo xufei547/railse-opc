@@ -122,3 +122,23 @@ func TestResponseAnswers(t *testing.T) {
 		t.Fatalf("allow 应答不应有 answers 键: %s", b)
 	}
 }
+
+// MapText 换掉题面、标题、选项的标签与说明四处文字，别的不动；返回深拷贝，没有选项的题得到 []；nil 进 nil 出。
+func TestAskMapText(t *testing.T) {
+	if (*Ask)(nil).MapText(strings.ToUpper) != nil {
+		t.Fatal("nil 应得 nil")
+	}
+	in := &Ask{Questions: []Question{
+		{Question: "q", Header: "h", Options: []Option{{Label: "l", Description: "d"}}, MultiSelect: true},
+		{Question: "q2"},
+	}}
+	out := in.MapText(strings.ToUpper)
+	b, _ := json.Marshal(out)
+	if want := `{"questions":[{"question":"Q","header":"H","options":[{"label":"L","description":"D"}],"multiSelect":true},{"question":"Q2","options":[]}]}`; string(b) != want {
+		t.Fatalf("MapText = %s，要 %s", b, want)
+	}
+	out.Questions[0].Options[0].Label = "改"
+	if in.Questions[0].Options[0].Label != "l" || in.Questions[0].Question != "q" {
+		t.Fatalf("应是深拷贝: %+v", in)
+	}
+}

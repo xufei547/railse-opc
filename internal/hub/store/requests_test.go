@@ -737,3 +737,140 @@ func TestOpenQuestions(t *testing.T) {
 		t.Fatalf("吊销 mac2 后 = %s", got)
 	}
 }
+
+// testAsk 是两道题的提问；题面带前后空格与 < > &，存取都要逐字节不变。
+func testAsk() *proto.Ask {
+	return &proto.Ask{Questions: []proto.Question{
+		{Question: "  用方案 A 还是 B？<b>&</b> ", Header: "方案", Options: []proto.Option{{Label: "A", Description: "快"}, {Label: "B"}}},
+		{Question: "要不要写测试？", Options: []proto.Option{}, MultiSelect: true},
+	}}
+}
+
+func newAsk(machine, id string, a *proto.Ask) Request {
+	return Request{ID: id, MachineID: machine, Kind: "ask", ToolName: "AskUserQuestion", Ask: a, State: "pending", TurnID: "t1", CLISessionID: "s1"}
+}
+
+// 答题请求存题目（JSON）、载荷列为 {}，payload_hash 是题目的哈希（AskHash）：同一回合两道不同的题哈希不同，FindResend 按它找重发。
+func TestAskRequestRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	a := testAsk()
+	if err := s.InsertRequest(newAsk(m.ID, "a1", a)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetRequest("a1")
+	if err != nil || got.Kind != "ask" || !reflect.DeepEqual(got.Ask, a) || got.Answers != nil || !reflect.DeepEqual(got.Payload, policy.Payload{}) {
+		t.Fatalf("GetRequest = %+v, %v", got, err)
+	}
+	var payload, askCol, answers string
+	if err := s.db.QueryRow("SELECT payload, ask, answers FROM requests WHERE id = 'a1'").Scan(&payload, &askCol, &answers); err != nil {
+		t.Fatal(err)
+	}
+	if payload != "{}" || answers != "" || !strings.Contains(askCol, "要不要写测试？") {
+		t.Fatalf("列: payload=%q ask=%q answers=%q", payload, askCol, answers)
+	}
+	if got.PayloadHash != AskHash(a) || len(got.PayloadHash) != 64 {
+		t.Fatalf("payload_hash = %q，应为 AskHash %q", got.PayloadHash, AskHash(a))
+	}
+	other := &proto.Ask{Questions: []proto.Question{{Question: "另一道题", Options: []proto.Option{}}}}
+	if AskHash(other) == AskHash(a) || AskHash(other) == PayloadHash(policy.Payload{}) {
+		t.Fatal("不同的题哈希应不同，也不同于空载荷的哈希")
+	}
+	if r, err := s.FindResend(m.ID, "s1", "t1", "AskUserQuestion", AskHash(a), 15*time.Minute); err != nil || r.ID != "a1" {
+		t.Fatalf("同一道题应认作重发: %+v, %v", r, err)
+	}
+	if _, err := s.FindResend(m.ID, "s1", "t1", "AskUserQuestion", AskHash(other), 15*time.Minute); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("另一道题不算重发: %v", err)
+	}
+	// JSON：题目在 ask，答案在 answers；没有时省略
+	b, _ := json.Marshal(got)
+	if !strings.Contains(string(b), `"ask":{"questions":[`) || strings.Contains(string(b), `"answers"`) {
+		t.Fatalf("JSON: %s", b)
+	}
+}
+
+// AnswerRequest：仍 pending 的提问改 answered（存答案原文）或 passthrough（不存答案），decided_by user、decided_at 为 now；
+// 已不是 pending、不是提问、没有这条请求分别报 ErrNotPending、ErrNotAsk、ErrNotFound，行不动。
+func TestAnswerRequest(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	a := testAsk()
+	for _, id := range []string{"a1", "a2"} {
+		if err := s.InsertRequest(newAsk(m.ID, id, a)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.InsertRequest(newReq(m.ID, "p1", "touch a")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 31, 8, 0, 0, 123, time.UTC)
+	answers := map[string]string{a.Questions[0].Question: "B，token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", a.Questions[1].Question: "要"}
+	got, err := s.AnswerRequest("a1", answers, false, now)
+	if err != nil || got.State != "answered" || got.DecidedBy != "user" || got.DecidedAt == nil || *got.DecidedAt != FormatTime(now) ||
+		!reflect.DeepEqual(got.Answers, answers) || !reflect.DeepEqual(got.Ask, a) || got.DeliveredAt != nil {
+		t.Fatalf("作答 = %+v, %v", got, err)
+	}
+	if again, err := s.GetRequest("a1"); err != nil || !reflect.DeepEqual(again, got) {
+		t.Fatalf("读回应与返回的一致（答案存原文）:\n%+v\n%+v, %v", again, got, err)
+	}
+	answers["要不要写测试？"] = "改了" // 返回值不与调用方的 map 共享
+	if again, _ := s.GetRequest("a1"); again.Answers["要不要写测试？"] != "要" {
+		t.Fatalf("库里的答案被调用方改动: %+v", again.Answers)
+	}
+	if _, err := s.AnswerRequest("a1", answers, false, now); !errors.Is(err, ErrNotPending) {
+		t.Fatalf("已回答再答应 ErrNotPending: %v", err)
+	}
+	pt, err := s.AnswerRequest("a2", map[string]string{"忽略": "x"}, true, now)
+	if err != nil || pt.State != "passthrough" || pt.DecidedBy != "user" || pt.Answers != nil {
+		t.Fatalf("交回终端 = %+v, %v", pt, err)
+	}
+	var col string
+	if err := s.db.QueryRow("SELECT answers FROM requests WHERE id = 'a2'").Scan(&col); err != nil || col != "" {
+		t.Fatalf("交回终端不存答案: %q, %v", col, err)
+	}
+	if _, err := s.AnswerRequest("p1", answers, false, now); !errors.Is(err, ErrNotAsk) {
+		t.Fatalf("审批不能作答: %v", err)
+	}
+	if p1, _ := s.GetRequest("p1"); p1.State != "pending" {
+		t.Fatalf("审批不应被改: %+v", p1)
+	}
+	if _, err := s.AnswerRequest("nope", answers, false, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("不存在: %v", err)
+	}
+	if _, err := s.AnswerRequest("p1", nil, false, now); !errors.Is(err, ErrNotAsk) {
+		t.Fatalf("先认种类: %v", err)
+	}
+}
+
+// 已回答与已批准、已拒绝一样要送到守护进程：列进未送达的决定、接受送达回执；交回终端的不补发、回执不记。
+func TestAnsweredIsDeliverable(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	a := testAsk()
+	for _, id := range []string{"a1", "a2", "a3"} {
+		if err := s.InsertRequest(newAsk(m.ID, id, a)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	answers := map[string]string{a.Questions[0].Question: "A", a.Questions[1].Question: "要"}
+	if _, err := s.AnswerRequest("a1", answers, false, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AnswerRequest("a2", nil, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	und, err := s.UndeliveredDecisions(m.ID)
+	if err != nil || len(und) != 1 || und[0].ID != "a1" || !reflect.DeepEqual(und[0].Answers, answers) {
+		t.Fatalf("未送达的决定应只有 a1 且带答案: %+v, %v", und, err)
+	}
+	for id, want := range map[string]bool{"a1": true, "a2": false, "a3": false} {
+		if updated, err := s.MarkDelivered(m.ID, id); err != nil || updated != want {
+			t.Fatalf("%s 送达回执 = %v, %v，应为 %v", id, updated, err, want)
+		}
+	}
+	for state, want := range map[string]bool{"approved": true, "denied": true, "answered": true, "pending": false, "passthrough": false, "expired": false} {
+		if got := Deliverable(state); got != want {
+			t.Fatalf("Deliverable(%q) = %v", state, got)
+		}
+	}
+}

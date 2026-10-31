@@ -18,6 +18,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/hub/push"
 	"github.com/xufei547/railse-opc/internal/hub/store"
 	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 const (
@@ -227,11 +228,11 @@ func (s *Server) announceNew(r store.Request) {
 	s.push.enqueue(r)
 }
 
-// pushWorthy 判断一条新请求要不要推：permission、webhook 推（只有新登记的 pending 走到这里）；question 只推事件时间在
+// pushWorthy 判断一条新请求要不要推：permission、ask、webhook 推（只有新登记的 pending 走到这里）；question 只推事件时间在
 // pushQuestionMaxAge 之内的——守护进程断线重连后补发的旧审计批次，不该一下子弹出一串过时的“等你回答”；done 不推。
 func pushWorthy(r store.Request, now time.Time) bool {
 	switch r.Kind {
-	case "permission", "webhook":
+	case "permission", "ask", "webhook":
 		return true
 	case "question":
 		t, err := time.Parse(time.RFC3339Nano, r.CreatedAt)
@@ -529,12 +530,13 @@ func (p *pushService) manyMachines() bool {
 
 // pushMessage 组推送载荷 {"id","kind","title","body","url":"/r/<id>"}，文案说人话（谁要做什么、在哪、该干嘛）：
 //   - permission：标题“<CLI> 要<动词>”（动词按风险，见 riskVerbs），正文两行：载荷摘要、“点开批准或拒绝”（摘要为空，如不带网址的搜索时，第一行写工具名）；
+//   - ask：标题“<CLI> 在问你”，正文两行：第一道题的题面（题数大于 1 时加“ 等 N 题”）、“点开回答”；
 //   - question：标题“<CLI> 在终端等你回答”，正文是问题；
 //   - webhook：标题“工作流等你批准”，正文是来源给的标题。
 //
-// permission、question 的标题有项目时追加“ · 项目”，w.Many 时再追加“ · 机器名”（去掉 .local），超长的砍法见 pushTitle。
-// 项目名、机器名、摘要、问题与 webhook 标题都先并成一行（控制字符、换行当空白，去掉不可见的格式字符）再按字符截断；
-// permission 正文的两行在规整之后才用 \n 连接。编码后仍保证不超过 push.MaxPlaintext（见 encodePushPayload）。
+// permission、ask、question 的标题有项目时追加“ · 项目”，w.Many 时再追加“ · 机器名”（去掉 .local），超长的砍法见 pushTitle。
+// 项目名、机器名、摘要、题面、问题与 webhook 标题都先并成一行（控制字符、换行当空白，去掉不可见的格式字符）再按字符截断；
+// permission、ask 正文的两行在规整之后才用 \n 连接。编码后仍保证不超过 push.MaxPlaintext（见 encodePushPayload）。
 func pushMessage(r store.Request, w pushWho) ([]byte, error) {
 	machine := ""
 	if w.Many {
@@ -549,6 +551,9 @@ func pushMessage(r store.Request, w pushWho) ([]byte, error) {
 			summary = clean(r.ToolName, pushSummaryLen)
 		}
 		body = joinNonEmpty("\n", summary, "点开批准或拒绝")
+	case "ask":
+		title = pushTitle(cliName(w.Tool)+" 在问你", w.Project, machine)
+		body = joinNonEmpty("\n", askSummary(r.Ask), "点开回答")
 	case "question":
 		title = pushTitle(cliName(w.Tool)+" 在终端等你回答", w.Project, machine)
 		body = clean(r.Title, pushBodyLen)
@@ -577,6 +582,19 @@ func pushTitle(head, project, machine string) string {
 		}
 	}
 	return truncate(joinNonEmpty(sep, parts...), pushTitleLen)
+}
+
+// askSummary 是提问推送正文的第一行：第一道题的题面（并成一行、截到 pushSummaryLen 个字符），题数大于 1 时加“ 等 N 题”。
+// 没有题目时为空。
+func askSummary(a *proto.Ask) string {
+	if a == nil || len(a.Questions) == 0 {
+		return ""
+	}
+	first := clean(a.Questions[0].Question, pushSummaryLen)
+	if n := len(a.Questions); n > 1 {
+		first += fmt.Sprintf(" 等 %d 题", n)
+	}
+	return first
 }
 
 // payloadSummary 取载荷里最能说明这次操作的一段：shell 取命令、file_write 取路径、network 取 URL、mcp 取“服务/工具”，认不出的工具取工具名。
