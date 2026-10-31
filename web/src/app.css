@@ -185,3 +185,4 @@ code.mono { word-break: break-all; }
 .push-state { margin: 6px 0 0; font-size: 14px; overflow-wrap: anywhere; }
 ol.steps { margin: 8px 0 4px; padding-left: 22px; font-size: 14px; }
 ol.steps li { margin: 4px 0; }
+.ask-hint { margin: 0 0 8px; text-align: center; }

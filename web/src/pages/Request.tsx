@@ -84,14 +84,14 @@ function RequestDetail({ id }: { id: string }) {
   }
 
   // 决定面板与答题表单共用：attempted 是这次做的事（面板不带，取正在做的批准或拒绝）
-  function onDone(updated: RequestView | null, message?: string, attempted: Attempt | undefined = action ?? undefined) {
+  function onDone(updated: RequestView | null, message?: string, attempted: Attempt | undefined = action ?? undefined, sent?: Record<string, string>) {
     setAction(null)
     if (updated) {
       setData((d) => (d ? { ...d, request: updated } : d))
       setOutcome({ kind: 'done', request: updated })
     } else {
       // 已处理、已过期、机器已吊销（409），没有这条（404），或面板开着时有了结果：告诉用户为什么，并重新加载
-      setOutcome({ kind: 'gone', message: message || '这条请求已经决定不了', attempted })
+      setOutcome({ kind: 'gone', message: message || '这条请求已经决定不了', attempted, sent })
     }
     void load()
     void reload()
@@ -156,7 +156,7 @@ export function RequestBody({
 }: {
   data: Detail
   onOpen: (a: Verdict) => void
-  onDone: (updated: RequestView | null, message: string | undefined, attempted: Attempt) => void
+  onDone: (updated: RequestView | null, message: string | undefined, attempted: Attempt, sent?: Record<string, string>) => void
 }) {
   const r = data.request
   return (

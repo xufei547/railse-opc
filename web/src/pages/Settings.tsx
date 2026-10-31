@@ -93,7 +93,7 @@ export function Settings() {
           <dd>{status?.rules_version ?? '-'}</dd>
           <dt>在线机器</dt>
           <dd>{status ? `${online} / ${total}` : '-'}</dd>
-          <dt>待审批</dt>
+          <dt>待处理</dt>
           <dd>{status?.pending ?? '-'}</dd>
           <dt>已运行</dt>
           <dd>{status ? formatUptime(status.uptime) : '-'}</dd>

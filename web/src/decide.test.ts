@@ -362,22 +362,59 @@ describe('提问的结果文案（答题表单与决定面板同一套）', () =
   it('409 但重新拉到的正是你这次的回答或交回终端：绿色；是另一个页面做的另一件事：红色，说明现在的结果', () => {
     const answered = ask({ state: 'answered' })
     const passed = ask({ state: 'passthrough' })
-    expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'answer' }, answered)).toEqual({
+    expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'answer', sent: { q: 'A' } }, { ...answered, answers: { q: 'A' } })).toEqual({
       tone: 'ok',
       title: '你的决定已生效',
       text: '已回答，答案正在送回 agent',
     })
     expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'passthrough' }, passed).tone).toBe('ok')
-    expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'answer' }, passed)).toEqual({
+    expect(outcomeView({ kind: 'gone', message: '请求已经处理过', attempted: 'answer', sent: { q: 'A' } }, passed)).toEqual({
       tone: 'warn',
       title: '没有生效',
       text: '这条请求在别处有了结果：交回终端（交回终端问了）',
     })
-    expect(outcomeView({ kind: 'gone', message: '请求已过期', attempted: 'answer' }, ask({ state: 'expired', decided_by: 'timeout' }))).toEqual({
+    expect(outcomeView({ kind: 'gone', message: '请求已过期', attempted: 'answer', sent: { q: 'A' } }, ask({ state: 'expired', decided_by: 'timeout' }))).toEqual({
       tone: 'warn',
       title: '没有生效',
       text: '请求已过期',
     })
+  })
+})
+
+describe('提问 409：只有结果真是这次提交的才说已生效', () => {
+  const ask = (over: Partial<RequestView>) =>
+    req({ kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', decided_by: 'user', ...over })
+  const gone = (attempted: 'answer' | 'passthrough', sent?: Record<string, string>) =>
+    ({ kind: 'gone', message: '请求已经处理过', attempted, sent }) as const
+
+  it('作答：答案与本次提交完全相同才算；别的设备答了不同内容是“别处”', () => {
+    const same = ask({ state: 'answered', answers: { 甲: 'A', 乙: 'x, y' } })
+    expect(outcomeView(gone('answer', { 乙: 'x, y', 甲: 'A' }), same)).toMatchObject({ tone: 'ok', title: '你的决定已生效' })
+    const diff = ask({ state: 'answered', answers: { 甲: 'B', 乙: 'x, y' } })
+    expect(outcomeView(gone('answer', { 甲: 'A', 乙: 'x, y' }), diff)).toEqual({
+      tone: 'warn',
+      title: '没有生效',
+      text: '这条请求在别处有了结果：已回答（你答了）',
+    })
+    // 多一题、少一题、没带答案、本次没记答案：都不算
+    expect(outcomeView(gone('answer', { 甲: 'A' }), same).tone).toBe('warn')
+    expect(outcomeView(gone('answer', { 甲: 'A', 乙: 'x, y', 丙: 'z' }), same).tone).toBe('warn')
+    expect(outcomeView(gone('answer', { 甲: 'A' }), ask({ state: 'answered' })).tone).toBe('warn')
+    expect(outcomeView(gone('answer'), same).tone).toBe('warn')
+    // 不是用户答的（终端先答了）
+    expect(outcomeView(gone('answer', { 甲: 'A', 乙: 'x, y' }), { ...same, decided_by: 'terminal' }).tone).toBe('warn')
+  })
+
+  it('goneMessage（面板开着时请求有了结果）同一口径', () => {
+    const r = ask({ state: 'answered', answers: { 甲: 'B' } })
+    expect(goneMessage(r, 'answer', { 甲: 'A' })).toBe('这条请求在别处有了结果：已回答（你答了）')
+    expect(goneMessage(r, 'answer', { 甲: 'B' })).toBe('你的决定已生效：已回答')
+  })
+
+  it('交回终端：最终是 passthrough 且 decided_by 为 user 才算', () => {
+    expect(outcomeView(gone('passthrough'), ask({ state: 'passthrough' }))).toMatchObject({ tone: 'ok', title: '你的决定已生效' })
+    expect(outcomeView(gone('passthrough'), ask({ state: 'passthrough', decided_by: 'terminal' })).tone).toBe('warn')
+    expect(outcomeView(gone('passthrough'), ask({ state: 'answered', answers: { 甲: 'A' } })).tone).toBe('warn')
   })
 })
 

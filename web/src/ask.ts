@@ -42,6 +42,8 @@ export type AskAction =
   | { type: 'custom'; question: number; text: string }
   | { type: 'submit'; verb: AskVerb }
   | { type: 'failed'; message: string }
+  /** 只解除提交中、不写错误：原因由页面的结果提示说（409、404），表单里不再重复。 */
+  | { type: 'settled' }
 
 export function initAsk(questions: Question[]): AskState {
   return { picked: questions.map(() => []), custom: questions.map(() => ''), busy: null, error: null }
@@ -81,6 +83,8 @@ export function askReducer(s: AskState, a: AskAction): AskState {
       return { ...s, busy: a.verb, error: null }
     case 'failed':
       return { ...s, busy: null, error: a.message }
+    case 'settled':
+      return { ...s, busy: null }
     default:
       return s
   }
@@ -112,6 +116,11 @@ export function answers(questions: Question[], s: AskState): Record<string, stri
   return Object.fromEntries(entries)
 }
 
+/** 还有几题没答（选了选项或自己填了才算答）；全答了为 0。 */
+export function unansweredCount(questions: Question[], s: AskState): number {
+  return questions.filter((_, i) => (s.picked[i] ?? []).length === 0 && !filled(s.custom[i] ?? '')).length
+}
+
 /** “回答”能不能点：不在提交中，且每题都有答案。 */
 export function canAnswer(questions: Question[], s: AskState): boolean {
   return s.busy === null && answers(questions, s) !== null
@@ -134,5 +143,34 @@ export async function sendAsk(run: () => Promise<RequestView>): Promise<{ done: 
   } catch (e) {
     const c = classifyError(e, '提交失败')
     return c.gone ? { gone: c.message } : { failed: c.message }
+  }
+}
+
+interface SubmitDeps {
+  call: (body: AnswerBody) => Promise<RequestView>
+  dispatch: (a: AskAction) => void
+  /** 提交有了结果：成功带作答后的请求；答不了（gone）时带 null 与 hub 的文案。sent 是这次回答提交的答案（交回终端不带）。 */
+  onDone: (updated: RequestView | null, message: string | undefined, attempted: AskVerb, sent?: Record<string, string>) => void
+}
+
+/**
+ * 答题表单的提交：同一时刻只发一次（连点、提交中再点都不发）；成功交给 onDone；409、404（gone）只解除提交中、
+ * 原因交给页面的结果提示（onDone），表单里不再写同一条错误；400、连不上等留在表单上显示 hub 的文案，可以改了再试。
+ * 返回的函数每次用最新的 (题目, 状态) 调。
+ */
+export function askSubmitter({ call, dispatch, onDone }: SubmitDeps): (verb: AskVerb, questions: Question[], s: AskState) => Promise<void> {
+  let flying = false
+  return async (verb, questions, s) => {
+    const body = submitBody(verb, questions, s)
+    if (!body || s.busy || flying) return
+    flying = true
+    dispatch({ type: 'submit', verb })
+    const r = await sendAsk(() => call(body))
+    flying = false
+    if ('done' in r) onDone(r.done, undefined, verb, body.answers)
+    else if ('gone' in r) {
+      dispatch({ type: 'settled' })
+      onDone(null, r.gone, verb, body.answers)
+    } else dispatch({ type: 'failed', message: r.failed })
   }
 }

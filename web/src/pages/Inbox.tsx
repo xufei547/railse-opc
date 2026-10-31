@@ -88,7 +88,7 @@ export function Inbox() {
         )}
         {groups.length > 0 && (
           <section>
-            <h2 className="section-title">待审批</h2>
+            <h2 className="section-title">待处理</h2>
             {groups.map((g) => (
               <div key={g.key}>
                 <div className="group-title">

@@ -1,15 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ApiError } from './api'
 import {
   answerFor,
   answers,
   askQuestions,
   askReducer,
+  askSubmitter,
   canAnswer,
   initAsk,
   questionOptions,
   sendAsk,
   submitBody,
+  unansweredCount,
   type AskAction,
   type AskState,
 } from './ask'
@@ -186,5 +188,100 @@ describe('sendAsk：结果的口径与决定面板一致', () => {
     expect(await sendAsk(() => Promise.reject(new ApiError(400, '答案不合规：第 1 题没有答案')))).toEqual({ failed: '答案不合规：第 1 题没有答案' })
     expect(await sendAsk(() => Promise.reject(new ApiError(0, '连不上 hub，请检查网络')))).toEqual({ failed: '连不上 hub，请检查网络' })
     expect(await sendAsk(() => Promise.reject(new TypeError('boom')))).toEqual({ failed: '提交失败' })
+  })
+})
+
+describe('unansweredCount：还有几题没答', () => {
+  it('选了或自己填了（非空白）的不算；全答了为 0', () => {
+    expect(unansweredCount(qs, initAsk(qs))).toBe(3)
+    expect(unansweredCount(qs, run(initAsk(qs), pick(0, 1)))).toBe(2)
+    expect(unansweredCount(qs, run(initAsk(qs), pick(0, 1), type(2, '  ')))).toBe(2)
+    expect(unansweredCount(qs, run(initAsk(qs), pick(0, 1), pick(1, 0, true), type(2, '无')))).toBe(0)
+  })
+})
+
+describe('askSubmitter：AskForm 的提交逻辑（单飞、gone 交给页面、其余留在表单）', () => {
+  const one = [fruit]
+  const picked = run(initAsk(one), pick(0, 1))
+  function setup(call: () => Promise<RequestView>) {
+    const actions: AskAction[] = []
+    const onDone = vi.fn()
+    const callSpy = vi.fn(call)
+    const submit = askSubmitter({ call: callSpy, dispatch: (a) => actions.push(a), onDone })
+    return { actions, onDone, callSpy, submit }
+  }
+
+  it('回答：发 { answers }，成功带回作答后的请求', async () => {
+    const done = req({ state: 'answered' })
+    const t = setup(async () => done)
+    await t.submit('answer', one, picked)
+    expect(t.callSpy).toHaveBeenCalledWith({ answers: { '你更喜欢苹果还是香蕉？': 'Banana' } })
+    expect(t.actions).toEqual([{ type: 'submit', verb: 'answer' }])
+    expect(t.onDone).toHaveBeenCalledWith(done, undefined, 'answer', { '你更喜欢苹果还是香蕉？': 'Banana' })
+  })
+
+  it('交回终端：发 { passthrough: true }，不带答案', async () => {
+    const t = setup(async () => req({ state: 'passthrough' }))
+    await t.submit('passthrough', one, initAsk(one))
+    expect(t.callSpy).toHaveBeenCalledWith({ passthrough: true })
+    expect(t.onDone.mock.calls[0]?.[3]).toBeUndefined()
+  })
+
+  it('单飞：连点两次只发一次，结束后可以再提交', async () => {
+    let finish!: (r: RequestView) => void
+    let n = 0
+    const t = setup(() => (n++ === 0 ? new Promise<RequestView>((res) => (finish = res)) : Promise.resolve(req({ state: 'answered' }))))
+    const first = t.submit('answer', one, picked)
+    await t.submit('answer', one, picked)
+    await t.submit('passthrough', one, picked)
+    expect(t.callSpy).toHaveBeenCalledTimes(1)
+    finish(req({ state: 'answered' }))
+    await first
+    await t.submit('answer', one, picked)
+    expect(t.callSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('还有题没答时回答不发请求', async () => {
+    const t = setup(async () => req())
+    await t.submit('answer', one, initAsk(one))
+    expect(t.callSpy).not.toHaveBeenCalled()
+    expect(t.actions).toEqual([])
+  })
+
+  it('400：留在表单显示 hub 的文案（failed），不调 onDone，可以改了再交', async () => {
+    let n = 0
+    const t = setup(() => (n++ === 0 ? Promise.reject(new ApiError(400, '答案不合规')) : Promise.resolve(req({ state: 'answered' }))))
+    await t.submit('answer', one, picked)
+    expect(t.actions).toEqual([{ type: 'submit', verb: 'answer' }, { type: 'failed', message: '答案不合规' }])
+    expect(t.onDone).not.toHaveBeenCalled()
+    await t.submit('answer', one, picked)
+    expect(t.onDone).toHaveBeenCalledTimes(1)
+  })
+
+  it('409、404：只解除提交中、表单不写错误，原因交给页面的结果提示（onDone 带文案与这次的答案）', async () => {
+    for (const status of [409, 404]) {
+      const t = setup(() => Promise.reject(new ApiError(status, '请求已经处理过')))
+      await t.submit('answer', one, picked)
+      expect(t.actions).toEqual([{ type: 'submit', verb: 'answer' }, { type: 'settled' }])
+      expect(t.onDone).toHaveBeenCalledWith(null, '请求已经处理过', 'answer', { '你更喜欢苹果还是香蕉？': 'Banana' })
+    }
+    const p = setup(() => Promise.reject(new ApiError(409, '请求已经处理过')))
+    await p.submit('passthrough', one, picked)
+    expect(p.onDone).toHaveBeenCalledWith(null, '请求已经处理过', 'passthrough', undefined)
+  })
+
+  it('网络错误：留在表单显示文案，不调 onDone', async () => {
+    const t = setup(() => Promise.reject(new ApiError(0, '连不上 hub，请检查网络')))
+    await t.submit('answer', one, picked)
+    expect(t.actions).toEqual([{ type: 'submit', verb: 'answer' }, { type: 'failed', message: '连不上 hub，请检查网络' }])
+    expect(t.onDone).not.toHaveBeenCalled()
+  })
+})
+
+describe('askReducer settled', () => {
+  it('只解除提交中，不写错误', () => {
+    const s = run(initAsk([fruit]), pick(0, 0), { type: 'submit', verb: 'answer' })
+    expect(s.busy).toBe('answer')
+    expect(run(s, { type: 'settled' })).toMatchObject({ busy: null, error: null })
   })
 })

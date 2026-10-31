@@ -1,4 +1,4 @@
-import { useEffect, useId, useReducer, useRef } from 'react'
+import { useEffect, useId, useReducer, useRef, useState } from 'react'
 import { hub } from '../api'
 import {
   answerFor,
@@ -7,8 +7,8 @@ import {
   canAnswer,
   initAsk,
   questionOptions,
-  sendAsk,
-  submitBody,
+  askSubmitter,
+  unansweredCount,
   type AskAction,
   type AskState,
   type AskVerb,
@@ -33,6 +33,7 @@ interface ViewProps {
 export function AskFormView({ questions, state: s, dispatch, onAnswer, onPassthrough }: ViewProps) {
   const id = useId()
   const busy = s.busy !== null
+  const left = unansweredCount(questions, s)
   return (
     <div className="ask">
       {questions.map((q, i) => {
@@ -78,6 +79,7 @@ export function AskFormView({ questions, state: s, dispatch, onAnswer, onPassthr
               <input
                 className="input"
                 type="text"
+                aria-describedby={`${id}-q${i}`}
                 maxLength={1000}
                 value={s.custom[i] ?? ''}
                 disabled={busy}
@@ -91,6 +93,11 @@ export function AskFormView({ questions, state: s, dispatch, onAnswer, onPassthr
         <div className="error" role="alert">
           {s.error}
         </div>
+      )}
+      {left > 0 && (
+        <p className="sub ask-hint" role="status">
+          还有 {left} 题没答
+        </p>
       )}
       <button type="button" className="btn primary block" onClick={onAnswer} disabled={!canAnswer(questions, s)}>
         {s.busy === 'answer' ? '正在提交…' : '回答'}
@@ -109,7 +116,7 @@ interface Props {
    * 提交有了结果：成功时带作答后的请求；这条已经答不了（409 已处理、已过期、机器已吊销，404 没有这条）时带 null 与 hub 的文案。
    * 都带上这次做的是回答还是交回终端，父组件据此显示结果提示（与决定面板同一套）并重新加载。
    */
-  onDone: (updated: RequestView | null, message: string | undefined, attempted: AskVerb) => void
+  onDone: (updated: RequestView | null, message: string | undefined, attempted: AskVerb, sent?: Record<string, string>) => void
 }
 
 /**
@@ -119,29 +126,24 @@ interface Props {
 export function AskForm({ request, onDone }: Props) {
   const questions = askQuestions(request)
   const [s, dispatch] = useReducer(askReducer, questions, initAsk)
-  const submitting = useRef(false)
   const onDoneRef = useRef(onDone)
   useEffect(() => {
     onDoneRef.current = onDone
   }, [onDone])
+  // 提交逻辑（单飞、gone 交给页面、其余留在表单）在 askSubmitter 里；这里每个表单实例只建一次
+  const [submit] = useState(() =>
+    askSubmitter({
+      call: (body) => hub.answer(request.id, body),
+      dispatch: (a) => dispatchRef.current(a),
+      onDone: (...args) => onDoneRef.current(...args),
+    }),
+  )
+  const dispatchRef = useRef(dispatch)
+  useEffect(() => {
+    dispatchRef.current = dispatch
+  }, [dispatch])
 
-  async function send(verb: AskVerb) {
-    const body = submitBody(verb, questions, s)
-    if (!body || s.busy || submitting.current) return
-    submitting.current = true
-    dispatch({ type: 'submit', verb })
-    const r = await sendAsk(() => hub.answer(request.id, body))
-    submitting.current = false
-    if ('done' in r) {
-      onDoneRef.current(r.done, undefined, verb)
-      return
-    }
-    // 答不了（gone）时页面显示红色结果提示并重新加载，这条多半已不再待答、表单随之消失；万一还在，表单解除提交中、留着原因可以再试
-    dispatch({ type: 'failed', message: 'gone' in r ? r.gone : r.failed })
-    if ('gone' in r) onDoneRef.current(null, r.gone, verb)
-  }
-
-  return <AskFormView questions={questions} state={s} dispatch={dispatch} onAnswer={() => void send('answer')} onPassthrough={() => void send('passthrough')} />
+  return <AskFormView questions={questions} state={s} dispatch={dispatch} onAnswer={() => void submit('answer', questions, s)} onPassthrough={() => void submit('passthrough', questions, s)} />
 }
 
 /** 提问结束后的题目与答案：每题一行“问题 → 你的答案”；没有答案的（交回终端、过期……）只列问题。 */

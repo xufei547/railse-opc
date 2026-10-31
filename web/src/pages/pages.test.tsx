@@ -391,6 +391,8 @@ describe('四个页面的首屏（还没数据）', () => {
     expect(html).toMatch(/<input type="checkbox" role="switch" disabled=""/)
     expect(html).toContain('规则版本')
     expect(html).toContain('在线机器')
+    expect(html).toContain('<dt>待处理</dt>')
+    expect(html).not.toContain('待审批')
     expect(html).toContain('退出登录')
     // 通知区块在总开关与 hub 信息之间，首屏在检查中
     expect(html).toContain('<h2 class="section-title">通知</h2>')

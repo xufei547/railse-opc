@@ -147,7 +147,7 @@ describe('AskFormView', () => {
     const names = inputTags(html, 'radio').map((t) => /name="([^"]+)"/.exec(t)?.[1])
     expect(names[0]).toBeTruthy()
     expect(new Set(names).size).toBe(1)
-    expect(html).toMatch(/<label class="field"><span>自己填<\/span><input class="input" type="text" maxLength="1000"/i)
+    expect(html).toMatch(/<label class="field"><span>自己填<\/span><input class="input" type="text" aria-describedby="[^"]+" maxLength="1000"/i)
     expect(html).not.toContain('style=')
   })
 
@@ -182,6 +182,27 @@ describe('AskFormView', () => {
     expect(answer(html)?.[1]).not.toContain('disabled')
     html = form(qs, st(qs, { custom: ['', '  '] }))
     expect(answer(html)?.[1]).toContain('disabled=""')
+  })
+
+  it('多选题时“回答”不可点，旁边小字说还有几题没答；全答了不显示；只有一题也说', () => {
+    const qs = [fruit, many, free]
+    const hint = (h: string) => /<p class="sub ask-hint" role="status">([^<]*)<\/p>/.exec(h)?.[1]
+    expect(hint(form(qs))).toBe('还有 3 题没答')
+    expect(hint(form(qs, st(qs, { picked: [[1], [], []], custom: ['', '', ' '] })))).toBe('还有 2 题没答')
+    expect(hint(form(qs, st(qs, { picked: [[1], [0], []], custom: ['', '', '无'] })))).toBeUndefined()
+    expect(hint(form([fruit]))).toBe('还有 1 题没答')
+    expect(hint(form([fruit], st([fruit], { picked: [[0]] })))).toBeUndefined()
+  })
+
+  it('“自己填”输入框用 aria-describedby 关联到这题的题面', () => {
+    const html = form([fruit, many])
+    const inputs = inputTags(html, 'text')
+    expect(inputs).toHaveLength(2)
+    const texts = inputs.map((t) => {
+      const id = /aria-describedby="([^"]+)"/.exec(t)?.[1]
+      return id ? new RegExp(`id="${id}">([^<]*)<`).exec(html)?.[1] : undefined
+    })
+    expect(texts).toEqual(['你更喜欢苹果还是香蕉？', '要哪些？'])
   })
 
   it('提交中：所有选项、输入框与两个按钮都 disabled，按钮文案说在做什么', () => {

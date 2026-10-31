@@ -37,6 +37,8 @@ test('提问：收件箱出现“在问你”，选 Banana 回答，钩子带着
   await expect(card.locator('.cmd')).toHaveText('Apple / Banana')
   await expect(card.locator('.where')).toHaveText('Claude Code · e2e-mac · repo')
   await expect(inbox.locator('.badge')).toHaveText('1')
+  await expect(page.getByRole('heading', { name: '待处理', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '待审批' })).toHaveCount(0)
 
   await card.click()
   await expect(page.getByRole('heading', { name: '提问', exact: true })).toBeVisible()
@@ -50,7 +52,10 @@ test('提问：收件箱出现“在问你”，选 Banana 回答，钩子带着
   await expect(group.getByText('水果', { exact: true })).toBeVisible()
   const answer = page.getByRole('button', { name: '回答', exact: true })
   await expect(answer).toBeDisabled()
+  await expect(page.getByText('还有 1 题没答')).toBeVisible()
+  await expect(page.getByRole('textbox', { name: '自己填' })).toHaveAccessibleDescription('你更喜欢苹果还是香蕉？')
   await group.getByRole('radio', { name: 'Banana', exact: true }).check()
+  await expect(page.getByText(/题没答/)).toHaveCount(0)
   await expect(answer).toBeEnabled()
   await answer.click()
 
