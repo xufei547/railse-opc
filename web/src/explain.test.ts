@@ -384,7 +384,7 @@ describe('explainRequest：next', () => {
     expect(explainRequest(req({ risk: 'network' })).next).toEqual([
       '批准：agent 执行这一条，只这一次。',
       '拒绝：agent 收到拒绝，会换个做法或停下来。',
-      '勾「记住」可以存成规则，下次同类的不再问。',
+      '勾「记住」可以存成规则，下次同类的不再问；记成放行后，Claude Code 自己的权限检查也会跳过。',
     ])
     expect(explainRequest(req({ has_redacted: true })).next).toEqual([
       '批准：agent 执行这一条，只这一次。',
@@ -395,7 +395,7 @@ describe('explainRequest：next', () => {
   it('“记住”那行别许诺做不到的事', () => {
     const rem = (over: Partial<RequestView>) => explainRequest(req(over)).next[2]
     const onlyDeny = '勾「记住」只能存成拒绝规则，下次同类的直接拒绝；这类操作不能记成放行。'
-    const canRule = '勾「记住」可以存成规则，下次同类的不再问。'
+    const canRule = '勾「记住」可以存成规则，下次同类的不再问；记成放行后，Claude Code 自己的权限检查也会跳过。'
     for (const risk of ['outward', 'destructive', 'unknown', 'write_outside']) expect(rem({ risk })).toBe(onlyDeny)
     for (const risk of ['read', 'write_in_project', 'network']) expect(rem({ risk })).toBe(canRule)
     expect(rem({ risk: 'network', project_root: '' })).toBe(onlyDeny)
@@ -573,7 +573,7 @@ describe('explain 的英文', () => {
     expect(explainRequest(req({ risk: 'network' })).next).toEqual([
       'Approve: the agent runs this, just this once.',
       'Deny: the agent is told no and will try another way or stop.',
-      'Turn on "Remember" to save a rule, so you won\'t be asked about similar requests again.',
+      'Turn on "Remember" to save a rule, so you won\'t be asked about similar requests again. Once remembered as allowed, Claude Code\'s own permission checks are skipped too.',
     ])
     expect(explainRequest(req({ risk: 'outward' })).next[2]).toBe(
       'Turn on "Remember" to save a deny rule, so similar requests are denied next time. This kind of action can\'t be remembered as allowed.',

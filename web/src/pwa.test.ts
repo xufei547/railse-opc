@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setLang } from './i18n'
-import { getSubscription, isIOS, isStandalone, pushSupported, registerServiceWorker, subscribe, urlBase64ToUint8Array } from './pwa'
+import { createVersionWatcher, getSubscription, isIOS, isStandalone, pushSupported, registerServiceWorker, subscribe, urlBase64ToUint8Array } from './pwa'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -209,5 +209,45 @@ describe('Service Worker 与订阅', () => {
     } finally {
       setLang('zh')
     }
+  })
+})
+
+describe('createVersionWatcher', () => {
+  it('首次记录版本；回前台版本变了就重载一次，dev 不比较', async () => {
+    const calls: string[] = []
+    let v = '0.2.0'
+    const w = createVersionWatcher({ fetchVersion: async () => v, reload: () => calls.push('reload') })
+    await w.check() // 记录 0.2.0
+    await w.check()
+    expect(calls).toEqual([])
+    v = '0.2.1'
+    await w.check()
+    expect(calls).toEqual(['reload'])
+    v = '0.2.2'
+    await w.check()
+    expect(calls).toEqual(['reload']) // 只重载一次
+    const d = createVersionWatcher({ fetchVersion: async () => 'dev', reload: () => calls.push('x') })
+    await d.check()
+    await d.check()
+    expect(calls).toEqual(['reload'])
+  })
+
+  it('取不到版本时不算数，之后照常比较', async () => {
+    const calls: string[] = []
+    let fail = true
+    let v = '0.2.0'
+    const w = createVersionWatcher({
+      fetchVersion: async () => {
+        if (fail) throw new Error('offline')
+        return v
+      },
+      reload: () => calls.push('reload'),
+    })
+    await w.check()
+    fail = false
+    await w.check() // 这时才记下 0.2.0
+    v = '0.2.1'
+    await w.check()
+    expect(calls).toEqual(['reload'])
   })
 })

@@ -70,3 +70,33 @@ export async function subscribe(publicKey: string): Promise<PushSubscription> {
     throw new Error(t('浏览器没能订阅推送：{reason}', { reason: e instanceof Error ? e.message || e.name : String(e) }))
   }
 }
+
+/**
+ * 看 hub 的版本有没有变：第一次 check 记下当时的版本，之后版本不同就重载页面，同一次打开只重载一次。
+ * 手机上开着的旧页面（PWA 尤其常驻）在 hub 升级后还跑着旧代码，回到前台时据此换成新页面。
+ * 开发版（dev）不比较；取不到版本（断网、hub 重启中）时这次不算，下次再比。
+ */
+export function createVersionWatcher(deps: { fetchVersion: () => Promise<string>; reload: () => void }): { check: () => Promise<void> } {
+  let seen: string | null = null
+  let reloaded = false
+  return {
+    async check() {
+      if (reloaded) return
+      let v: string
+      try {
+        v = await deps.fetchVersion()
+      } catch {
+        return
+      }
+      if (!v || v === 'dev') return
+      if (seen === null) {
+        seen = v
+        return
+      }
+      if (v !== seen) {
+        reloaded = true
+        deps.reload()
+      }
+    },
+  }
+}
