@@ -1,0 +1,18 @@
+{
+  "session_id": "39963194-6458-48c7-bd7e-1ea5d82bd466",
+  "transcript_path": "/Users/xufei/.claude/projects/-Users-xufei-RailseWork--claude-worktrees-v0-1-5-answer-questions-09a2a5/39963194-6458-48c7-bd7e-1ea5d82bd466.jsonl",
+  "cwd": "/Users/xufei/RailseWork/.claude/worktrees/v0-1-5-answer-questions-09a2a5",
+  "scratchpad_dir": "/private/tmp/claude-501/-Users-xufei-RailseWork--claude-worktrees-v0-1-5-answer-questions-09a2a5/39963194-6458-48c7-bd7e-1ea5d82bd466/scratchpad",
+  "prompt_id": "50817445-ac46-4265-99bc-9e07c3fd3372",
+  "permission_mode": "default",
+  "effort": {
+    "level": "xhigh"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo hi-default",
+    "description": "Print hi-default"
+  },
+  "tool_use_id": "toolu_01Af44FxDnDjQNKCUbqfZHpJ"
+}
