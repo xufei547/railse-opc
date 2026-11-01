@@ -328,14 +328,26 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 			}
 		}
 	}
-	// 只缺 PreToolUse 是旧安装：审批、提醒都照常，只是 Claude Code 的选择题进不了手机，所以降为 warn 而不是 fail
-	askMissing := i18n.T("缺 PreToolUse：Claude Code 的选择题进不了手机")
-	noAsk := cli == "claude" && slices.Equal(missing, []string{"PreToolUse"}) && len(short) == 0
-	// 0.2.0 及更早只让 PreToolUse 匹配 AskUserQuestion：auto 模式下 Claude 不触发 PermissionRequest，审批全绕过 Railse
-	var warns []string
-	if noAsk {
-		warns = append(warns, askMissing)
+	// 只缺 PreToolUse、PostToolUse 是旧安装：审批、提醒都照常，前者只是 Claude Code 的选择题进不了手机，后者只是桌面应用里
+	// 已在本机处理掉的审批，手机上的卡片要等过期才消失，所以降为 warn 而不是 fail
+	soft := map[string]string{
+		"PreToolUse":  i18n.T("缺 PreToolUse：Claude Code 的选择题进不了手机"),
+		"PostToolUse": i18n.T("缺 PostToolUse：桌面应用里已在本机处理的审批，手机上要等过期才消失"),
 	}
+	var hard, warns []string
+	for _, ev := range missing {
+		if msg, ok := soft[ev]; ok && cli == "claude" {
+			warns = append(warns, msg)
+		} else {
+			hard = append(hard, ev)
+		}
+	}
+	sort.Strings(warns)
+	noAsk := len(warns) > 0 && len(hard) == 0 && len(short) == 0
+	if !noAsk {
+		warns = nil
+	}
+	// 0.2.0 及更早只让 PreToolUse 匹配 AskUserQuestion：auto 模式下 Claude 不触发 PermissionRequest，审批全绕过 Railse
 	if pre := ins.Events["PreToolUse"]; cli == "claude" && pre.Present && !hooksconf.MatcherCovers(pre.Matcher, "Bash") {
 		warns = append(warns, fmt.Sprintf(i18n.T("PreToolUse 只匹配 %s：auto 模式下审批进不了 Railse"), pre.Matcher))
 	}

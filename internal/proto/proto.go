@@ -114,12 +114,17 @@ type Response struct {
 	Trigger *policy.Trigger `json:"trigger,omitempty"`
 }
 
-// Event 是只展示不操作的事件，Kind 为 question、done 或 session_end。
+// Event 是只展示不操作的事件，Kind 为 question、done、session_end 或 tool_done。
+// tool_done 来自 Claude 的 PostToolUse：工具已经跑完，守护进程据此取消同一调用还挂着的审批（桌面应用不结束 PermissionRequest 钩子），
+// 带工具名、载荷（与审批同一算法，只用来对上，不上报）与 tool_use_id；其余事件没有这三项。
 type Event struct {
-	V       int     `json:"v"`
-	Kind    string  `json:"kind"`
-	Session Session `json:"session"`
-	Message string  `json:"message,omitempty"`
+	V         int             `json:"v"`
+	Kind      string          `json:"kind"`
+	Session   Session         `json:"session"`
+	Message   string          `json:"message,omitempty"`
+	ToolName  string          `json:"tool_name,omitempty"`
+	Payload   *policy.Payload `json:"payload,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
 }
 
 // EventAck 是事件的确认。

@@ -215,14 +215,14 @@ func (d *HubDecider) oldHub(id string) Outcome {
 	return unreachable(reasonOldHub, "")
 }
 
-// abandon 在 ctx 结束时告诉 hub：钩子消失发 cancel(terminal)，等待到期发 expired，其余（守护进程停止）发
+// abandon 在 ctx 结束时告诉 hub：钩子消失或本机已处理掉（errSettledElsewhere）发 cancel(terminal)，等待到期发 expired，其余（守护进程停止）发
 // cancel(shutdown)，最多等 hubNoticeTimeout。断线或写不出去时只记日志：重连对齐会按 agent_restart 取消，随后本机终态审计覆盖。
 func (d *HubDecider) abandon(ctx context.Context, id string) {
 	nctx, cancel := context.WithTimeout(context.Background(), hubNoticeTimeout)
 	defer cancel()
 	var err error
 	switch {
-	case errors.Is(context.Cause(ctx), errHookGone):
+	case errors.Is(context.Cause(ctx), errHookGone), errors.Is(context.Cause(ctx), errSettledElsewhere):
 		err = d.Client.SendCancel(nctx, id, "terminal")
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		err = d.Client.SendExpired(nctx, id)

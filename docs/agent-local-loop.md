@@ -31,7 +31,8 @@ Claude Code 装的钩子有五个事件：
 | `PermissionRequest` | 全部 | 审批的兜底：MCP、Task 等 `PreToolUse` 不管的工具，以及 Claude 自己决定要问人时 | 86400 秒 |
 | `PreToolUse` | `AskUserQuestion\|Bash\|Edit\|Write\|MultiEdit\|NotebookEdit\|WebFetch` | 审批（0.2.1 起，任何权限模式都触发）；手机上答选择题（0.1.5 起） | 86400 秒 |
 | `Notification` | 全部 | 映射为 `question` 事件 | 默认 |
-| `Stop` | 全部 | 映射为 `done` 事件 | 默认 |
+| `PostToolUse` | 同 `PreToolUse` | 工具已跑完，映射为 `tool_done` 事件：取消同一调用还挂着的审批（0.2.2 起；不写审计，只记它引起的取消） | 默认 |
+| `Stop` | 全部 | 映射为 `done` 事件；同时取消这个会话里还挂着的审批与答题（0.2.2 起） | 默认 |
 | `SessionEnd` | 全部 | 会话结束 | 默认 |
 
 0.1.5 之前装过钩子的，重跑一次 `railse setup hooks --claude` 补上 `PreToolUse`；不补不影响别的功能，`railse doctor` 的 `hooks.claude` 会报 warn“缺 PreToolUse：Claude Code 的选择题进不了手机”。0.2.0 装的 `PreToolUse` 只匹配 `AskUserQuestion`，同样重跑一次换成上表的匹配器；不换的话 auto 模式下审批全绕过 Railse，doctor 报 warn“PreToolUse 只匹配 AskUserQuestion：auto 模式下审批进不了 Railse”。
@@ -126,6 +127,14 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 
 - **本机设置 `~/.railse/settings.yaml`。** 目前只有 `claude_undecided: classifier | phone`（默认 `classifier`）。不放 `rules.yaml`：那份由 hub 下发覆盖，解析时也拒绝未知字段。守护进程启动、`railse agent reload` 与 SIGHUP 时读；读不了、有未知字段或值不对时按默认值跑，reload 回报错。
 - **硬底线：终端与手机同屏（0.2.2 起）。** 实测（[findings](superpowers/specs/2026-11-01-pretooluse-ask-findings.md)）`permissionDecision: "ask"` 在 auto 模式下也强制让人确认，不回分类器；交互式终端里弹出带理由的确认框，并且照样触发 `PermissionRequest`。所以对外与不可逆两档在 `PreToolUse` 不等任何东西，立刻输出 `ask`，不看 hub 状态；理由由钩子按终端语言拼：“Railse：命令里的「rm -rf after」会删除文件，删了不可恢复。已发到手机，也可以在这里直接批”（引擎给出触发点：哪一段、什么性质）。随后的 `PermissionRequest` 按老路送手机：手机先答 → 输出 allow/deny，终端框关闭；终端先答 → Claude 结束钩子，守护进程向 hub 取消这一条；hub 不可达等 → 不表态，框还在。`claude -p` 下 `ask` 等于拒绝，Claude 收到理由文本。中间三级交回终端一律输出空，免得比 auto 模式更吵。
+  各权限模式下硬底线的表现：
+
+  | 权限模式 / 宿主 | 硬底线的表现 |
+  |---|---|
+  | 终端 CLI：default / acceptEdits / plan / auto | 终端确认框 + 手机卡片，谁先答谁算；终端先答时 Claude 结束 `PermissionRequest` 钩子 |
+  | `-p` 非交互 | `ask` 等于拒绝，Claude 收到理由文本 |
+  | bypassPermissions / dontAsk | 待真机验收第 6 条测出来后填 |
+  | Claude Code 桌面应用 / SDK 宿主 | `ask` 由宿主的权限回调裁决（auto 模式是宿主的分类器，不一定经人）；`PermissionRequest` 钩子不随之结束，由 `PostToolUse`（工具跑完）与 `Stop`、`SessionEnd`（一轮或会话结束）事件清理：守护进程取消同会话里挂着的请求，hub 记 `cancelled`、`decided_by: terminal`（取消原因“已在终端处理，取消等待”，钩子收到 passthrough 退出） |
 - **不再去重。** 0.2.1 的去重表已删：`PreToolUse` 从此不把任何请求送手机，`PermissionRequest` 来的每一条都该送（硬底线是约好的第二步，中间三级是 Claude 自己升级成要问人）。两条审计靠会话 + 载荷对上（`tool_use_id` 只有 `PreToolUse` 有）。
 - **放行是终局。** `PreToolUse` 回 allow 时 Claude Code 跳过它自己的权限检查（含 auto 的分类器），所以内置放行只覆盖只读与项目内改动两档；`settings.json` 里你写的 deny 规则仍先于钩子生效。
 - **失败即不表态。** 守护进程不在、hub 30 秒不可达、解析失败、超时，钩子都输出空（硬底线例外，见上一条），Claude 照自己的流程走；hub 不可达时 stderr 多一行 `railse hook: 连不上 hub，交回 Claude 自己的确认`。

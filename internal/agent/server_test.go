@@ -1002,3 +1002,142 @@ func TestPreToolUseRuleAllowUnchanged(t *testing.T) {
 		t.Fatalf("只读命令应由规则放行：%+v", resp)
 	}
 }
+
+// causeDecider 一直等到 ctx 结束，记下取消原因；started 在每条请求进来时收到一次。
+type causeDecider struct {
+	started chan string
+	mu      sync.Mutex
+	causes  map[string]error
+}
+
+func newCauseDecider() *causeDecider {
+	return &causeDecider{started: make(chan string, 8), causes: map[string]error{}}
+}
+
+func (d *causeDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, error) {
+	d.started <- pr.Req.Payload.Command
+	<-ctx.Done()
+	d.mu.Lock()
+	d.causes[pr.Req.Payload.Command] = context.Cause(ctx)
+	d.mu.Unlock()
+	return Outcome{}, ctx.Err()
+}
+
+func (d *causeDecider) cause(cmd string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.causes[cmd]
+}
+
+// toolDone 是 PostToolUse 来的事件：工具已经跑完。
+func toolDone(cwd, session, cmd string) proto.Event {
+	return proto.Event{V: proto.Version, Kind: "tool_done", Session: proto.Session{Tool: "claude", CLISessionID: session, Cwd: cwd},
+		ToolName: "Bash", Payload: &policy.Payload{Type: policy.PayloadShell, Command: cmd, Cwd: cwd}, ToolUseID: "toolu_x"}
+}
+
+// 桌面应用不结束 PermissionRequest 钩子：同会话同载荷的 tool_done 取消挂着的审批，钩子收到 passthrough，审计 cancelled/terminal，
+// Decider 的 ctx 以 errSettledElsewhere 取消（HubDecider 据此告诉 hub cancel(terminal)）；tool_done 本身不写审计。
+func TestToolDoneCancelsPendingPermission(t *testing.T) {
+	dec := newCauseDecider()
+	env := startServer(t, dec, nil)
+	pr := permission(env.repo, "git push origin main")
+	pr.Source, pr.PermissionMode = proto.SourcePermissionRequest, "auto"
+	got := make(chan proto.Response, 1)
+	go func() {
+		var resp proto.Response
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, pr), &resp)
+		got <- resp
+	}()
+	<-dec.started
+	var ack proto.EventAck
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, toolDone(env.repo, "s1", "git push origin main")), &ack)
+	if !ack.OK {
+		t.Fatalf("ack: %+v", ack)
+	}
+	select {
+	case resp := <-got:
+		if resp.Decision != "passthrough" || resp.DecidedBy != "terminal" || resp.Reason != reasonSettledElsewhere {
+			t.Fatalf("钩子应收到 passthrough: %+v", resp)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("tool_done 没有取消挂着的审批")
+	}
+	if c := dec.cause("git push origin main"); !errors.Is(c, errSettledElsewhere) {
+		t.Fatalf("Decider 的取消原因: %v", c)
+	}
+	var cancelled, toolDoneRows int
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		if e.Kind == "permission" && e.State == "cancelled" && e.DecidedBy == "terminal" && e.Reason == reasonSettledElsewhere {
+			cancelled++
+		}
+		if e.Kind == "tool_done" {
+			toolDoneRows++
+		}
+	}
+	if cancelled != 1 || toolDoneRows != 0 {
+		t.Fatalf("审计：cancelled=%d tool_done=%d", cancelled, toolDoneRows)
+	}
+}
+
+// 别的载荷、别的会话的 tool_done 不动挂着的审批。
+func TestToolDoneOtherCallUnaffected(t *testing.T) {
+	dec := newCauseDecider()
+	env := startServer(t, dec, nil)
+	pr := permission(env.repo, "git push origin main")
+	pr.Source = proto.SourcePermissionRequest
+	go func() { roundTrip(t, env.cfg.SocketPath, pr) }()
+	<-dec.started
+	roundTrip(t, env.cfg.SocketPath, toolDone(env.repo, "s1", "git push origin dev"))
+	roundTrip(t, env.cfg.SocketPath, toolDone(env.repo, "s2", "git push origin main"))
+	time.Sleep(200 * time.Millisecond)
+	if n := env.srv.pending.Count(); n != 1 {
+		t.Fatalf("不相干的 tool_done 不该取消：pending=%d", n)
+	}
+}
+
+// 一轮结束（done）取消该会话全部待决，含答题；别的会话的不动。
+func TestDoneCancelsSessionPending(t *testing.T) {
+	dec := newCauseDecider()
+	env := startServer(t, dec, nil)
+	sock := env.cfg.SocketPath
+	results := make(chan proto.Response, 3)
+	send := func(r proto.Request) {
+		go func() {
+			var resp proto.Response
+			json.Unmarshal(roundTrip(t, sock, r), &resp)
+			results <- resp
+		}()
+		<-dec.started
+	}
+	a := permission(env.repo, "git push origin main")
+	a.Source = proto.SourcePermissionRequest
+	send(a)
+	send(askReq("用哪个方案？"))
+	other := permission(env.repo, "git push origin dev")
+	other.Session.CLISessionID = "s2"
+	send(other)
+	roundTrip(t, sock, proto.Event{V: proto.Version, Kind: "done", Session: proto.Session{Tool: "claude", CLISessionID: "s1"}, Message: "DONE"})
+	for i := 0; i < 2; i++ {
+		select {
+		case resp := <-results:
+			if resp.Decision != "passthrough" || resp.DecidedBy != "terminal" {
+				t.Fatalf("应交回终端: %+v", resp)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("done 没有取消会话里挂着的请求")
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := env.srv.pending.Count(); n != 1 {
+		t.Fatalf("别的会话应还在等：pending=%d", n)
+	}
+	var done int
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		if e.Kind == "done" && e.State == "recorded" {
+			done++
+		}
+	}
+	if done != 1 {
+		t.Fatalf("done 事件照旧写审计：%d", done)
+	}
+}

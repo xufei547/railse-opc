@@ -31,6 +31,14 @@ const maxNonGitLogged = 1024
 // errHookGone 是钩子连接断开时取消请求 ctx 的原因，用来和守护进程关停区分开。
 var errHookGone = errors.New("钩子连接已断开")
 
+// errSettledElsewhere 是本机已经处理掉、不必再等的请求的取消原因：同一调用的工具已经跑完（tool_done），或这一轮、会话已经结束
+// （done、session_end）。Claude Code 桌面应用（SDK 宿主）在 PreToolUse 回 ask 后用自己的权限回调裁决，却不结束同一调用的
+// PermissionRequest 钩子，不清掉的话它会挂到过期，手机上一直留着一张卡片。
+var errSettledElsewhere = errors.New("已在终端处理")
+
+// reasonSettledElsewhere 是这类取消写进审计、回给钩子的理由。
+const reasonSettledElsewhere = "已在终端处理，取消等待"
+
 // hubUnreachable 是 Decider 在 hub 连不上（HubGrace 内没重连上）时填的 DecidedBy。
 // 这时钩子收 passthrough，本机审计记 expired（设计 3.2：等待作废，不是“根本没去等”）。
 const hubUnreachable = "hub_unreachable"
@@ -277,7 +285,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		if resp.Decision != "" { // 钩子已消失时 resp 为空，不写回
 			s.reply(conn, kind, resp)
 		}
-	case "question", "done", "session_end":
+	case "question", "done", "session_end", "tool_done":
 		var ev proto.Event
 		if err := proto.Decode(line, &ev); err != nil {
 			s.reply(conn, kind, proto.EventAck{V: proto.Version, OK: false, Error: err.Error()})
@@ -496,9 +504,13 @@ func (s *Server) await(ctx context.Context, pr *PendingRequest, entry AuditEntry
 	}
 	now := time.Now()
 	pr.Created, pr.Deadline = now, now.Add(wait)
+	// 取消句柄存进待决表：tool_done、done、session_end 事件靠它以 errSettledElsewhere 取消（见 handleEvent）
+	sctx, settle := context.WithCancelCause(ctx)
+	defer settle(nil)
+	pr.settle = settle
 	s.pending.Add(pr)
 	defer s.pending.Remove(pr.ID)
-	dctx, cancel := context.WithDeadline(ctx, pr.Deadline)
+	dctx, cancel := context.WithDeadline(sctx, pr.Deadline)
 	defer cancel()
 	out, err := s.decider.Decide(dctx, *pr)
 	switch {
@@ -508,6 +520,11 @@ func (s *Server) await(ctx context.Context, pr *PendingRequest, entry AuditEntry
 		entry.State, entry.DecidedBy, entry.Reason = "cancelled", "terminal", "钩子进程在决定前退出"
 		s.writeAudit(entry)
 		return Outcome{}, proto.Response{}, false // 对方已不在，不写回
+	case errors.Is(context.Cause(sctx), errSettledElsewhere):
+		// 本机已经处理掉了（宿主自己裁决、工具已跑完，或这一轮已结束）：钩子要收到答复才会退出，回 passthrough；
+		// 宿主已经裁决过，不会再弹框。HubDecider 据同一原因告诉 hub cancel(terminal)。
+		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "cancelled", "terminal", reasonSettledElsewhere
+		resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
 	case ctx.Err() != nil:
 		// 守护进程正在停止，钩子还在等：明确交回终端。
 		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "shutdown", "守护进程正在停止，交回终端处理"
@@ -563,6 +580,22 @@ func (s *Server) writeAudit(e AuditEntry) {
 // 消息先按文本语境脱敏再写审计：Gemini 的 ToolPermission 通知会拼进完整命令，
 // last_assistant_message、prompt_response 也可能原样带出凭据。
 func (s *Server) handleEvent(ev proto.Event) proto.EventAck {
+	switch ev.Kind {
+	case "tool_done":
+		// 工具已经跑完：同一调用还挂着的审批不用等了。按会话 + 工具 + 载荷对上（PermissionRequest 没有 tool_use_id）。
+		// 事件本身不写审计（每次工具调用一条太多），只记它引起的取消。
+		if ev.Payload != nil {
+			if n := s.pending.CancelMatching(ev.Session.CLISessionID, payloadKey(ev.ToolName, *ev.Payload), errSettledElsewhere); n > 0 {
+				s.log.Printf("会话 %q 的工具已跑完，取消 %d 条挂着的审批", clipText(ev.Session.CLISessionID, hubLogFieldMax), n)
+			}
+		}
+		return proto.EventAck{V: proto.Version, OK: true}
+	case "done", "session_end":
+		// 这一轮或会话已经结束：这个会话里挂着的审批与答题都不会再有人等，取消掉
+		if n := s.pending.CancelSession(ev.Session.CLISessionID, errSettledElsewhere); n > 0 {
+			s.log.Printf("会话 %q 的这一轮已结束，取消 %d 条挂着的请求", clipText(ev.Session.CLISessionID, hubLogFieldMax), n)
+		}
+	}
 	state := "recorded"
 	if ev.Kind == "question" && s.pending.HasSession(ev.Session.CLISessionID) {
 		state = "suppressed"

@@ -514,6 +514,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"%s（超时 %d，要 ≥ %d）":                                 "%s (timeout %d, needs ≥ %d)",
 	"PreToolUse 只匹配 %s：auto 模式下审批进不了 Railse":           "PreToolUse only matches %s: in auto mode approvals bypass Railse",
 	"缺 PreToolUse：Claude Code 的选择题进不了手机":               "missing PreToolUse: Claude Code's questions can't reach your phone",
+	"缺 PostToolUse：桌面应用里已在本机处理的审批，手机上要等过期才消失":          "missing PostToolUse: in the desktop app, requests already handled on this machine stay on your phone until they expire",
 	"缺 %s":                                                       "missing %s",
 	"超时不够：%s":                                                    "timeout too short: %s",
 	"换过安装路径就重新 %s":                                               "If you moved the install, run %s again",

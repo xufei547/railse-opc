@@ -68,6 +68,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
   | default / acceptEdits / plan / auto | 终端确认框 + 手机卡片，谁先答谁算 |
   | `-p` 非交互 | `ask` 等于拒绝，Claude 收到理由文本 |
   | bypassPermissions / dontAsk | 待真机验收第 6 条测出来后填（弹框或等于拒绝） |
+  | Claude Code 桌面应用 / SDK 宿主 | `ask` 由宿主的权限回调裁决（auto 模式是宿主的分类器，不一定经人）；`PermissionRequest` 钩子不随之结束，由 `PostToolUse`（工具跑完）与 `Stop`、`SessionEnd`（一轮或会话结束）事件清理：守护进程取消同会话里挂着的请求，hub 记 `cancelled`、`decided_by: terminal` |
 
 - **Claude Code 的选择题（`AskUserQuestion`）不过引擎，直接送 hub 等手机回答。** 守护进程把题目（题面、标题、选项文字先在本机脱敏）作为 `kind: "ask"` 的请求上报，也带项目根；不看规则、不看暂停开关，不能“记住”，不计入自动审批。手机上回答或选“让它在终端问我”之前，钩子一直等（期限同审批）。答案经 hub 下发给守护进程，钩子按 Claude Code 的格式把原 `questions` 连同 `answers` 交回，agent 立刻继续，终端不再弹选项；选“让它在终端问我”、没接 hub、连不上 hub、hub 太旧（0.1.4 及更早，welcome 里没有 `"features":["ask"]`：守护进程不把提问送给它，等待中重连到它也立即交回）、题目脱敏后超出上限、等过期、答案不合规，钩子都不输出，Claude Code 照旧在终端问。Codex、Gemini 没有这个口子，不进 hub。
 - **手机上的备注不会给到 agent。** 钩子只看到固定文案：放行“已在手机上批准”，拒绝时 Claude、Codex 看到“Railse：已在手机上拒绝”。备注只进本机审计的 `note` 字段与 hub 的 `decision_note`、审计。

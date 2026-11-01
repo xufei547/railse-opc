@@ -26,6 +26,7 @@ const (
 	KindDone       Kind = "done"        // 一轮结束
 	KindSessionEnd Kind = "session_end" // 会话退出
 	KindAsk        Kind = "ask"         // agent 要人答题（Claude 的 AskUserQuestion）
+	KindToolDone   Kind = "tool_done"   // 工具已经跑完（Claude 的 PostToolUse），用来清掉同一调用挂着的审批
 	KindIgnore     Kind = "ignore"      // 认识但不关心的事件
 )
 
@@ -43,14 +44,14 @@ type Input struct {
 	Kind     Kind
 	Session  proto.Session
 	ToolName string
-	Payload  policy.Payload // 仅 KindPermission
+	Payload  policy.Payload // KindPermission；KindToolDone 也有（只用来对上挂着的审批）
 	Message  string         // question、done 的摘要
 
 	Ask          *proto.Ask      // 仅 KindAsk
 	RawToolInput json.RawMessage // 仅 KindAsk：PreToolUse 的 tool_input 原文，渲染答案时原样回填
 
 	// 以下仅 KindPermission：来自哪个钩子事件（SourcePreToolUse、SourcePermissionRequest，Codex、Gemini 留空），
-	// Claude Code 的权限模式与工具调用编号（PermissionRequest 不带编号）。
+	// Claude Code 的权限模式与工具调用编号（PermissionRequest 不带编号；KindToolDone 也带编号）。
 	Source         string
 	PermissionMode string
 	ToolUseID      string

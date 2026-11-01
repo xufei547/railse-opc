@@ -1180,6 +1180,33 @@ Expected：四条 destructive 的第四列分别是 `删除文件，删了不可
 
 ---
 
+### Task 9: 桌面应用里挂着的 PermissionRequest 由 PostToolUse / Stop 清理（真机验收后追加）
+
+**现象**：Claude Code 桌面应用（SDK 宿主）里，PreToolUse 回 ask 后宿主用自己的权限回调裁决（auto 模式是它的分类器），命令照常执行，但同一调用的 PermissionRequest 钩子进程不会被宿主结束：一直挂在守护进程里等手机，hub 与手机上留一张待决卡片直到 24 小时过期。终端 CLI 会杀掉钩子进程，没这个问题。
+
+**做法**：工具真正跑完、这一轮结束或会话退出时，守护进程把同一会话里还挂着的审批取消，钩子收到 passthrough 退出，hub 记 cancelled/terminal。
+
+**Files:**
+- Modify: `internal/hooksconf/hooksconf.go`（Plan、Expected 加 `PostToolUse`，匹配器同 `ClaudePreToolUseMatcher`，timeout 0）、`internal/doctor/hooks.go`（缺 PostToolUse 降为 warn）
+- Modify: `internal/adapter/adapter.go`（`KindToolDone`）、`internal/adapter/claude.go`（`PostToolUse` → `KindToolDone`：Session、ToolName、`mapTool` 算的 Payload、ToolUseID；AskUserQuestion 忽略）
+- Modify: `internal/proto/proto.go`（`Event` 加 `ToolName`、`Payload *policy.Payload`、`ToolUseID`，均 omitempty；`Kind: "tool_done"`）、`cmd/railse/hook.go`（当事件发，不输出，exit 0）
+- Modify: `internal/agent/requests.go`（`PendingRequest` 存取消句柄；`Pending.CancelMatching(session, key)`、`Pending.CancelSession(cliSessionID)`；`payloadKey` 照 v0.2.1 `recent.keys` 的"工具 + 载荷 JSON 的 SHA-256"）、`internal/agent/server.go`（`await` 用 `context.WithCancelCause` 派生；`errSettledElsewhere`；`handleEvent` 的 `tool_done` / `done` / `session_end`）、`internal/agent/hubdecider.go`（`abandon` 对 `errSettledElsewhere` 也发 cancel(terminal)）
+- Test: `internal/agent/server_test.go`（三条）、`internal/adapter/claude_test.go`、`internal/hooksconf/hooksconf_test.go`、`internal/doctor/*_test.go`、`cmd/railse/hook_test.go`
+- Docs: `docs/hub.md`、`docs/agent-local-loop.md` 的模式边界表加"桌面应用 / SDK 宿主"一行；README 两份升级说明加"重跑 `railse setup hooks --claude` 补 PostToolUse"
+
+**行为：**
+- `tool_done`：按"会话 + 工具 + 载荷 JSON 哈希"找同会话的待决审批（PermissionRequest 没有 tool_use_id，不能只靠它），取消，cause 为 `errSettledElsewhere`；事件本身不写审计（每次工具调用一条太多），只记它引起的取消。
+- `done`、`session_end`：取消该会话全部待决（含答题：这一轮已结束，没人再等答案）；事件照旧写审计。
+- `await` 遇 `errSettledElsewhere`：审计 `state: cancelled`、`decided_by: terminal`、`reason: 已在终端处理，取消等待`；给钩子回 `passthrough`（钩子要收到答复才退出；宿主已裁决，不会再弹框）。hub 经 `abandon` 收到 cancel(terminal)，hub 不用改。
+
+- [ ] Step 1：写失败的测试（agent 三条：同会话同载荷的 `tool_done` 取消、钩子收到 passthrough、审计 cancelled/terminal、Decider 的 ctx 被取消；不同载荷或会话不影响；`done` 取消该会话全部待决含 ask。适配器、hooksconf、doctor、钩子各一条）
+- [ ] Step 2：跑测试确认失败
+- [ ] Step 3：实现
+- [ ] Step 4：`make test` 全绿
+- [ ] Step 5：文档；提交 `agent: 工具跑完、一轮结束或会话退出时取消同会话挂着的审批（桌面应用不结束 PermissionRequest 钩子）`
+
+---
+
 ## 自查
 
 - 设计 §2.1（ask + PermissionRequest，去重表删除）→ Task 4；§2.2（Trigger）→ Task 1、4、5；§2.3（文案两端）→ Task 3（终端）、Task 6（手机）；§2.4（description）→ Task 2、3、6；§2.5（scratchpad）本版不做，设计已改；§2.6 无代码；§3 真机验收留给主会话（第 5 条随 §2.5 删去）；§4 文档 → Task 7。
@@ -1268,3 +1295,25 @@ ask	outward	无规则命中，按 outward 默认询问	git push origin main｜pu
 8. 老 hub（0.2.1）配新守护进程：卡片照常，只是没有触发点与说明；新 hub 配老守护进程同理。另外：升级后守护进程还没重启时，PreToolUse 的硬底线理由应是老话“连不上 hub…”或按老逻辑等手机，不应出现“已发到手机”而手机上没有（偏离第 5 条）。
 
 升级提醒：hub 库 v4 → v5 不能降级，验收前先备份 `~/.railse-hub`。
+
+### Task 9（真机验收后追加）
+
+提交：`agent: 工具跑完、一轮结束或会话退出时取消同会话挂着的审批（桌面应用不结束 PermissionRequest 钩子）`（含本节报告，提交号见分支日志；在 `8afc9bc` 之后）。
+
+做了什么：
+- `hooksconf`：Claude 的钩子加 `PostToolUse`，匹配器同 `ClaudePreToolUseMatcher`，timeout 省略（0）；`Expected` 同步。`setup hooks --claude` 走同一份 Plan，幂等补上。
+- `doctor`：缺 `PostToolUse` 与缺 `PreToolUse` 一样降为 warn（只缺这两个时），细节“缺 PostToolUse：桌面应用里已在本机处理的审批，手机上要等过期才消失”，提示重跑 `railse setup hooks --claude`。
+- 适配器：`PostToolUse` → `KindToolDone`（会话、工具名、`mapTool` 算的载荷、`tool_use_id`）；只认审批的六样工具，`AskUserQuestion` 与其余工具忽略。`proto.Event` 加 `tool_name`、`payload`、`tool_use_id`（omitempty）。钩子把它当事件发、不输出；发不出去也不在 stderr 说（每次工具调用都有一条，老守护进程不认识 `tool_done` 时会刷屏）。
+- 守护进程：`await` 用 `context.WithCancelCause` 派生，取消句柄存进 `PendingRequest`；`Pending.CancelMatching(会话, 载荷键, 原因)`、`Pending.CancelSession(会话, 原因)`；载荷键 `payloadKey` = SHA-256（工具名 + `\x00` + 载荷 JSON），算法同 v0.2.1 的去重键。`tool_done` 取消同会话同载荷的审批（不含答题），本身不写审计；`done`、`session_end` 取消该会话全部待决（含答题），事件照旧写审计。`await` 遇 `errSettledElsewhere`：审计 `action: passthrough`、`state: cancelled`、`decided_by: terminal`、`reason: 已在终端处理，取消等待`，给钩子回 passthrough。`HubDecider.abandon` 对 `errSettledElsewhere` 也发 cancel(terminal)（这是 agent 包里的改动；hub 本身没改）。
+- 文档：`docs/hub.md` 模式边界表、`docs/agent-local-loop.md`（钩子表加 `PostToolUse`，`Stop` 一行说明取消；新增模式边界表）、`docs/setup.md` 第 8 条与两份 README 的 0.2.1 升级说明改成“重跑 `railse setup hooks --claude` 补 PostToolUse”。
+
+测试：`TestToolDoneCancelsPendingPermission`（钩子收到 passthrough/terminal、审计一条 cancelled、没有 tool_done 审计、Decider 的取消原因是 `errSettledElsewhere`）、`TestToolDoneOtherCallUnaffected`（别的载荷、别的会话不动）、`TestDoneCancelsSessionPending`（同会话的审批与答题都取消，别的会话的还在，done 照旧写审计）；`TestClaudeParsePostToolUse`（载荷与同一调用的 PermissionRequest 一致）、`TestPlanClaudePostToolUse`、`TestHookChecks` 加缺 PostToolUse 的两种情形、`TestHookClaudePostToolUseSendsToolDone`。
+
+偏离与注意：
+- 旧测试里写死“Claude 有 5 个事件”的两处改成 6；`TestSameOurs` 的手写等价文档补上 PostToolUse；doctor 测试“旧匹配器”原来按字符串替换第一个匹配器，PostToolUse 用同一匹配器且排在前面，改成按 JSON 只改 PreToolUse 的。
+- 同一会话里并行跑两条一模一样的命令时，前一条的 `tool_done` 会把后一条还在等的审批一并取消（载荷键相同、PermissionRequest 没有 tool_use_id 可分）。罕见，代价是那一条交回终端，可接受。
+- 终端 CLI 里 PostToolUse 只在工具跑完后触发，那时 PermissionRequest 早已结束，`tool_done` 找不到要取消的，不影响原有行为。
+
+留给真机验收（追加第 9 条）：Claude Code 桌面应用里 auto 模式跑一次 `git push --dry-run origin main`：宿主自己裁决、命令执行后，守护进程里那条 PermissionRequest 应被取消（本机审计 `cancelled`/`terminal`、理由“已在终端处理，取消等待”），hub 里同一条 `cancelled`，手机卡片消失，`ps` 里没有挂着的 `railse hook claude`。先在那台机器上重跑 `railse setup hooks --claude` 并重启守护进程。
+
+`make test`：第一次 `internal/redact` 的 `TestStringLinearOnAdversarialInput`（计时测试）失败，那时本机 load average 约 59、该包跑了 314 秒（平时 30–67 秒）；Task 9 没改 redact，单独重跑通过（9.7 秒），再跑一遍完整 `make test` 退出码 0（Go 全部 ok，网页 796 个测试通过）。

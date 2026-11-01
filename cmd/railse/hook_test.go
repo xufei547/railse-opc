@@ -553,3 +553,24 @@ func TestTriggerWhysHaveEnglish(t *testing.T) {
 		}
 	}
 }
+
+// PostToolUse 当事件发给守护进程（tool_done，带工具名、载荷与 tool_use_id），钩子什么都不输出。
+func TestHookClaudePostToolUseSendsToolDone(t *testing.T) {
+	sock, lines := fakeDaemon(t, `{"v":1,"ok":true}`)
+	in := `{"session_id":"s1","prompt_id":"p1","cwd":"/tmp/p","permission_mode":"auto","hook_event_name":"PostToolUse","tool_name":"Bash",` +
+		`"tool_input":{"command":"git push origin main","description":"Push"},"tool_response":{},"tool_use_id":"toolu_7"}`
+	stdout, stderr, code := runHookWith(t, in, "claude", "--socket", sock)
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	got := lines()
+	if len(got) != 1 {
+		t.Fatalf("应发一条事件: %q", got)
+	}
+	var ev proto.Event
+	json.Unmarshal([]byte(got[0]), &ev)
+	if ev.Kind != "tool_done" || ev.ToolName != "Bash" || ev.ToolUseID != "toolu_7" || ev.Payload == nil || ev.Payload.Command != "git push origin main" ||
+		ev.Session.CLISessionID != "s1" {
+		t.Fatalf("事件: %s", got[0])
+	}
+}

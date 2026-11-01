@@ -127,6 +127,12 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 			return hookAsk(ctx, ad, client, in, stdout, stderr)
 		}
 		return hookPermission(ctx, ad, client, in, stdout, stderr)
+	case adapter.KindToolDone:
+		// 工具跑完了：告诉守护进程清掉同一调用还挂着的审批。每次工具调用都有一条，什么都不输出；
+		// 发不出去（守护进程不在、老守护进程不认识）也不说，挂着的审批只是照旧等到过期。
+		p := in.Payload
+		_ = client.Event(proto.Event{V: proto.Version, Kind: string(in.Kind), Session: in.Session, ToolName: in.ToolName, Payload: &p, ToolUseID: in.ToolUseID})
+		return 0
 	case adapter.KindQuestion, adapter.KindDone, adapter.KindSessionEnd:
 		// 事件只展示：发完就退，连不上也只在 stderr 说一句。
 		if err := client.Event(proto.Event{V: proto.Version, Kind: string(in.Kind), Session: in.Session, Message: in.Message}); err != nil {
