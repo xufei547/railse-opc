@@ -3,6 +3,8 @@ package i18n
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -88,6 +90,28 @@ func TestCatalogVerbsMatch(t *testing.T) {
 		if a, b := fmtVerbs(zh), fmtVerbs(e); !equalStrings(a, b) {
 			t.Errorf("占位符不一致：%q 有 %v，英文 %q 有 %v", zh, a, e, b)
 		}
+	}
+}
+
+// 英文值的门禁：没有中日韩字符与全角标点（含 U+3000–U+303F 的中文标点）；感叹号只许出现在醒目警告的 "!!! " 标记里；
+// 以 Please 开头的句子全表不超过三条（语气：短句、说人话，不客套）。
+func TestCatalogValuesEnglish(t *testing.T) {
+	please := regexp.MustCompile(`(^|[.:;?]\s+|\n\s*)Please\b`)
+	n := 0
+	for zh, e := range en {
+		for _, r := range e {
+			if (r >= 0x4E00 && r <= 0x9FFF) || (r >= 0x3000 && r <= 0x303F) || (r >= 0xFF00 && r <= 0xFFEF) {
+				t.Errorf("英文值里有中文或全角字符 %q：%q（键 %q）", r, e, zh)
+				break
+			}
+		}
+		if strings.Contains(strings.ReplaceAll(e, "!!! ", ""), "!") {
+			t.Errorf("英文值里有感叹号：%q", e)
+		}
+		n += len(please.FindAllString(e, -1))
+	}
+	if n > 3 {
+		t.Errorf("以 Please 开头的句子有 %d 条，最多 3 条", n)
 	}
 }
 

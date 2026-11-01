@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,23 +30,24 @@ func hasCJK(s string) bool {
 }
 
 // 英文的汇总行与“修复：”。汇总行用全动词（passed、warned、failed、skipped），不涉单复数。
+// 项名、细节、提示只用英文表里真有的键（或不需翻译的命令），整段输出不得有中文。
 func TestReportWriteEnglish(t *testing.T) {
 	i18n.Set(i18n.EN)
 	t.Cleanup(func() { i18n.Set(i18n.ZH) })
 	r := Report{Version: "0.2.0", Checks: []Check{
-		{ID: "cli.bin", Name: i18n.T("railse 可执行文件"), Status: OK, Detail: "/opt/homebrew/bin/railse"},
-		{ID: "hooks.claude", Name: i18n.T("Claude Code 钩子"), Status: Warn, Detail: i18n.T("缺 PreToolUse"), Hint: i18n.T("运行 railse setup hooks --claude")},
+		{ID: "agent.socket", Name: i18n.T("socket 文件"), Status: OK, Detail: "/home/u/.railse/agent.sock"},
+		{ID: "hooks.claude", Name: i18n.T("Claude Code 钩子"), Status: Warn, Detail: fmt.Sprintf(i18n.T("缺 %s"), "PreToolUse"), Hint: "railse setup hooks --claude"},
 	}}
 	var b bytes.Buffer
 	r.Write(&b)
 	got := b.String()
-	for _, want := range []string{"[ok]", "[warn]", "Fix: ", "1 passed, 1 warned, 0 failed, 0 skipped (railse 0.2.0)"} {
+	for _, want := range []string{"[ok]", "[warn]", "Socket file: ", "missing PreToolUse", "        Fix: railse setup hooks --claude\n", "1 passed, 1 warned, 0 failed, 0 skipped (railse 0.2.0)"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("缺 %q：\n%s", want, got)
 		}
 	}
-	if strings.ContainsAny(got, "项通过修复") {
-		t.Fatalf("英文汇总里有中文：\n%s", got)
+	if hasCJK(got) {
+		t.Fatalf("英文体检输出里有中文：\n%s", got)
 	}
 	if !strings.Contains(got, "Claude Code hooks: ") {
 		t.Fatalf("项名与细节之间应是英文冒号：\n%s", got)
@@ -77,7 +79,7 @@ func checkEnglish(t *testing.T, r Report) string {
 }
 
 // 还没装过的机器（只下了二进制就跑 railse doctor）：多数项 fail、skip 或 warn，项名、细节、修复提示全是英文。
-// 问守护进程状态的报错换成英文的假报错：真实的来自 internal/hookclient（“连接守护进程: …”），不归 doctor 翻。
+// 问守护进程状态走真实的 internal/hookclient（不打桩）：socket 在临时目录里、不存在，连不上的报错也是英文。
 func TestRunEnglishUnconfigured(t *testing.T) {
 	i18n.Set(i18n.EN)
 	t.Cleanup(func() { i18n.Set(i18n.ZH) })
@@ -98,10 +100,7 @@ func TestRunEnglishUnconfigured(t *testing.T) {
 			TailscaleRun: func(context.Context, string, ...string) (string, error) {
 				return "", errors.New("not run in tests")
 			},
-			HTTP: loopbackOnlyClient(t),
-			AgentStatus: func(string) (proto.Status, error) {
-				return proto.Status{}, errors.New("dial unix " + filepath.Join(home, ".railse", "agent.sock") + ": connect: no such file or directory")
-			},
+			HTTP:      loopbackOnlyClient(t),
 			Geteuid:   func() int { return 1000 },
 			FileOwner: func(string) (int, bool) { return 1000, true },
 		}
@@ -111,9 +110,9 @@ func TestRunEnglishUnconfigured(t *testing.T) {
 	text := checkEnglish(t, Run(opts()))
 	for _, want := range []string{
 		"[fail]  Daemon data directory: " + filepath.Join(home, ".railse") + " doesn't exist\n",
-		"[fail]  Daemon running: dial unix ",
+		"[fail]  Daemon status: can't connect to the daemon: dial unix ",
 		"[skip]  Hub connection: the daemon isn't running\n",
-		"[skip]  Hub reachable: no machine.json (not enrolled with a hub)\n",
+		"[skip]  Hub reachability: no machine.json (not enrolled with a hub)\n",
 		"[fail]  Claude Code hooks: no hooks installed (looked in ",
 		"        Fix: railse setup hooks --claude\n",
 		"[warn]  Codex notify: ",
@@ -213,7 +212,7 @@ func TestRunEnglishManyProblems(t *testing.T) {
 		"hook format was recorded with ", "--version failed: exit status 1; output: boom", "is older than 0.65.0",
 		"[warn]  Project root: ", "database version ", "no password yet", "VAPID keys not generated yet",
 		"private key files in it aren't 0600: acme_account+key(0644)", "isn't valid JSON",
-		"so they connect to the daemon in ", "to railse doctor. Delete the Railse hook entries in ",
+		"so they connect to the daemon in ", "to railse doctor — Delete the Railse hook entries in ",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("缺 %q:\n%s", want, text)

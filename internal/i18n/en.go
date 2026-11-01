@@ -34,18 +34,18 @@ Commands:
 	"未知子命令 %q\n\n%s\n": "Unknown command %q\n\n%s\n",
 
 	// cmd/railse/lang.go
-	"当前语言 %s（来源：%s）\n":            "Current language: %s (from %s)\n",
+	"当前语言 %s（来源：%s）\n":            "Current language: %s (source: %s)\n",
 	"语言只能是 zh 或 en，不是 %q\n\n%s\n": "Language must be zh or en, not %q\n\n%s\n",
 	"找不到家目录，没法写 lang 文件":          "Can't find your home directory, so the lang file can't be written",
 	"写不了 lang 文件：%v\n":            "Can't write the lang file: %v\n",
-	"注意：环境变量 RAILSE_LANG=%s 优先于 lang 文件；要让 lang 文件生效，请去掉它。\n": "Note: the RAILSE_LANG=%s environment variable takes priority over the lang file. Remove it for the lang file to apply.\n",
+	"注意：环境变量 RAILSE_LANG=%s 优先于 lang 文件；要让 lang 文件生效，请去掉它。\n": "Note: RAILSE_LANG=%s is set and takes priority over the lang file. Unset it for the lang file to apply.\n",
 	"已写入 %s\n":         "Wrote %s\n",
 	"多余的参数 %q\n%s\n":   "Unexpected argument %q\n%s\n",
-	"环境变量 RAILSE_LANG": "the RAILSE_LANG environment variable",
-	"lang 文件":          "the lang file",
-	"系统 LANG":          "the system LANG",
+	"环境变量 RAILSE_LANG": "RAILSE_LANG environment variable",
+	"lang 文件":          "lang file",
+	"系统 LANG":          "system LANG",
 	"命令指定":             "this command",
-	"默认":               "the default",
+	"默认":               "default",
 	`用法: railse lang [zh|en]
 不带参数打印当前语言和它从哪来；带参数写进数据目录的 lang 文件（$RAILSE_HOME 或 ~/.railse）。
 解析顺序：环境变量 RAILSE_LANG → lang 文件 → 系统 LANG（zh 开头算中文，其余英文）。`: `Usage: railse lang [zh|en]
@@ -53,12 +53,12 @@ Without an argument, prints the current language and where it came from. With on
 Resolution order: the RAILSE_LANG environment variable, then the lang file, then the system LANG (zh* means Chinese, anything else English).`,
 
 	// cmd/railse/setup_wizard.go
-	"接入 hub 还缺几项，逐个回答（Ctrl-D 取消，什么都不做）：":    "A few things are needed to connect to the hub. Answer them one at a time (Ctrl-D cancels and changes nothing):",
+	"接入 hub 还缺几项，逐个回答（Ctrl-D 取消，什么都不做）：":    "To enroll with the hub, answer a few questions (Ctrl-D cancels and changes nothing):",
 	"hub 地址（如 https://hub.example.com）：":    "Hub address (e.g. https://hub.example.com): ",
 	"接入码（在 hub 机器上运行 railse hub token 生成）：": "Enroll token (run railse hub token on the hub machine to get one): ",
 	"接入码不能为空":                 "The enroll token can't be empty",
 	"本机在 hub 里的名字（直接回车用 %s）：": "Name for this machine on the hub (Enter uses %s): ",
-	"名字%w": "Name: %w",
+	"名字%w": "The name %w",
 	"检查本机 hub（必要时重新托管）":         "check the local hub (reinstalling its service if needed)",
 	"重装钩子（连同 Codex 的 notify）":   "reinstall hooks (and Codex notify)",
 	"本机 hub、钩子与守护进程都没动":         "the local hub, hooks and daemon were not touched",
@@ -73,15 +73,15 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"hub 在哪里？\n  1) 本机：用 Tailscale 给手机一个地址，不用服务器（要先装好并登录 Tailscale）\n  2) 已有 hub：填它的地址和接入码\n": "Where is your hub?\n  1) This machine: Tailscale gives your phone an address, no server needed (install Tailscale and log in first)\n  2) An existing hub: enter its address and an enroll token\n",
 	"选 [%s]：": "Choose [%s]: ",
 	"请答 1 或 2（直接回车选 %s）\n": "Answer 1 or 2 (Enter picks %s)\n",
-	"hub 地址%w": "Hub address: %w",
+	"hub 地址%w": "The hub address %w",
 	"%s；确在可信内网的，用 railse setup all --hub <地址> 给出":               "%s. If it really is on a trusted private network, pass it with railse setup all --hub <address>",
-	"hub 地址是 http://，明文传输密钥，只适合本机或可信内网；公网请用 https://":           "The hub address is http://, which sends the key in plain text. That's only OK on this machine or a trusted private network; over the internet use https://",
-	"\n下一步：在手机上打开 hub 的地址":                                      "\nNext: open this on your phone: the hub's address",
+	"hub 地址是 http://，明文传输密钥，只适合本机或可信内网；公网请用 https://":           "The hub address is http://, which sends the key in plain text. That's only OK on this machine or a trusted private network; over the internet, use an https:// address",
+	"\n下一步：在手机上打开 hub 的地址":                                      "\nNext: open the hub's address on your phone",
 	"\n下一步：在手机上打开\n╔%s╗\n║  %s  ║\n╚%s╝\n":                      "\nNext: open this on your phone\n╔%s╗\n║  %s  ║\n╚%s╝\n",
-	"这个地址由 Tailscale 提供；手机挂着代理打不开时关掉代理再试。":                      "This address is served by Tailscale; if your phone is on a proxy and it won't open, turn the proxy off and retry.",
+	"这个地址由 Tailscale 提供；手机挂着代理打不开时关掉代理再试。":                      "This address comes from Tailscale. If your phone uses a proxy and the address won't open, turn the proxy off and try again.",
 	"手机 Safari 打开后分享→添加到主屏幕，再从图标打开；登录后在设置里开启通知（见 docs/web.md）。": "In Safari on the phone: Share → Add to Home Screen, then open it from the icon; after logging in, turn on notifications in Settings (see docs/web.md).",
-	"已取消，什么都没做":        "Cancelled, nothing was done",
-	"读输入失败，什么都没做：%v\n": "Couldn't read input, nothing was done: %v\n",
+	"已取消，什么都没做":        "Cancelled; nothing was done",
+	"读输入失败，什么都没做：%v\n": "Can't read input; nothing was done: %v\n",
 
 	// cmd/railse/setup.go：用法（setupUsageText 按这四段拼；setupCodexNotifyUsage 在 setup_codex.go 一段）
 	`用法:
@@ -107,7 +107,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
     --no-autostart 只管守护进程，本机 hub 总是托管。本机已接入别的 hub 时停下，加 --force 改接本机 hub；
     接的就是本机 hub 时不带 --local-hub 重跑也按本机 hub 走（在终端里先问一次再复查 Funnel、托管）。`: `  railse setup all --hub URL --token TOKEN [--name NAME] [--project DIR] [--dir DIR] [--bin PATH] [--no-autostart] [--no-hooks] [--force]
   railse setup all --local-hub [--hub-port 8787] [--hub-dir DIR] [--public-url https://…] [--name NAME] [--project DIR] [--dir DIR] [--bin PATH] [--no-autostart] [--no-hooks] [--force]
-    One step: connect to the hub → install hooks for the three CLIs → autostart → health check (railse doctor). Hooks go in at user level by default (all projects);
+    One step: enroll with the hub → install hooks for the three CLIs → autostart → health check (railse doctor). Hooks go in at user level by default (all projects);
     with --project, the Claude and Gemini hooks go in at that project's level instead (same as setup hooks). After the hooks it wires up Codex notify
     (same as setup codex-notify; if that fails, setup all doesn't, and the final "Note" gives the command). --no-hooks skips both.
     Already enrolled (machine.json exists): enrolling is skipped and --hub and --token can be left out; --force enrolls again. Health check failures are shown but don't fail setup all.
@@ -140,9 +140,10 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"用法:\n%s\n":   "Usage:\n%s\n",
 	"\n用法:\n%s\n": "\nUsage:\n%s\n",
 
-	// cmd/railse/setup.go：setup all 的步骤名（变量，step、fail 里用 i18n.Lookup 翻；完整性测试查不到，TestSetupStepNamesEnglish 核对）
+	// cmd/railse/setup.go：setup all 的步骤名（变量，step、fail 里用 i18n.Lookup 翻；完整性测试查不到，TestSetupStepNamesEnglish 核对）。
+	// 小写：它们也嵌在 fail 的句子里；step 打印标题时由 capFirst 把首字母转大写
 	"本机 hub": "local hub",
-	"接入 hub": "connect to the hub",
+	"接入 hub": "enroll with the hub",
 	"安装钩子":   "install hooks",
 	"开机自启":   "autostart",
 	"体检":     "health check",
@@ -162,7 +163,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"取不到家目录（%v），装不了用户级的 Claude、Gemini 钩子：用 --project 目录 装成那个项目的项目级\n": "Can't find your home directory (%v), so the user-level Claude and Gemini hooks can't be installed: use --project DIR to install them at that project's level\n",
 	"== %s（迁走 Railse 钩子后）==\n%s": "== %s (after moving out the Railse hooks) ==\n%s",
 	"== %s（会先备份到 %s）==\n%s":      "== %s (will be backed up to %s first) ==\n%s",
-	"备份 %s 失败，没有改它：%v\n":         "Couldn't back up %s, so it was not changed: %v\n",
+	"备份 %s 失败，没有改它：%v\n":         "Can't back up %s, so it was not changed: %v\n",
 	"已备份 %s 到 %s\n":              "Backed up %s to %s\n",
 	"已从 %s 迁走 Railse 钩子（现在写在 settings.local.json，不入库）\n": "Moved the Railse hooks out of %s (they're now in settings.local.json, which isn't committed)\n",
 	"已写入 %s（用户级，对所有项目生效）\n":                              "Wrote %s (user level, applies to all projects)\n",
@@ -173,8 +174,8 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"提醒 Gemini：钩子只能拒绝不能放行，需要 Gemini CLI 0.65.0 以上，不要开 yolo 模式。":                                              "Reminder for Gemini: hooks can deny but not approve. It needs Gemini CLI 0.65.0 or later; don't turn on yolo mode.",
 	"（用户级已对所有项目生效；在项目里跑 railse doctor 也会指出）":                                                                 " (the user-level hooks already apply to all projects; railse doctor in the project points this out too)",
 	"提醒：%s 里也有 Railse 的钩子，与用户级的条目完全相同，Claude Code 只跑一次：其中 Railse 的条目可删可不删%s\n":                               "Reminder: %s also has Railse hooks, identical to the user-level ones, so Claude Code runs them once. You can delete the Railse entries there or leave them%s\n",
-	"提醒：%s 里也有 Railse 的钩子，与用户级的条目不同，Claude Code 会触发两次：建议删掉其中 Railse 的条目%s\n":                                 "Reminder: %s also has Railse hooks that differ from the user-level ones, so Claude Code fires twice. Delete the Railse entries there%s\n",
-	"提醒：%s 里也有 Railse 的钩子，Gemini 会触发两次：建议删掉其中 Railse 的条目%s\n":                                                "Reminder: %s also has Railse hooks, so Gemini fires twice. Delete the Railse entries there%s\n",
+	"提醒：%s 里也有 Railse 的钩子，与用户级的条目不同，Claude Code 会触发两次：建议删掉其中 Railse 的条目%s\n":                                 "Reminder: %s also has Railse hooks that differ from the user-level ones, so Claude Code runs them twice. Delete the Railse entries there%s\n",
+	"提醒：%s 里也有 Railse 的钩子，Gemini 会触发两次：建议删掉其中 Railse 的条目%s\n":                                                "Reminder: %s also has Railse hooks, so Gemini runs them twice. Delete the Railse entries there%s\n",
 
 	// cmd/railse/setup.go：setup all
 	"hub 地址，如 https://hub.example.com":                                  "hub address, e.g. https://hub.example.com",
@@ -193,14 +194,14 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"hub 机器（Linux）用 %s 装成系统服务":                          "on the hub machine (Linux), install it as a system service with %s",
 	"macOS 上 hub 也不用 sudo：railse setup autostart --hub": "on macOS the hub doesn't need sudo either: railse setup autostart --hub",
 	"setup all 要用平时的用户身份运行，不要 sudo：以 root 跑会用掉一次性接入码，machine.json 与钩子配置也会成为 root 的文件；%s\n": "Run setup all as your normal user, not with sudo: as root it would use up the one-time enroll token, and machine.json and the hook configs would end up owned by root; %s\n",
-	"--local-hub 不和 --hub、--token 一起用：本机 hub 的接入码由 setup all 自己生成":                         "--local-hub doesn't go with --hub or --token: setup all creates the local hub's enroll token itself",
+	"--local-hub 不和 --hub、--token 一起用：本机 hub 的接入码由 setup all 自己生成":                         "--local-hub doesn't work with --hub or --token: setup all creates the local hub's enroll token itself",
 	"--hub-port、--hub-dir、--public-url 只配合 --local-hub 用":                                  "--hub-port, --hub-dir and --public-url only work with --local-hub",
 	"--hub-port %d 不在 1..65535": "--hub-port %d is not in 1..65535",
-	"需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）": "Needs --hub and --token (get an enroll token with railse hub token on the hub)",
+	"需要 --hub 与 --token（接入码由 hub 上的 railse hub token 生成）": "--hub and --token are required (get an enroll token by running railse hub token on the hub)",
 	"项目目录 %s 不存在或不是目录：--project 给要装项目级钩子的项目，不给则钩子装用户级\n":  "Project directory %s doesn't exist or isn't a directory: --project takes the project to install project-level hooks in; without it, hooks go in at user level\n",
 	"重启守护进程":                                "restart the daemon",
 	"托管并启动守护进程":                             "set up autostart for the daemon and start it",
-	"读输入失败，%s：%v\n":                         "Couldn't read input; %s: %v\n",
+	"读输入失败，%s：%v\n":                         "Can't read input; %s: %v\n",
 	"已取消，%s\n":                              "Cancelled; %s\n",
 	"%v\nmachine.json 坏了：用 %s 重新接入本机 hub\n": "%v\nmachine.json is broken: enroll with the local hub again with %s\n",
 	"本机接的是 127.0.0.1:%d 的 hub，这次的本机 hub 在 127.0.0.1:%d；要改接，加 --force 重新接入\n":                  "This machine is enrolled with the hub at 127.0.0.1:%d, but this local hub is at 127.0.0.1:%d. To switch, add --force to enroll again\n",
@@ -240,13 +241,13 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"守护进程等了 %s 还没有应答，下面的体检可能显示它没在跑\n":                          "The daemon hasn't answered after %s; the health check below may show it as not running\n",
 	"体检有失败项；setup all 不因体检失败而失败：刚托管的守护进程可能还没起来，过几秒再跑 %s 复查。\n": "Some health checks failed. They don't fail setup all: the daemon may not be up yet, so run %s again in a few seconds.\n",
 	"体检有失败项；setup all 不因体检失败而失败：按上面的“修复：”处理后再跑 %s 复查。\n":       "Some health checks failed. They don't fail setup all: follow the \"Fix:\" lines above, then run %s again.\n",
-	"没能记住界面语言（%v），需要时运行 railse lang zh 或 railse lang en":       "Couldn't save the UI language (%v); run railse lang zh or railse lang en if needed",
+	"没能记住界面语言（%v），需要时运行 railse lang zh 或 railse lang en":       "Can't save the UI language (%v); run railse lang zh or railse lang en if needed",
 	"\n注意：%s。": "\nNote: %s.",
 
 	// cmd/railse/setup_localhub.go
 	"hub 端口 %d 不在 1..65535": "Hub port %d is not in 1..65535",
 	"本机 hub 只支持 macOS（launchd）与 Linux（systemd）：要靠它们托管 hub": "The local hub only works on macOS (launchd) and Linux (systemd): it needs them to run the hub as a service",
-	"对外地址%w": "Public address: %w",
+	"对外地址%w": "The public address %w",
 	"%s 已有一个不是托管的 hub 在跑（手动起的？）：先停掉它，或用 --hub-port 换端口": "A hub that isn't the managed service is already running on %s (started by hand?): stop it first, or pick another port with --hub-port",
 	"%s 被别的程序占用：用 --hub-port 换一个":                       "%s is taken by another program: pick another port with --hub-port",
 	"对外地址用你给的 %s（自己的隧道要把它转到 %s）\n":                      "Public address: %s, as given (your tunnel needs to forward it to %s)\n",
@@ -261,7 +262,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"本机 hub 还是旧版本（%s，本程序是 %s）：Claude Code 的选择题会直接交回终端，请重启本机 hub：%s\n": "The local hub is still the old version (%s, this program is %s): Claude Code questions will go straight back to the terminal. Restart the local hub: %s\n",
 	"托管并启动 hub（只监听 %s）":                                               "Installing the hub as a service and starting it (listening only on %s)",
 	"托管的 hub 不是按这次的对外地址与端口装的，重新托管":                                    "The hub service wasn't installed with this public address and port, reinstalling it",
-	"托管 hub 失败，见上面":                                                   "Couldn't install the hub as a service, see above",
+	"托管 hub 失败，见上面":                                                   "Installing the hub as a service failed, see above",
 	"hub 托管了但 %s 内没应答：看 %s":                                           "The hub service is installed but didn't answer within %s: see %s",
 	"本机 hub 已应答（版本 %s）\n":                                             "The local hub answered (version %s)\n",
 	"hub 应答过后又没了应答，没开 Funnel：看 %s":                                    "The hub answered, then stopped answering, so Funnel was not turned on: see %s",
@@ -283,7 +284,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"不能带路径，只要 https://主机[:端口]":             "can't have a path, only https://host[:port]",
 	"port %d 不在 1..65535":                  "port %d is not in 1..65535",
 	"public_url 不合规：%w":                    "public_url is invalid: %w",
-	"读 %s: %w":                             "read %s: %w",
+	"读 %s: %w":                             "can't read %s: %w",
 	"%s 不是合法 JSON: %w":                     "%s is not valid JSON: %w",
 	"本机 hub 描述不合规: %w":                     "invalid local hub description: %w",
 	"hub 还没设网页密码：先运行 railse hub password（--dir %s），或在终端里跑 setup": "The hub has no web password yet: run railse hub password (--dir %s) first, or run setup in a terminal",
@@ -365,7 +366,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"没有配置 hub，交回终端处理":            "No hub is set up; handed back to the terminal",
 	"连不上 hub，交回终端处理":             "Can't reach the hub; handed back to the terminal",
 	"hub 拒绝了本机密钥，交回终端处理":         "The hub rejected this machine's key; handed back to the terminal",
-	"无法送往 hub，交回终端处理":            "Couldn't send it to the hub; handed back to the terminal",
+	"无法送往 hub，交回终端处理":            "Can't send it to the hub; handed back to the terminal",
 	"与 hub 断线超过宽限，交回终端处理":        "Lost the hub connection for too long; handed back to the terminal",
 	"hub 没有给出有效决定，交回终端处理":        "The hub didn't give a valid decision; handed back to the terminal",
 	"hub 版本太旧，不认识提问，交回终端处理":      "The hub is too old to handle questions; handed back to the terminal",
@@ -456,8 +457,8 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"%s 不是 socket":            "%s isn't a socket",
 	"移走这个文件后重启守护进程":           "Move this file away, then restart the daemon",
 	"%s 权限是 %04o，应为 0600":     "%s has mode %04o, should be 0600",
-	"chmod 600 %s，或重启守护进程":    "chmod 600 %s, or restart the daemon",
-	"守护进程在跑":                  "Daemon running",
+	"chmod 600 %s，或重启守护进程":    "Run chmod 600 %s, or restart the daemon",
+	"守护进程在跑":                  "Daemon status",
 	"hub 连接":                  "Hub connection",
 	"守护进程没在跑":                 "the daemon isn't running",
 	"未暂停":                     "not paused",
@@ -486,7 +487,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"Gemini 钩子":      "Gemini hooks",
 	"；":              "; ",
 	"%s：%s":          "%s: %s",
-	"%s；%s":          "%s. %s",
+	"%s；%s":          "%s — %s",
 	"；守护进程确实在 %s 的话，railse doctor 加 --dir %s":      "; if the daemon really is in %s, add --dir %s to railse doctor",
 	"%s 也装了相同的钩子（Claude Code 对相同的处理器只跑一次），可以删掉 %s": "%s has the same hooks too (Claude Code runs identical handlers once); you can delete %s",
 	"取不到家目录（$HOME 没设），也没有指定项目目录（--project），跳过":     "home directory not found ($HOME isn't set) and no project directory given (--project), skipped",
@@ -552,7 +553,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"试一次需要审批的操作，确认请求经过 Railse；不行就换回 %s 并反馈":  "Try an action that needs approval and check that the request goes through Railse. If it doesn't, go back to %s and report it",
 
 	// internal/doctor/hub.go
-	"hub 可达":                   "Hub reachable",
+	"hub 可达":                   "Hub reachability",
 	"没有 machine.json（未接入 hub）": "no machine.json (not enrolled with a hub)",
 	"railse agent enroll --hub … --token … --force 重新接入": "Enroll again with railse agent enroll --hub … --token … --force",
 	"确认 hub 在跑、地址与端口对、这台机器访问得到它（证书错误时看 hub 的 TLS 配置）":    "Check that the hub is running, the address and port are right, and this machine can reach it (for certificate errors, check the hub's TLS setup)",
@@ -573,8 +574,8 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"这台机器没有 hub 数据目录":    "this machine has no hub data directory",
 	"没有 hub 数据目录 %s":     "no hub data directory at %s",
 	"hub 数据目录 %s %s":     "hub data directory %s %s",
-	"railse hub run 会建好": "railse hub run creates it",
-	"--hub-dir 要指向 hub 的数据目录（railse hub run --dir 用的那个）": "--hub-dir must point to the hub's data directory (the one railse hub run --dir uses)",
+	"railse hub run 会建好": "Run railse hub run to create it",
+	"--hub-dir 要指向 hub 的数据目录（railse hub run --dir 用的那个）": "Point --hub-dir at the hub's data directory (the one railse hub run --dir uses)",
 	"不是目录": "isn't a directory",
 	"确认 --hub-dir 写对了（railse hub run --dir 用的那个目录）；这台机器不跑 hub 就去掉 --hub-dir": "Check that --hub-dir is right (the directory railse hub run --dir uses). If this machine doesn't run a hub, drop --hub-dir",
 	"不存在":       "doesn't exist",
@@ -587,10 +588,10 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"暂时读不了：确认用跑 hub 的同一个用户运行 doctor，hub.db 与 -wal、-shm 的属主和权限对，稍后重跑 railse doctor": "Can't read it right now. Run doctor as the same user that runs the hub, check the owner and permissions of hub.db, -wal and -shm, then rerun railse doctor in a moment",
 	"库里没有 hub 的表（不是 hub 建的库，或建库中途断了）：railse hub run 会补建；不是 hub 的数据目录就换对 --hub-dir": "The database has no hub tables (the hub didn't create it, or creating it was cut short). railse hub run adds them; if this isn't the hub's data directory, fix --hub-dir",
 	"暂时读不了，稍后重跑 railse doctor；一直这样就带上这条报错反馈":                                       "Can't read it right now. Rerun railse doctor in a moment; if it keeps happening, report it with this error",
-	"railse hub run 会建好数据库": "railse hub run creates the database",
+	"railse hub run 会建好数据库": "Run railse hub run to create the database",
 	"没有数据库":                 "no database",
 	"hub 上次没正常退出且 -shm 不在，WAL 里有未检查点的数据，doctor 只读不做恢复": "the hub didn't shut down cleanly last time and -shm is missing, so the WAL has uncheckpointed data; doctor is read-only and doesn't recover it",
-	"启动一次 railse hub run（会自动恢复）后重跑 railse doctor":      "Start railse hub run once (it recovers automatically), then rerun railse doctor",
+	"启动一次 railse hub run（会自动恢复）后重跑 railse doctor":      "Run railse hub run once (it recovers automatically), then rerun railse doctor",
 	"WAL 里有未恢复的数据，不按旧数据下结论":                            "the WAL has unrecovered data, so nothing is concluded from stale data",
 	"读不到 schema_version：%s":                            "can't read schema_version: %s",
 	"数据库读不了":                                           "the database can't be read",
@@ -608,7 +609,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"railse hub vapid --rotate 重建（所有手机要重新开启通知）":                  "Rebuild them with railse hub vapid --rotate (every phone has to turn notifications on again)",
 	"VAPID 密钥可用":                                                 "VAPID keys are usable",
 	"没有 acme 目录（没用 --acme-domain 自动证书）":                          "no acme directory (automatic certificates with --acme-domain aren't used)",
-	"railse hub run --acme-domain … 会建好":                         "railse hub run --acme-domain … creates it",
+	"railse hub run --acme-domain … 会建好":                         "Run railse hub run --acme-domain … to create it",
 	"里面有私钥文件不是 0600：%s":                                          "private key files in it aren't 0600: %s",
 	"不是带主机名的 https:// 地址":                                        "not an https:// address with a host name",
 	"带了用户名或密码":                                                   "has a user name or password",
@@ -630,7 +631,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"Funnel 没把 %s 转到 127.0.0.1:%d":                             "Funnel doesn't forward %s to 127.0.0.1:%d",
 	"tailscale funnel --bg %d，或重跑 %s":                          "Run tailscale funnel --bg %d, or rerun %s",
 	"从本机访问不到对外地址：可能是本机代理拦截了（见 setup 结尾的提醒），用手机 4G 打开验证；Funnel 入口 TLS 握手失败时先关掉代理再试": "This machine can't reach the public address. A proxy on this machine may be blocking it (see the reminder at the end of setup); check by opening it on your phone over cellular. If the TLS handshake at the Funnel entry fails, turn the proxy off and retry",
-	"从本机访问 %s 失败：%s": "couldn't reach %s from this machine: %s",
+	"从本机访问 %s 失败：%s": "can't reach %s from this machine: %s",
 	"对外地址没转到本机 hub：确认它转到 127.0.0.1:%d（那里的 hub 看 hub.reachable）；也可能是本机代理拦截了，用手机 4G 打开验证": "The public address doesn't lead to the local hub. Check that it forwards to 127.0.0.1:%d (hub.reachable covers the hub there). A proxy on this machine may also be blocking it; check by opening it on your phone over cellular",
 	"（从本机经 tailnet 访问到，没经过 Funnel 的公网入口；公网上打不打得开用手机 4G 验证）":                             " (reached from this machine over the tailnet, not through Funnel's public entry; check on your phone over cellular whether it opens from the internet)",
 
@@ -640,9 +641,9 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"托管 hub 而不是守护进程":       "manage the hub instead of the daemon",
 	"停止并移除托管（数据目录保留）":      "stop and remove the managed service (the data directory is kept)",
 	"只查看是否在跑":              "only show whether it is running",
-	"数据目录，默认 $RAILSE_HOME 或 ~/.railse；--hub 时 $RAILSE_HUB_HOME 或 ~/.railse-hub；--system 时 /var/lib/railse-hub": "data directory; default $RAILSE_HOME or ~/.railse; with --hub $RAILSE_HUB_HOME or ~/.railse-hub; with --system /var/lib/railse-hub",
+	"数据目录，默认 $RAILSE_HOME 或 ~/.railse；--hub 时 $RAILSE_HUB_HOME 或 ~/.railse-hub；--system 时 /var/lib/railse-hub": "data directory, default $RAILSE_HOME or ~/.railse; with --hub, $RAILSE_HUB_HOME or ~/.railse-hub; with --system, /var/lib/railse-hub",
 	"Linux：hub 用系统单元（须 root，hub 以 --user 运行）":                                                                  "Linux: run the hub as a system unit (needs root; the hub runs as --user)",
-	"系统单元以哪个用户运行，默认 $SUDO_USER；不能是 root":                                                                       "user the system unit runs as; default $SUDO_USER; can't be root",
+	"系统单元以哪个用户运行，默认 $SUDO_USER；不能是 root":                                                                       "user the system unit runs as, default $SUDO_USER; can't be root",
 	"只打印要写的文件与要跑的命令，不写不跑":                                                                                      "only print the files it would write and the commands it would run; write and run nothing",
 	"多余的参数 %q（给 hub run 的参数放在 -- 之后）":                                                                          "Unexpected argument %q (put arguments for hub run after --)",
 	"开机自启只支持 macOS（launchd）与 Linux（systemd）":                                                                   "Autostart only works on macOS (launchd) and Linux (systemd)",
@@ -650,7 +651,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"-- 之后的额外参数只给 hub（--hub）；守护进程不收":                                                                           "Extra arguments after -- are only for the hub (--hub); the daemon takes none",
 	"--system 只给 hub（--hub）用；守护进程用用户级托管：railse setup autostart":                                                "--system is only for the hub (--hub); the daemon uses the user-level service: railse setup autostart",
 	"--system 只在 Linux 上有效":                                                                                    "--system only works on Linux",
-	"--user 只和 --system 一起用":                                                                                   "--user only goes with --system",
+	"--user 只和 --system 一起用":                                                                                   "--user only works with --system",
 	"数据目录用 setup autostart 自己的 --dir 指定，不要放在 -- 之后（托管文件里的环境变量、日志与可写目录都按它算）":                      "Set the data directory with setup autostart's own --dir, not after -- (the environment variable, log and writable directory in the service file all follow it)",
 	"路径与参数里不能有换行等控制字符（包括 RAILSE_HOME、RAILSE_HUB_HOME 给的默认值）: %q":                                 "Paths and arguments can't contain newlines or other control characters (this includes the defaults from RAILSE_HOME and RAILSE_HUB_HOME): %q",
 	"macOS 上不要用 sudo 跑：launchd 用户代理装在当前登录用户下，直接 railse setup autostart":                          "Don't run this with sudo on macOS: the launchd user agent is installed for the logged-in user. Just run railse setup autostart",
@@ -667,7 +668,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
     用反向代理时改成 --listen 127.0.0.1:8787（不要 --acme-domain），见 docs/setup.md。
 
 `: `
-Warning: a Linux user unit runs as you and has no permission to bind ports below 1024, so the hub can't bind %s. It will fail to start and systemd will keep restarting it.
+!!! Warning: a Linux user unit runs as you and has no permission to bind ports below 1024, so the hub can't bind %s. It will fail to start and systemd will keep restarting it.
     It was installed anyway. To serve directly on 443/80, use a system unit instead (it only adds CAP_NET_BIND_SERVICE; the hub does not run as root). First remove this user unit:
       railse setup autostart --hub --uninstall
       %s -- %s
@@ -698,13 +699,13 @@ Warning: a Linux user unit runs as you and has no permission to bind ports below
 	"%s 不是刚建的目录（属主不对），不 chown": "%s is not the directory just created (wrong owner), so it won't be chowned",
 	"%s 不属于 root": "%s isn't owned by root",
 	"%s 别人也能写":    "%s is writable by others",
-	"停止 %s 失败，托管文件 %s 没删：\n%v\n": `Failed to stop %s; the service file %s was not removed:
+	"停止 %s 失败，托管文件 %s 没删：\n%v\n": `Stopping %s failed; the service file %s was not removed:
 %v
 `,
 	"会删除 %s\n": "Would delete %s\n",
 	"（--dry-run：以上没有删文件，也没有跑命令）":     "(--dry-run: no file above was deleted and no command was run)",
 	"已停止并移除 %s 的托管（删除了 %s）；数据目录保留\n": "Stopped and removed the managed %s (deleted %s); the data directory is kept\n",
-	"没有找到 %s：%s 本来就没托管\n":            "Did not find %s: %s was not being managed\n",
+	"没有找到 %s：%s 本来就没托管\n":            "%s not found: %s wasn't being managed\n",
 	"launchd 里没有加载 %s":               "%s is not loaded in launchd",
 	"%s 已托管并在跑（%s）\n":                "%s is managed and running (%s)\n",
 	"%s 没有托管（没有 %s）；托管：%s\n":         "%s is not managed (no %s); to manage it: %s\n",
@@ -735,7 +736,7 @@ Warning: a Linux user unit runs as you and has no permission to bind ports below
 
 %s
 `,
-	"配置目录，默认 $RAILSE_HOME 或 ~/.railse": "config directory; default $RAILSE_HOME or ~/.railse",
+	"配置目录，默认 $RAILSE_HOME 或 ~/.railse": "daemon data directory, default $RAILSE_HOME or ~/.railse",
 	"日志同时写到 stderr":                    "also write the log to stderr",
 	"覆盖已有的 machine.json":               "overwrite an existing machine.json",
 	"railse agent %s 不认 %s\n%s\n": `railse agent %s doesn't take %s
@@ -754,7 +755,7 @@ Warning: a Linux user unit runs as you and has no permission to bind ports below
 	"hub 的答复不完整或不合规，没有写 machine.json": "The hub's reply was incomplete or invalid, so machine.json was not written",
 	"写 %s: %w": "Can't write %s: %w",
 	"已接入 hub %s，机器 id %s，名字 %s\n已写入 %s；重启 railse agent run 后生效\n": `Enrolled with hub %s. Machine id %s, name %s
-Wrote %s; restart railse agent run for it to take effect
+Wrote %s; restart the daemon (railse agent run) for it to take effect
 `,
 	"注意：首次连上 hub 时本机 rules.yaml 会被 hub 规则覆盖（会自动备份），如有手写规则请先导入。\n  本机规则 %s，备份为同目录的 rules.local-<时间>.yaml；覆盖后其中手写的规则（例如 deny）不再生效\n  导入：POST %s/api/rules/import（整套替换 hub 的规则，见 docs/hub.md）\n": `Note: the first time this machine connects to the hub, its rules.yaml is overwritten by the hub's rules (with an automatic backup). Import any hand-written rules first.
   Local rules: %s, backed up as rules.local-<time>.yaml in the same directory; hand-written rules in it (deny, for example) stop applying after the overwrite
@@ -765,7 +766,7 @@ Wrote %s; restart railse agent run for it to take effect
 	"不能带 ? 查询或 # 片段":                    "can't include a ? query or a # fragment",
 	"至多 %d 字节":                          "must be at most %d bytes",
 	"必须是合法 UTF-8，且不能含控制字符或不可见的格式字符":     "must be valid UTF-8 and can't contain control or invisible formatting characters",
-	"名字 %w（用 --name 另取一个）":              "name %w (pick another with --name)",
+	"名字 %w（用 --name 另取一个）":              "The name %w (pick another with --name)",
 	"<接入码>":                             "<enroll token>",
 	"找不到家目录，拒绝启动：家目录为空会让 ~/ 开头的敏感路径规则失效": "Can't find your home directory, so it won't start: with an empty home directory, the sensitive-path rules that start with ~/ would not apply",
 	"收紧日志文件权限: %w": "Can't tighten the log file permissions: %w",
@@ -788,8 +789,8 @@ Wrote %s; restart railse agent run for it to take effect
 
 %s
 `,
-	"数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub":                                           "data directory; default $RAILSE_HUB_HOME or ~/.railse-hub",
-	"监听地址，默认 127.0.0.1:8787（给了 --acme-domain 时默认 :443）":                                  "listen address; default 127.0.0.1:8787 (:443 when --acme-domain is given)",
+	"数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub":                                           "data directory, default $RAILSE_HUB_HOME or ~/.railse-hub",
+	"监听地址，默认 127.0.0.1:8787（给了 --acme-domain 时默认 :443）":                                  "listen address, default 127.0.0.1:8787 (:443 when --acme-domain is given)",
 	"cookie 加 Secure（hub 在 TLS 反向代理后面而没设 --public-url 时打开；设了 https 的 --public-url 已自动加）": "add Secure to cookies (turn on when the hub is behind a TLS reverse proxy and --public-url is not set; an https --public-url already adds it)",
 	"接入码有效期": "how long the enroll token is valid",
 	"hub 对外的 https 源，如 https://hub.example.com；不设则停用推送":  "the hub's public https origin, e.g. https://hub.example.com; push is disabled if not set",
@@ -802,7 +803,7 @@ Wrote %s; restart railse agent run for it to take effect
 %s
 `,
 	"--ttl 应在 0 到 %s 之间（不含 0），得到 %s\n":       "--ttl must be between 0 and %s (not including 0), got %s\n",
-	"%s 要和 --acme-domain 一起用\n":              "%s goes with --acme-domain\n",
+	"%s 要和 --acme-domain 一起用\n":              "%s only works with --acme-domain\n",
 	"密码已设置（已登录的网页需要重新登录）":                    "Password set (web sessions that are already logged in have to log in again)",
 	"删除了 %d 条推送订阅：各设备重新登录后，要在网页设置里重新开启通知。\n": "Deleted %d push subscriptions: after logging in again, each device has to turn notifications back on in the web settings.\n",
 	"接入码: %s\n有效期: %s（只能用一次）\n在要接入的机器上、项目目录里运行（接入、装钩子、开机自启、体检一次做完）:\n  railse setup all --hub https://<hub 地址> --token %s\n只接入（钩子与开机自启自己装）:\n  railse agent enroll --hub https://<hub 地址> --token %s\n": `Enroll token: %s
@@ -864,11 +865,11 @@ Switched to a new key and deleted %d push subscriptions. Every phone has to turn
 
 %s
 `,
-	"规则 YAML 文件，不给则用内置规则包": "rules YAML file; the built-in rule pack if omitted",
+	"规则 YAML 文件，不给则用内置规则包": "rules YAML file, default the built-in rules",
 	"命令的工作目录":              "working directory of the command",
-	"项目根目录，不给则用 cwd":       "project root; cwd if omitted",
+	"项目根目录，不给则用 cwd":       "project root, default the working directory",
 	"载荷类型":                 "payload type",
-	"mcp 的参数应为 服务/工具，得到 %q\n\n%s\n": `The mcp argument should be server/tool, got %q
+	"mcp 的参数应为 服务/工具，得到 %q\n\n%s\n": `The mcp argument must be server/tool, got %q
 
 %s
 `,
@@ -878,7 +879,7 @@ Switched to a new key and deleted %d push subscriptions. Every phone has to turn
 `,
 	"用法: railse policy check <规则文件>": "Usage: railse policy check <rules file>",
 	"无效:":         "Invalid:",
-	"有效，%d 条规则\n": "Valid. Rules: %d\n",
+	"有效，%d 条规则\n": "Valid: %d rules\n",
 	`用法:
   railse policy eval [--rules 文件] [--cwd 目录] [--project 目录] [--type shell|file_write|mcp|network] <命令|路径|服务/工具|URL>
   railse policy check <规则文件>`: `Usage:

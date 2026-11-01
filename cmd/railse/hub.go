@@ -372,11 +372,10 @@ func runHubServe(ctx context.Context, cfg hub.Config, foreground bool, stderr io
 	}
 	logger := log.New(w, "railse-hub ", log.LstdFlags)
 	if hubEuid() == 0 {
-		warning := fmt.Sprintf(i18n.T(hubRootWarning), sudoSystemHubCmd)
-		logger.Print(warning)
-		if !foreground { // --foreground 时日志已经写到 stderr
-			fmt.Fprintln(stderr, warning)
-		}
+		// 日志不翻：hub.log 写中文原句，终端（stderr）才用当前语言。--foreground 时 logger 也写 stderr，
+		// 所以这一条日志只写文件，stderr 不论前台与否都单独打一行译文
+		log.New(logFile, "railse-hub ", log.LstdFlags).Printf(hubRootWarning, sudoSystemHubCmd)
+		fmt.Fprintf(stderr, i18n.T(hubRootWarning)+"\n", sudoSystemHubCmd)
 	}
 	st, err := openHubStore(cfg.DBPath)
 	if err != nil {

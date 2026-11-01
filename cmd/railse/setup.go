@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/doctor"
@@ -934,8 +936,9 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 		}
 		return strings.Join(shown, i18n.T("、"))
 	}
-	step := func(name string) { fmt.Fprintf(stdout, "\n== %d. %s ==\n", stepNo(name), i18n.Lookup(name)) }
-	// fail 说明停在哪一步、哪些做完了、哪些没做；extra 是已按当前语言翻好的补充说明（以句号结尾），可为空
+	step := func(name string) { fmt.Fprintf(stdout, "\n== %d. %s ==\n", stepNo(name), capFirst(i18n.Lookup(name))) }
+	// fail 说明停在哪一步、哪些做完了、哪些没做；extra 是已按当前语言翻好的补充说明（以句号结尾），可为空。
+	// 它直接接在下面那句的“修好后重跑”前面：英文值要以句号加空格（". "）结尾，才能与后面的 "Once fixed, rerun…" 隔开
 	fail := func(name, extra string) int {
 		n := stepNo(name)
 		fmt.Fprintf(stderr, i18n.T("railse setup all 停在第 %d 步（%s）"), n, i18n.Lookup(name))
@@ -1134,6 +1137,15 @@ func runSetupAllAs(goos string, euid int, args []string, stdout, stderr io.Write
 	}
 	printPhoneStep(stdout, phoneURL, viaTailscale)
 	return 0
+}
+
+// capFirst 把首字母转大写：英文步骤名在句中是小写片段，独立成行做标题时才大写；中文没有大小写，原样返回。
+func capFirst(s string) string {
+	r, n := utf8.DecodeRuneInString(s)
+	if n == 0 {
+		return s
+	}
+	return string(unicode.ToUpper(r)) + s[n:]
 }
 
 // waitDaemon 每 200 毫秒问一次守护进程，直到它应答或过了 wait（见 setupDaemonWait 说的最坏时长）；wait 为零时只问一次。

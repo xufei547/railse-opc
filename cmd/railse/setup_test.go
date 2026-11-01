@@ -2970,7 +2970,7 @@ func TestSetupAllEnglish(t *testing.T) {
 	}
 	s := out.String()
 	bar := strings.Repeat("═", len(hub)+4)
-	for _, want := range []string{"== 1. connect to the hub ==", "== 2. install hooks ==", "== 3. autostart ==", "== 4. health check ==",
+	for _, want := range []string{"== 1. Enroll with the hub ==", "== 2. Install hooks ==", "== 3. Autostart ==", "== 4. Health check ==",
 		"Already enrolled", "Skipped (--no-autostart)", "Reminder for Codex", "Reminder for Gemini",
 		"Next: open this on your phone\n╔" + bar + "╗\n║  " + hub + "  ║\n╚" + bar + "╝\n", "Add to Home Screen"} {
 		if !strings.Contains(s, want) {
@@ -2978,7 +2978,7 @@ func TestSetupAllEnglish(t *testing.T) {
 		}
 	}
 	// 体检那一段是 doctor 打印的英文
-	for _, want := range []string{"[fail]  Hub reachable: ", "        Fix: ", " passed, ", "Some health checks failed", "can't connect to the daemon: "} {
+	for _, want := range []string{"[fail]  Hub reachability: ", "        Fix: ", " passed, ", "Some health checks failed", "can't connect to the daemon: "} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("体检那一段缺 %q:\n%s", want, s)
 		}
@@ -3008,8 +3008,14 @@ func TestSetupStepNamesEnglish(t *testing.T) {
 	i18n.Set(i18n.EN)
 	t.Cleanup(func() { i18n.Set(i18n.ZH) })
 	for _, name := range []string{stepLocalHub, stepEnroll, stepHooks, stepAutostart, stepDoctor} {
-		if got := i18n.Lookup(name); got == name || hasCJK(got) {
-			t.Errorf("步骤名 %q 没有英文: %q", name, got)
+		if got := i18n.Lookup(name); got == name || hasCJK(got) || got != strings.ToLower(got) {
+			t.Errorf("步骤名 %q 没有英文，或不是小写片段: %q", name, got)
+		}
+	}
+	// 标题才大写；中文与空串原样
+	for in, want := range map[string]string{"local hub": "Local hub", "体检": "体检", "": ""} {
+		if got := capFirst(in); got != want {
+			t.Errorf("capFirst(%q) = %q，想要 %q", in, got, want)
 		}
 	}
 }
@@ -3033,12 +3039,12 @@ func TestSetupAllLocalHubNoTailscaleEnglish(t *testing.T) {
 	if code := run(f.localArgs(), &out, &errOut); code != 1 {
 		t.Fatalf("英文: %d\n%s\n%s", code, out.String(), errOut.String())
 	}
-	for _, want := range []string{"Tailscale", "https://tailscale.com/download", "stopped at step 1 (local hub)"} {
+	for _, want := range []string{"Tailscale", "https://tailscale.com/download", "stopped at step 1 (local hub); not done: enroll with the hub, install hooks, autostart, health check."} {
 		if !strings.Contains(errOut.String(), want) {
 			t.Fatalf("英文报错缺 %q:\n%s", want, errOut.String())
 		}
 	}
-	if !strings.Contains(out.String(), "== 1. local hub ==") || hasCJK(out.String()) || hasCJK(errOut.String()) {
+	if !strings.Contains(out.String(), "== 1. Local hub ==") || hasCJK(out.String()) || hasCJK(errOut.String()) {
 		t.Fatalf("英文输出里有中文或缺第 1 步:\n%s\n%s", out.String(), errOut.String())
 	}
 	if _, err := os.Stat(filepath.Join(f.home, ".railse", i18n.FileName)); !os.IsNotExist(err) {

@@ -773,7 +773,7 @@ func TestSetupWizardFirstScreenEnglish(t *testing.T) {
 	if strings.Count(s, "Choose [1]: ") != 2 {
 		t.Fatalf("答 3 应重问一次:\n%s", s)
 	}
-	if errOut.String() != "Cancelled, nothing was done\n" {
+	if errOut.String() != "Cancelled; nothing was done\n" {
 		t.Fatalf("取消的那句: %q", errOut.String())
 	}
 	if hasCJK(s) || hasCJK(errOut.String()) {
