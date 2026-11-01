@@ -13,10 +13,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xufei547/railse-opc/internal/hooksconf"
 	"github.com/xufei547/railse-opc/internal/hub"
 	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 // localHub 是 setup all --local-hub 装的本机 hub 的描述，存在 <hub 数据目录>/local-hub.json（0600），重跑与 doctor 都读它。
@@ -41,10 +43,10 @@ func parsePublicOrigin(raw string) (string, error) {
 		return "", err
 	}
 	if u.Scheme != "https" {
-		return "", errors.New("必须是 https:// 地址（手机加到主屏幕、开通知都要 https）")
+		return "", errors.New(i18n.T("必须是 https:// 地址（手机加到主屏幕、开通知都要 https）"))
 	}
 	if base != "https://"+u.Host {
-		return "", errors.New("不能带路径，只要 https://主机[:端口]")
+		return "", errors.New(i18n.T("不能带路径，只要 https://主机[:端口]"))
 	}
 	return base, nil
 }
@@ -53,11 +55,11 @@ func parsePublicOrigin(raw string) (string, error) {
 // 错误信息不带 public_url 原文（坏文件的警告会打到 stderr）。
 func normalizeLocalHub(lh localHub) (localHub, error) {
 	if lh.Port < 1 || lh.Port > 65535 {
-		return localHub{}, fmt.Errorf("port %d 不在 1..65535", lh.Port)
+		return localHub{}, fmt.Errorf(i18n.T("port %d 不在 1..65535"), lh.Port)
 	}
 	norm, err := parsePublicOrigin(lh.PublicURL)
 	if err != nil {
-		return localHub{}, fmt.Errorf("public_url 不合规：%w", err)
+		return localHub{}, fmt.Errorf(i18n.T("public_url 不合规：%w"), err)
 	}
 	lh.PublicURL = norm
 	if lh.Provider == "" {
@@ -74,10 +76,10 @@ func loadLocalHub(hubDir string) (lh localHub, ok bool, err error) {
 		return localHub{}, false, nil
 	}
 	if err != nil {
-		return localHub{}, false, fmt.Errorf("读 %s: %w", path, err)
+		return localHub{}, false, fmt.Errorf(i18n.T("读 %s: %w"), path, err)
 	}
 	if err := json.Unmarshal(data, &lh); err != nil {
-		return localHub{}, false, fmt.Errorf("%s 不是合法 JSON: %w", path, err)
+		return localHub{}, false, fmt.Errorf(i18n.T("%s 不是合法 JSON: %w"), path, err)
 	}
 	lh, err = normalizeLocalHub(lh)
 	if err != nil {
@@ -90,7 +92,7 @@ func loadLocalHub(hubDir string) (lh localHub, ok bool, err error) {
 func saveLocalHub(hubDir string, lh localHub) error {
 	lh, err := normalizeLocalHub(lh)
 	if err != nil {
-		return fmt.Errorf("本机 hub 描述不合规: %w", err)
+		return fmt.Errorf(i18n.T("本机 hub 描述不合规: %w"), err)
 	}
 	data, err := json.MarshalIndent(lh, "", "  ")
 	if err != nil {
@@ -145,8 +147,16 @@ func waitHub(port int, wait time.Duration) (string, bool) {
 	}
 }
 
+// minPasswordRunes 是网页密码的最少字符数，与 internal/hub/auth.go 的 SetPassword 同步。
+const minPasswordRunes = 8
+
 // setHubPassword 把 pw 设为网页密码（railse hub password 与 setup 共用；长度等规则由 SetPassword 查），返回变更（删了多少订阅）。
 func setHubPassword(cfg hub.Config, st *store.Store, pw string) (store.PasswordChange, error) {
+	// 密码至少 8 个字符（按 rune 计）：规则与 internal/hub/auth.go 的 SetPassword 同步。hub 包里的报错只有中文，
+	// 所以先在这里按同样的规则查一遍，英文界面才不会看到中文；中文句子与 hub 的原句逐字相同。
+	if utf8.RuneCountInString(pw) < minPasswordRunes {
+		return store.PasswordChange{}, errors.New(i18n.T("密码至少 8 个字符"))
+	}
 	srv, err := hub.New(cfg, st, log.New(io.Discard, "", 0))
 	if err != nil {
 		return store.PasswordChange{}, err
@@ -163,10 +173,10 @@ func ensureHubPassword(cfg hub.Config, st *store.Store, stdin io.Reader, termina
 		return false, nil
 	}
 	if !terminal {
-		return false, fmt.Errorf("hub 还没设网页密码：先运行 railse hub password（--dir %s），或在终端里跑 setup", cfg.Dir)
+		return false, fmt.Errorf(i18n.T("hub 还没设网页密码：先运行 railse hub password（--dir %s），或在终端里跑 setup"), cfg.Dir)
 	}
-	fmt.Fprintf(stdout, "本机 hub 还没设网页密码，在这里输入一个后回车（至少 8 个字符，手机登录用）。屏幕会回显；不想回显就 Ctrl-C，先这样设好再重跑：\n"+
-		"  read -rs PW; printf '%%s\\n' \"$PW\" | railse hub password --dir %s; unset PW\n", hooksconf.ShellQuote(cfg.Dir))
+	fmt.Fprintf(stdout, i18n.T("本机 hub 还没设网页密码，在这里输入一个后回车（至少 8 个字符，手机登录用）。屏幕会回显；不想回显就 Ctrl-C，先这样设好再重跑：\n  read -rs PW; printf '%%s\\n' \"$PW\" | railse hub password --dir %s; unset PW\n"),
+		hooksconf.ShellQuote(cfg.Dir))
 	pw, err := readPasswordLine(stdin)
 	if err != nil {
 		return false, err
@@ -199,7 +209,7 @@ func proxyNote(goos string, getenv func(string) string, run func(name string, ar
 	if !on {
 		return ""
 	}
-	return fmt.Sprintf("本机开着代理；手机若也经同一代理打不开 %s，关掉代理再试，或在代理规则里把 ts.net 设为直连", publicURL)
+	return fmt.Sprintf(i18n.T("本机开着代理；手机若也经同一代理打不开 %s，关掉代理再试，或在代理规则里把 ts.net 设为直连"), publicURL)
 }
 
 // localHubRestartCmd 是重启托管的本机 hub 的命令（与 docs/setup.md 升级一节一致）：macOS 用 launchctl kickstart，Linux 用用户单元。

@@ -2,8 +2,10 @@ package adapter
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -31,7 +33,7 @@ type claudeHook struct {
 func (claude) Parse(stdin []byte) (Input, error) {
 	var h claudeHook
 	if err := json.Unmarshal(stdin, &h); err != nil {
-		return Input{}, fmt.Errorf("解析 Claude 钩子输入: %w", err)
+		return Input{}, fmt.Errorf(i18n.T("解析 Claude 钩子输入: %w"), err)
 	}
 	in := Input{Session: proto.Session{Tool: "claude", CLISessionID: h.SessionID, TurnID: h.PromptID, Cwd: h.Cwd}}
 	switch h.HookEventName {
@@ -41,7 +43,7 @@ func (claude) Parse(stdin []byte) (Input, error) {
 			break
 		}
 		if h.SessionID == "" || h.ToolName == "" {
-			return Input{}, fmt.Errorf("PermissionRequest 缺少 session_id 或 tool_name")
+			return Input{}, errors.New(i18n.T("PermissionRequest 缺少 session_id 或 tool_name"))
 		}
 		p, err := mapTool("claude", h.ToolName, h.ToolInput, h.Cwd)
 		if err != nil {
@@ -54,11 +56,11 @@ func (claude) Parse(stdin []byte) (Input, error) {
 			break
 		}
 		if h.SessionID == "" {
-			return Input{}, fmt.Errorf("PreToolUse 缺少 session_id")
+			return Input{}, errors.New(i18n.T("PreToolUse 缺少 session_id"))
 		}
 		var ask proto.Ask
 		if err := json.Unmarshal(h.ToolInput, &ask); err != nil {
-			return Input{}, fmt.Errorf("AskUserQuestion 的题目不合规: 解析 tool_input: %w", err)
+			return Input{}, fmt.Errorf(i18n.T("AskUserQuestion 的题目不合规: 解析 tool_input: %w"), err)
 		}
 		if err := ValidateAsk(&ask); err != nil {
 			return Input{}, err

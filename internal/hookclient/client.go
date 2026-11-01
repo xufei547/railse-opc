@@ -4,12 +4,12 @@ package hookclient
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -26,8 +26,13 @@ const (
 	defaultWatchFailures = 2
 )
 
-// ErrUnresponsive 是看门狗判定守护进程活着但不响应、放弃等待审批答复时的原因。
-var ErrUnresponsive = errors.New("守护进程无响应")
+// ErrUnresponsive 是看门狗判定守护进程活着但不响应、放弃等待审批答复时的原因。包级变量不能在初始化时翻译
+// （那时语言还没定），所以是在 Error() 时才翻译的小类型；errors.Is 照常可用。
+var ErrUnresponsive error = unresponsiveError{}
+
+type unresponsiveError struct{}
+
+func (unresponsiveError) Error() string { return i18n.T("守护进程无响应") }
 
 // Client 指向守护进程的 socket。
 type Client struct {
@@ -48,7 +53,7 @@ func (c Client) dial(ctx context.Context) (net.Conn, error) {
 	d := net.Dialer{Timeout: timeout}
 	conn, err := d.DialContext(ctx, "unix", c.SocketPath)
 	if err != nil {
-		return nil, fmt.Errorf("连接守护进程: %w", err) // err 里已带 socket 路径
+		return nil, fmt.Errorf(i18n.T("连接守护进程: %w"), err) // err 里已带 socket 路径
 	}
 	return conn, nil
 }
@@ -67,16 +72,16 @@ func (c Client) roundTrip(ctx context.Context, msg, out any) error {
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
 	if err := proto.WriteLine(conn, msg); err != nil {
-		return stepErr(ctx, "发送请求", err)
+		return stepErr(ctx, i18n.T("发送请求"), err)
 	}
 	line, err := proto.ReadLine(bufio.NewReader(conn))
 	if err != nil {
-		return stepErr(ctx, "等待答复", err)
+		return stepErr(ctx, i18n.T("等待答复"), err)
 	}
 	return proto.Decode(line, out)
 }
 
-// stepErr 优先报 ctx 结束的原因（超时、收到信号），其次才是底层的连接错误。
+// stepErr 优先报 ctx 结束的原因（超时、收到信号），其次才是底层的连接错误。step 由调用方翻好。
 func stepErr(ctx context.Context, step string, err error) error {
 	if ctx.Err() != nil {
 		return fmt.Errorf("%s: %w", step, context.Cause(ctx))
@@ -157,7 +162,7 @@ func (c Client) Event(ev proto.Event) error {
 		return err
 	}
 	if !ack.OK {
-		return fmt.Errorf("守护进程拒绝事件: %s", ack.Error)
+		return fmt.Errorf(i18n.T("守护进程拒绝事件: %s"), ack.Error)
 	}
 	return nil
 }

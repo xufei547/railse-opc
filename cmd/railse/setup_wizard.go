@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 // setupStdin 是向导与重跑确认读答案的地方；stdinIsTerminal 判断 stdin 是不是终端（见 isTerminal）：是才提问，
@@ -50,17 +52,17 @@ func askSetupAll(in io.Reader, stdout io.Writer, hubURL, token, name *string, de
 			fmt.Fprintln(stdout, err)
 		}
 	}
-	fmt.Fprintln(stdout, "接入 hub 还缺几项，逐个回答（Ctrl-D 取消，什么都不做）：")
+	fmt.Fprintln(stdout, i18n.T("接入 hub 还缺几项，逐个回答（Ctrl-D 取消，什么都不做）："))
 	if *hubURL == "" {
-		if hubBase, err = ask("hub 地址（如 https://hub.example.com）：", checkHubAnswer); err != nil {
+		if hubBase, err = ask(i18n.T("hub 地址（如 https://hub.example.com）："), checkHubAnswer); err != nil {
 			return "", err
 		}
 		*hubURL = hubBase
 	}
 	if *token == "" {
-		*token, err = ask("接入码（在 hub 机器上运行 railse hub token 生成）：", func(s string) (string, error) {
+		*token, err = ask(i18n.T("接入码（在 hub 机器上运行 railse hub token 生成）："), func(s string) (string, error) {
 			if s == "" {
-				return "", errors.New("接入码不能为空")
+				return "", errors.New(i18n.T("接入码不能为空"))
 			}
 			return s, nil
 		})
@@ -69,12 +71,12 @@ func askSetupAll(in io.Reader, stdout io.Writer, hubURL, token, name *string, de
 		}
 	}
 	if *name == "" {
-		*name, err = ask("本机在 hub 里的名字（直接回车用 "+defaultName+"）：", func(s string) (string, error) {
+		*name, err = ask(fmt.Sprintf(i18n.T("本机在 hub 里的名字（直接回车用 %s）："), defaultName), func(s string) (string, error) {
 			if s == "" {
 				s = defaultName
 			}
 			if err := checkDisplayName(s); err != nil {
-				return "", fmt.Errorf("名字%w", err)
+				return "", fmt.Errorf(i18n.T("名字%w"), err)
 			}
 			return s, nil
 		})
@@ -87,36 +89,36 @@ func askSetupAll(in io.Reader, stdout io.Writer, hubURL, token, name *string, de
 
 // rerunWork 说已接入的机器重跑 setup all 接下来要重做的事：local 为真是本机模式，第 1 步要复查本机 hub（Funnel、托管，必要时重新托管）；
 // hooks 为真要重装钩子，连同 Codex 的 notify（可能改写 ~/.codex/config.toml），问句里一并说出；daemon 是“开机自启”那一步对守护进程
-// 要做的事（“重启守护进程”“托管并启动守护进程”，空表示不碰它）。
+// 要做的事（“重启守护进程”“托管并启动守护进程”，已按当前语言翻好；空表示不碰它）。
 // what 放进确认的问句，untouched 是取消时说的哪些没动；都没有要做的时两个都是空。
 func rerunWork(local, hooks bool, daemon string) (what, untouched string) {
 	var did []string
 	if local {
-		did = append(did, "检查本机 hub（必要时重新托管）")
+		did = append(did, i18n.T("检查本机 hub（必要时重新托管）"))
 	}
 	if hooks {
-		did = append(did, "重装钩子（连同 Codex 的 notify）")
+		did = append(did, i18n.T("重装钩子（连同 Codex 的 notify）"))
 	}
 	if daemon != "" {
 		did = append(did, daemon)
 	}
 	switch {
 	case local && hooks && daemon != "":
-		untouched = "本机 hub、钩子与守护进程都没动"
+		untouched = i18n.T("本机 hub、钩子与守护进程都没动")
 	case local && hooks:
-		untouched = "本机 hub 与钩子都没动"
+		untouched = i18n.T("本机 hub 与钩子都没动")
 	case local && daemon != "":
-		untouched = "本机 hub 与守护进程都没动"
+		untouched = i18n.T("本机 hub 与守护进程都没动")
 	case local:
-		untouched = "本机 hub 没动"
+		untouched = i18n.T("本机 hub 没动")
 	case hooks && daemon != "":
-		untouched = "钩子与守护进程都没动"
+		untouched = i18n.T("钩子与守护进程都没动")
 	case hooks:
-		untouched = "钩子没动"
+		untouched = i18n.T("钩子没动")
 	case daemon != "":
-		untouched = "守护进程没动"
+		untouched = i18n.T("守护进程没动")
 	}
-	return strings.Join(did, "、"), untouched
+	return strings.Join(did, i18n.T("、")), untouched
 }
 
 // confirmRerun 在终端里问已接入 hubURL 的机器要不要接着做 what（见 rerunWork）。直接回车或 y、yes 返回 true，n、no 返回 false，
@@ -125,7 +127,7 @@ func rerunWork(local, hooks bool, daemon string) (what, untouched string) {
 func confirmRerun(in io.Reader, stdout io.Writer, hubURL, what string) (bool, error) {
 	r := bufio.NewReader(in)
 	for {
-		fmt.Fprintf(stdout, "本机已接入 %s。接下来%s，继续吗？[Y/n] ", hubURL, what)
+		fmt.Fprintf(stdout, i18n.T("本机已接入 %s。接下来%s，继续吗？[Y/n] "), hubURL, what)
 		line, err := r.ReadString('\n')
 		if err != nil {
 			fmt.Fprintln(stdout) // 同 askSetupAll：“已取消”不跟在 [Y/n] 后面
@@ -137,7 +139,7 @@ func confirmRerun(in io.Reader, stdout io.Writer, hubURL, what string) (bool, er
 		case "n", "no":
 			return false, nil
 		}
-		fmt.Fprintln(stdout, "请回答 y 或 n（直接回车算 y）")
+		fmt.Fprintln(stdout, i18n.T("请回答 y 或 n（直接回车算 y）"))
 	}
 }
 
@@ -150,11 +152,9 @@ func askHubWhere(in io.Reader, stdout io.Writer, tailscaleFound bool) (local boo
 	if tailscaleFound {
 		def = "1"
 	}
-	fmt.Fprint(stdout, "hub 在哪里？\n"+
-		"  1) 本机：用 Tailscale 给手机一个地址，不用服务器（要先装好并登录 Tailscale）\n"+
-		"  2) 已有 hub：填它的地址和接入码\n")
+	fmt.Fprint(stdout, i18n.T("hub 在哪里？\n  1) 本机：用 Tailscale 给手机一个地址，不用服务器（要先装好并登录 Tailscale）\n  2) 已有 hub：填它的地址和接入码\n"))
 	for {
-		fmt.Fprintf(stdout, "选 [%s]：", def)
+		fmt.Fprintf(stdout, i18n.T("选 [%s]："), def)
 		line, err := readLineRaw(in)
 		if err != nil {
 			fmt.Fprintln(stdout) // 终端不会替 Ctrl-D 换行：调用方接着说的“已取消”不跟在提示后面
@@ -170,7 +170,7 @@ func askHubWhere(in io.Reader, stdout io.Writer, tailscaleFound bool) (local boo
 		case "2":
 			return false, nil
 		}
-		fmt.Fprintf(stdout, "请答 1 或 2（直接回车选 %s）\n", def)
+		fmt.Fprintf(stdout, i18n.T("请答 1 或 2（直接回车选 %s）\n"), def)
 	}
 }
 
@@ -198,10 +198,10 @@ func readLineRaw(r io.Reader) (string, error) {
 func checkHubAnswer(s string) (string, error) {
 	u, base, err := parseHubAddr(s)
 	if err != nil {
-		return "", fmt.Errorf("hub 地址%w", err)
+		return "", fmt.Errorf(i18n.T("hub 地址%w"), err)
 	}
 	if plaintextHub(u) {
-		return "", errors.New(plaintextHubNote + "；确在可信内网的，用 railse setup all --hub <地址> 给出")
+		return "", fmt.Errorf(i18n.T("%s；确在可信内网的，用 railse setup all --hub <地址> 给出"), i18n.T(plaintextHubNote))
 	}
 	return base, nil
 }
@@ -211,13 +211,13 @@ func checkHubAnswer(s string) (string, error) {
 // 地址由 Tailscale 提供，手机挂着代理打不开时关掉代理再试（代理常把 *.ts.net 解析或转发坏）。
 func printPhoneStep(w io.Writer, hubURL string, local bool) {
 	if hubURL == "" {
-		fmt.Fprintln(w, "\n下一步：在手机上打开 hub 的地址")
+		fmt.Fprintln(w, i18n.T("\n下一步：在手机上打开 hub 的地址"))
 	} else {
 		bar := strings.Repeat("═", utf8.RuneCountInString(hubURL)+4)
-		fmt.Fprintf(w, "\n下一步：在手机上打开\n╔%s╗\n║  %s  ║\n╚%s╝\n", bar, hubURL, bar)
+		fmt.Fprintf(w, i18n.T("\n下一步：在手机上打开\n╔%s╗\n║  %s  ║\n╚%s╝\n"), bar, hubURL, bar)
 	}
 	if local {
-		fmt.Fprintln(w, "这个地址由 Tailscale 提供；手机挂着代理打不开时关掉代理再试。")
+		fmt.Fprintln(w, i18n.T("这个地址由 Tailscale 提供；手机挂着代理打不开时关掉代理再试。"))
 	}
-	fmt.Fprintln(w, "手机 Safari 打开后分享→添加到主屏幕，再从图标打开；登录后在设置里开启通知（见 docs/web.md）。")
+	fmt.Fprintln(w, i18n.T("手机 Safari 打开后分享→添加到主屏幕，再从图标打开；登录后在设置里开启通知（见 docs/web.md）。"))
 }

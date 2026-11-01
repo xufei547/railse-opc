@@ -2,8 +2,10 @@ package adapter
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -33,13 +35,13 @@ type geminiHook struct {
 func (gemini) Parse(stdin []byte) (Input, error) {
 	var h geminiHook
 	if err := json.Unmarshal(stdin, &h); err != nil {
-		return Input{}, fmt.Errorf("解析 Gemini 钩子输入: %w", err)
+		return Input{}, fmt.Errorf(i18n.T("解析 Gemini 钩子输入: %w"), err)
 	}
 	in := Input{Session: proto.Session{Tool: "gemini", CLISessionID: h.SessionID, Cwd: h.Cwd}}
 	switch h.HookEventName {
 	case "BeforeTool":
 		if h.SessionID == "" || h.ToolName == "" {
-			return Input{}, fmt.Errorf("BeforeTool 缺少 session_id 或 tool_name")
+			return Input{}, errors.New(i18n.T("BeforeTool 缺少 session_id 或 tool_name"))
 		}
 		p, err := mapTool("gemini", h.ToolName, h.ToolInput, h.Cwd)
 		if err != nil {

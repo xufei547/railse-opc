@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 // realStdinIsTerminal 是 TestMain 换掉之前的 stdinIsTerminal，只给测它本身的测试用。
@@ -53,6 +55,8 @@ func TestMain(m *testing.M) {
 	os.Setenv("HOME", home)
 	os.Unsetenv("RAILSE_HOME")
 	os.Unsetenv("RAILSE_HUB_HOME")
+	os.Setenv("RAILSE_LANG", "zh")
+	i18n.Set(i18n.ZH)
 	realStdinIsTerminal, stdinIsTerminal = stdinIsTerminal, func() bool { return false }
 	setupStdin = strings.NewReader("")
 	tailscaleFind = func() (string, error) {

@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/policy"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
@@ -155,5 +157,54 @@ func TestWatchdogStopsAfterAnswer(t *testing.T) {
 	}
 	if after := runtime.NumGoroutine(); after > before {
 		t.Fatalf("Permission 返回后不应留下 goroutine: 之前 %d 之后 %d", before, after)
+	}
+}
+
+// 英文下钩子会写进 stderr 的报错：连不上、守护进程无响应（等答复时）、守护进程拒绝事件；哨兵错误 errors.Is 照常认得出。
+func TestErrorsEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	if got := ErrUnresponsive.Error(); got != "the daemon isn't responding" {
+		t.Fatalf("ErrUnresponsive = %q", got)
+	}
+
+	dir, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(dir)
+	none := filepath.Join(dir, "none.sock")
+	if _, err := (Client{SocketPath: none}).Control("status"); err == nil || !strings.HasPrefix(err.Error(), "can't connect to the daemon: dial unix "+none) {
+		t.Fatalf("连不上的报错 = %v", err)
+	}
+
+	stuck := filepath.Join(dir, "stuck.sock")
+	ln, err := net.Listen("unix", stuck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	c := Client{SocketPath: stuck, WatchInterval: 50 * time.Millisecond, WatchTimeout: 50 * time.Millisecond, WatchFailures: 2}
+	_, err = c.Permission(context.Background(), proto.Request{V: proto.Version, Kind: "permission"})
+	if !errors.Is(err, ErrUnresponsive) || err.Error() != "waiting for the reply: the daemon isn't responding" {
+		t.Fatalf("无响应的报错 = %v", err)
+	}
+
+	// 假守护进程对事件答 ok=false
+	rej := filepath.Join(dir, "rej.sock")
+	ln2, err := net.Listen("unix", rej)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln2.Close()
+	go func() {
+		conn, err := ln2.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, err := proto.ReadLine(bufio.NewReader(conn)); err == nil {
+			proto.WriteLine(conn, proto.EventAck{V: proto.Version, OK: false, Error: "bad event"})
+		}
+	}()
+	if err := (Client{SocketPath: rej}).Event(proto.Event{V: proto.Version, Kind: "done"}); err == nil || err.Error() != "the daemon rejected the event: bad event" {
+		t.Fatalf("拒绝事件的报错 = %v", err)
 	}
 }

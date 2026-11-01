@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh
 - **平台。** macOS（Apple Silicon）、Linux amd64 与 arm64；不支持 Windows 与 Intel Mac。
 - **校验和。** 脚本从 GitHub Releases 下载 `railse_<版本>_<系统>_<架构>.tar.gz`，按同一发布的 `checksums.txt` 校验 sha256，不符就不装（只有校验和，没有签名：两者来自同一处）。新文件先写到安装目录里的临时名再改名替换，正在运行的旧二进制不受影响。
 - **安装目录。** 脚本不调用 sudo：`/usr/local/bin` 可写就装那里，否则装 `~/.local/bin`（不存在时等下载与校验都过了才建），它不在 `PATH` 里时打印要加进 shell 配置的那一行。
-- **环境变量**（经管道运行时写在 `sh` 前面）：`RAILSE_VERSION`（如 `0.1.0`，带 `v` 也行，默认最新正式版）、`RAILSE_INSTALL_DIR`（安装目录，不存在就建）、`RAILSE_REPO`（默认 `xufei547/railse-opc`）。例如：
+- **环境变量**（经管道运行时写在 `sh` 前面）：`RAILSE_VERSION`（如 `0.1.0`，带 `v` 也行，默认最新正式版）、`RAILSE_INSTALL_DIR`（安装目录，不存在就建）、`RAILSE_REPO`（默认 `xufei547/railse-opc`）、`RAILSE_LANG`（提示用 `zh` 还是 `en`，见“语言”）。例如：
   ```sh
   curl -fsSL https://raw.githubusercontent.com/xufei547/railse-opc/main/install.sh | RAILSE_VERSION=0.1.0 RAILSE_INSTALL_DIR="$HOME/bin" sh
   ```
@@ -113,7 +113,7 @@ railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com --tr
 
 `--public-url` 是手机打开网页的 https 源（不带路径），设了才启用推送，cookie 也随之加 Secure；`--trusted-proxy` 让 hub 只信任代理给的 `X-Forwarded-For`。代理必须保留原 Host、转发 WebSocket，配置示例见 [hub.md](hub.md) 的“部署与反向代理”。
 
-### Linux：装成系统服务
+### Linux：装成系统服务（Linux system service）
 
 普通用户绑不了 443/80，hub 也不该以 root 跑：系统单元以普通用户运行，只多给一项 `CAP_NET_BIND_SERVICE`（`AmbientCapabilities=`），整个文件系统只读、只有数据目录可写。
 
@@ -236,6 +236,28 @@ hub 侧：数据目录默认 `$RAILSE_HUB_HOME`，否则 `~/.railse-hub`；Linux
 | `hubsrv.acme` | ACME 证书目录 | `acme/` 是 0700、里面的文件 0600；没有这个目录（没用 ACME）时 skip | 按提示 `chmod` |
 | `hubsrv.local` | 本机 hub 对外地址 | 读 hub 数据目录里 `setup all --local-hub` 写的 `local-hub.json`（没有时 skip）：Tailscale 提供的先看 `tailscale serve status --json` 里 Funnel 是否把 `<机器名>:443` 转到 `127.0.0.1:<端口>`（sudo 下整项 skip）；不论哪种都从本机 GET 一次 `<对外地址>/api/version`，答得上是 hub 为 ok（Tailscale 提供的，本机经 MagicDNS 走 tailnet 访问到，没经过 Funnel 的公网入口，细节里注明，公网上打不打得开用手机 4G 验证）。端口上的 hub 本身由 `hub.reachable` 看 | `local-hub.json` 坏了（只说哪一项不合规，不回显内容）：重跑 `railse setup all --local-hub --hub-dir <目录>`（守护进程不在 `~/.railse` 时带 `--dir`，用自己隧道的再带 `--public-url`）；找不到 tailscale、Funnel 没转到这个端口（fail）：装好并登录 Tailscale，`tailscale funnel --bg <端口>` 或重跑同一条 setup；从本机访问不到（warn）：常是本机代理拦着 `*.ts.net`，用手机 4G 打开验证，Funnel 入口 TLS 握手失败时先关掉代理再试 |
 | `hubsrv.autostart` | hub 开机自启 | 有没有 hub 的托管文件（plist、用户单元或系统单元） | `railse setup autostart --hub`（warn） |
+
+## 语言
+
+命令行的输出（向导、`railse doctor`、钩子留在终端里的话、用法与报错）有中文、英文两套。日志（`agent.log`、`hub.log`）里的固定句子不翻，始终是中文；但其中转述的报错（比如提问题目不合规的原因）会随该进程的语言。
+
+**按什么定。** 每个 railse 进程启动后定一次，按下面的顺序，前面的有值就不再往下看：
+
+1. 环境变量 `RAILSE_LANG`；
+2. 数据目录（`$RAILSE_HOME`，否则 `~/.railse`）里的 `lang` 文件；
+3. `LC_ALL`、`LC_MESSAGES`、`LANG` 里第一个非空的（如 `LC_ALL=C` 时就是英文，不再看 `LANG`）。
+
+值以 `zh` 开头（不分大小写，如 `zh_CN.UTF-8`）算中文，其余一律英文；三处都没有也是英文。
+
+**`railse lang`。** 不带参数打印当前语言和它从哪来（环境变量 `RAILSE_LANG`、lang 文件、系统 LANG 或默认）。`railse lang zh`、`railse lang en` 把语言写进上面那个 `lang` 文件（目录不在就按 0700 建），只收这两个值。环境里设着与之不同的 `RAILSE_LANG` 时，写完会提示它优先，要去掉它 lang 文件才生效。钩子每次都是新进程，改了马上生效；已在跑的守护进程与 hub 下次启动才换。
+
+**向导记住第一次的语言。** `railse setup`、`railse setup all` 走到最后（体检有失败项也算）时，守护进程的数据目录（`--dir`，默认 `$RAILSE_HOME` 或 `~/.railse`）里还没有 `lang` 文件，就把这次用的语言写进去；已有的不改（`railse lang` 设过的不会被覆盖），写不了只在最后的“注意”里说，不让 setup 失败。
+
+**为什么要 lang 文件。** 托管的守护进程与 hub 由 launchd/systemd 拉起，拿不到你终端里的 `LANG`（launchd 下通常什么都没有，就成了英文），靠 lang 文件与你在终端里用的语言一致。读的总是 `$RAILSE_HOME` 或 `~/.railse` 里的 `lang`，与命令的 `--dir` 无关：`setup all --dir <目录>` 把它写在 `<目录>` 里，托管的守护进程（带着 `RAILSE_HOME=<目录>`）读得到，不带 `RAILSE_HOME` 的命令与钩子读不到，要它们一致就再跑一次 `railse lang zh`（或 `en`）。
+
+**安装脚本。** `install.sh` 不读 lang 文件，按 `RAILSE_LANG`、`LC_ALL`、`LC_MESSAGES`、`LANG` 的顺序取第一个非空的，`zh` 开头算中文，其余英文。经管道运行时写在 `sh` 前面：`curl -fsSL … | RAILSE_LANG=zh sh`。
+
+**中文用户的终端没有 `LANG`。** 有的终端、容器、ssh 会话里这几个变量都是空的，railse 就按英文显示：运行一次 `railse lang zh`，之后不带 `RAILSE_LANG` 的 railse 命令与钩子都用中文。只想这一次用中文，在命令前加 `RAILSE_LANG=zh`。
 
 ## 升级
 

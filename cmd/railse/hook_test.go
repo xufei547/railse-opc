@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -16,6 +18,8 @@ import (
 
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/i18n"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 func startTestAgent(t *testing.T) (sock string, repo string, cfg agent.Config) {
@@ -260,5 +264,170 @@ func TestHookPassthroughWhenParentDies(t *testing.T) {
 		if time.Now().After(end) {
 			t.Fatalf("钩子放弃后守护进程应把请求记为 cancelled:\n%s", b)
 		}
+	}
+}
+
+func TestLocalizeReason(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	// proto.Response 带 map 字段，不能当 map 的键，用切片列用例。
+	cases := []struct {
+		resp proto.Response
+		want string
+	}{
+		{proto.Response{Reason: "命中规则 deny-rm", RuleID: "deny-rm"}, "Matched rule deny-rm"},
+		{proto.Response{Reason: "已在手机上拒绝"}, "Denied on your phone"},
+		// 手机上拒绝并记住：带规则号，但理由不是“命中规则 …”，照固定句子查
+		{proto.Response{Reason: "已在手机上拒绝", RuleID: "user-1"}, "Denied on your phone"},
+		{proto.Response{Reason: "自动审批已暂停，交回终端处理"}, "Auto-approval is paused; handed back to the terminal"},
+		{proto.Response{Reason: "一句没见过的话"}, "一句没见过的话"},
+	}
+	for _, c := range cases {
+		if got := localizeReason(c.resp); got != c.want {
+			t.Errorf("localizeReason(%+v) = %q，想要 %q", c.resp, got, c.want)
+		}
+	}
+	i18n.Set(i18n.ZH)
+	if got := localizeReason(proto.Response{Reason: "命中规则 deny-rm", RuleID: "deny-rm"}); got != "命中规则 deny-rm" {
+		t.Errorf("中文下应原样: %q", got)
+	}
+}
+
+// 守护进程回传给钩子的固定理由（localizeReason 用 i18n.Lookup 查，完整性测试查不到）：英文下逐个核对都有译文、译文不带中文。
+// 原文逐字抄自：internal/agent/hubdecider.go 的 reason* 常量；internal/agent/server.go 与 requests.go 写进 proto.Response.Reason 的
+// 固定句子；internal/policy/engine.go 的暂停理由。那边的句子改了，这里与 internal/i18n/en.go 要一起改。
+func TestLocalizeReasonFixedSentences(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	for _, s := range []string{
+		// internal/agent/hubdecider.go
+		"Gemini 只能拒绝不能放行，交回原生确认框",
+		"没有配置 hub，交回终端处理",
+		"连不上 hub，交回终端处理",
+		"hub 拒绝了本机密钥，交回终端处理",
+		"无法送往 hub，交回终端处理",
+		"与 hub 断线超过宽限，交回终端处理",
+		"hub 没有给出有效决定，交回终端处理",
+		"hub 版本太旧，不认识提问，交回终端处理",
+		"已在手机上批准",
+		"已在手机上拒绝",
+		"已在手机上回答",
+		"在手机上选了在终端回答",
+		// internal/agent/server.go
+		"请求格式错误",
+		"自动审批已暂停，交回终端处理",
+		"脱敏后有题面相同的题，分不清答的是哪道，交回终端处理",
+		"决定来源给的答案不完整，交回终端处理",
+		"守护进程正在停止，交回终端处理",
+		"等待过期，交回终端处理",
+		"决定来源出错，交回终端处理",
+		// internal/agent/requests.go
+		"本机没有连接 hub，交回终端处理",
+		// internal/policy/engine.go
+		"自动审批已暂停",
+	} {
+		if got := localizeReason(proto.Response{Reason: s}); got == s || hasCJK(got) {
+			t.Errorf("固定理由 %q 没有英文: %q", s, got)
+		}
+	}
+}
+
+func TestPassthroughMessageEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	var b bytes.Buffer
+	passthrough(&b, i18n.T("请求没有对应的适配器"))
+	if got := b.String(); got != "railse hook: no adapter for this request; handed back to the terminal\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// 英文下命中规则的拒绝：守护进程回传中文理由与规则号，钩子按规则号重拼，JSON 里给模型看的理由是英文。
+func TestHookDenyWithRuleEnglish(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	os.WriteFile(cfg.RulesPath, []byte("version: 1\nrules:\n  - id: deny-rm\n    source: user\n    scope: global\n    match: {payload: shell, command_prefix: rm}\n    action: deny\n"), 0o600)
+	if reply, err := (hookclient.Client{SocketPath: sock}).Control("reload"); err != nil || !reply.OK {
+		t.Fatalf("reload: %+v %v", reply, err)
+	}
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	got, _, code := runHookWith(t, claudePermission(repo, "rm x"), "claude", "--socket", sock)
+	if want := `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Railse: Matched rule deny-rm"}}}` + "\n"; code != 0 || got != want {
+		t.Fatalf("code=%d out=%q", code, got)
+	}
+}
+
+// fixedDecider 立即给出固定的结论。
+type fixedDecider agent.Outcome
+
+func (d fixedDecider) Decide(ctx context.Context, pr agent.PendingRequest) (agent.Outcome, error) {
+	return agent.Outcome(d), nil
+}
+
+// 英文下手机上拒绝（含拒绝并记住，带规则号）：Claude 与 Gemini 的拒绝 JSON 里都是英文理由。
+func TestHookDenyOnPhoneEnglish(t *testing.T) {
+	for _, ruleID := range []string{"", "user-1"} {
+		sock, repo, _ := startAgentWith(t, fixedDecider{Action: "deny", Reason: "已在手机上拒绝", RuleID: ruleID, DecidedBy: "user"})
+		i18n.Set(i18n.EN)
+		t.Cleanup(func() { i18n.Set(i18n.ZH) })
+		got, _, code := runHookWith(t, claudePermission(repo, "curl https://x.y"), "claude", "--socket", sock)
+		if want := `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Railse: Denied on your phone"}}}` + "\n"; code != 0 || got != want {
+			t.Fatalf("Claude（规则号 %q）: code=%d out=%q", ruleID, code, got)
+		}
+		stdin := `{"session_id":"g","cwd":"` + repo + `","hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"curl https://x.y"}}`
+		got, _, code = runHookWith(t, stdin, "gemini", "--socket", sock)
+		if want := `{"decision":"deny","reason":"Railse: Denied on your phone"}` + "\n"; code != 0 || got != want {
+			t.Fatalf("Gemini（规则号 %q）: code=%d out=%q", ruleID, code, got)
+		}
+	}
+}
+
+// 英文下钩子留在 stderr 的句子：用法、参数错误、不认识的 CLI、缺参数、坏输入、题目不合规、连不上守护进程，都不带中文。
+func TestHookStderrEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	dir, err := os.MkdirTemp("", "rs") // 短路径：unix socket 路径有长度上限
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	none := filepath.Join(dir, "none.sock")
+	badAsk := `{"session_id":"s1","cwd":"/p","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[]}}`
+	cases := []struct {
+		name  string
+		stdin string
+		args  []string
+		want  string
+	}{
+		{"用法", "", nil, "Usage:\n  railse hook claude|codex|gemini [--socket path]"},
+		{"参数错误", "", []string{"claude", "--bogus"}, "railse hook: bad arguments: flag provided but not defined: -bogus; handed back to the terminal\n"},
+		{"不认识的 CLI", "{}", []string{"nope", "--socket", none}, "railse hook: unknown CLI nope; handed back to the terminal\n"},
+		{"codex-notify 缺参数", "", []string{"codex-notify", "--socket", none}, "railse hook: codex-notify needs a JSON argument; handed back to the terminal\n"},
+		{"坏输入", "not json", []string{"claude", "--socket", none}, "railse hook: can't parse the Claude hook input: "},
+		{"缺字段", `{"hook_event_name":"BeforeTool"}`, []string{"gemini", "--socket", none}, "railse hook: BeforeTool is missing session_id or tool_name; handed back to the terminal\n"},
+		{"题目不合规", badAsk, []string{"claude", "--socket", none}, "railse hook: invalid AskUserQuestion: no questions; handed back to the terminal\n"},
+		{"连不上守护进程", claudePermission("/p", "git status"), []string{"claude", "--socket", none}, "railse hook: can't connect to the daemon: dial unix " + none},
+	}
+	for _, c := range cases {
+		out, errOut, code := runHookWith(t, c.stdin, c.args...)
+		if code != 0 || out != "" || !strings.Contains(errOut, c.want) || hasCJK(errOut) {
+			t.Errorf("%s: code=%d out=%q err=%q，想要含 %q 且不带中文", c.name, code, out, errOut, c.want)
+		}
+	}
+}
+
+// 哨兵错误在 Error() 时才翻译：英文下不带中文，errors.Is 照常认得出。
+func TestErrParentGoneEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	if got := errParentGone.Error(); got != "the parent process (the CLI) has exited" {
+		t.Fatalf("got %q", got)
+	}
+	if !errors.Is(fmt.Errorf("x: %w", errParentGone), errParentGone) {
+		t.Fatal("errors.Is 应认得出包了一层的 errParentGone")
+	}
+	i18n.Set(i18n.ZH)
+	if got := errParentGone.Error(); got != "父进程（CLI）已退出" {
+		t.Fatalf("中文下应原样: %q", got)
 	}
 }

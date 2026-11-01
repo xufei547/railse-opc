@@ -22,6 +22,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hub"
 	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 // cancelledHubRun 让 hub run 的运行期一开始就已取消：即使误把它跑起来，也会立刻关停而不是挂住测试。
@@ -782,4 +783,44 @@ func TestHubRunWarnsWhenRoot(t *testing.T) {
 			t.Fatalf("stderr 应恰好一条警告并给出建议: %q", errOut.String())
 		}
 	}
+}
+
+// 英文下 root 警告：stderr 是英文（前台与否都恰好一条），hub.log 仍写中文原句（日志不翻）。
+func TestHubRunRootWarningEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	old := hubEuid
+	t.Cleanup(func() { hubEuid = old })
+	hubEuid = func() int { return 0 }
+	for _, foreground := range []bool{false, true} {
+		dir := filepath.Join(tempDir(t), "hub")
+		cfg := hub.DefaultConfig(dir)
+		cfg.Listen = "127.0.0.1:0"
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var errOut lockedBuf
+		if err := runHubServe(ctx, cfg, foreground, &errOut); err != nil {
+			t.Fatal(err)
+		}
+		if got := errOut.String(); strings.Count(got, "the hub is running as root") != 1 || !strings.Contains(got, sudoSystemHubCmd) || strings.Contains(got, "以 root 运行") {
+			t.Fatalf("foreground %v: stderr 应恰好一条英文警告: %q", foreground, got)
+		}
+		b, _ := os.ReadFile(filepath.Join(dir, "hub.log"))
+		if strings.Count(string(b), "警告：hub 正以 root 运行") != 1 || strings.Contains(string(b), "running as root") {
+			t.Fatalf("foreground %v: hub.log 应写中文原句一条:\n%s", foreground, b)
+		}
+	}
+}
+
+// 用法里展开写的系统单元命令要与 sudoSystemHubCmd 一致（i18n.T 的键必须是字面量，没法拼常量），中英文都查，防漂移。
+func TestUsageMentionsSudoSystemHubCmd(t *testing.T) {
+	for _, lang := range []string{i18n.ZH, i18n.EN} {
+		i18n.Set(lang)
+		for name, usage := range map[string]string{"autostartUsage": i18n.T(autostartUsage), "hubUsage": i18n.T(hubUsage)} {
+			if !strings.Contains(usage, sudoSystemHubCmd) {
+				t.Errorf("%s 的 %s 里没有 %s:\n%s", lang, name, sudoSystemHubCmd, usage)
+			}
+		}
+	}
+	i18n.Set(i18n.ZH)
 }

@@ -2,18 +2,19 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/xufei547/railse-opc/internal/adapter"
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -33,16 +34,21 @@ var (
 	getppid             = os.Getppid
 )
 
-// errParentGone 是 CLI 已退出（钩子被过继）时取消等待的原因。
-var errParentGone = errors.New("父进程（CLI）已退出")
+// errParentGone 是 CLI 已退出（钩子被过继）时取消等待的原因。包级变量不能在初始化时翻译（那时语言还没定），
+// 所以是在 Error() 时才翻译的小类型；errors.Is 照常可用。
+var errParentGone error = parentGoneError{}
+
+type parentGoneError struct{}
+
+func (parentGoneError) Error() string { return i18n.T("父进程（CLI）已退出") }
 
 // runHook 永远以“不作决定”收场（stdout 为空、退出 0），除非守护进程明确给了 allow、deny 或答题的答案。
-// 这里绝不读取或打印环境变量：CLI 会往钩子环境里注入令牌。
+// 这里绝不打印任何环境变量，只读：找守护进程 socket 与 lang 文件用的 RAILSE_HOME、HOME，以及界面语言用的 RAILSE_LANG、LC_ALL、LC_MESSAGES、LANG（见 internal/i18n）：CLI 会往钩子环境里注入令牌。
 // 从入口起就接管 SIGTERM、SIGINT、SIGHUP：任何阶段收到信号都不作决定并退出 0，进程不会被信号杀掉。
 func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 	defer func() {
 		if r := recover(); r != nil {
-			code = passthrough(stderr, fmt.Sprintf("内部错误: %v", r))
+			code = passthrough(stderr, fmt.Sprintf(i18n.T("内部错误: %v"), r))
 		}
 	}()
 	ctx, cancel := context.WithCancelCause(context.Background())
@@ -53,20 +59,20 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 	go func() {
 		select {
 		case sig := <-sigs:
-			cancel(fmt.Errorf("收到信号 %v", sig))
+			cancel(fmt.Errorf(i18n.T("收到信号 %v"), sig))
 		case <-ctx.Done():
 		}
 	}()
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, hookUsage)
+		fmt.Fprintln(stderr, i18n.T(hookUsage))
 		return 0
 	}
 	cli := args[0]
 	fs := flag.NewFlagSet("hook", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	socket := fs.String("socket", "", "守护进程 socket 路径")
+	socket := fs.String("socket", "", i18n.T("守护进程 socket 路径"))
 	if err := fs.Parse(args[1:]); err != nil {
-		return passthrough(stderr, "参数错误: "+err.Error())
+		return passthrough(stderr, fmt.Sprintf(i18n.T("参数错误: %v"), err))
 	}
 	if *socket == "" {
 		cfg, err := agent.DefaultConfig()
@@ -83,7 +89,7 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 	case "codex-notify":
 		// Codex 把 JSON 追加为最后一个参数。
 		if fs.NArg() == 0 {
-			return passthrough(stderr, "codex-notify 需要一个 JSON 参数")
+			return passthrough(stderr, i18n.T("codex-notify 需要一个 JSON 参数"))
 		}
 		var err error
 		in, err = adapter.ParseCodexNotify([]byte(fs.Arg(fs.NArg() - 1)))
@@ -94,7 +100,7 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 		var ok bool
 		ad, ok = adapter.Get(cli)
 		if !ok {
-			return passthrough(stderr, "不认识的 CLI "+cli)
+			return passthrough(stderr, fmt.Sprintf(i18n.T("不认识的 CLI %s"), cli))
 		}
 		raw, err := readStdin(ctx, stdin)
 		if err != nil {
@@ -113,7 +119,7 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 	switch in.Kind {
 	case adapter.KindPermission, adapter.KindAsk:
 		if ad == nil {
-			return passthrough(stderr, "请求没有对应的适配器")
+			return passthrough(stderr, i18n.T("请求没有对应的适配器"))
 		}
 		if in.Kind == adapter.KindAsk {
 			return hookAsk(ctx, ad, client, in, stdout, stderr)
@@ -145,7 +151,7 @@ func readStdin(ctx context.Context, stdin io.Reader) ([]byte, error) {
 	select {
 	case r := <-ch:
 		if r.err != nil {
-			return nil, fmt.Errorf("读 stdin: %w", r.err)
+			return nil, fmt.Errorf(i18n.T("读 stdin: %w"), r.err)
 		}
 		return r.b, nil
 	case <-ctx.Done():
@@ -160,6 +166,16 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 		return passthrough(stderr, err.Error())
 	}
 	return writeOutput(stdout, ad.Render(adapter.Decision{Action: resp.Decision, Reason: resp.Reason}))
+}
+
+// localizeReason 把守护进程回传的拒绝原因翻成终端语言：守护进程（launchd、systemd 下）未必知道用户的语言，钩子知道，
+// 所以协议不变、由钩子在本地重拼。命中规则的按规则号重拼（规则号本身不翻）；其余是守护进程里的固定句子，按英文表查
+// （i18n.Lookup，句子都手工列在 en.go），查不到原样返回。只有拒绝原因会显示（passthrough 的原因不显示），其余照样翻、无害。
+func localizeReason(resp proto.Response) string {
+	if resp.RuleID != "" && strings.HasPrefix(resp.Reason, "命中规则 ") {
+		return fmt.Sprintf(i18n.T("命中规则 %s"), resp.RuleID)
+	}
+	return i18n.Lookup(resp.Reason)
 }
 
 // hookAsk 把答题请求交给守护进程等答案（见 awaitReply）。只有答复是 answer 才输出：答案合进原 tool_input（questions 等字段
@@ -193,7 +209,12 @@ func awaitReply(ctx context.Context, ad adapter.Adapter, client hookclient.Clien
 		<-parentDone
 	}()
 	req.V, req.DeadlineSeconds = proto.Version, ad.DeadlineSeconds()
-	return client.Permission(ctx, req)
+	resp, err := client.Permission(ctx, req)
+	if err != nil {
+		return resp, err
+	}
+	resp.Reason = localizeReason(resp)
+	return resp, nil
 }
 
 // writeOutput 把适配器的输出（非空时）写成一行。适配器约定只用退出码 0，决定全靠 stdout 表达；这里再兜一层，钩子进程恒以 0 退出。
@@ -227,8 +248,8 @@ func watchParent(ctx context.Context, cancel context.CancelCauseFunc, ppid func(
 	}
 }
 
-// passthrough 在 stderr 说明原因，stdout 不写，退出 0。
+// passthrough 在 stderr 说明原因，stdout 不写，退出 0。why 由调用方翻好。
 func passthrough(stderr io.Writer, why string) int {
-	fmt.Fprintln(stderr, "railse hook: "+why+"，交回终端处理")
+	fmt.Fprintln(stderr, "railse hook: "+why+i18n.T("，交回终端处理"))
 	return 0
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/doctor"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
 	"github.com/xufei547/railse-opc/internal/hub/store"
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/tailscale"
 )
 
@@ -150,8 +151,8 @@ func TestSetupHooksOnlyClaudeGetsPreToolUse(t *testing.T) {
 }
 
 func TestSetupUsageMentionsPhoneQuestions(t *testing.T) {
-	if !strings.Contains(setupUsage, "Claude 的选择题（AskUserQuestion）也能在手机上答") {
-		t.Fatalf("用法说明应提到选择题能在手机上答:\n%s", setupUsage)
+	if u := setupUsageText(); !strings.Contains(u, "Claude 的选择题（AskUserQuestion）也能在手机上答") {
+		t.Fatalf("用法说明应提到选择题能在手机上答:\n%s", u)
 	}
 }
 
@@ -1477,6 +1478,9 @@ func TestSetupAllEnrollsHooksAutostartAndDoctor(t *testing.T) {
 	if strings.Index(s, "下一步") < last {
 		t.Fatalf("下一步应在体检之后:\n%s", s)
 	}
+	if b, err := os.ReadFile(filepath.Join(f.dir, i18n.FileName)); err != nil || string(b) != "zh\n" {
+		t.Fatalf("setup all 成功后要写 lang 文件：%q, %v", b, err)
+	}
 	// 再跑一次：已接入则跳过接入，不报错；--no-autostart 不再托管
 	calls := len(f.rec.calls)
 	out.Reset()
@@ -1796,6 +1800,9 @@ func TestSetupAllEnrollFailureStopsAtStep1(t *testing.T) {
 	}
 	if len(f.rec.calls) != 0 || strings.Contains(out.String(), "下一步") || strings.Contains(out.String(), "项通过") {
 		t.Fatalf("接入失败后不该托管、体检: %v %q", f.rec.calls, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, i18n.FileName)); !os.IsNotExist(err) {
+		t.Fatalf("setup all 失败不该写 lang 文件: %v", err)
 	}
 }
 
@@ -2295,6 +2302,9 @@ func TestSetupAllLocalHubEndToEnd(t *testing.T) {
 		t.Fatalf("本机 hub 那一步应说接入码只交给下一步接入、不显示:\n%s", s)
 	}
 	assertNoEnrollSecrets(t, oneEnrollToken(t, spy), s, errOut.String())
+	if b, err := os.ReadFile(filepath.Join(f.home, ".railse", i18n.FileName)); err != nil || string(b) != "zh\n" {
+		t.Fatalf("setup all 成功后要写 lang 文件：%q, %v", b, err)
+	}
 }
 
 // 第 5 步体检看本机 hub 的对外地址（hubsrv.local），测试里绝不出网、不跑真 tailscale：Funnel 配置由假 tailscale 的
@@ -2931,3 +2941,113 @@ func failingTransport(hosts *[]string) http.RoundTripper {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// setup all 的英文：已接入的机器重跑（跳过接入、装钩子、--no-autostart、体检、下一步），整段输出（含 doctor 打印的体检）都不带中文。
+// 成功后数据目录里写 lang 文件（当前语言 en）；已有的 lang 文件不改。不出网：同 TestSetupAllRerunBoxShowsEnrolledHub。
+// 体检的细节里会原样带出拦请求的 RoundTripper 的报错（测试自己的），这里换成英文的假报错；问守护进程状态走真的
+// internal/hookclient（临时目录里没有守护进程），它的“连接守护进程: …”在英文下也是英文。
+func TestSetupAllEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	f := setupAllEnv(t)
+	const hub = "https://hub.example.com"
+	writeMachine(t, filepath.Join(f.dir, "machine.json"), hub)
+	var doctorHosts, otherHosts []string
+	prev := doctorOptions
+	setDoctorOptions(t, func(o *doctor.Options) {
+		prev(o)
+		o.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			doctorHosts = append(doctorHosts, r.URL.Hostname())
+			return nil, errors.New("offline in tests")
+		})}
+	})
+	oldDefault := http.DefaultTransport
+	http.DefaultTransport = failingTransport(&otherHosts)
+	t.Cleanup(func() { http.DefaultTransport = oldDefault })
+	var out, errOut bytes.Buffer
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("%d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	s := out.String()
+	bar := strings.Repeat("═", len(hub)+4)
+	for _, want := range []string{"== 1. Enroll with the hub ==", "== 2. Install hooks ==", "== 3. Autostart ==", "== 4. Health check ==",
+		"Already enrolled", "Skipped (--no-autostart)", "Reminder for Codex", "Reminder for Gemini",
+		"Next: open this on your phone\n╔" + bar + "╗\n║  " + hub + "  ║\n╚" + bar + "╝\n", "Add to Home Screen"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("英文输出缺 %q:\n%s", want, s)
+		}
+	}
+	// 体检那一段是 doctor 打印的英文
+	for _, want := range []string{"[fail]  Hub reachability: ", "        Fix: ", " passed, ", "Some health checks failed", "can't connect to the daemon: "} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("体检那一段缺 %q:\n%s", want, s)
+		}
+	}
+	if hasCJK(s) || hasCJK(errOut.String()) {
+		t.Fatalf("英文的 setup all 里有中文:\n%s\n%s", s, errOut.String())
+	}
+	lang := filepath.Join(f.dir, i18n.FileName)
+	if b, err := os.ReadFile(lang); err != nil || string(b) != "en\n" {
+		t.Fatalf("setup all 成功后要写 lang 文件：%q, %v", b, err)
+	}
+	if err := os.WriteFile(lang, []byte("zh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := run(f.args("--no-autostart"), &out, &errOut); code != 0 {
+		t.Fatalf("重跑: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	if b, err := os.ReadFile(lang); err != nil || string(b) != "zh\n" {
+		t.Fatalf("已有的 lang 文件不该改：%q, %v", b, err)
+	}
+}
+
+// setup all 的步骤名是变量（step、fail 里用 i18n.Lookup 翻），完整性测试查不到：逐个核对英文表里都有、译文不带中文。
+func TestSetupStepNamesEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	for _, name := range []string{stepLocalHub, stepEnroll, stepHooks, stepAutostart, stepDoctor} {
+		if got := i18n.Lookup(name); got == name || hasCJK(got) || got != strings.ToLower(got) {
+			t.Errorf("步骤名 %q 没有英文，或不是小写片段: %q", name, got)
+		}
+	}
+	// 标题才大写；中文与空串原样
+	for in, want := range map[string]string{"local hub": "Local hub", "体检": "体检", "": ""} {
+		if got := capFirst(in); got != want {
+			t.Errorf("capFirst(%q) = %q，想要 %q", in, got, want)
+		}
+	}
+}
+
+// 没装 tailscale 时 setup all --local-hub 停在第 1 步。tailscale 包的报错是中文，setup 认出它（errors.Is）换成过 i18n.T 的同一句：
+// 中文下与原来逐字相同，英文下整段输出不带中文。失败时不写 lang 文件。
+func TestSetupAllLocalHubNoTailscaleEnglish(t *testing.T) {
+	f := localSetupEnv(t)
+	oldFind := tailscaleFind
+	tailscaleFind = func() (string, error) { return "", tailscale.ErrNotFound }
+	t.Cleanup(func() { tailscaleFind = oldFind })
+	var out, errOut bytes.Buffer
+	if code := run(f.localArgs(), &out, &errOut); code != 1 || !strings.Contains(errOut.String(), tailscale.ErrNotFound.Error()+"\n") ||
+		!strings.Contains(errOut.String(), "停在第 1 步（本机 hub）") {
+		t.Fatalf("中文: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	out.Reset()
+	errOut.Reset()
+	if code := run(f.localArgs(), &out, &errOut); code != 1 {
+		t.Fatalf("英文: %d\n%s\n%s", code, out.String(), errOut.String())
+	}
+	for _, want := range []string{"Tailscale", "https://tailscale.com/download", "stopped at step 1 (local hub); not done: enroll with the hub, install hooks, autostart, health check."} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("英文报错缺 %q:\n%s", want, errOut.String())
+		}
+	}
+	if !strings.Contains(out.String(), "== 1. Local hub ==") || hasCJK(out.String()) || hasCJK(errOut.String()) {
+		t.Fatalf("英文输出里有中文或缺第 1 步:\n%s\n%s", out.String(), errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(f.home, ".railse", i18n.FileName)); !os.IsNotExist(err) {
+		t.Fatalf("setup all 失败不该写 lang 文件: %v", err)
+	}
+}

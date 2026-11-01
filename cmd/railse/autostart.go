@@ -21,6 +21,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/autostart"
 	"github.com/xufei547/railse-opc/internal/hooksconf"
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 const autostartUsage = `用法:
@@ -30,7 +31,7 @@ const autostartUsage = `用法:
     macOS 写 ~/Library/LaunchAgents/dev.railse.<agent|hub>.plist（launchd 用户代理，日志在数据目录的 launchd.log）；
     Linux 写 ~/.config/systemd/user/railse-<agent|hub>.service（用户单元，日志：journalctl --user -u railse-<agent|hub>）。
     hub 要直出 443/80 时在 Linux 上用系统单元（只给绑定特权端口的权限，hub 不以 root 运行）：
-      ` + sudoSystemHubCmd + ` [--user 名字] -- --acme-domain hub.example.com --acme-email me@example.com
+      sudo "$(command -v railse)" setup autostart --hub --system [--user 名字] -- --acme-domain hub.example.com --acme-email me@example.com
       写 /etc/systemd/system/railse-hub.service，以 --user（默认 $SUDO_USER）运行，数据目录默认 /var/lib/railse-hub。
     --uninstall 停止并移除托管（数据目录保留）；--status 看是否在跑；--dry-run 只打印要写的文件与要跑的命令。`
 
@@ -136,9 +137,9 @@ func systemdExecArg(s string) string { return strings.ReplaceAll(systemdQuote(s)
 // 系统单元只给 hub 用，按最小权限：指定的普通用户、只多一项绑定特权端口的能力、整个文件系统只读、只有数据目录可写、私有 /tmp。
 func systemdUnit(sp autostartSpec) []byte {
 	var b strings.Builder
-	title := "Railse agent（审批守护进程）"
+	title := i18n.T("Railse agent（审批守护进程）")
 	if sp.Kind == "hub" {
-		title = "Railse hub（审批中心）"
+		title = i18n.T("Railse hub（审批中心）")
 	}
 	fmt.Fprintf(&b, "[Unit]\nDescription=%s\n", title)
 	if sp.System {
@@ -186,58 +187,58 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 	fs := flag.NewFlagSet("setup autostart", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, autostartUsage)
+		fmt.Fprintln(stderr, i18n.T(autostartUsage))
 		fs.PrintDefaults()
 	}
-	hubMode := fs.Bool("hub", false, "托管 hub 而不是守护进程")
-	uninstall := fs.Bool("uninstall", false, "停止并移除托管（数据目录保留）")
-	status := fs.Bool("status", false, "只查看是否在跑")
-	dir := fs.String("dir", "", "数据目录，默认 $RAILSE_HOME 或 ~/.railse；--hub 时 $RAILSE_HUB_HOME 或 ~/.railse-hub；--system 时 /var/lib/railse-hub")
-	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
-	system := fs.Bool("system", false, "Linux：hub 用系统单元（须 root，hub 以 --user 运行）")
-	userName := fs.String("user", "", "系统单元以哪个用户运行，默认 $SUDO_USER；不能是 root")
-	dryRun := fs.Bool("dry-run", false, "只打印要写的文件与要跑的命令，不写不跑")
+	hubMode := fs.Bool("hub", false, i18n.T("托管 hub 而不是守护进程"))
+	uninstall := fs.Bool("uninstall", false, i18n.T("停止并移除托管（数据目录保留）"))
+	status := fs.Bool("status", false, i18n.T("只查看是否在跑"))
+	dir := fs.String("dir", "", i18n.T("数据目录，默认 $RAILSE_HOME 或 ~/.railse；--hub 时 $RAILSE_HUB_HOME 或 ~/.railse-hub；--system 时 /var/lib/railse-hub"))
+	bin := fs.String("bin", "", i18n.T("railse 可执行文件路径，默认当前程序"))
+	system := fs.Bool("system", false, i18n.T("Linux：hub 用系统单元（须 root，hub 以 --user 运行）"))
+	userName := fs.String("user", "", i18n.T("系统单元以哪个用户运行，默认 $SUDO_USER；不能是 root"))
+	dryRun := fs.Bool("dry-run", false, i18n.T("只打印要写的文件与要跑的命令，不写不跑"))
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	usageErr := func(format string, a ...any) int {
-		fmt.Fprintf(stderr, format+"\n%s\n", append(a, autostartUsage)...)
+		fmt.Fprintf(stderr, format+"\n%s\n", append(a, i18n.T(autostartUsage))...)
 		return 2
 	}
 	if fs.NArg() != 0 {
-		return usageErr("多余的参数 %q（给 hub run 的参数放在 -- 之后）", fs.Args())
+		return usageErr(i18n.T("多余的参数 %q（给 hub run 的参数放在 -- 之后）"), fs.Args())
 	}
 	if goos != "darwin" && goos != "linux" {
-		fmt.Fprintln(stderr, "开机自启只支持 macOS（launchd）与 Linux（systemd）")
+		fmt.Fprintln(stderr, i18n.T("开机自启只支持 macOS（launchd）与 Linux（systemd）"))
 		return 1
 	}
 	switch {
 	case *status && *uninstall:
-		return usageErr("--status 与 --uninstall 只能选一个")
+		return usageErr(i18n.T("--status 与 --uninstall 只能选一个"))
 	case len(extra) > 0 && !*hubMode:
-		return usageErr("-- 之后的额外参数只给 hub（--hub）；守护进程不收")
+		return usageErr(i18n.T("-- 之后的额外参数只给 hub（--hub）；守护进程不收"))
 	case *system && !*hubMode:
-		return usageErr("--system 只给 hub（--hub）用；守护进程用用户级托管：railse setup autostart")
+		return usageErr(i18n.T("--system 只给 hub（--hub）用；守护进程用用户级托管：railse setup autostart"))
 	case *system && goos != "linux":
-		return usageErr("--system 只在 Linux 上有效")
+		return usageErr(i18n.T("--system 只在 Linux 上有效"))
 	case *userName != "" && !*system:
-		return usageErr("--user 只和 --system 一起用")
+		return usageErr(i18n.T("--user 只和 --system 一起用"))
 	}
 	for _, a := range extra {
 		if a == "--dir" || a == "-dir" || strings.HasPrefix(a, "--dir=") || strings.HasPrefix(a, "-dir=") {
-			return usageErr("数据目录用 setup autostart 自己的 --dir 指定，不要放在 -- 之后（托管文件里的环境变量、日志与可写目录都按它算）")
+			return usageErr(i18n.T("数据目录用 setup autostart 自己的 --dir 指定，不要放在 -- 之后（托管文件里的环境变量、日志与可写目录都按它算）"))
 		}
 	}
 	install := !*status && !*uninstall
 	switch {
 	case uid == 0 && !*system && goos == "darwin":
-		fmt.Fprintln(stderr, "macOS 上不要用 sudo 跑：launchd 用户代理装在当前登录用户下，直接 railse setup autostart")
+		fmt.Fprintln(stderr, i18n.T("macOS 上不要用 sudo 跑：launchd 用户代理装在当前登录用户下，直接 railse setup autostart"))
 		return 1
 	case uid == 0 && !*system:
-		fmt.Fprintln(stderr, "不要以 root 管用户级托管：守护进程与 hub 都以普通用户运行，请用普通用户跑本命令；hub 要直出 443/80 用 "+sudoSystemHubCmd+" --user 名字（只给绑定特权端口的权限）")
+		fmt.Fprintf(stderr, i18n.T("不要以 root 管用户级托管：守护进程与 hub 都以普通用户运行，请用普通用户跑本命令；hub 要直出 443/80 用 %s --user 名字（只给绑定特权端口的权限）\n"), sudoSystemHubCmd)
 		return 1
 	case *system && !*status && uid != 0 && !*dryRun:
-		fmt.Fprintln(stderr, "--system 要写 /etc/systemd/system，需要 root："+sudoSystemHubCmd+" …")
+		fmt.Fprintf(stderr, i18n.T("--system 要写 /etc/systemd/system，需要 root：%s …\n"), sudoSystemHubCmd)
 		return 1
 	}
 
@@ -284,7 +285,7 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 	// 默认值（当前程序路径、RAILSE_HOME、RAILSE_HUB_HOME）也要查：换行会在托管文件里拆出新的一行
 	for _, s := range append([]string{sp.Bin, sp.Dir}, sp.Extra...) {
 		if strings.IndexFunc(s, unicode.IsControl) >= 0 {
-			return usageErr("路径与参数里不能有换行等控制字符（包括 RAILSE_HOME、RAILSE_HUB_HOME 给的默认值）: %q", s)
+			return usageErr(i18n.T("路径与参数里不能有换行等控制字符（包括 RAILSE_HOME、RAILSE_HUB_HOME 给的默认值）: %q"), s)
 		}
 	}
 	var runAs runUser
@@ -304,10 +305,10 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 				fmt.Fprintln(stderr, err)
 				return 1
 			}
-			fmt.Fprintf(stderr, "警告：%v\n", err)
+			fmt.Fprintf(stderr, i18n.T("警告：%v\n"), err)
 		}
 		if underTempDir(sp.Bin) {
-			fmt.Fprintf(stderr, "警告：托管文件会指向临时路径 %s，之后它可能就没了（go run 的产物？）；用 --bin 指定装好的 railse\n", sp.Bin)
+			fmt.Fprintf(stderr, i18n.T("警告：托管文件会指向临时路径 %s，之后它可能就没了（go run 的产物？）；用 --bin 指定装好的 railse\n"), sp.Bin)
 		}
 	}
 	switch {
@@ -320,8 +321,7 @@ func runAutostartOS(goos string, uid int, args []string, stdout, stderr io.Write
 		// 整个 Funnel，那里可能还有别的配置
 		if code == 0 && sp.Kind == "hub" {
 			if lh, ok, err := loadLocalHub(sp.Dir); err == nil && ok && lh.Provider == "tailscale" {
-				fmt.Fprintf(stdout, "注意：Tailscale Funnel 可能还开着（tailscale funnel status 看），%s 可能仍转到 127.0.0.1:%d；"+
-					"不用就 tailscale funnel --https=443 off（会关掉 443 上的整个 Funnel，有别的配置先核对）\n", lh.PublicURL, lh.Port)
+				fmt.Fprintf(stdout, i18n.T("注意：Tailscale Funnel 可能还开着（tailscale funnel status 看），%s 可能仍转到 127.0.0.1:%d；不用就 tailscale funnel --https=443 off（会关掉 443 上的整个 Funnel，有别的配置先核对）\n"), lh.PublicURL, lh.Port)
 			}
 		}
 		return code
@@ -391,10 +391,14 @@ func warnUserUnitLowPorts(extra []string, stderr io.Writer) {
 	for i, a := range extra {
 		q[i] = hooksconf.ShellQuote(a)
 	}
-	fmt.Fprintf(stderr, "\n!!! 警告：Linux 的用户单元以你的身份运行，没有绑定 1024 以下端口的权限，hub 绑不了 %s，会起不来并被 systemd 反复拉起。\n"+
-		"    照样装了；要直出 443/80 改用系统单元（只多给 CAP_NET_BIND_SERVICE，hub 不以 root 运行），先卸掉这个用户单元：\n"+
-		"      railse setup autostart --hub --uninstall\n      %s -- %s\n"+
-		"    用反向代理时改成 --listen 127.0.0.1:8787（不要 --acme-domain），见 docs/setup.md。\n\n", strings.Join(low, "、"), sudoSystemHubCmd, strings.Join(q, " "))
+	fmt.Fprintf(stderr, i18n.T(`
+!!! 警告：Linux 的用户单元以你的身份运行，没有绑定 1024 以下端口的权限，hub 绑不了 %s，会起不来并被 systemd 反复拉起。
+    照样装了；要直出 443/80 改用系统单元（只多给 CAP_NET_BIND_SERVICE，hub 不以 root 运行），先卸掉这个用户单元：
+      railse setup autostart --hub --uninstall
+      %s -- %s
+    用反向代理时改成 --listen 127.0.0.1:8787（不要 --acme-domain），见 docs/setup.md。
+
+`), strings.Join(low, i18n.T("、")), sudoSystemHubCmd, strings.Join(q, " "))
 }
 
 // runUser 是系统单元的运行用户。
@@ -410,28 +414,28 @@ func systemUnitUser(name string) (runUser, error) {
 		name = os.Getenv("SUDO_USER")
 	}
 	if name == "" {
-		return runUser{}, errors.New("--system 要指定 hub 的运行用户：--user 名字（默认取 $SUDO_USER，现在没有）")
+		return runUser{}, errors.New(i18n.T("--system 要指定 hub 的运行用户：--user 名字（默认取 $SUDO_USER，现在没有）"))
 	}
 	if strings.IndexFunc(name, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
-		return runUser{}, fmt.Errorf("用户名 %q 不合法", name)
+		return runUser{}, fmt.Errorf(i18n.T("用户名 %q 不合法"), name)
 	}
 	if strings.Trim(name, "0123456789") == "" {
-		return runUser{}, fmt.Errorf("用户名 %s 全是数字：systemd 会把 User=%s 当成 uid，请用用户名", name, name)
+		return runUser{}, fmt.Errorf(i18n.T("用户名 %s 全是数字：systemd 会把 User=%s 当成 uid，请用用户名"), name, name)
 	}
 	u, err := lookupUser(name)
 	if err != nil {
-		return runUser{}, fmt.Errorf("找不到用户 %s: %v", name, err)
+		return runUser{}, fmt.Errorf(i18n.T("找不到用户 %s: %v"), name, err)
 	}
 	uid, err := strconv.Atoi(u.Uid)
 	if err != nil || uid < 0 {
-		return runUser{}, fmt.Errorf("用户 %s 的 uid %q 不是合法的数字", name, u.Uid)
+		return runUser{}, fmt.Errorf(i18n.T("用户 %s 的 uid %q 不是合法的数字"), name, u.Uid)
 	}
 	if uid == 0 || name == "root" {
-		return runUser{}, fmt.Errorf("hub 不以 root 运行（用户 %s 的 uid 是 0）：用 --user 指定一个普通用户", name)
+		return runUser{}, fmt.Errorf(i18n.T("hub 不以 root 运行（用户 %s 的 uid 是 0）：用 --user 指定一个普通用户"), name)
 	}
 	gid, err := strconv.Atoi(u.Gid)
 	if err != nil || gid < 0 {
-		return runUser{}, fmt.Errorf("用户 %s 的 gid %q 不是合法的数字", name, u.Gid)
+		return runUser{}, fmt.Errorf(i18n.T("用户 %s 的 gid %q 不是合法的数字"), name, u.Gid)
 	}
 	return runUser{Name: name, UID: uid, GID: gid}, nil
 }
@@ -441,11 +445,11 @@ func checkExecutable(p string) error {
 	st, err := os.Stat(p)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("railse 可执行文件 %s 不存在：用 --bin 指定装好的 railse", p)
+		return fmt.Errorf(i18n.T("railse 可执行文件 %s 不存在：用 --bin 指定装好的 railse"), p)
 	case err != nil:
-		return fmt.Errorf("railse 可执行文件 %s 用不了：%v", p, err)
+		return fmt.Errorf(i18n.T("railse 可执行文件 %s 用不了：%v"), p, err)
 	case !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0:
-		return fmt.Errorf("%s 不是可执行文件：用 --bin 指定装好的 railse", p)
+		return fmt.Errorf(i18n.T("%s 不是可执行文件：用 --bin 指定装好的 railse"), p)
 	}
 	return nil
 }
@@ -534,7 +538,7 @@ func autostartInstall(goos string, sp autostartSpec, runAs runUser, dry bool, st
 	// 首次安装时目录可能还没有，作业会起不来；系统单元显式给了 --dir 时由 root 准备好（见 prepareSystemDir），单元里写它的真实路径。
 	switch {
 	case goos == "darwin" && dry:
-		fmt.Fprintf(stdout, "会建数据目录 %s（0700）\n", sp.Dir)
+		fmt.Fprintf(stdout, i18n.T("会建数据目录 %s（0700）\n"), sp.Dir)
 	case goos == "darwin":
 		if err := os.MkdirAll(sp.Dir, 0o700); err != nil {
 			return fail(err)
@@ -543,7 +547,7 @@ func autostartInstall(goos string, sp autostartSpec, runAs runUser, dry bool, st
 			return fail(err)
 		}
 	case sp.System && sp.StateDir == "" && dry:
-		fmt.Fprintf(stdout, "会准备数据目录 %s（已有的须已属于 %s；没有的新建为 0700 并交给 %s）\n", sp.Dir, sp.User, sp.User)
+		fmt.Fprintf(stdout, i18n.T("会准备数据目录 %s（已有的须已属于 %s；没有的新建为 0700 并交给 %s）\n"), sp.Dir, sp.User, sp.User)
 	case sp.System && sp.StateDir == "":
 		real, err := prepareSystemDir(sp.Dir, runAs)
 		if err != nil {
@@ -564,7 +568,7 @@ func autostartInstall(goos string, sp autostartSpec, runAs runUser, dry bool, st
 		if err := writeFileAtomic(path, content, 0o644); err != nil {
 			return fail(err)
 		}
-		fmt.Fprintf(stdout, "已写入 %s\n", path)
+		fmt.Fprintf(stdout, i18n.T("已写入 %s\n"), path)
 	}
 	if goos == "darwin" {
 		target := fmt.Sprintf("gui/%d", sp.UID)
@@ -585,19 +589,19 @@ func autostartInstall(goos string, sp autostartSpec, runAs runUser, dry bool, st
 		}
 	}
 	if dry {
-		fmt.Fprintln(stdout, "（--dry-run：以上没有写文件，也没有跑命令）")
+		fmt.Fprintln(stdout, i18n.T("（--dry-run：以上没有写文件，也没有跑命令）"))
 		return 0
 	}
-	how := "登录后由 launchd 启动、退出后自动拉起"
+	how := i18n.T("登录后由 launchd 启动、退出后自动拉起")
 	switch {
 	case goos == "linux" && sp.System:
-		how = "开机由 systemd 启动、以 " + sp.User + " 运行、退出后自动拉起"
+		how = fmt.Sprintf(i18n.T("开机由 systemd 启动、以 %s 运行、退出后自动拉起"), sp.User)
 	case goos == "linux":
-		how = "由 systemd 用户实例启动、退出后自动拉起"
+		how = i18n.T("由 systemd 用户实例启动、退出后自动拉起")
 	}
-	fmt.Fprintf(stdout, "已托管 %s：%s；日志：%s；查看状态：%s\n", sp.Kind, how, logHint(goos, sp), statusHint(sp))
+	fmt.Fprintf(stdout, i18n.T("已托管 %s：%s；日志：%s；查看状态：%s\n"), sp.Kind, how, logHint(goos, sp), statusHint(sp))
 	if goos == "linux" && !sp.System {
-		fmt.Fprintln(stdout, "提示：要在没人登录时也跑（开机即起、退出登录不停），执行一次 loginctl enable-linger $USER")
+		fmt.Fprintln(stdout, i18n.T("提示：要在没人登录时也跑（开机即起、退出登录不停），执行一次 loginctl enable-linger $USER"))
 	}
 	return 0
 }
@@ -627,9 +631,9 @@ func prepareSystemDir(dir string, ru runUser) (string, error) {
 	st, err := os.Lstat(dir)
 	switch {
 	case err == nil && st.Mode()&os.ModeSymlink != 0:
-		return "", fmt.Errorf("%s 是符号链接：--dir 要给真实的目录", dir)
+		return "", fmt.Errorf(i18n.T("%s 是符号链接：--dir 要给真实的目录"), dir)
 	case err == nil && !st.IsDir():
-		return "", fmt.Errorf("%s 不是目录", dir)
+		return "", fmt.Errorf(i18n.T("%s 不是目录"), dir)
 	case err == nil:
 		return tightenExistingDir(dir, ru)
 	case !errors.Is(err, os.ErrNotExist):
@@ -649,7 +653,7 @@ func tightenExistingDir(dir string, ru runUser) (string, error) {
 		return "", err
 	}
 	if owner, ok := fileOwner(st); !ok || owner != ru.UID {
-		return "", fmt.Errorf("%s 已存在但不属于 %s，不替它 chown：换一个以 %s 身份建好的目录（sudo -u %s mkdir -p -m 700 <目录>）用 --dir 指向它，或不给 --dir 用默认的 %s",
+		return "", fmt.Errorf(i18n.T("%s 已存在但不属于 %s，不替它 chown：换一个以 %s 身份建好的目录（sudo -u %s mkdir -p -m 700 <目录>）用 --dir 指向它，或不给 --dir 用默认的 %s"),
 			dir, ru.Name, ru.Name, ru.Name, systemHubDir)
 	}
 	if err := f.Chmod(0o700); err != nil {
@@ -675,7 +679,7 @@ func createSystemDir(dir string, ru runUser) (string, error) {
 		return "", err
 	}
 	if err := checkTrustedChain(real); err != nil {
-		return "", fmt.Errorf("不替你新建 %s：%v（运行用户可能在 root 建目录与 chown 之间把路径换掉）；先以 %s 身份建好再重跑：sudo -u %s mkdir -p -m 700 %s",
+		return "", fmt.Errorf(i18n.T("不替你新建 %s：%v（运行用户可能在 root 建目录与 chown 之间把路径换掉）；先以 %s 身份建好再重跑：sudo -u %s mkdir -p -m 700 %s"),
 			dir, err, ru.Name, ru.Name, hooksconf.ShellQuote(dir))
 	}
 	cur := real
@@ -702,7 +706,7 @@ func createSystemDir(dir string, ru runUser) (string, error) {
 		return "", err
 	}
 	if owner, ok := fileOwner(st); !ok || owner != os.Geteuid() {
-		return "", fmt.Errorf("%s 不是刚建的目录（属主不对），不 chown", cur)
+		return "", fmt.Errorf(i18n.T("%s 不是刚建的目录（属主不对），不 chown"), cur)
 	}
 	if err := chownDir(f, ru.UID, ru.GID); err != nil {
 		return "", err
@@ -722,13 +726,13 @@ func checkTrustedChain(p string) error {
 			return err
 		}
 		if !st.IsDir() {
-			return fmt.Errorf("%s 不是目录", p)
+			return fmt.Errorf(i18n.T("%s 不是目录"), p)
 		}
 		if owner, ok := fileOwner(st); !ok || (owner != 0 && owner != os.Geteuid()) {
-			return fmt.Errorf("%s 不属于 root", p)
+			return fmt.Errorf(i18n.T("%s 不属于 root"), p)
 		}
 		if st.Mode().Perm()&0o022 != 0 && st.Mode()&os.ModeSticky == 0 {
-			return fmt.Errorf("%s 别人也能写", p)
+			return fmt.Errorf(i18n.T("%s 别人也能写"), p)
 		}
 		parent := filepath.Dir(p)
 		if parent == p {
@@ -769,11 +773,11 @@ func autostartUninstall(goos string, sp autostartSpec, dry bool, stdout, stderr 
 		err = nil
 	}
 	if err != nil && existed {
-		fmt.Fprintf(stderr, "停止 %s 失败，托管文件 %s 没删：\n%v\n", sp.Kind, path, cmdError(name, args, out, err))
+		fmt.Fprintf(stderr, i18n.T("停止 %s 失败，托管文件 %s 没删：\n%v\n"), sp.Kind, path, cmdError(name, args, out, err))
 		return 1
 	}
 	if dry {
-		fmt.Fprintf(stdout, "会删除 %s\n", path)
+		fmt.Fprintf(stdout, i18n.T("会删除 %s\n"), path)
 	} else if existed {
 		if err := os.Remove(path); errors.Is(err, os.ErrNotExist) {
 			existed = false
@@ -784,16 +788,16 @@ func autostartUninstall(goos string, sp autostartSpec, dry bool, stdout, stderr 
 	}
 	if goos == "linux" {
 		if err := runOrPrint(dry, stdout, "systemctl", append(systemctlArgs(sp.System), "daemon-reload")...); err != nil {
-			fmt.Fprintf(stderr, "警告：%v\n", err)
+			fmt.Fprintf(stderr, i18n.T("警告：%v\n"), err)
 		}
 	}
 	switch {
 	case dry:
-		fmt.Fprintln(stdout, "（--dry-run：以上没有删文件，也没有跑命令）")
+		fmt.Fprintln(stdout, i18n.T("（--dry-run：以上没有删文件，也没有跑命令）"))
 	case existed:
-		fmt.Fprintf(stdout, "已停止并移除 %s 的托管（删除了 %s）；数据目录保留\n", sp.Kind, path)
+		fmt.Fprintf(stdout, i18n.T("已停止并移除 %s 的托管（删除了 %s）；数据目录保留\n"), sp.Kind, path)
 	default:
-		fmt.Fprintf(stdout, "没有找到 %s：%s 本来就没托管\n", path, sp.Kind)
+		fmt.Fprintf(stdout, i18n.T("没有找到 %s：%s 本来就没托管\n"), path, sp.Kind)
 	}
 	return 0
 }
@@ -828,19 +832,19 @@ func autostartStatus(goos string, sp autostartSpec, dry bool, stdout io.Writer) 
 		if st := launchdState(out); st != "" && st != "running" {
 			running, detail = false, "state = "+st
 		} else if err != nil {
-			detail = "launchd 里没有加载 " + launchdLabel(sp.Kind)
+			detail = fmt.Sprintf(i18n.T("launchd 里没有加载 %s"), launchdLabel(sp.Kind))
 		}
 	} else if detail = strings.TrimSpace(out); detail == "" && err != nil {
 		detail = err.Error()
 	}
 	if running {
-		fmt.Fprintf(stdout, "%s 已托管并在跑（%s）\n", sp.Kind, path)
+		fmt.Fprintf(stdout, i18n.T("%s 已托管并在跑（%s）\n"), sp.Kind, path)
 		return 0
 	}
 	if _, serr := os.Stat(path); serr != nil {
-		fmt.Fprintf(stdout, "%s 没有托管（没有 %s）；托管：%s\n", sp.Kind, path, strings.TrimSuffix(statusHint(sp), " --status"))
+		fmt.Fprintf(stdout, i18n.T("%s 没有托管（没有 %s）；托管：%s\n"), sp.Kind, path, strings.TrimSuffix(statusHint(sp), " --status"))
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s 有托管文件 %s，但没在跑（%s）；日志：%s\n", sp.Kind, path, detail, logHint(goos, sp))
+	fmt.Fprintf(stdout, i18n.T("%s 有托管文件 %s，但没在跑（%s）；日志：%s\n"), sp.Kind, path, detail, logHint(goos, sp))
 	return 1
 }

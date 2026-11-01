@@ -8,6 +8,8 @@ import (
 	"os/user"
 	"path/filepath"
 	"time"
+
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
 // Config 是守护进程的路径与常量。
@@ -73,7 +75,7 @@ func DefaultConfig() (Config, error) {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return Config{}, fmt.Errorf("找不到家目录: %w", err)
+		return Config{}, fmt.Errorf(i18n.T("找不到家目录: %w"), err)
 	}
 	return ConfigIn(filepath.Join(home, ".railse")), nil
 }

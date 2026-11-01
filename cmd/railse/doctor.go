@@ -9,16 +9,21 @@ import (
 	"runtime"
 
 	"github.com/xufei547/railse-opc/internal/doctor"
+	"github.com/xufei547/railse-opc/internal/i18n"
 )
 
+// doctorUsage 是单个字面量（i18n.T 只认这种常量），%s 处是系统单元的 hub 数据目录，由 doctorUsageText 填上。
 const doctorUsage = `用法:
   railse doctor [--project 目录] [--dir 目录] [--hub-dir 目录] [--bin 路径] [--json]
     检查守护进程、hub 连接、三个 CLI 的钩子与版本、项目根、文件权限；这台机器有 hub 数据目录时还检查数据库、密码与推送密钥，
     有 local-hub.json（setup all --local-hub 装的本机 hub）时再看对外地址：Funnel 配置，并从本机访问一次。
     只读：不改配置、不建文件；会起的进程只有 claude、codex、gemini 的 --version 与 tailscale serve status --json（带超时，sudo 下不跑）。
-    hub 数据目录默认 $RAILSE_HUB_HOME，否则 ~/.railse-hub，Linux 上两者都没有时再看系统单元的 ` + systemHubDir + `
+    hub 数据目录默认 $RAILSE_HUB_HOME，否则 ~/.railse-hub，Linux 上两者都没有时再看系统单元的 %s
     （只在它归当前用户或以 root 运行时）；默认目录都不在就跳过 hub 侧，显式给的 --hub-dir 不在则报失败。
     有任一项失败退出码 1。`
+
+// doctorUsageText 是当前语言的 doctor 用法。
+func doctorUsageText() string { return fmt.Sprintf(i18n.T(doctorUsage), systemHubDir) }
 
 // doctorOptions 在 doctor.Run 之前最后改一次检查的输入。是变量只为测试能把 LookPath、RunCmd、TailscalePath、TailscaleRun、HTTP 换成假的，
 // 不在开发机上真的跑 claude、codex、gemini 的 --version 与 tailscale，也不出网（经 runDoctor 体检的 setup all 也走这里）。
@@ -46,19 +51,19 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, doctorUsage)
+		fmt.Fprintln(stderr, doctorUsageText())
 		fs.PrintDefaults()
 	}
-	project := fs.String("project", ".", "项目目录（检查项目级钩子与项目根）；不给时看当前目录，它不是 git 仓库或在系统目录里时项目根只告知")
-	dir := fs.String("dir", "", "守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse")
-	hubDir := fs.String("hub-dir", "", "hub 数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub，Linux 上再看 "+systemHubDir+"（默认目录都不在则跳过 hub 侧）")
-	bin := fs.String("bin", "", "railse 可执行文件路径，默认当前程序")
-	asJSON := fs.Bool("json", false, "输出 JSON")
+	project := fs.String("project", ".", i18n.T("项目目录（检查项目级钩子与项目根）；不给时看当前目录，它不是 git 仓库或在系统目录里时项目根只告知"))
+	dir := fs.String("dir", "", i18n.T("守护进程数据目录，默认 $RAILSE_HOME 或 ~/.railse"))
+	hubDir := fs.String("hub-dir", "", fmt.Sprintf(i18n.T("hub 数据目录，默认 $RAILSE_HUB_HOME 或 ~/.railse-hub，Linux 上再看 %s（默认目录都不在则跳过 hub 侧）"), systemHubDir))
+	bin := fs.String("bin", "", i18n.T("railse 可执行文件路径，默认当前程序"))
+	asJSON := fs.Bool("json", false, i18n.T("输出 JSON"))
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintf(stderr, "多余的参数 %q\n%s\n", fs.Args(), doctorUsage)
+		fmt.Fprintf(stderr, i18n.T("多余的参数 %q\n%s\n"), fs.Args(), doctorUsageText())
 		return 2
 	}
 	cfg, err := agentConfigFor(*dir)
@@ -143,12 +148,12 @@ func doctorHubDir() (dir, skip string) {
 			if owner, ok := doctorDirOwner(sys); ok && (owner == doctorEuid() || doctorEuid() == 0) {
 				return sys, ""
 			}
-			return "", "系统 hub 目录 " + sys + " 属于别的用户；要检查请用那个用户运行 doctor 或给 --hub-dir"
+			return "", fmt.Sprintf(i18n.T("系统 hub 目录 %s 属于别的用户；要检查请用那个用户运行 doctor 或给 --hub-dir"), sys)
 		}
 		if err != nil {
-			return "", "没有 hub 数据目录（查过 " + sys + "）"
+			return "", fmt.Sprintf(i18n.T("没有 hub 数据目录（查过 %s）"), sys)
 		}
-		return "", "没有 hub 数据目录（查过 " + user + " 与 " + sys + "）"
+		return "", fmt.Sprintf(i18n.T("没有 hub 数据目录（查过 %s 与 %s）"), user, sys)
 	}
 	if err != nil {
 		return "", ""
