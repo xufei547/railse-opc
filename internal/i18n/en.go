@@ -364,6 +364,8 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"在手机上选了在终端回答":                "You chose on your phone to answer in the terminal",
 	"Gemini 只能拒绝不能放行，交回原生确认框":    "Gemini hooks can deny but not approve; handed back to Gemini's own prompt",
 	"没有配置 hub，交回终端处理":            "No hub is set up; handed back to the terminal",
+	"连不上 hub，这类操作要你亲自确认":         "Couldn't reach the hub; confirm this kind of action yourself",
+	"连不上 hub，交回 Claude 自己的确认":    "hub unreachable, falling back to Claude's own prompt",
 	"连不上 hub，交回终端处理":             "Couldn't reach the hub; handed back to the terminal",
 	"hub 拒绝了本机密钥，交回终端处理":         "The hub rejected this machine's key; handed back to the terminal",
 	"无法送往 hub，交回终端处理":            "Couldn't send it to the hub; handed back to the terminal",
@@ -371,6 +373,8 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"hub 没有给出有效决定，交回终端处理":        "The hub didn't return a valid decision; handed back to the terminal",
 	"hub 版本太旧，不认识提问，交回终端处理":      "The hub is too old to handle questions; handed back to the terminal",
 	"请求格式错误":                     "Malformed request",
+	"交给 Claude 自己的权限流程":          "Left to Claude's own permission flow",
+	"刚才已交回终端，这次不再问":              "Already handed back to the terminal; not asking again",
 	"自动审批已暂停，交回终端处理":             "Auto-approval is paused; handed back to the terminal",
 	"自动审批已暂停":                    "Auto-approval is paused",
 	"本机没有连接 hub，交回终端处理":          "This machine isn't connected to a hub; handed back to the terminal",
@@ -389,6 +393,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 
 	// internal/adapter/adapter.go（ValidateAsk 也被守护进程与 hub 调用，那里随各自进程的语言）
 	"Railse：已拒绝": "Railse: denied",
+	"Railse：已放行": "Railse: allowed",
 	"Railse：":    "Railse: ",
 	"AskUserQuestion 的题目不合规: 没有题目":                                "invalid AskUserQuestion: no questions",
 	"AskUserQuestion 的题目不合规: 有 %d 题，最多 %d 题":                      "invalid AskUserQuestion: %d questions, at most %d",
@@ -507,6 +512,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"确认用跑 CLI 的同一个用户运行 doctor":                         "Run doctor as the same user that runs the CLI",
 	"修好 JSON 后再 %s":                                    "Fix the JSON, then run %s",
 	"%s（超时 %d，要 ≥ %d）":                                 "%s (timeout %d, needs ≥ %d)",
+	"PreToolUse 只匹配 %s：auto 模式下审批进不了 Railse":           "PreToolUse only matches %s: in auto mode approvals bypass Railse",
 	"缺 PreToolUse：Claude Code 的选择题进不了手机":               "missing PreToolUse: Claude Code's questions can't reach your phone",
 	"缺 %s":                                                       "missing %s",
 	"超时不够：%s":                                                    "timeout too short: %s",

@@ -55,7 +55,7 @@ func TestClaudeParseEvents(t *testing.T) {
 		{"claude/2.1.280/Notification.idle_prompt.json", KindQuestion, "Claude is waiting for your input"},
 		{"claude/2.1.280/Stop.json", KindDone, "DONE"},
 		{"claude/2.1.280/SessionEnd.json", KindSessionEnd, ""},
-		{"claude/2.1.280/PreToolUse.json", KindIgnore, ""},
+		{"claude/2.1.280/PreToolUse.json", KindPermission, ""},
 	}
 	for _, c := range cases {
 		in, err := a.Parse(sample(t, c.file))
@@ -200,5 +200,84 @@ func TestClaudeRenderDenyEmptyReason(t *testing.T) {
 	want := `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Railse：已拒绝"}}}`
 	if out := a.Render(Decision{Action: "deny"}); string(out.Stdout) != want || out.ExitCode != 0 {
 		t.Fatalf("空理由的拒绝 = %q/%d, 想要 %q/0", out.Stdout, out.ExitCode, want)
+	}
+}
+
+func TestClaudeParsePreToolUseBash(t *testing.T) {
+	for _, f := range []string{"claude/pretooluse-bash-default.json", "claude/pretooluse-bash-auto.json"} {
+		in, err := claude{}.Parse(sample(t, f))
+		if err != nil {
+			t.Fatal(f, err)
+		}
+		if in.Kind != KindPermission || in.ToolName != "Bash" || in.Payload.Type != policy.PayloadShell {
+			t.Fatalf("%s: kind=%s tool=%s type=%s", f, in.Kind, in.ToolName, in.Payload.Type)
+		}
+		if in.Source != SourcePreToolUse || in.ToolUseID == "" || (in.PermissionMode != "default" && in.PermissionMode != "auto") {
+			t.Fatalf("%s: source=%s id=%q mode=%q", f, in.Source, in.ToolUseID, in.PermissionMode)
+		}
+	}
+	// PermissionRequest 的来源与模式也要带上；2.1.280 的 PermissionRequest 没有 tool_use_id
+	in, err := claude{}.Parse(sample(t, "claude/2.1.280/PermissionRequest.json"))
+	if err != nil || in.Source != SourcePermissionRequest || in.PermissionMode != "default" || in.ToolUseID != "" {
+		t.Fatalf("PermissionRequest: %+v %v", in, err)
+	}
+}
+
+func TestClaudeParsePreToolUseTools(t *testing.T) {
+	mk := func(tool, input string) []byte {
+		return []byte(`{"session_id":"s","cwd":"/p","permission_mode":"acceptEdits","hook_event_name":"PreToolUse","tool_name":"` + tool + `","tool_input":` + input + `,"tool_use_id":"toolu_x"}`)
+	}
+	cases := []struct {
+		tool, input string
+		typ         policy.PayloadType
+		path, url   string
+	}{
+		{"Edit", `{"file_path":"/p/a.go","old_string":"a","new_string":"b"}`, policy.PayloadFileWrite, "/p/a.go", ""},
+		{"Write", `{"file_path":"/p/b.go","content":"x"}`, policy.PayloadFileWrite, "/p/b.go", ""},
+		{"MultiEdit", `{"file_path":"/p/c.go","edits":[{"old_string":"a","new_string":"b"}]}`, policy.PayloadFileWrite, "/p/c.go", ""},
+		{"NotebookEdit", `{"notebook_path":"/p/n.ipynb","new_source":"x"}`, policy.PayloadFileWrite, "/p/n.ipynb", ""},
+		{"WebFetch", `{"url":"https://x.example/","prompt":"p"}`, policy.PayloadNetwork, "", "https://x.example/"},
+	}
+	for _, c := range cases {
+		in, err := claude{}.Parse(mk(c.tool, c.input))
+		if err != nil {
+			t.Fatal(c.tool, err)
+		}
+		if in.Kind != KindPermission || in.Payload.Type != c.typ || in.Payload.Path != c.path || in.Payload.URL != c.url {
+			t.Errorf("%s: %+v", c.tool, in)
+		}
+		if in.Source != SourcePreToolUse || in.PermissionMode != "acceptEdits" || in.ToolUseID != "toolu_x" {
+			t.Errorf("%s: source=%s mode=%s id=%s", c.tool, in.Source, in.PermissionMode, in.ToolUseID)
+		}
+	}
+	a := claude{}
+	if _, err := a.Parse([]byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`)); err == nil {
+		t.Fatal("缺 session_id 应报错")
+	}
+}
+
+func TestClaudeRenderPreToolUse(t *testing.T) {
+	cases := map[string]string{
+		"allow":       `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Railse：命中规则 r1"}}`,
+		"deny":        `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Railse：已在手机上拒绝"}}`,
+		"ask":         `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：连不上 hub"}}`,
+		"passthrough": ``, // 不表态：ask 在 auto 下会强制弹框，见 Task 1 实测
+	}
+	for action, want := range cases {
+		reason := map[string]string{"allow": "命中规则 r1", "deny": "已在手机上拒绝", "ask": "连不上 hub"}[action]
+		out := claude{}.Render(Decision{Source: SourcePreToolUse, Action: action, Reason: reason})
+		if string(out.Stdout) != want || out.ExitCode != 0 {
+			t.Errorf("%s: got %s want %s", action, out.Stdout, want)
+		}
+	}
+	// 没有来源（PermissionRequest）照旧
+	out := claude{}.Render(Decision{Action: "allow"})
+	if !strings.Contains(string(out.Stdout), `"hookEventName":"PermissionRequest"`) {
+		t.Errorf("PermissionRequest 输出变了: %s", out.Stdout)
+	}
+	// 放行理由为空时有固定文案
+	out = claude{}.Render(Decision{Source: SourcePreToolUse, Action: "allow"})
+	if !strings.Contains(string(out.Stdout), `"permissionDecisionReason":"Railse：已放行"`) {
+		t.Errorf("空理由: %s", out.Stdout)
 	}
 }

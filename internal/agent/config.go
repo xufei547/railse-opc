@@ -20,9 +20,11 @@ type Config struct {
 	AuditPath  string
 	StatePath  string
 	LogPath    string
-	MachineID  string
-	HomeDir    string
-	Deadline   time.Duration // 单条请求的等待上限
+	// SettingsPath 是本机设置 settings.yaml（见 Settings），不随 hub 下发
+	SettingsPath string
+	MachineID    string
+	HomeDir      string
+	Deadline     time.Duration // 单条请求的等待上限
 
 	MachinePath  string        // machine.json：本机在 hub 的身份，不存在表示未接入 hub
 	HubGrace     time.Duration // 请求送到 hub 后断线，最多等这么久重连，超时交回终端
@@ -52,15 +54,16 @@ func ConfigIn(dir string) Config {
 		host = "local"
 	}
 	return Config{
-		Dir:        dir,
-		SocketPath: filepath.Join(dir, "agent.sock"),
-		RulesPath:  filepath.Join(dir, "rules.yaml"),
-		AuditPath:  filepath.Join(dir, "audit.jsonl"),
-		StatePath:  filepath.Join(dir, "state.json"),
-		LogPath:    filepath.Join(dir, "agent.log"),
-		MachineID:  host,
-		HomeDir:    home,
-		Deadline:   deadline,
+		Dir:          dir,
+		SocketPath:   filepath.Join(dir, "agent.sock"),
+		RulesPath:    filepath.Join(dir, "rules.yaml"),
+		AuditPath:    filepath.Join(dir, "audit.jsonl"),
+		StatePath:    filepath.Join(dir, "state.json"),
+		LogPath:      filepath.Join(dir, "agent.log"),
+		SettingsPath: filepath.Join(dir, "settings.yaml"),
+		MachineID:    host,
+		HomeDir:      home,
+		Deadline:     deadline,
 
 		MachinePath:  filepath.Join(dir, "machine.json"),
 		HubGrace:     30 * time.Second,

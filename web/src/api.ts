@@ -89,6 +89,7 @@ export const hub = {
   login: (password: string) => request<void>('POST', '/api/login', { body: { password }, noUnauthorizedHandler: true }),
   logout: () => post<void>('/api/logout'),
   status: () => get<Status>('/api/status'),
+  version: () => get<{ version: string }>('/api/version'),
   inbox: () => get<Inbox>('/api/inbox'),
   requests: (state = '', limit = 50) => get<RequestView[]>(`/api/requests?state=${enc(state)}&limit=${limit}`),
   request: (id: string) => get<{ request: RequestView; audit: AuditEvent[] }>(`/api/requests/${enc(id)}`),

@@ -32,7 +32,7 @@ Railse turns all of that into one rule: **every approval goes through the rules 
 
 ## How it does it
 
-1. **All three CLIs' permission hooks talk to one daemon.** Every machine you write code on runs `railse agent`, and every tool call from Claude Code, Codex and Gemini CLI passes through it (Gemini CLI hooks can deny but not approve, see the limitations below). Adding a fourth CLI is one more translator; the rules don't change.
+1. **All three CLIs' permission hooks talk to one daemon.** Every machine you write code on runs `railse agent`. Every Bash, file-write and network call from Claude Code passes through it before it runs (`PreToolUse`), whatever the permission mode, auto mode included; Codex and Gemini CLI go through their own permission events (Gemini CLI hooks can deny but not approve, see the limitations below). Adding a fourth CLI is one more translator; the rules don't change.
 2. **Each request is risk-rated first, then matched against rules.** Commands are classified into seven levels by a built-in table. The built-in rules allow only two of them: read-only, and edits inside the project. Network, edits outside the project, pushes and deletes all ask.
 
    | Level | Examples | Default |
@@ -51,6 +51,14 @@ Railse turns all of that into one rule: **every approval goes through the rules 
 5. **The floor is hard-coded in the engine.** Outward and destructive actions can never be remembered as allowed. The only way to allow them is a hand-written rule that names the risk level explicitly. The engine checks this when rules are created and when they're imported, and the web app can't override it.
 6. **A Railse failure never blocks an agent or approves anything.** If the daemon isn't running, the hub can't be reached for 30 seconds, or a hook hits any error, the answer is "no decision": the CLI shows its own permission prompt, and the worst case is exactly what you had before installing Railse.
 7. **Claude Code's multiple-choice questions can be answered on your phone.** When it asks with `AskUserQuestion`, the question skips the rules and goes straight to your phone. You pick an option or type your own line and the agent continues at once, with no prompt in the terminal; or tap "Ask me in the terminal instead" to hand it back. With no hub, an unreachable hub or a timeout, the terminal asks as usual.
+
+What each CLI supports:
+
+| | Can approve | Deny only | Reminders only | Answer questions on the phone | Works in auto / yolo mode |
+|---|---|---|---|---|---|
+| Claude Code | yes | — | waiting for you, finished | yes (`AskUserQuestion`) | yes: outward and destructive always reach the phone (the terminal asks you to confirm if the hub can't be reached); network, writes outside the project and unknown commands go to Claude first and reach the phone only when Claude asks |
+| Codex | yes (interactive sessions) | — | finished | no | depends on Codex's own `approval_policy` |
+| Gemini CLI | no | yes | questions, finished | no | no (yolo skips hooks) |
 
 Besides approvals and these questions, the inbox also shows when an agent stops to wait for your next message and when it finishes, telling you which machine and directory to go to in the terminal. Human-approval steps from workflows like n8n can be posted to the hub's webhook and show up in the same inbox as agent approvals. See [docs/integrations/n8n.en.md](docs/integrations/n8n.en.md).
 
@@ -147,8 +155,11 @@ The docs under `docs/` are in Chinese.
 
 ## Status and limitations
 
-- This is v0.2.0, and the author is dogfooding it.
-- The phone web app, the CLI output and the docs under `docs/` are in Chinese only for now.
+- This is v0.2.1, and the author is dogfooding it.
+- For Claude Code, network calls, writes outside the project and commands Railse hasn't seen are left to Claude first, in every permission mode: whatever your Claude allow list or auto mode's classifier lets through just runs, and only when Claude decides to ask does it reach the phone. Outward and destructive actions always reach the phone, and if the hub can't be reached the terminal asks you to confirm. To send all of them to the phone, put `claude_undecided: phone` in `~/.railse/settings.yaml` and run `railse agent reload`.
+- When Railse allows a call at `PreToolUse` (the built-in read-only and in-project rules, or an allow rule you remembered), Claude Code skips its own permission checks; deny rules in Claude's `settings.json` still apply first.
+- Upgrading from 0.2.0: rerun `railse setup hooks --claude` once so Claude's `PreToolUse` hook also matches Bash and the other tools (`railse doctor` reports it under `hooks.claude`); until then approvals in auto mode still bypass Railse.
+- Most docs under `docs/` are in Chinese for now; the CLI and the phone web app are in both languages.
 - Gemini CLI hooks can deny but can't approve: rule denials still apply, and everything else goes back to Gemini's own prompt and never reaches the phone. Needs Gemini CLI 0.65.0 or later.
 - On the phone you can only answer Claude Code's multiple-choice questions (`AskUserQuestion`). Questions from Codex and Gemini, and an agent stopping to wait for your next message, are still reminders only: you go back to the terminal.
 - The project started in Chinese; the English UI is new in 0.2. If something reads oddly, open an issue with the sentence.

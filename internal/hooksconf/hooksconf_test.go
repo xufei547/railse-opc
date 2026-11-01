@@ -74,7 +74,7 @@ func TestSameOurs(t *testing.T) {
 		merge(`{"model":"opus","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"my-guard"}]}]}}`, bin, ""),
 		`{"hooks":{"Stop":[{"hooks":[{"command":"/opt/railse hook claude","type":"command"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}],` +
 			`"Notification":[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]},{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}],` +
-			`"PreToolUse":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":"AskUserQuestion"}],` +
+			`"PreToolUse":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"}],` +
 			`"PermissionRequest":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":""}]}}`,
 	}
 	for _, b := range same {
@@ -326,7 +326,7 @@ func TestPlan(t *testing.T) {
 func TestPlanClaudePreToolUse(t *testing.T) {
 	// Claude 的 AskUserQuestion 靠 PreToolUse 钩子推到手机：matcher 只匹配这个工具，超时同 PermissionRequest
 	b, _ := json.Marshal(Plan("claude", "/opt/railse", "")["PreToolUse"])
-	want := `[{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}]`
+	want := `[{"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}]`
 	if string(b) != want {
 		t.Fatalf("PreToolUse 的 JSON: %s", b)
 	}
@@ -371,7 +371,7 @@ func TestMergePreToolUse(t *testing.T) {
 		}
 		return gs
 	}
-	ours := norm(`{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}`)
+	ours := norm(`{"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}`)
 	theirsN := norm(theirs)
 	for name, tc := range map[string]struct {
 		existing string
@@ -596,5 +596,40 @@ func TestInspectDetails(t *testing.T) {
 	ins, _ = Inspect([]byte(two), "/opt/railse")
 	if st := ins.Events["PermissionRequest"]; !st.Present || st.Timeout != 60 || st.Program != "/opt/railse" {
 		t.Fatalf("两份我们的条目时应报告较小的超时: %+v", st)
+	}
+}
+
+// 0.2.0 装的 PreToolUse 只匹配 AskUserQuestion：重跑 Merge 换成新匹配器，不留旧组；Inspect 报出匹配器。
+func TestMergeUpgradesPreToolUseMatcher(t *testing.T) {
+	old := []byte(`{"hooks":{"PreToolUse":[{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]},` +
+		`{"matcher":"Bash","hooks":[{"type":"command","command":"my-linter"}]}]}}`)
+	ins, err := Inspect(old, "/opt/railse")
+	if err != nil || ins.Events["PreToolUse"].Matcher != "AskUserQuestion" {
+		t.Fatalf("旧: %+v %v", ins, err)
+	}
+	out, err := Merge(old, "/opt/railse", Plan("claude", "/opt/railse", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ins, err = Inspect(out, "/opt/railse")
+	if err != nil || ins.Events["PreToolUse"].Matcher != ClaudePreToolUseMatcher {
+		t.Fatalf("新: %+v %v\n%s", ins, err, out)
+	}
+	if strings.Contains(string(out), `"matcher": "AskUserQuestion",`) || !strings.Contains(string(out), "my-linter") {
+		t.Fatalf("旧组应换掉、别人的组应留下:\n%s", out)
+	}
+}
+
+func TestMatcherCovers(t *testing.T) {
+	for _, c := range []struct {
+		m    string
+		want bool
+	}{
+		{"", true}, {"*", true}, {".*", true}, {ClaudePreToolUseMatcher, true}, {"Bash", true}, {"Edit | Bash", true},
+		{"AskUserQuestion", false}, {"BashOutput", false}, {"Bash.*", false},
+	} {
+		if got := MatcherCovers(c.m, "Bash"); got != c.want {
+			t.Errorf("%q: %v", c.m, got)
+		}
 	}
 }

@@ -147,7 +147,7 @@ export const en: Record<string, string> = {
   '批准：agent 执行这一条，只这一次。': 'Approve: the agent runs this, just this once.',
   '拒绝：agent 收到拒绝，会换个做法或停下来。': 'Deny: the agent is told no and will try another way or stop.',
   '勾「记住」只能存成拒绝规则，下次同类的直接拒绝；这类操作不能记成放行。': 'Turn on "Remember" to save a deny rule, so similar requests are denied next time. This kind of action can\'t be remembered as allowed.',
-  '勾「记住」可以存成规则，下次同类的不再问。': 'Turn on "Remember" to save a rule, so you won\'t be asked about similar requests again.',
+  '勾「记住」可以存成规则，下次同类的不再问；记成放行后，Claude Code 自己的权限检查也会跳过。': 'Turn on "Remember" to save a rule, so you won\'t be asked about similar requests again. Once remembered as allowed, Claude Code\'s own permission checks are skipped too.',
   // history.ts
   全部: 'All',
   问题与完成: 'Terminal questions and finished turns',

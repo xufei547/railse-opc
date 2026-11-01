@@ -41,10 +41,10 @@ PreToolUse 的输出格式：`{"hookSpecificOutput":{"hookEventName":"PreToolUse
 |---|---|
 | 规则 allow（内建只读、项目内写；用户学来的 allow） | `allow`，理由 `Railse：命中规则 X` |
 | 规则 deny | `deny`，理由同现在 |
-| 定不了，风险为 outward / destructive（硬底线） | 送 hub 等手机：批 → `allow`，拒 → `deny`，交回终端 / 超时 / hub 不可达 → `ask` |
+| 定不了，风险为 outward / destructive（硬底线） | 送 hub 等手机：批 → `allow`，拒 → `deny`；没接 hub / hub 不可达 / 等待过期 → `ask`（见 2.6） |
 | 定不了，风险为 network / write_outside / unknown | 看 2.3.1 |
 
-**2.3.1 中间三级在 auto 模式下的处理（本版的取舍）**：auto 模式的用户选它就是为了少被打扰，Railse 不能比原来更吵。默认：`permission_mode == auto` 时，中间三级**不表态**，交给 Claude 的分类器；分类器若决定要问人，会触发 `PermissionRequest`，那时再按现有流程送手机。其他模式（default、acceptEdits、plan）下中间三级送手机，与现在一致。守护进程加一个本机开关：`~/.railse/settings.yaml` 里 `claude_auto_mode: classifier | phone`（默认 `classifier`；不放 rules.yaml，因为那份文件由 hub 下发覆盖、且解析时拒绝未知字段），`railse agent reload` 或重启后生效；想让 auto 模式下所有拿不准的都到手机的人改成 `phone`。`bypassPermissions` / `dontAsk` 下同 auto（用户明确要求不问）。
+**2.3.1 中间三级不看模式（本版的取舍，2026-11-01 实施后改定）**：Railse 不能比 Claude 自己更吵。PreToolUse 来的中间三级（network / write_outside / unknown）**任何模式都不表态**：default、acceptEdits、plan 下由 Claude 自己的 allow 列表（`settings.json` 的 `permissions.allow`）先走，auto 下由分类器先走，`bypassPermissions` / `dontAsk` 按用户要求不问；Claude 若决定要问人，会触发 `PermissionRequest`，那时再按现有流程送手机。（初稿是“auto 下不表态、其余模式送手机”，实施后发现那样会让 default 模式比装 Railse 前更吵，用户在 Claude 里配的 allow 列表也失效，故改。）守护进程加一个本机开关：`~/.railse/settings.yaml` 里 `claude_undecided: classifier | phone`（默认 `classifier`；不放 rules.yaml，因为那份文件由 hub 下发覆盖、且解析时拒绝未知字段），`railse agent reload` 或重启后生效；改成 `phone` 时 PreToolUse 直接把中间三级送手机，任何模式。
 
 **为什么硬底线不看模式**：这正是 auto 模式放行了 `git push` 与 `rm -rf` 的那一类；Railse 的承诺是"这两级永远不自动过"，模式不能改变承诺。
 
@@ -55,7 +55,7 @@ PreToolUse 的输出格式：`{"hookSpecificOutput":{"hookEventName":"PreToolUse
 PreToolUse 不表态后，Claude 若要问人会再触发 `PermissionRequest`。2.1.280 的 PermissionRequest 样本里没有 `tool_use_id`，所以去重键用：有 `tool_use_id` 就用它，否则用 `session_id + 载荷哈希`，窗口 10 分钟。守护进程记最近 10 分钟内 PreToolUse 已处理过的键与结果：
 
 - PreToolUse 已送手机且得到交回终端（passthrough）→ 同 id 的 `PermissionRequest` 直接不表态，不再送手机。
-- PreToolUse 因模式不表态（2.3.1）→ 同 id 的 `PermissionRequest` 按现有流程送手机（这是 Claude 自己升级成提问，正该问）。
+- PreToolUse 因中间三级不表态（2.3.1）→ 同 id 的 `PermissionRequest` 按现有流程送手机（这是 Claude 自己升级成提问，正该问）。
 - 其余情况（allow/deny 已回）不会再有 `PermissionRequest`。
 
 审计里两次事件都记，`tool_use_id` 相同可对上。
@@ -68,9 +68,11 @@ PreToolUse 返回 `allow` 会让 Claude **跳过自己的权限系统**（包括
 - 用户 `settings.json` 里的 deny 规则 Claude 仍会先于钩子生效（deny 优先），不受影响。
 - "记住"学来的 allow 规则现在在 auto 模式下也是终局决定，网页上"记住"的说明加一句"记住后 Claude 自己的检查也会跳过"。
 
-### 2.6 失败即不表态
+### 2.6 失败即不表态；硬底线送不到手机时要终端确认
 
-守护进程不在、hub 30 秒不可达、解析失败、超时：PreToolUse 输出空，Claude 照常自己处理；与现在 `PermissionRequest` 的 fail-open 一致。硬底线请求在 hub 不可达时同样不表态（不能因为 Railse 坏了把人挡在终端外），但在终端打一行 `railse hook: hub unreachable, falling back to Claude's own prompt`（为此 `proto.Response` 加 `decided_by` 字段，钩子据此判断）。
+守护进程不在、hub 30 秒不可达、解析失败、超时：PreToolUse 输出空，Claude 照常自己处理；与现在 `PermissionRequest` 的 fail-open 一致。
+
+例外（2026-11-01 实施后改定）：对外（outward）与不可逆（destructive）两档在**没接 hub、hub 不可达、等待过期**这三种情况下，PreToolUse 输出 `permissionDecision: "ask"`，理由 `Railse：连不上 hub，这类操作要你亲自确认`，任何模式都如此。原因：Task 1 实测 `ask` 在 auto 模式下也强制让人确认；不表态的话 auto 的分类器会直接放行 `git push`、`rm -rf`（实测没接 hub 时 `rm -rf` 被执行）。`ask` 不把人挡在终端外，人在就能批；`-p` 下等于拒绝，可以接受。守护进程不在、钩子解析失败、守护进程出错或停止时仍输出空（钩子拿不到守护进程的判断）。hub 不可达时终端照旧打一行 `railse hook: hub unreachable, falling back to Claude's own prompt`（为此 `proto.Response` 加 `decided_by` 字段，钩子据此判断）。
 
 ## 3 顺带的三件小事
 
@@ -81,10 +83,10 @@ PreToolUse 返回 `allow` 会让 Claude **跳过自己的权限系统**（包括
 ## 4 验收
 
 1. 作者 Mac，`defaultMode: auto`，重跑 2026-11-01 的五条命令：`cat` 与项目内 `echo >` 本地放行（审计 `auto_allowed`）；`curl` 不表态、由 Claude 分类器处理；`git push` 与 `rm -rf` 推到手机，拒绝后终端显示 `Railse: Denied on your phone`，命令没有执行。
-2. `--permission-mode default` 下同五条：`curl` 也进手机。
-3. `claude_auto_mode: phone` 时 auto 模式下 `curl` 进手机。
+2. `--permission-mode default` 下同五条：`curl` 在 PreToolUse 不表态，Claude 弹自己的确认前触发 PermissionRequest，进手机（只进一次）。
+3. `claude_undecided: phone` 时 auto 模式下 `curl` 在 PreToolUse 直接进手机。
 4. 手机上对 `git push` 选"让它在终端问我"后，Claude 只问一次，不会再来一条推送。
-5. hub 停掉：五条命令 Claude 照常自己处理，终端有一行回退提示。
+5. hub 停掉：`git push`、`rm -rf` 约 30 秒后终端强制确认（PreToolUse 回 `ask`），其余照常由 Claude 处理；终端有一行回退提示。
 6. `echo 'rm -rf ~' | sh` 定为 destructive（`railse policy eval`）。
 7. 升级 hub 后，手机上开着的旧页面切出再切回会自动重载。
 
@@ -93,7 +95,8 @@ PreToolUse 返回 `allow` 会让 Claude **跳过自己的权限系统**（包括
 | 决策 | 为什么 |
 |---|---|
 | 审批搬到 PreToolUse 而不是要求用户关掉 auto 模式 | auto 是官方默认，要求用户改模式等于放弃多数用户 |
-| 硬底线不看模式，中间三级在 auto 下默认交给分类器 | 守住承诺的同时不比 auto 更吵；开关留给想全管的人 |
+| 硬底线不看模式，中间三级任何模式都先交给 Claude 自己 | 守住承诺的同时不比 Claude 自己更吵、不让用户的 allow 列表失效；开关留给想全管的人 |
+| 硬底线送不到手机时回 `ask` | 不表态会让 auto 的分类器直接放行；`ask` 让人在终端确认，不把人挡在外面 |
 | 保留 PermissionRequest 作兜底 | MCP、Task 等工具 PreToolUse 不匹配；Claude 自己升级成提问时仍该到手机 |
 | 不做 Codex 的 PreToolUse | 官方文档写 `ask` 尚不支持，Codex 的 PermissionRequest 现状可用 |
 | 统计页与审计导出挪到 v0.2.2 | 本版先把承诺做实，再算账 |

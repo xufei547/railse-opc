@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -429,5 +430,86 @@ func TestErrParentGoneEnglish(t *testing.T) {
 	i18n.Set(i18n.ZH)
 	if got := errParentGone.Error(); got != "父进程（CLI）已退出" {
 		t.Fatalf("中文下应原样: %q", got)
+	}
+}
+
+// claudePreToolUse 按 pretooluse-bash-*.json 的形状造 PreToolUse 输入。
+func claudePreToolUse(cwd, cmd, mode string) string {
+	return `{"session_id":"s1","prompt_id":"p1","cwd":"` + cwd + `","permission_mode":"` + mode + `","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"` + cmd + `","description":"d"},"tool_use_id":"toolu_1"}`
+}
+
+// PreToolUse 的 Bash 经钩子得到 PreToolUse 格式的决定：只读放行、auto 下的联网不表态、硬底线照规则拒。
+func TestHookClaudePreToolUse(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	out, _, code := runHookWith(t, claudePreToolUse(repo, "git status", "auto"), "claude", "--socket", sock)
+	if code != 0 || !strings.HasPrefix(out, `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Railse：`) {
+		t.Fatalf("只读: code=%d out=%s", code, out)
+	}
+	out, _, code = runHookWith(t, claudePreToolUse(repo, "curl https://x.y", "auto"), "claude", "--socket", sock)
+	if code != 0 || out != "" {
+		t.Fatalf("auto 下的联网应不表态: code=%d out=%q", code, out)
+	}
+	// 没接 hub（LocalDecider）：硬底线要 Claude 在终端里强制问（ask），不说“连不上 hub”的回退提示
+	out, errOut, code := runHookWith(t, claudePreToolUse(repo, "git push origin main", "auto"), "claude", "--socket", sock)
+	if code != 0 || out != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：连不上 hub，这类操作要你亲自确认"}}`+"\n" ||
+		strings.Contains(errOut, "hub") {
+		t.Fatalf("没接 hub: code=%d out=%q err=%q", code, out, errOut)
+	}
+	var sources []string
+	b, _ := os.ReadFile(cfg.AuditPath)
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var e agent.AuditEntry
+		json.Unmarshal([]byte(l), &e)
+		sources = append(sources, e.Source+"/"+e.PermissionMode+"/"+e.ToolUseID)
+	}
+	if len(sources) != 3 || sources[0] != "pretooluse/auto/toolu_1" {
+		t.Fatalf("审计应带来源、模式与编号: %q", sources)
+	}
+}
+
+// 钩子把来源、模式、编号发给守护进程；守护进程拒绝时渲染成 PreToolUse 的 deny。
+func TestHookClaudePreToolUseRequest(t *testing.T) {
+	sock, lines := fakeDaemon(t, `{"v":1,"decision":"deny","reason":"已在手机上拒绝","decided_by":"user"}`)
+	out, _, _ := runHookWith(t, claudePreToolUse("/p", "git push origin main", "default"), "claude", "--socket", sock)
+	if out != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Railse：已在手机上拒绝"}}`+"\n" {
+		t.Fatalf("out=%s", out)
+	}
+	var req proto.Request
+	json.Unmarshal([]byte(lines()[0]), &req)
+	if req.Kind != "permission" || req.Source != "pretooluse" || req.PermissionMode != "default" || req.ToolUseID != "toolu_1" || req.Payload.Command != "git push origin main" {
+		t.Fatalf("请求: %+v", req)
+	}
+}
+
+// hub 不可达时钩子不表态，并在 stderr 提示回退；PermissionRequest 同样提示，Codex（没有来源）不提。
+func TestHookHubUnreachableNote(t *testing.T) {
+	reply := `{"v":1,"decision":"passthrough","decided_by":"hub_unreachable","reason":"连不上 hub，交回终端处理"}`
+	sock, _ := fakeDaemon(t, reply)
+	stdout, stderr, _ := runHookWith(t, claudePreToolUse("/tmp/p", "curl https://x.y", "auto"), "claude", "--socket", sock)
+	if stdout != "" || stderr != "railse hook: 连不上 hub，交回 Claude 自己的确认\n" {
+		t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
+	}
+	// 硬底线：守护进程回 ask，钩子输出 ask，stderr 提示照旧
+	sock, _ = fakeDaemon(t, `{"v":1,"decision":"ask","decided_by":"hub_unreachable","reason":"连不上 hub，这类操作要你亲自确认"}`)
+	stdout, stderr, _ = runHookWith(t, claudePreToolUse("/tmp/p", "git push origin main", "auto"), "claude", "--socket", sock)
+	if !strings.Contains(stdout, `"permissionDecision":"ask"`) || !strings.Contains(stderr, "连不上 hub") {
+		t.Fatalf("硬底线 ask: stdout=%q stderr=%q", stdout, stderr)
+	}
+	sock, _ = fakeDaemon(t, reply)
+	_, stderr, _ = runHookWith(t, claudePermission("/tmp/p", "git push origin main"), "claude", "--socket", sock)
+	if !strings.Contains(stderr, "hub") {
+		t.Fatalf("PermissionRequest 也该提示: %q", stderr)
+	}
+	sock, _ = fakeDaemon(t, reply)
+	codex := `{"session_id":"s","turn_id":"t","cwd":"/p","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git push"}}`
+	_, stderr, _ = runHookWith(t, codex, "codex", "--socket", sock)
+	if stderr != "" {
+		t.Fatalf("Codex 不提 Claude: %q", stderr)
+	}
+	// 别的交回终端（过期等）不提示
+	sock, _ = fakeDaemon(t, `{"v":1,"decision":"passthrough","decided_by":"timeout"}`)
+	_, stderr, _ = runHookWith(t, claudePreToolUse("/tmp/p", "git push origin main", "auto"), "claude", "--socket", sock)
+	if stderr != "" {
+		t.Fatalf("过期不提示: %q", stderr)
 	}
 }

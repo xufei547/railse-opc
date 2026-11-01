@@ -582,5 +582,5 @@ function rememberLine(r: RequestView): string {
     ((r.payload.type === 'shell' || r.payload.type === 'file_write') && r.project_root === '')
   return denyOnly
     ? t('勾「记住」只能存成拒绝规则，下次同类的直接拒绝；这类操作不能记成放行。')
-    : t('勾「记住」可以存成规则，下次同类的不再问。')
+    : t('勾「记住」可以存成规则，下次同类的不再问；记成放行后，Claude Code 自己的权限检查也会跳过。')
 }

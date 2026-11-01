@@ -48,11 +48,25 @@ type Input struct {
 
 	Ask          *proto.Ask      // 仅 KindAsk
 	RawToolInput json.RawMessage // 仅 KindAsk：PreToolUse 的 tool_input 原文，渲染答案时原样回填
+
+	// 以下仅 KindPermission：来自哪个钩子事件（SourcePreToolUse、SourcePermissionRequest，Codex、Gemini 留空），
+	// Claude Code 的权限模式与工具调用编号（PermissionRequest 不带编号）。
+	Source         string
+	PermissionMode string
+	ToolUseID      string
 }
+
+// 审批请求的来源钩子事件，与 proto 同值。
+const (
+	SourcePreToolUse        = proto.SourcePreToolUse
+	SourcePermissionRequest = proto.SourcePermissionRequest
+)
 
 // Decision 是守护进程的答复。Action 为 allow、deny、passthrough 或 answer。
 // answer 带 Answers（问题原文 → 答案）和 KindAsk 时拿到的 RawToolInput。
+// Source 是请求的来源钩子事件，Claude 据此决定渲染成 PreToolUse 还是 PermissionRequest 的输出。
 type Decision struct {
+	Source       string
 	Action       string
 	Reason       string
 	Answers      map[string]string
@@ -220,6 +234,14 @@ func marshalNoEscape(v any) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// allowMessage 是 PreToolUse 放行（或要求终端确认）时给 agent 看的理由，带 Railse 前缀；理由为空时用固定文案。
+func allowMessage(reason string) string {
+	if reason == "" {
+		return i18n.T("Railse：已放行")
+	}
+	return i18n.T("Railse：") + reason
 }
 
 // denyMessage 是拒绝时给 agent 看的理由，带 Railse 前缀；理由为空时用固定文案。reason 由钩子按终端语言翻好（见 cmd/railse 的 localizeReason）。

@@ -3,6 +3,7 @@ import { ApiError, hub } from './api'
 import { coalesce } from './coalesce'
 import { t } from './i18n'
 import { closeStaleNotifications } from './notifications'
+import { createVersionWatcher } from './pwa'
 import { initialState, reduce, waitingIDs, type Action, type State } from './store'
 import { closeSessionInvalid, Live } from './ws'
 
@@ -76,6 +77,9 @@ export function StoreProvider({ children, onUnauthorized }: { children: ReactNod
     void reloader()
     live.start()
     if (document.visibilityState === 'hidden') live.hidden()
+    // hub 升级后，开着的旧页面回到前台时重载一次，换成新代码；挂载时先记下当前版本
+    const versionWatcher = createVersionWatcher({ fetchVersion: async () => (await hub.version()).version, reload: () => location.reload() })
+    void versionWatcher.check()
     // 回到前台：后台久了重建连接（可能已半死），否则只在等退避时立即重连；都全量重拉一次
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') {
@@ -84,6 +88,7 @@ export function StoreProvider({ children, onUnauthorized }: { children: ReactNod
       }
       live.visible()
       void reloader()
+      void versionWatcher.check()
     }
     // 网络恢复（含切换网络）：旧连接多半已经不通，直接换一条
     const onOnline = () => {

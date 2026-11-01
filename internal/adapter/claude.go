@@ -11,7 +11,8 @@ import (
 
 func init() { register(claude{}) }
 
-// claude 对应 Claude Code 2.1.x 的钩子：PermissionRequest 决定，Notification 为 question，Stop 为 done，
+// claude 对应 Claude Code 2.1.x 的钩子：PreToolUse 的 Bash、文件写、WebFetch 与 PermissionRequest 都是审批（前者任何权限模式
+// 都触发，后者只在 Claude 自己决定要问人时触发，留作 MCP 等其余工具的兜底），Notification 为 question，Stop 为 done，
 // PreToolUse 的 AskUserQuestion 为 ask（答案经 updatedInput 回填）；PermissionRequest 的 AskUserQuestion 无效，一律忽略。
 type claude struct{}
 
@@ -28,7 +29,12 @@ type claudeHook struct {
 	NotificationType string          `json:"notification_type"`
 	Message          string          `json:"message"`
 	LastMessage      string          `json:"last_assistant_message"`
+	PermissionMode   string          `json:"permission_mode"`
+	ToolUseID        string          `json:"tool_use_id"`
 }
+
+// preToolUseTools 是 PreToolUse 钩子当审批处理的工具；其余工具（MCP、Task 等）PreToolUse 不管，留给 PermissionRequest。
+var preToolUseTools = map[string]bool{"Bash": true, "Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true, "WebFetch": true}
 
 func (claude) Parse(stdin []byte) (Input, error) {
 	var h claudeHook
@@ -50,13 +56,23 @@ func (claude) Parse(stdin []byte) (Input, error) {
 			return Input{}, err
 		}
 		in.Kind, in.ToolName, in.Payload = KindPermission, h.ToolName, p
+		in.Source, in.PermissionMode, in.ToolUseID = SourcePermissionRequest, h.PermissionMode, h.ToolUseID
 	case "PreToolUse":
-		if h.ToolName != proto.AskToolName {
-			in.Kind = KindIgnore
+		if h.ToolName != proto.AskToolName && !preToolUseTools[h.ToolName] {
+			in.Kind = KindIgnore // 其余工具留给 PermissionRequest 兜底
 			break
 		}
 		if h.SessionID == "" {
 			return Input{}, errors.New(i18n.T("PreToolUse 缺少 session_id"))
+		}
+		if h.ToolName != proto.AskToolName {
+			p, err := mapTool("claude", h.ToolName, h.ToolInput, h.Cwd)
+			if err != nil {
+				return Input{}, err
+			}
+			in.Kind, in.ToolName, in.Payload = KindPermission, h.ToolName, p
+			in.Source, in.PermissionMode, in.ToolUseID = SourcePreToolUse, h.PermissionMode, h.ToolUseID
+			break
 		}
 		var ask proto.Ask
 		if err := json.Unmarshal(h.ToolInput, &ask); err != nil {
@@ -84,9 +100,12 @@ func (claude) Parse(stdin []byte) (Input, error) {
 }
 
 // Render 把答案渲染成 PreToolUse 输出；没有答案、合并不了（没有 tool_input 原文、不是 JSON 对象）就不作决定。
-// 其余动作照旧渲染成 PermissionRequest 输出。
+// 来自 PreToolUse 的审批渲染成 PreToolUse 的 permissionDecision，其余动作照旧渲染成 PermissionRequest 输出。
 func (claude) Render(d Decision) Output {
 	if d.Action != "answer" {
+		if d.Source == SourcePreToolUse {
+			return renderPreToolUse(d)
+		}
 		return renderPermission(d)
 	}
 	if len(d.Answers) == 0 || len(d.RawToolInput) == 0 {
@@ -96,5 +115,31 @@ func (claude) Render(d Decision) Output {
 	if err != nil {
 		return passthrough()
 	}
+	return Output{Stdout: b, ExitCode: 0}
+}
+
+// renderPreToolUse 把审批决定渲染成 PreToolUse 输出：allow、deny、ask 带 Railse 前缀的理由，其余不作决定（stdout 为空），
+// Claude 照自己的权限流程走。ask 只给守护进程明确要求的硬底线（送不到手机时）：2.1.280 实测它在任何模式下都强制让人
+// 确认、不回分类器（见 docs/superpowers/specs/2026-11-01-pretooluse-ask-findings.md），用在一般的不表态上会比 auto 模式更吵。
+func renderPreToolUse(d Decision) Output {
+	var decision, reason string
+	switch d.Action {
+	case "allow":
+		decision, reason = "allow", allowMessage(d.Reason)
+	case "deny":
+		decision, reason = "deny", denyMessage(d.Reason)
+	case "ask":
+		decision, reason = "ask", allowMessage(d.Reason)
+	default:
+		return passthrough()
+	}
+	type hso struct {
+		HookEventName            string `json:"hookEventName"`
+		PermissionDecision       string `json:"permissionDecision"`
+		PermissionDecisionReason string `json:"permissionDecisionReason"`
+	}
+	b, _ := marshalNoEscape(struct {
+		HookSpecificOutput hso `json:"hookSpecificOutput"`
+	}{hso{"PreToolUse", decision, reason}})
 	return Output{Stdout: b, ExitCode: 0}
 }

@@ -50,7 +50,7 @@ func TestSetupHooksWritesAllThree(t *testing.T) {
 	}
 	ask := claude["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)
 	askHook := ask["hooks"].([]any)[0].(map[string]any)
-	if ask["matcher"] != "AskUserQuestion" || askHook["command"] != "/opt/railse hook claude" || askHook["timeout"] != float64(86400) {
+	if ask["matcher"] != hooksconf.ClaudePreToolUseMatcher || askHook["command"] != "/opt/railse hook claude" || askHook["timeout"] != float64(86400) {
 		t.Fatalf("Claude PreToolUse: %+v", ask)
 	}
 	codex := readJSON(t, codexFile)
@@ -104,7 +104,7 @@ func TestSetupHooksIsIdempotentAndPreservesOthers(t *testing.T) {
 	if len(pre) != 2 || !strings.Contains(string(first), "echo hi") {
 		t.Fatalf("别人的 PreToolUse 应保留且只加一组: %+v", pre)
 	}
-	if pre[1].(map[string]any)["matcher"] != "AskUserQuestion" {
+	if pre[1].(map[string]any)["matcher"] != hooksconf.ClaudePreToolUseMatcher {
 		t.Fatalf("新增的应是 AskUserQuestion 组: %+v", pre)
 	}
 	if _, err := os.Stat(filepath.Join(project, ".gemini", "settings.json")); err == nil {
@@ -127,7 +127,7 @@ func TestSetupHooksDryRunWritesNothing(t *testing.T) {
 	if !strings.Contains(out.String(), "PermissionRequest") {
 		t.Fatalf("dry-run 应打印将写入的内容: %s", out.String())
 	}
-	if !strings.Contains(out.String(), `"PreToolUse"`) || !strings.Contains(out.String(), `"matcher": "AskUserQuestion"`) {
+	if !strings.Contains(out.String(), `"PreToolUse"`) || !strings.Contains(out.String(), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"`) {
 		t.Fatalf("dry-run 应打印新的 PreToolUse 组: %s", out.String())
 	}
 }

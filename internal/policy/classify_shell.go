@@ -15,9 +15,13 @@ func classifyShell(command, cwd string, ctx Context) Risk {
 	}
 	risk := RiskRead
 	lost := false // 工作目录已无法静态确定
+	piped := pipedSegments(command)
 	for _, text := range segs {
 		seg := parseSegment(text)
 		r := classifySegment(seg, cwd, ctx)
+		if (piped[text] && readsScriptFromStdin(seg)) || runsSubstitution(seg) {
+			r = RiskDestructive
+		}
 		if lost {
 			r = maxRisk(r, RiskUnknown)
 		}
@@ -454,4 +458,67 @@ func effectiveSegments(command string) []segment {
 		}
 	}
 	return out
+}
+
+// scriptInterpreters 是不带脚本参数（或参数是 -）时从标准输入读脚本来执行的解释器（shell 由 isShell 认）。
+var scriptInterpreters = map[string]bool{"python": true, "python3": true, "node": true, "perl": true, "ruby": true, "php": true}
+
+// pipedSegments 返回接在管道（| 或 |&，不含 ||）后面的段的原文（同 splitSegments 的段）。按原文记，
+// 同一文本既出现在管道后又出现在别处时都算，宁严勿宽。
+func pipedSegments(command string) map[string]bool {
+	runes := []rune(command)
+	segs, _, heredoc := scanShell(runes)
+	out := map[string]bool{}
+	if heredoc {
+		return out
+	}
+	for i := 1; i < len(segs); i++ {
+		sep := strings.TrimSpace(strings.ReplaceAll(string(runes[segs[i-1].end:segs[i].start]), "\\\n", ""))
+		if sep == "|" || sep == "|&" {
+			out[string(runes[segs[i].start:segs[i].end])] = true
+		}
+	}
+	return out
+}
+
+// readsScriptFromStdin 报告这一段是不是从标准输入读脚本来执行的 shell 或解释器：shell 没有 -c 命令串（含 -s、
+// 没有脚本参数、脚本参数是 -，以及认不出的选项），解释器没有参数或参数是 -。用在管道后面时，执行的就是管道前送来的内容：
+// curl … | sh 执行的是网上下载的脚本，cat x | sh 执行的是没法静态审查的文件，一律按 destructive。
+func readsScriptFromStdin(seg segment) bool {
+	argv, _ := commandWords(seg)
+	if len(argv) == 0 {
+		return false
+	}
+	name := filepath.Base(argv[0])
+	if isShell(name) {
+		call, ok := parseShellCall(name, argv)
+		if !ok {
+			return true
+		}
+		if call.hasCommand {
+			return false
+		}
+		return call.stdin || call.rest >= len(argv) || argv[call.rest] == "-"
+	}
+	if scriptInterpreters[name] {
+		return len(argv) == 1 || argv[1] == "-"
+	}
+	return false
+}
+
+// runsSubstitution 报告这一段是不是把命令替换或进程替换的结果当脚本执行：bash -c "$(curl …)"、eval "$(curl …)"、
+// sh <(curl …)、source <(…)。替换出来的内容无从审查，按 destructive。
+func runsSubstitution(seg segment) bool {
+	if !seg.subshell {
+		return false
+	}
+	argv, _ := commandWords(seg)
+	if len(argv) == 0 {
+		return false
+	}
+	name := filepath.Base(argv[0])
+	if !isShell(name) && name != "eval" && name != "source" && name != "." {
+		return false
+	}
+	return strings.Contains(seg.text, "$(") || strings.Contains(seg.text, "`") || strings.Contains(seg.text, "<(")
 }
