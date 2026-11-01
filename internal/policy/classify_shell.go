@@ -88,7 +88,8 @@ func explainSegment(seg segment, risk Risk, pipedScript, subst, download bool, c
 		return WhyPipedScript
 	case hasSQLDrop(seg.text):
 		return WhySQLDrop
-	case destructive && (words["sudo"] || words["doas"] || strings.Contains(seg.text, " sudo ") || strings.HasPrefix(seg.text, "sudo ")):
+	// 只认这一段本身是 sudo、doas：ssh 远端命令里的 sudo 分类器不看（只按联网定级），那时抬到 destructive 的另有原因（如 -i 的密钥文件）
+	case destructive && (name == "sudo" || name == "doas"):
 		return WhySudo
 	case destructive && (name == "kill" || name == "pkill" || name == "killall"):
 		return WhyKill
