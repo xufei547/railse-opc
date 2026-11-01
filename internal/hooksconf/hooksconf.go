@@ -53,6 +53,23 @@ func HookCommand(bin, cli, socket string) string {
 	return cmd
 }
 
+// ClaudePreToolUseMatcher 是 Claude 的 PreToolUse 钩子匹配的工具（正则，| 分隔），与适配器认的工具一致。
+const ClaudePreToolUseMatcher = "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"
+
+// MatcherCovers 报告 Claude 的 matcher 是否匹配工具 tool：空串、* 与 .* 匹配一切，否则按 | 分开逐个比。
+// 只认这几种写法，别人手写的复杂正则当作不匹配（doctor 只会因此多报一条 warn）。
+func MatcherCovers(matcher, tool string) bool {
+	if matcher == "" || matcher == "*" || matcher == ".*" {
+		return true
+	}
+	for _, m := range strings.Split(matcher, "|") {
+		if strings.TrimSpace(m) == tool {
+			return true
+		}
+	}
+	return false
+}
+
 // Plan 给出每个 CLI 要写入的事件与条目；socket 见 HookCommand，为空时命令不带 --socket。
 func Plan(cli, bin, socket string) map[string][]Group {
 	cmd := HookCommand(bin, cli, socket)
@@ -63,8 +80,9 @@ func Plan(cli, bin, socket string) map[string][]Group {
 	case "claude":
 		return map[string][]Group{
 			"PermissionRequest": {{Matcher: strp(""), Hooks: []Entry{{Type: "command", Command: cmd, Timeout: 86400}}}},
-			// 选择题（AskUserQuestion）不走 PermissionRequest，只能在 PreToolUse 里代答；matcher 只匹配这一个工具
-			"PreToolUse":   {{Matcher: strp("AskUserQuestion"), Hooks: []Entry{{Type: "command", Command: cmd, Timeout: 86400}}}},
+			// PreToolUse 任何权限模式都触发：选择题（AskUserQuestion）只能在这里代答，Bash、文件写、WebFetch 在这里审批
+			// （auto 模式下 PermissionRequest 根本不触发）；其余工具（MCP、Task 等）留给 PermissionRequest 兜底
+			"PreToolUse":   {{Matcher: strp(ClaudePreToolUseMatcher), Hooks: []Entry{{Type: "command", Command: cmd, Timeout: 86400}}}},
 			"Notification": one("", 0),
 			"Stop":         one("", 0),
 			"SessionEnd":   one("", 0),
@@ -324,6 +342,7 @@ type EventState struct {
 	Timeout int    // 我们的条目的 timeout；同一事件有多条时取最小的（超时下限要每条都满足）
 	Program string // 从命令里认出的程序路径；命令不是 Plan 写的形状时为空
 	Socket  string // 命令里 --socket 给的路径；不带 --socket（连默认 socket）或命令不是 Plan 写的形状时为空
+	Matcher string // 我们的条目所在组的 matcher；没有 matcher 键时为空串
 }
 
 // Installed 是一份钩子配置里我们的条目，按事件名索引；没有我们条目的事件不在里面。
@@ -350,6 +369,7 @@ func Inspect(doc []byte, bin string) (Installed, error) {
 				}
 				em := e.(map[string]any)
 				st := EventState{Present: true}
+				st.Matcher, _ = gm["matcher"].(string)
 				if cmd, _ := em["command"].(string); cmd != "" {
 					if c, ok := ParseCommand(cmd); ok {
 						st.Program, st.Socket = c.Program, c.Socket

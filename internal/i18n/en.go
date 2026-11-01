@@ -511,6 +511,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"确认用跑 CLI 的同一个用户运行 doctor":                         "Run doctor as the same user that runs the CLI",
 	"修好 JSON 后再 %s":                                    "Fix the JSON, then run %s",
 	"%s（超时 %d，要 ≥ %d）":                                 "%s (timeout %d, needs ≥ %d)",
+	"PreToolUse 只匹配 %s：auto 模式下审批进不了 Railse":           "PreToolUse only matches %s: in auto mode approvals bypass Railse",
 	"缺 PreToolUse：Claude Code 的选择题进不了手机":               "missing PreToolUse: Claude Code's questions can't reach your phone",
 	"缺 %s":                                                       "missing %s",
 	"超时不够：%s":                                                    "timeout too short: %s",

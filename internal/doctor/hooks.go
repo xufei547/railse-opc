@@ -331,6 +331,14 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 	// 只缺 PreToolUse 是旧安装：审批、提醒都照常，只是 Claude Code 的选择题进不了手机，所以降为 warn 而不是 fail
 	askMissing := i18n.T("缺 PreToolUse：Claude Code 的选择题进不了手机")
 	noAsk := cli == "claude" && slices.Equal(missing, []string{"PreToolUse"}) && len(short) == 0
+	// 0.2.0 及更早只让 PreToolUse 匹配 AskUserQuestion：auto 模式下 Claude 不触发 PermissionRequest，审批全绕过 Railse
+	var warns []string
+	if noAsk {
+		warns = append(warns, askMissing)
+	}
+	if pre := ins.Events["PreToolUse"]; cli == "claude" && pre.Present && !hooksconf.MatcherCovers(pre.Matcher, "Bash") {
+		warns = append(warns, fmt.Sprintf(i18n.T("PreToolUse 只匹配 %s：auto 模式下审批进不了 Railse"), pre.Matcher))
+	}
 	sort.Strings(missing)
 	sort.Strings(short)
 	sort.Strings(others)
@@ -346,14 +354,11 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 		}
 		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s：%s"), path, strings.Join(parts, i18n.T("；"))), Hint: hint}
 	}
-	if noAsk && len(others) == 0 && len(socks) == 0 {
-		return Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf(i18n.T("%s：%s"), path, askMissing), Hint: hint}
+	if len(warns) > 0 && len(others) == 0 && len(socks) == 0 {
+		return Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf(i18n.T("%s：%s"), path, strings.Join(warns, i18n.T("；"))), Hint: hint}
 	}
 	if len(others) > 0 || len(socks) > 0 {
-		var parts []string
-		if noAsk {
-			parts = append(parts, askMissing)
-		}
+		parts := warns
 		h := fmt.Sprintf(i18n.T("换过安装路径就重新 %s"), hint)
 		if len(others) > 0 {
 			parts = append(parts, fmt.Sprintf(i18n.T("钩子指向 %s，当前程序是 %s"), strings.Join(others, i18n.T("、")), o.Bin))

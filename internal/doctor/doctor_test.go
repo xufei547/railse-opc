@@ -438,12 +438,12 @@ func TestHookChecks(t *testing.T) {
 	}
 	o.Bin = bin
 	// PreToolUse 超时不够：选择题等不到手机上的回答，照超时不够 fail
-	shortPre := strings.Replace(string(doc), `"matcher": "AskUserQuestion",
+	shortPre := strings.Replace(string(doc), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch",
         "hooks": [
           {
             "type": "command",
             "command": "/usr/local/bin/railse hook claude",
-            "timeout": 86400`, `"matcher": "AskUserQuestion",
+            "timeout": 86400`, `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch",
         "hooks": [
           {
             "type": "command",
@@ -456,6 +456,19 @@ func TestHookChecks(t *testing.T) {
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Fail || !strings.Contains(c.Detail, "PreToolUse（超时 60") {
 		t.Fatalf("PreToolUse 超时不够: %+v", c)
 	}
+	// 0.2.0 的旧匹配器（只有 AskUserQuestion）：auto 模式下审批进不了 Railse，warn 并给重装命令
+	oldMatcher := strings.Replace(string(doc), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"`, `"matcher": "AskUserQuestion"`, 1)
+	writeFile(t, local, []byte(oldMatcher))
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "PreToolUse 只匹配 AskUserQuestion：auto 模式下审批进不了 Railse") ||
+		!strings.Contains(c.Hint, "setup hooks") || !strings.Contains(c.Hint, "--claude") {
+		t.Fatalf("旧匹配器: %+v", c)
+	}
+	// 旧匹配器又换过安装路径：两条都在
+	o.Bin = "/opt/new/railse"
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "/opt/new/railse") || !strings.Contains(c.Detail, "只匹配 AskUserQuestion") {
+		t.Fatalf("旧匹配器且路径不同: %+v", c)
+	}
+	o.Bin = bin
 	// 坏 JSON
 	writeFile(t, local, []byte("{bad"))
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Fail || !strings.Contains(c.Detail, "JSON") || c.Hint == "" {
