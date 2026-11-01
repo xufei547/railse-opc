@@ -44,7 +44,7 @@ PreToolUse 的输出格式：`{"hookSpecificOutput":{"hookEventName":"PreToolUse
 | 定不了，风险为 outward / destructive（硬底线） | 送 hub 等手机：批 → `allow`，拒 → `deny`，交回终端 / 超时 / hub 不可达 → `ask` |
 | 定不了，风险为 network / write_outside / unknown | 看 2.3.1 |
 
-**2.3.1 中间三级在 auto 模式下的处理（本版的取舍）**：auto 模式的用户选它就是为了少被打扰，Railse 不能比原来更吵。默认：`permission_mode == auto` 时，中间三级**不表态**，交给 Claude 的分类器；分类器若决定要问人，会触发 `PermissionRequest`，那时再按现有流程送手机。其他模式（default、acceptEdits、plan）下中间三级送手机，与现在一致。守护进程加一个开关 `rules.yaml` 顶层 `claude_auto_mode: classifier | phone`（默认 `classifier`），想让 auto 模式下所有拿不准的都到手机的人改成 `phone`。`bypassPermissions` / `dontAsk` 下同 auto（用户明确要求不问）。
+**2.3.1 中间三级在 auto 模式下的处理（本版的取舍）**：auto 模式的用户选它就是为了少被打扰，Railse 不能比原来更吵。默认：`permission_mode == auto` 时，中间三级**不表态**，交给 Claude 的分类器；分类器若决定要问人，会触发 `PermissionRequest`，那时再按现有流程送手机。其他模式（default、acceptEdits、plan）下中间三级送手机，与现在一致。守护进程加一个本机开关：`~/.railse/settings.yaml` 里 `claude_auto_mode: classifier | phone`（默认 `classifier`；不放 rules.yaml，因为那份文件由 hub 下发覆盖、且解析时拒绝未知字段），`railse agent reload` 或重启后生效；想让 auto 模式下所有拿不准的都到手机的人改成 `phone`。`bypassPermissions` / `dontAsk` 下同 auto（用户明确要求不问）。
 
 **为什么硬底线不看模式**：这正是 auto 模式放行了 `git push` 与 `rm -rf` 的那一类；Railse 的承诺是"这两级永远不自动过"，模式不能改变承诺。
 
@@ -52,7 +52,7 @@ PreToolUse 的输出格式：`{"hookSpecificOutput":{"hookEventName":"PreToolUse
 
 ### 2.4 同一调用不问两次
 
-PreToolUse 不表态后，Claude 若要问人会再触发 `PermissionRequest`，两次是同一个 `tool_use_id`。守护进程记最近 10 分钟内 PreToolUse 已处理过的 `tool_use_id` 与结果：
+PreToolUse 不表态后，Claude 若要问人会再触发 `PermissionRequest`。2.1.280 的 PermissionRequest 样本里没有 `tool_use_id`，所以去重键用：有 `tool_use_id` 就用它，否则用 `session_id + 载荷哈希`，窗口 10 分钟。守护进程记最近 10 分钟内 PreToolUse 已处理过的键与结果：
 
 - PreToolUse 已送手机且得到交回终端（passthrough）→ 同 id 的 `PermissionRequest` 直接不表态，不再送手机。
 - PreToolUse 因模式不表态（2.3.1）→ 同 id 的 `PermissionRequest` 按现有流程送手机（这是 Claude 自己升级成提问，正该问）。
@@ -70,7 +70,7 @@ PreToolUse 返回 `allow` 会让 Claude **跳过自己的权限系统**（包括
 
 ### 2.6 失败即不表态
 
-守护进程不在、hub 30 秒不可达、解析失败、超时：PreToolUse 输出空，Claude 照常自己处理；与现在 `PermissionRequest` 的 fail-open 一致。硬底线请求在 hub 不可达时同样不表态（不能因为 Railse 坏了把人挡在终端外），但在终端打一行 `railse hook: hub unreachable, falling back to Claude's own prompt`。
+守护进程不在、hub 30 秒不可达、解析失败、超时：PreToolUse 输出空，Claude 照常自己处理；与现在 `PermissionRequest` 的 fail-open 一致。硬底线请求在 hub 不可达时同样不表态（不能因为 Railse 坏了把人挡在终端外），但在终端打一行 `railse hook: hub unreachable, falling back to Claude's own prompt`（为此 `proto.Response` 加 `decided_by` 字段，钩子据此判断）。
 
 ## 3 顺带的三件小事
 
