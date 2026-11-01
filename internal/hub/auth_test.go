@@ -619,7 +619,7 @@ func TestSetPasswordClearsPushSubscriptions(t *testing.T) {
 	}
 	login(t, h, "hunter22")
 	for _, ep := range []string{"https://web.push.apple.com/lost-phone", "https://fcm.googleapis.com/fcm/send/other"} {
-		if _, err := h.st.UpsertPushSubscription(ep, "p", "a", ""); err != nil {
+		if _, err := h.st.UpsertPushSubscription(ep, "p", "a", "", "zh"); err != nil {
 			t.Fatal(err)
 		}
 	}

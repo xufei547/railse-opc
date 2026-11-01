@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import { setLang } from './i18n'
 import { groupByProject, initialState, reduce, waitingIDs, type State } from './store'
 import type { Frame } from './ws'
 import type { RequestView, Status } from './types'
@@ -246,5 +247,14 @@ describe('waitingIDs', () => {
     expect(waitingIDs(s)?.sort()).toEqual(['b', 'q1'])
     s = reduce(s, frame({ type: 'request_new', data: req({ id: 'd1', kind: 'done', session_id: 's9', state: 'recorded' }) }))
     expect(waitingIDs(s)).toEqual(['b'])
+  })
+})
+
+describe('groupByProject 的英文', () => {
+  afterEach(() => setLang('zh'))
+  it('没有项目的一组叫 Other', () => {
+    setLang('en')
+    const g = groupByProject([req({ id: '1', project: '' }), req({ id: '2', kind: 'webhook', project: '' })])
+    expect(g.map((x) => x.project)).toEqual(['Other', 'webhook'])
   })
 })

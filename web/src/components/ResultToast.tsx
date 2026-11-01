@@ -1,5 +1,6 @@
 import { useCallback, useLayoutEffect, useRef, type Ref } from 'react'
 import type { OutcomeView } from '../decide'
+import { t } from '../i18n'
 import { toastSpace } from '../modal'
 
 /**
@@ -59,7 +60,7 @@ export function ResultToast({
         <span>{view.text}</span>
       </div>
       <button type="button" className="btn" onClick={onClose}>
-        知道了
+        {t('知道了')}
       </button>
     </div>
   )

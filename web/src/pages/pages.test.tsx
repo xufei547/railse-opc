@@ -1,16 +1,34 @@
 import type { ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { MemoryRouter } from 'react-router'
-import { describe, expect, it } from 'vitest'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ConfirmSheet } from '../components/Confirm'
+import { setLang } from '../i18n'
 import type { PushControl } from '../push'
+import type { State } from '../store'
 import { StoreProvider } from '../StoreProvider'
-import type { Machine, RequestView, Rule } from '../types'
+import type { Machine, RequestView, Rule, Status } from '../types'
 import { History, HistoryCard } from './History'
 import { MachineRow, Machines } from './Machines'
 import { RuleCard, Rules } from './Rules'
-import { RequestBody, RequestHead } from './Request'
+import { RequestBody, RequestHead, RequestPage } from './Request'
 import { NotificationView, Settings } from './Settings'
+
+// SSR 不跑 effect，拿不到 hub 的数据：要渲染有数据的页面时，在真实 store 的 state 上盖几个字段（默认不盖）
+const store = vi.hoisted(() => ({ over: null as Partial<State> | null }))
+vi.mock('../StoreProvider', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../StoreProvider')>()
+  return {
+    ...mod,
+    useStore: () => {
+      const s = mod.useStore()
+      return store.over ? { ...s, state: { ...s.state, ...store.over } } : s
+    },
+  }
+})
+afterEach(() => {
+  store.over = null
+})
 
 const noop = () => {}
 const inRouter = (node: ReactNode, path = '/') => renderToStaticMarkup(<MemoryRouter initialEntries={[path]}>{node}</MemoryRouter>)
@@ -180,6 +198,7 @@ describe('RuleCard', () => {
     const html = card(rule({ source: 'learned', hit_count: 3, created_from: 'abcdef0123456789', yaml: 'id: x\nmatch: "<b>"\n' }))
     expect(html).toContain('<span class="tag plain">学来的</span>')
     expect(html).toContain('命中 3 次')
+    expect(html).toMatch(/命中 3 次，来自请求 <a href="\/r\/abcdef0123456789"[^>]*>abcdef01<\/a>/)
     expect(html).toContain('href="/r/abcdef0123456789"')
     expect(html).toContain('>abcdef01</a>')
     expect(html).toMatch(/<details><summary>规则原文<\/summary><pre class="block mono">id: x\nmatch: &quot;&lt;b&gt;&quot;\n<\/pre><\/details>/)
@@ -413,5 +432,187 @@ describe('四个页面的首屏（还没数据）', () => {
     ] as const) {
       expect(page(node, path)).not.toContain('style=')
     }
+  })
+})
+
+describe('有数据的页面（中文）', () => {
+  const page = (node: ReactNode, path: string) => inRouter(<StoreProvider onUnauthorized={noop}>{node}</StoreProvider>, path)
+
+  it('规则：启用着的高风险规则横幅（1 条与多条）、没有规则', () => {
+    store.over = { rules: [rule({ elevated: true })] }
+    expect(page(<Rules />, '/rules')).toContain('有 1 条启用着的规则能自动放行对外或不可逆的操作（下面标红的），匹配的请求不会再问你。请确认每一条都是你要的。')
+    store.over = { rules: [rule({ elevated: true }), rule({ id: 'b', elevated: true }), rule({ id: 'c' })] }
+    expect(page(<Rules />, '/rules')).toContain('有 2 条启用着的规则能自动放行')
+    store.over = { rules: [] }
+    expect(page(<Rules />, '/rules')).toContain('<div class="empty">没有规则</div>')
+  })
+
+  it('机器：还没有机器时说怎么接入', () => {
+    store.over = { machines: [] }
+    expect(page(<Machines />, '/machines')).toContain(
+      '<div class="empty">还没有机器。在 hub 上运行 <code class="mono">railse hub token</code>，再在机器上运行 <code class="mono">railse agent enroll</code>。</div>',
+    )
+  })
+})
+
+describe('英文（SSR）：页面里没有中文', () => {
+  beforeEach(() => setLang('en'))
+  afterEach(() => setLang('zh'))
+  const cjk = /[　-〿一-鿿＀-￯]/
+  const page = (node: ReactNode, path: string) => inRouter(<StoreProvider onUnauthorized={noop}>{node}</StoreProvider>, path)
+  const status = (over: Partial<Status> = {}): Status => ({
+    paused: false, pending: 2, rules_version: 7, uptime: '26h5m0s', push_enabled: true, push_subscriptions: 1,
+    machines: [{ id: 'm1', name: 'mac', online: true, last_seen: null, revoked: false }, { id: 'm2', name: 'pi', online: false, last_seen: null, revoked: false }],
+    ...over,
+  })
+
+  it('历史：卡片与首屏', () => {
+    const card = inRouter(<HistoryCard request={req({ has_redacted: true, rule_id: 'learned-git-push' })} />)
+    expect(card).toContain('<span class="tag low">Approved</span>')
+    expect(card).toContain('<span class="tag high">Hidden parts</span>')
+    const hook = inRouter(<HistoryCard request={req({ kind: 'webhook', machine_name: '', project: '', title: 'Deploy v1.2', state: 'expired', decided_by: 'timeout' })} />)
+    const html = page(<History />, '/history?state=denied')
+    expect(html).toContain('<h1>History</h1>')
+    expect(html).toContain('<span>Show</span>')
+    expect(html).toMatch(/<option value="denied" selected="">Denied<\/option>/)
+    expect(html).toContain('<div class="empty">Loading…</div>')
+    for (const h of [card, hook, html]) expect(h).not.toMatch(cjk)
+  })
+
+  it('请求详情：顶栏（没数据时、审批）与吸底的拒绝、批准', () => {
+    const empty = inRouter(<RequestHead onBack={noop} />)
+    expect(empty).toContain('aria-label="Back"')
+    expect(empty).toContain('<h1>Request</h1>')
+    const r = req({ state: 'pending', decided_by: '' })
+    const html = inRouter(
+      <>
+        <RequestHead request={r} onBack={noop} />
+        <RequestBody data={{ request: r, audit: [] }} onOpen={noop} onDone={noop} />
+      </>,
+    )
+    expect(html).toContain('<h1>Approval</h1>')
+    expect(html).toContain('<span class="tag high">Outward</span>')
+    expect(html).toMatch(/<div class="decide-bar"><button type="button" class="btn danger">Deny<\/button><button type="button" class="btn primary">Approve<\/button><\/div>/)
+    for (const h of [empty, html]) expect(h).not.toMatch(cjk)
+  })
+
+  it('请求页首屏与待答的提问', () => {
+    const first = renderToStaticMarkup(
+      <MemoryRouter initialEntries={['/r/x']}>
+        <StoreProvider onUnauthorized={noop}>
+          <Routes>
+            <Route path="/r/:id" element={<RequestPage />} />
+          </Routes>
+        </StoreProvider>
+      </MemoryRouter>,
+    )
+    expect(first).toContain('<h1>Request</h1>')
+    expect(first).toContain('Loading…')
+    expect(first).not.toMatch(cjk)
+    const r = req({
+      kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', engine_reason: '', state: 'pending', decided_by: '',
+      ask: { questions: [{ question: 'Apple or banana?', header: 'Fruit', options: [{ label: 'Apple', description: 'red' }, { label: 'Banana', description: 'yellow' }] }] },
+    })
+    const body = inRouter(<RequestBody data={{ request: r, audit: [] }} onOpen={noop} onDone={noop} />)
+    expect(body).toContain('Apple or banana?')
+    expect(body).not.toMatch(cjk)
+  })
+
+  it('规则：卡片、首屏、高风险横幅（单复数）、没有规则', () => {
+    const card = inRouter(<RuleCard rule={rule({ elevated: true, enabled: false, source: 'learned', hit_count: 3, created_from: 'abcdef0123456789' })} busy={false} onToggle={noop} onDelete={noop} />)
+    expect(card).toContain('<span class="tag high">Can allow high-risk actions</span>')
+    expect(card).toContain('<span class="tag plain">Disabled</span>')
+    expect(card).toMatch(/Matched 3 times · created from request <a href="\/r\/abcdef0123456789"[^>]*>abcdef01<\/a>/)
+    expect(card).toContain('<summary>Full rule</summary>')
+    expect(card).toContain('aria-label="Enable rule user-allow-deploy"')
+    expect(card).toContain('<span aria-hidden="true">Enable</span>')
+    expect(card).toMatch(/aria-label="Delete rule user-allow-deploy"[^>]*>Delete<\/button>/)
+    const loading = page(<Rules />, '/rules')
+    expect(loading).toContain('<h1>Rules</h1>')
+    expect(loading).toContain('download="railse-rules.yaml">Export</a>')
+    expect(loading).toMatch(/>Import<\/button>/)
+    expect(loading).toContain('New rules come from')
+    expect(loading).toContain('<div class="empty">Loading…</div>')
+    store.over = { rules: [rule({ elevated: true })] }
+    const one = page(<Rules />, '/rules')
+    expect(one).toContain('1 enabled rule can automatically allow outward or destructive actions')
+    store.over = { rules: [rule({ elevated: true }), rule({ id: 'b', elevated: true })] }
+    const two = page(<Rules />, '/rules')
+    expect(two).toContain('2 enabled rules can automatically allow outward or destructive actions')
+    store.over = { rules: [] }
+    const none = page(<Rules />, '/rules')
+    expect(none).toContain('<div class="empty">No rules yet</div>')
+    for (const h of [card, loading, one, two, none]) expect(h).not.toMatch(cjk)
+  })
+
+  it('机器：行（在线、离线没版本、已吊销）、首屏、还没有机器', () => {
+    const row = (m: Machine) => renderToStaticMarkup(<MachineRow machine={m} busy={false} onRevoke={noop} />)
+    const on = row(machine())
+    expect(on).toContain('aria-label="Online"')
+    expect(on).toContain('Version 0.4.0 · Online · Enrolled ')
+    expect(on).toMatch(/aria-label="Revoke mac-mini"[^>]*>Revoke<\/button>/)
+    const off = row(machine({ online: false, agent_version: '' }))
+    expect(off).toContain('aria-label="Offline"')
+    expect(off).toContain('Version unknown · Last seen ')
+    const revoked = row(machine({ revoked: true }))
+    expect(revoked).toContain('<span class="tag plain">Revoked</span>')
+    const loading = page(<Machines />, '/machines')
+    expect(loading).toContain('<h1>Machines</h1>')
+    expect(loading).toContain('<div class="empty">Loading…</div>')
+    store.over = { machines: [] }
+    const none = page(<Machines />, '/machines')
+    expect(none).toContain(
+      '<div class="empty">No machines yet. Run <code class="mono">railse hub token</code> on the hub, then <code class="mono">railse agent enroll</code> on the machine.</div>',
+    )
+    store.over = { machines: [machine()] }
+    const list = page(<Machines />, '/machines')
+    for (const h of [on, off, revoked, loading, none, list]) expect(h).not.toMatch(cjk)
+  })
+
+  it('通知区块：每种状态', () => {
+    const ctl = (over: Partial<PushControl>): PushControl => ({
+      status: 'off', reason: '', publicKey: 'BAEC', busy: false,
+      enable: async () => null, disable: async () => null, test: async () => null, refresh: async () => {}, ...over,
+    })
+    const view = (over: Partial<PushControl>) => renderToStaticMarkup(<NotificationView push={ctl(over)} act={async () => {}} />)
+    const buttons = (html: string) => [...html.matchAll(/<button[^>]*>([^<]*)<\/button>/g)].map((m) => m[1])
+    const checking = view({ status: 'checking' })
+    expect(checking).toContain('<h2 class="section-title">Notifications</h2>')
+    expect(checking).toContain('Checking notifications on this device…')
+    expect(buttons(view({ status: 'off' }))).toEqual(['Turn on notifications'])
+    expect(buttons(view({ status: 'on' }))).toEqual(['Send a test notification', 'Turn off notifications'])
+    expect(buttons(view({ status: 'stale' }))).toEqual(['Turn notifications back on', 'Clear old subscription'])
+    expect(buttons(view({ status: 'denied' }))).toEqual(['Check again'])
+    const unknown = view({ status: 'unknown', reason: 'hub down' })
+    expect(unknown).toContain('notifications: hub down')
+    expect(buttons(unknown)).toEqual(['Retry'])
+    expect(view({ status: 'hub_disabled', reason: 'no public URL' })).toContain('enabled on this hub: no public URL')
+    // hub 给的原因是中文常量：英文整句取英文，不透出
+    const disabled = view({ status: 'hub_disabled', reason: 'hub 没有配置 --public-url，推送停用' })
+    expect(disabled).toContain("Push isn&#x27;t enabled on this hub: it was started without --public-url.")
+    expect(disabled).not.toMatch(cjk)
+    const ios = view({ status: 'need_standalone' })
+    expect(ios).toContain('Add to Home Screen')
+    expect(ios).toContain('iOS 16.4')
+    for (const s of ['checking', 'unsupported', 'need_standalone', 'hub_disabled', 'denied', 'off', 'on', 'stale', 'unknown'] as const) {
+      for (const reason of ['', 'r']) expect(view({ status: s, reason }), `${s} ${reason}`).not.toMatch(cjk)
+    }
+  })
+
+  it('设置：首屏与有状态时（出错横幅、hub 信息、退出登录）', () => {
+    const first = page(<Settings />, '/settings')
+    expect(first).toContain('<h1>Settings</h1>')
+    expect(first).toContain('Pause auto-approval')
+    expect(first).toContain('>Log out</button>')
+    store.over = { status: status(), error: 'hub down' }
+    const html = page(<Settings />, '/settings')
+    expect(html).toContain('the status: hub down')
+    expect(html).toContain('>Retry</button>')
+    expect(html).toContain('<dt>Rules version</dt><dd>7</dd>')
+    expect(html).toContain('<dt>Machines online</dt><dd>1 / 2</dd>')
+    expect(html).toContain('<dt>Pending</dt><dd>2</dd>')
+    expect(html).toContain('<dt>Uptime</dt><dd>1 day 2 hours</dd>')
+    expect(html).toContain('>Language</h2>')
+    for (const h of [first, html]) expect(h).not.toMatch(cjk)
   })
 })

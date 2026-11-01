@@ -5,7 +5,9 @@
 
 const ICON = '/icons/icon-192.png'
 const DEFAULT_TITLE = 'Railse'
-const FALLBACK_BODY = '有新消息，点开查看'
+// 语言只有 zh/en 两档：浏览器语言 zh 开头用中文，其余英文（与 hub 对订阅 lang 的归一一致）
+const NAV_LANG = (self.navigator && self.navigator.language) || ''
+const FALLBACK_BODY = /^zh/i.test(NAV_LANG) ? '有新消息，点开查看' : 'New message, tap to open'
 const DEFAULT_TAG = 'railse'
 const TEST_TAG = 'railse-test'
 
@@ -187,7 +189,7 @@ async function resubscribe(event) {
     sub = await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
   }
   const json = { 'Content-Type': 'application/json' }
-  const r = await fetch('/api/push/subscribe', { method: 'POST', credentials: 'same-origin', headers: json, body: JSON.stringify(sub.toJSON()) })
+  const r = await fetch('/api/push/subscribe', { method: 'POST', credentials: 'same-origin', headers: json, body: JSON.stringify({ ...sub.toJSON(), lang: NAV_LANG }) })
   if (!r.ok) return
   if (old && old.endpoint && old.endpoint !== sub.endpoint) {
     await fetch('/api/push/subscribe', { method: 'DELETE', credentials: 'same-origin', headers: json, body: JSON.stringify({ endpoint: old.endpoint }) })

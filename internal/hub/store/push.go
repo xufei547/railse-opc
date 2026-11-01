@@ -21,6 +21,8 @@ type PushSubscription struct {
 	Failures  int
 	// FirstFailedAt 是这一轮连续失败的第一次失败时刻（timeLayout），没有在失败时为 nil。
 	FirstFailedAt *string
+	// Lang 是推送文案语言：zh 或 en。
+	Lang string
 	// Broken 表示 keys 列解不开（迁移来的旧行、手改的库）：P256dh、Auth 为空。这样的行照样列出、不让整个列表失败，
 	// 由调用方记日志并删掉。
 	Broken bool
@@ -31,11 +33,11 @@ type pushKeys struct {
 	Auth   string `json:"auth"`
 }
 
-const pushCols = "id, endpoint, keys, user_agent, created_at, last_ok_at, failures, first_failed_at"
+const pushCols = "id, endpoint, keys, user_agent, created_at, last_ok_at, failures, first_failed_at, lang"
 
-// UpsertPushSubscription 按端点登记或更新订阅：同一端点重新订阅时换 keys 与 UA，连续失败与 first_failed_at 归零，id、created_at 不变。
+// UpsertPushSubscription 按端点登记或更新订阅：同一端点重新订阅时换 keys、UA 与 lang，连续失败与 first_failed_at 归零，id、created_at 不变。
 // 一条语句写入并扫回写进去的行（RETURNING）：不会在写与读之间被别处删掉而返回 ErrNotFound。
-func (s *Store) UpsertPushSubscription(endpoint, p256dh, auth, userAgent string) (PushSubscription, error) {
+func (s *Store) UpsertPushSubscription(endpoint, p256dh, auth, userAgent, lang string) (PushSubscription, error) {
 	if endpoint == "" || p256dh == "" || auth == "" {
 		return PushSubscription{}, errors.New("订阅缺 endpoint 或 keys")
 	}
@@ -43,9 +45,9 @@ func (s *Store) UpsertPushSubscription(endpoint, p256dh, auth, userAgent string)
 	if err != nil {
 		return PushSubscription{}, err
 	}
-	p, err := scanPush(s.db.QueryRow(`INSERT INTO push_subscriptions(id, endpoint, keys, user_agent, created_at) VALUES(?, ?, ?, ?, ?)
-		ON CONFLICT(endpoint) DO UPDATE SET keys = excluded.keys, user_agent = excluded.user_agent, failures = 0, first_failed_at = NULL
-		RETURNING `+pushCols, NewID(), endpoint, string(keys), userAgent, Now()))
+	p, err := scanPush(s.db.QueryRow(`INSERT INTO push_subscriptions(id, endpoint, keys, user_agent, created_at, lang) VALUES(?, ?, ?, ?, ?, ?)
+		ON CONFLICT(endpoint) DO UPDATE SET keys = excluded.keys, user_agent = excluded.user_agent, lang = excluded.lang, failures = 0, first_failed_at = NULL
+		RETURNING `+pushCols, NewID(), endpoint, string(keys), userAgent, Now(), lang))
 	if err != nil {
 		return PushSubscription{}, fmt.Errorf("登记推送订阅: %w", err)
 	}
@@ -56,7 +58,7 @@ func (s *Store) UpsertPushSubscription(endpoint, p256dh, auth, userAgent string)
 func scanPush(row interface{ Scan(...any) error }) (PushSubscription, error) {
 	var p PushSubscription
 	var keys string
-	if err := row.Scan(&p.ID, &p.Endpoint, &keys, &p.UserAgent, &p.CreatedAt, &p.LastOkAt, &p.Failures, &p.FirstFailedAt); err != nil {
+	if err := row.Scan(&p.ID, &p.Endpoint, &keys, &p.UserAgent, &p.CreatedAt, &p.LastOkAt, &p.Failures, &p.FirstFailedAt, &p.Lang); err != nil {
 		return PushSubscription{}, err
 	}
 	var k pushKeys

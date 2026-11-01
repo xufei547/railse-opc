@@ -10,6 +10,7 @@ import { RequestDetails } from '../components/RequestAttrs'
 import { ResultToast } from '../components/ResultToast'
 import { keepDecided, outcomeView, type Attempt, type Detail, type Outcome, type Verdict } from '../decide'
 import { kindLabel, riskLabel, riskTone } from '../format'
+import { t } from '../i18n'
 import { useStore } from '../StoreProvider'
 import type { RequestView } from '../types'
 
@@ -46,7 +47,7 @@ function RequestDetail({ id }: { id: string }) {
           setError(null)
           return
         }
-        setError(e instanceof ApiError ? e.message : '加载失败')
+        setError(e instanceof ApiError ? e.message : t('加载失败'))
       }
     }),
   )
@@ -60,7 +61,7 @@ function RequestDetail({ id }: { id: string }) {
   useEffect(() => {
     if (missing && action) {
       setAction(null)
-      setOutcome({ kind: 'gone', message: '这条请求已不存在，决定面板已关闭' })
+      setOutcome({ kind: 'gone', message: t('这条请求已不存在，决定面板已关闭') })
     }
   }, [missing, action])
 
@@ -91,7 +92,7 @@ function RequestDetail({ id }: { id: string }) {
       setOutcome({ kind: 'done', request: updated })
     } else {
       // 已处理、已过期、机器已吊销（409），没有这条（404），或面板开着时有了结果：告诉用户为什么，并重新加载
-      setOutcome({ kind: 'gone', message: message || '这条请求已经决定不了', attempted, sent })
+      setOutcome({ kind: 'gone', message: message || t('这条请求已经决定不了'), attempted, sent })
     }
     void load()
     void reload()
@@ -106,22 +107,22 @@ function RequestDetail({ id }: { id: string }) {
       <div className={view ? 'page has-toast' : 'page'}>
         {error && (
           <Banner tone="warn">
-            {data ? `刷新失败：${error}` : error}
+            {data ? t('刷新失败：{reason}', { reason: error }) : error}
             <button type="button" className="btn" onClick={() => void load()}>
-              重试
+              {t('重试')}
             </button>
           </Banner>
         )}
         {missing && (
           <div className="empty">
-            <p>没有这条请求</p>
-            <Link to="/">回收件箱</Link>
+            <p>{t('没有这条请求')}</p>
+            <Link to="/">{t('回收件箱')}</Link>
           </div>
         )}
         {data && <RequestBody data={data} onOpen={open} onDone={onDone} />}
-        {!data && !missing && !error && <div className="empty">加载中…</div>}
+        {!data && !missing && !error && <div className="empty">{t('加载中…')}</div>}
       </div>
-      {view && <ResultToast view={view} onClose={() => setOutcome(null)} raised={canDecide} ref={toast} />}
+      {view && <ResultToast view={view} onClose={() => setOutcome(null)} raised={canDecide || (r?.kind === 'ask' && r.state === 'pending')} ref={toast} />}
       {r && action && <DecideSheet key={action} request={r} action={action} onClose={() => setAction(null)} onDone={onDone} />}
     </>
   )
@@ -136,10 +137,10 @@ function decidable(r: RequestView): boolean {
 export function RequestHead({ request: r, onBack }: { request?: RequestView; onBack: () => void }) {
   return (
     <header className="topbar">
-      <button type="button" className="back" onClick={onBack} aria-label="返回">
+      <button type="button" className="back" onClick={onBack} aria-label={t('返回')}>
         ‹
       </button>
-      <h1>{r ? kindLabel(r.kind) : '请求'}</h1>
+      <h1>{r ? kindLabel(r.kind) : t('请求')}</h1>
       {r?.kind === 'permission' && <span className={`tag ${riskTone(r.risk)}`}>{riskLabel(r.risk)}</span>}
     </header>
   )
@@ -168,10 +169,10 @@ export function RequestBody({
       {decidable(r) && (
         <div className="decide-bar">
           <button type="button" className="btn danger" onClick={() => onOpen('deny')}>
-            拒绝
+            {t('拒绝')}
           </button>
           <button type="button" className="btn primary" onClick={() => onOpen('allow')}>
-            批准
+            {t('批准')}
           </button>
         </div>
       )}

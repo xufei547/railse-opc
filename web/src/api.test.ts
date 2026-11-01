@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, hub, request, requestTimeoutMs, setUnauthorizedHandler } from './api'
+import { setLang } from './i18n'
 
 type Call = { url: string; init: RequestInit }
 function stubFetch(status: number, body: unknown, calls: Call[] = []) {
@@ -101,7 +102,7 @@ describe('request', () => {
   it('推送接口的路径、方法与请求体', async () => {
     const calls = stubFetch(204, undefined)
     const sub = { endpoint: 'https://push.example/x', keys: { p256dh: 'p', auth: 'a' } }
-    await hub.pushSubscribe(sub)
+    await hub.pushSubscribe(sub, 'zh')
     await hub.pushUnsubscribe('https://push.example/x')
     await hub.pushTest('https://push.example/x')
     expect(calls.map((c) => [c.init.method, c.url])).toEqual([
@@ -109,7 +110,7 @@ describe('request', () => {
       ['DELETE', '/api/push/subscribe'],
       ['POST', '/api/push/test'],
     ])
-    expect(JSON.parse(calls[0]?.init.body as string)).toEqual(sub)
+    expect(JSON.parse(calls[0]?.init.body as string)).toEqual({ ...sub, lang: 'zh' })
     expect(JSON.parse(calls[1]?.init.body as string)).toEqual({ endpoint: 'https://push.example/x' })
   })
 
@@ -216,5 +217,33 @@ describe('request', () => {
     const err = await hub.login('x').catch((e: unknown) => e)
     expect((err as ApiError).status).toBe(401)
     expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+})
+
+describe('英文：网页自己写的错误句按语言，hub 的原文照带', () => {
+  afterEach(() => setLang('zh'))
+  const message = async (p: Promise<unknown>) => ((await p.catch((e: unknown) => e)) as ApiError).message
+
+  it('连不上、非 2xx 不是 JSON、2xx 不是 JSON、hub 的错误原文', async () => {
+    setLang('en')
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new TypeError('Failed to fetch')
+    }))
+    expect(await message(hub.inbox())).toBe("Can't reach the hub. Check your network.")
+    stubFetch(502, 'bad gateway')
+    expect(await message(request('GET', '/api/x'))).toBe('Request failed (502)')
+    stubFetch(200, '<html></html>')
+    expect(await message(request('GET', '/api/x'))).toBe("The hub's response wasn't JSON (200)")
+    stubFetch(422, { error: '不能记住：含凭据的命令不能记住' })
+    expect(await message(hub.propose('r1', { action: 'allow' }))).toBe('不能记住：含凭据的命令不能记住')
+  })
+
+  it('超时', async () => {
+    setLang('en')
+    vi.useFakeTimers()
+    stubHangingFetch()
+    const p = message(hub.status())
+    await vi.advanceTimersByTimeAsync(requestTimeoutMs)
+    expect(await p).toBe("Request timed out: the hub didn't respond. Check your network.")
   })
 })

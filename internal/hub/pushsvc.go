@@ -285,10 +285,20 @@ func (p *pushService) deliver(ctx context.Context, r store.Request) {
 		p.s.log.Printf("请求 %s 的推送没有发出: %v", clip(r.ID), err)
 		return
 	}
-	msg, err := p.message(r)
-	if err != nil {
-		p.s.log.Printf("组请求 %s 的推送载荷: %v", clip(r.ID), err)
-		return
+	// “谁、在哪”只算一次（读视图与机器表），再按订阅语言各组一次载荷；组不出来的语言跟原来一样记日志并整批放弃。
+	who := p.who(r)
+	msgs := map[string][]byte{}
+	for _, sub := range subs {
+		lang := normalizeLang(sub.Lang)
+		if _, ok := msgs[lang]; ok {
+			continue
+		}
+		msg, err := pushMessage(r, who, lang)
+		if err != nil {
+			p.s.log.Printf("组请求 %s 的推送载荷: %v", clip(r.ID), err)
+			return
+		}
+		msgs[lang] = msg
 	}
 	o := push.Options{TTL: pushTTLFor(r, p.now()), Urgency: "high"}
 	if push.ValidTopic(r.ID) {
@@ -304,7 +314,7 @@ func (p *pushService) deliver(ctx context.Context, r store.Request) {
 					results <- pushFailed
 					continue
 				}
-				out, _ := p.sendOne(ctx, sub, msg, o)
+				out, _ := p.sendOne(ctx, sub, msgs[normalizeLang(sub.Lang)], o)
 				results <- out
 			}
 		})
@@ -451,6 +461,15 @@ func redactURL(err error) error {
 	return &redactedErr{msg: msg, err: err}
 }
 
+// normalizeLang 把订阅时网页或 Service Worker 给的语言标签收成 zh / en：空（旧网页、旧 SW）与 zh* 为 zh，其余 en。
+func normalizeLang(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" || strings.HasPrefix(s, "zh") {
+		return "zh"
+	}
+	return "en"
+}
+
 // pushPayload 是推送的明文：网页的 service worker 拿它 showNotification，点开去 url。
 type pushPayload struct {
 	ID    string `json:"id"`
@@ -463,18 +482,46 @@ type pushPayload struct {
 // cliNames 是推送文案里 CLI 的显示名，键是 sessions.tool。
 var cliNames = map[string]string{"claude": "Claude Code", "codex": "Codex", "gemini": "Gemini CLI"}
 
-// riskVerbs 是 permission 标题“<CLI> 要<动词>”里按风险等级取的动词。
-var riskVerbs = map[string]string{
-	"network":          "联网",
-	"outward":          "往外发",
-	"destructive":      "做不可逆的操作",
-	"write_outside":    "改项目外的文件",
-	"unknown":          "跑一个没见过的命令",
-	"write_in_project": "改项目里的文件",
-	"read":             "读文件",
+// pushCopy 是一种语言下推送文案的零件（CLI 名两种语言相同，不在这里）。
+type pushCopy struct {
+	// 注意空格是零件自带的：wants 前后都要有空格（zh " 要" 只有前导，en " wants to " 前后都有，后面直接接动词）；
+	// asking、waitingTerminal 只有前导空格；more 返回值带前导空格。新增语言别漏。
+	wants, asking, waitingTerminal, webhook string // 标题：<CLI>+wants+动词 / <CLI>+asking / <CLI>+waitingTerminal / webhook 整句
+	tapApprove, tapAnswer                   string // 正文第二行
+	verbs                                   map[string]string
+	fallbackVerb                            string
+	more                                    func(n int) string // 多题时第一行的后缀，n 是总题数
 }
 
-// cliName 是 sessions.tool 的显示名；空（没有会话、查不到）与不认识的都叫“Agent”。
+// pushCopies 的 zh 一栏与改造前的字面量一字不差；en 是 README.en.md 语气的短句。
+var pushCopies = map[string]pushCopy{
+	"zh": {
+		wants: " 要", asking: " 在问你", waitingTerminal: " 在终端等你回答", webhook: "工作流等你批准",
+		tapApprove: "点开批准或拒绝", tapAnswer: "点开回答",
+		verbs: map[string]string{"network": "联网", "outward": "往外发", "destructive": "做不可逆的操作", "write_outside": "改项目外的文件",
+			"unknown": "跑一个没见过的命令", "write_in_project": "改项目里的文件", "read": "读文件"},
+		fallbackVerb: "做一件事",
+		more:         func(n int) string { return fmt.Sprintf(" 等 %d 题", n) },
+	},
+	"en": {
+		wants: " wants to ", asking: " is asking you", waitingTerminal: " is waiting for you in the terminal", webhook: "A workflow is waiting for your approval",
+		tapApprove: "Open to approve or deny", tapAnswer: "Open to answer",
+		verbs: map[string]string{"network": "use the network", "outward": "push or publish", "destructive": "do something irreversible", "write_outside": "edit files outside the project",
+			"unknown": "run an unfamiliar command", "write_in_project": "edit files in the project", "read": "read files"},
+		fallbackVerb: "do something",
+		more:         func(n int) string { return fmt.Sprintf(" (+%d more)", n-1) },
+	},
+}
+
+// copyFor 取语言对应的文案；不认识的语言按中文（调用方一般已 normalizeLang）。
+func copyFor(lang string) pushCopy {
+	if c, ok := pushCopies[lang]; ok {
+		return c
+	}
+	return pushCopies["zh"]
+}
+
+// cliName 是 sessions.tool 的显示名；空（没有会话、查不到）与不认识的都叫“Agent”。两种语言相同。
 func cliName(tool string) string {
 	if n, ok := cliNames[tool]; ok {
 		return n
@@ -482,12 +529,13 @@ func cliName(tool string) string {
 	return "Agent"
 }
 
-// riskVerb 是风险等级对应的动词；不认识的是“做一件事”。
-func riskVerb(risk string) string {
-	if v, ok := riskVerbs[risk]; ok {
+// riskVerb 是风险等级对应的动词；不认识的是“做一件事”（en：do something）。
+func riskVerb(risk, lang string) string {
+	c := copyFor(lang)
+	if v, ok := c.verbs[risk]; ok {
 		return v
 	}
-	return "做一件事"
+	return c.fallbackVerb
 }
 
 // machineLabel 去掉机器名结尾的 .local（macOS 的默认主机名带它，不分大小写）；整个名字就是 .local 时原样返回。
@@ -506,10 +554,10 @@ type pushWho struct {
 	Many                   bool
 }
 
-// message 组一条请求的推送载荷：CLI、机器名、项目名取自请求视图，再数一下接入且未吊销的机器。
-func (p *pushService) message(r store.Request) ([]byte, error) {
+// who 取一条请求的 pushWho：CLI、机器名、项目名取自请求视图，再数一下接入且未吊销的机器。与语言无关，一次投递算一次。
+func (p *pushService) who(r store.Request) pushWho {
 	v := p.s.view(r)
-	return pushMessage(r, pushWho{Tool: v.CLI, Project: v.Project, Machine: v.MachineName, Many: p.manyMachines()})
+	return pushWho{Tool: v.CLI, Project: v.Project, Machine: v.MachineName, Many: p.manyMachines()}
 }
 
 // manyMachines 判断接入且未吊销的机器是否有不止一个名字（同名的重新接入不算，去掉 .local 后比）；读库出错时记日志、当作多台（宁可标题多带机器名）。
@@ -528,8 +576,9 @@ func (p *pushService) manyMachines() bool {
 	return len(names) > 1
 }
 
-// pushMessage 组推送载荷 {"id","kind","title","body","url":"/r/<id>"}，文案说人话（谁要做什么、在哪、该干嘛）：
-//   - permission：标题“<CLI> 要<动词>”（动词按风险，见 riskVerbs），正文两行：载荷摘要、“点开批准或拒绝”（摘要为空，如不带网址的搜索时，第一行写工具名）；
+// pushMessage 按 lang（zh / en，文案零件见 pushCopies）组推送载荷 {"id","kind","title","body","url":"/r/<id>"}，文案说人话（谁要做什么、在哪、该干嘛）。
+// 下面的文案以中文版为例，英文版的对应句子在 pushCopies 里：
+//   - permission：标题“<CLI> 要<动词>”（动词按风险，见 pushCopies 的 verbs），正文两行：载荷摘要、“点开批准或拒绝”（摘要为空，如不带网址的搜索时，第一行写工具名）；
 //   - ask：标题“<CLI> 在问你”，正文两行：第一道题的题面（题数大于 1 时加“ 等 N 题”）、“点开回答”；
 //   - question：标题“<CLI> 在终端等你回答”，正文是问题；
 //   - webhook：标题“工作流等你批准”，正文是来源给的标题。
@@ -537,7 +586,8 @@ func (p *pushService) manyMachines() bool {
 // permission、ask、question 的标题有项目时追加“ · 项目”，w.Many 时再追加“ · 机器名”（去掉 .local），超长的砍法见 pushTitle。
 // 项目名、机器名、摘要、题面、问题与 webhook 标题都先并成一行（控制字符、换行当空白，去掉不可见的格式字符）再按字符截断；
 // permission、ask 正文的两行在规整之后才用 \n 连接。编码后仍保证不超过 push.MaxPlaintext（见 encodePushPayload）。
-func pushMessage(r store.Request, w pushWho) ([]byte, error) {
+func pushMessage(r store.Request, w pushWho, lang string) ([]byte, error) {
+	c := copyFor(lang)
 	machine := ""
 	if w.Many {
 		machine = machineLabel(w.Machine)
@@ -545,20 +595,20 @@ func pushMessage(r store.Request, w pushWho) ([]byte, error) {
 	var title, body string
 	switch r.Kind {
 	case "permission":
-		title = pushTitle(cliName(w.Tool)+" 要"+riskVerb(r.Risk), w.Project, machine)
+		title = pushTitle(cliName(w.Tool)+c.wants+riskVerb(r.Risk, lang), w.Project, machine)
 		summary := clean(payloadSummary(r.Payload), pushSummaryLen)
 		if summary == "" {
 			summary = clean(r.ToolName, pushSummaryLen)
 		}
-		body = joinNonEmpty("\n", summary, "点开批准或拒绝")
+		body = joinNonEmpty("\n", summary, c.tapApprove)
 	case "ask":
-		title = pushTitle(cliName(w.Tool)+" 在问你", w.Project, machine)
-		body = joinNonEmpty("\n", askSummary(r.Ask), "点开回答")
+		title = pushTitle(cliName(w.Tool)+c.asking, w.Project, machine)
+		body = joinNonEmpty("\n", askSummary(r.Ask, lang), c.tapAnswer)
 	case "question":
-		title = pushTitle(cliName(w.Tool)+" 在终端等你回答", w.Project, machine)
+		title = pushTitle(cliName(w.Tool)+c.waitingTerminal, w.Project, machine)
 		body = clean(r.Title, pushBodyLen)
 	default:
-		title = "工作流等你批准"
+		title = c.webhook
 		body = clean(r.Title, pushBodyLen)
 	}
 	m := pushPayload{ID: r.ID, Kind: r.Kind, Title: truncate(title, pushTitleLen), Body: truncate(body, pushBodyLen), URL: "/r/" + url.PathEscape(r.ID)}
@@ -586,13 +636,13 @@ func pushTitle(head, project, machine string) string {
 
 // askSummary 是提问推送正文的第一行：第一道题的题面（并成一行、截到 pushSummaryLen 个字符），题数大于 1 时加“ 等 N 题”。
 // 没有题目时为空。
-func askSummary(a *proto.Ask) string {
+func askSummary(a *proto.Ask, lang string) string {
 	if a == nil || len(a.Questions) == 0 {
 		return ""
 	}
 	first := clean(a.Questions[0].Question, pushSummaryLen)
 	if n := len(a.Questions); n > 1 {
-		first += fmt.Sprintf(" 等 %d 题", n)
+		first += copyFor(lang).more(n)
 	}
 	return first
 }

@@ -1,3 +1,4 @@
+import { t } from './i18n'
 import type { Frame } from './ws'
 import type { Inbox, Machine, RequestView, Rule, Status } from './types'
 
@@ -171,7 +172,7 @@ export function waitingIDs(state: Pick<State, 'loaded' | 'pending' | 'questions'
 export function groupByProject(list: RequestView[]): { key: string; project: string; items: RequestView[] }[] {
   const groups = new Map<string, { project: string; items: RequestView[] }>()
   for (const r of list) {
-    const [key, project] = r.kind === 'webhook' ? ['w', 'webhook'] : r.project ? [`p:${r.project}`, r.project] : ['n', '其他']
+    const [key, project] = r.kind === 'webhook' ? ['w', 'webhook'] : r.project ? [`p:${r.project}`, r.project] : ['n', t('其他')]
     const g = groups.get(key)
     if (g) g.items.push(r)
     else groups.set(key, { project, items: [r] })

@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { historyFilters, historyTag, maxLimit, moreState, pageSize, parseFilter } from './history'
+import { setLang } from './i18n'
 import type { RequestView } from './types'
 
 function req(over: Partial<RequestView> = {}): RequestView {
@@ -14,12 +15,12 @@ function req(over: Partial<RequestView> = {}): RequestView {
 
 describe('historyFilters 与 parseFilter', () => {
   it('筛选项：全部在前，覆盖 pending 以外的每个状态，问题与完成用 recorded', () => {
-    expect(historyFilters[0]).toEqual(['', '全部'])
-    expect(historyFilters.map(([v]) => v)).toEqual([
+    expect(historyFilters()[0]).toEqual(['', '全部'])
+    expect(historyFilters().map(([v]) => v)).toEqual([
       '', 'approved', 'denied', 'answered', 'auto_allowed', 'auto_denied', 'passthrough', 'expired', 'cancelled', 'recorded',
     ])
-    expect(Object.fromEntries(historyFilters)['answered']).toBe('已回答')
-    expect(Object.fromEntries(historyFilters)['recorded']).toBe('问题与完成')
+    expect(Object.fromEntries(historyFilters())['answered']).toBe('已回答')
+    expect(Object.fromEntries(historyFilters())['recorded']).toBe('问题与完成')
   })
 
   it('地址栏里的 state：认得的原样，没有或不认得的当作全部', () => {
@@ -73,5 +74,44 @@ describe('moreState', () => {
   it('500 条也满了：说明只显示最近 500 条；不满就是全部', () => {
     expect(moreState(500, 500, 500)).toBe('capped')
     expect(moreState(321, 500, 500)).toBe('none')
+  })
+})
+
+describe('history 的英文', () => {
+  afterEach(() => setLang('zh'))
+
+  it('筛选项的十个标签', () => {
+    setLang('en')
+    expect(historyFilters()).toEqual([
+      ['', 'All'],
+      ['approved', 'Approved'],
+      ['denied', 'Denied'],
+      ['answered', 'Answered'],
+      ['auto_allowed', 'Auto-approved'],
+      ['auto_denied', 'Auto-denied'],
+      ['passthrough', 'Handed back'],
+      ['expired', 'Expired'],
+      ['cancelled', 'Cancelled'],
+      ['recorded', 'Terminal questions and finished turns'],
+    ])
+    expect(JSON.stringify(historyFilters())).not.toMatch(/[　-〿一-鿿＀-￯]/)
+    // 解析地址栏不看语言
+    expect(parseFilter('recorded')).toBe('recorded')
+    expect(parseFilter('pending')).toBe('')
+  })
+
+  it('切换语言后再取就是新语言（不是 import 时定死的表）', () => {
+    expect(historyFilters()[0]).toEqual(['', '全部'])
+    setLang('en')
+    expect(historyFilters()[0]).toEqual(['', 'All'])
+  })
+
+  it('卡片标签', () => {
+    setLang('en')
+    expect(historyTag(req({ state: 'approved' }))).toEqual({ label: 'Approved', tone: 'low' })
+    expect(historyTag(req({ state: 'denied' }))).toEqual({ label: 'Denied', tone: 'high' })
+    expect(historyTag(req({ kind: 'ask', state: 'answered' }))).toEqual({ label: 'Answered', tone: 'low' })
+    expect(historyTag(req({ kind: 'question', state: 'recorded' }))).toEqual({ label: 'Terminal question', tone: 'plain' })
+    expect(historyTag(req({ kind: 'done', state: 'recorded' }))).toEqual({ label: 'Done', tone: 'plain' })
   })
 })

@@ -232,7 +232,7 @@ func TestHubPasswordClearsPushSubscriptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.UpsertPushSubscription("https://web.push.apple.com/lost-phone", "p", "a", ""); err != nil {
+	if _, err := st.UpsertPushSubscription("https://web.push.apple.com/lost-phone", "p", "a", "", "zh"); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
@@ -643,7 +643,7 @@ func TestHubVapidPrintsAndRotates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if _, err := st.UpsertPushSubscription("https://web.push.apple.com/x", "p", "a", ""); err != nil {
+	if _, err := st.UpsertPushSubscription("https://web.push.apple.com/x", "p", "a", "", "zh"); err != nil {
 		t.Fatal(err)
 	}
 	priv, _, _ := st.GetSetting("vapid_private")

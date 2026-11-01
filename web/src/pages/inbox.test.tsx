@@ -1,11 +1,17 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { RequireAuth, Shell } from '../App'
+import { setLang } from '../i18n'
 import type { PushControl } from '../push'
+import type { State } from '../store'
 import { StoreProvider } from '../StoreProvider'
+import type { RequestView } from '../types'
 import { Inbox } from './Inbox'
 
 const push = vi.hoisted(() => ({ status: 'off' as PushControl['status'] }))
+// SSR 不跑 effect，拿不到 hub 的数据：要渲染有数据的收件箱时，在真实 store 的 state 上盖几个字段
+const store = vi.hoisted(() => ({ over: null as Partial<State> | null }))
 
 vi.mock('../push', () => ({
   usePush: (): PushControl => ({
@@ -20,6 +26,17 @@ vi.mock('../push', () => ({
   }),
 }))
 
+vi.mock('../StoreProvider', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../StoreProvider')>()
+  return {
+    ...mod,
+    useStore: () => {
+      const s = mod.useStore()
+      return store.over ? { ...s, state: { ...s.state, ...store.over } } : s
+    },
+  }
+})
+
 const render = () =>
   renderToStaticMarkup(
     <MemoryRouter>
@@ -29,16 +46,32 @@ const render = () =>
     </MemoryRouter>,
   )
 
+const mac = { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', platform: 'MacIntel', maxTouchPoints: 0 }
+
 beforeEach(() => {
   // 收件箱渲染时判断要不要显示 iOS 加到主屏幕的引导：给个电脑浏览器
-  vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', platform: 'MacIntel', maxTouchPoints: 0 })
+  vi.stubGlobal('navigator', mac)
   vi.stubGlobal('window', { matchMedia: () => ({ matches: false }) })
 })
 
 afterEach(() => {
   push.status = 'off'
+  store.over = null
+  setLang('zh')
   vi.unstubAllGlobals()
 })
+
+function req(over: Partial<RequestView> = {}): RequestView {
+  return {
+    id: 'r1', machine_id: 'm', session_id: 's', cli: 'claude', kind: 'permission', tool_name: 'Bash',
+    payload: { type: 'shell', command: 'git push origin main' }, risk: 'outward', project_root: '/p/blog', engine_reason: '',
+    state: 'pending', decided_by: '', decision_note: '', rule_id: '', turn_id: '', cli_session_id: '', title: '',
+    created_at: '2026-10-23T10:00:00.000000000Z', expires_at: null, decided_at: null, delivered_at: null,
+    machine_name: 'mac', project: 'blog', has_redacted: false, ...over,
+  }
+}
+
+const cjk = /[　-〿一-鿿＀-￯]/
 
 describe('收件箱的通知失效横幅', () => {
   it('本机有订阅但 hub 没有（stale）：红色横幅，链接去设置', () => {
@@ -52,5 +85,97 @@ describe('收件箱的通知失效横幅', () => {
       push.status = s
       expect(render(), s).not.toContain('通知已失效')
     }
+  })
+})
+
+describe('英文（SSR）：收件箱没有中文', () => {
+  it('空的收件箱', () => {
+    setLang('en')
+    store.over = { loaded: true, connected: true }
+    const html = render()
+    expect(html).toContain('<h1>Inbox</h1>')
+    expect(html).toContain('aria-label="Live updates connected"')
+    expect(html).toContain('<div class="empty">Nothing waiting for you</div>')
+    expect(html).not.toMatch(cjk)
+  })
+
+  it('加载中', () => {
+    setLang('en')
+    const html = render()
+    expect(html).toContain('<div class="empty">Loading…</div>')
+    expect(html).toContain('aria-label="Live updates disconnected"')
+    expect(html).not.toMatch(cjk)
+  })
+
+  it('断线、出错、已暂停、通知失效、iPhone 引导；等你回答与待处理（含没有项目的一组）', () => {
+    setLang('en')
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)', platform: 'iPhone', maxTouchPoints: 5 })
+    push.status = 'stale'
+    store.over = {
+      loaded: true,
+      connected: false,
+      error: 'hub said no',
+      status: { paused: true, pending: 2, rules_version: 1, machines: [], uptime: '1h0m0s', push_enabled: true, push_subscriptions: 1 },
+      questions: [req({ id: 'q1', kind: 'question', tool_name: '', payload: { type: '' }, risk: '', state: 'recorded', title: 'Delete the old branch?' })],
+      pending: [
+        req({ id: 'p1' }),
+        req({ id: 'p2', kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', project: '', project_root: '', ask: { questions: [{ question: 'Apple or banana?', options: [{ label: 'Apple' }] }] } }),
+      ],
+    }
+    const html = render()
+    expect(html).toContain('Live updates disconnected. Reconnecting; new requests may show up late.')
+    expect(html).toContain('>Refresh</button>')
+    expect(html).toContain('hub said no')
+    expect(html).toContain('>Retry</button>')
+    // 句子与链接之间英文要空格
+    expect(html).toMatch(/still come here\)\. <a href="\/settings"[^>]*>Go to Settings<\/a>/)
+    expect(html).toMatch(/this device\. <a href="\/settings"[^>]*>Turn them back on in Settings<\/a><\/div>/)
+    expect(html).toContain('Add to Home Screen')
+    expect(html).toContain('>Got it</button>')
+    expect(html).toContain('<h2 class="section-title">Waiting for your answer</h2>')
+    expect(html).toContain('<h2 class="section-title">Pending</h2>')
+    expect(html).toContain('Other<span class="count">1</span>')
+    expect(html).not.toMatch(cjk)
+  })
+})
+
+describe('外壳：连接中、导航、没有这个页面', () => {
+  const shell = () =>
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={['/nope']}>
+        <StoreProvider onUnauthorized={() => {}}>
+          <Shell />
+        </StoreProvider>
+      </MemoryRouter>,
+    )
+  const connecting = () =>
+    renderToStaticMarkup(
+      <MemoryRouter>
+        <RequireAuth>
+          <div />
+        </RequireAuth>
+      </MemoryRouter>,
+    )
+
+  it('中文', () => {
+    store.over = { pending: [req({ id: 'a' }), req({ id: 'b' })] }
+    const html = shell()
+    expect(html).toContain('<div class="empty">没有这个页面</div>')
+    expect(html).toMatch(/收件箱<span class="badge" aria-label="2 条等你处理">2<\/span><\/a>/)
+    for (const label of ['历史', '规则', '机器', '设置']) expect(html).toContain(`>${label}</a>`)
+    expect(connecting()).toContain('<div class="empty">正在连接 hub…</div>')
+  })
+
+  it('英文：没有中文；导航里的机器是复数', () => {
+    setLang('en')
+    store.over = { pending: [req({ id: 'a' }), req({ id: 'b' })] }
+    const html = shell()
+    expect(html).toContain('<div class="empty">Page not found</div>')
+    expect(html).toMatch(/Inbox<span class="badge" aria-label="2 waiting for you">2<\/span><\/a>/)
+    for (const label of ['History', 'Rules', 'Machines', 'Settings']) expect(html).toContain(`>${label}</a>`)
+    expect(html).not.toMatch(cjk)
+    const c = connecting()
+    expect(c).toContain('<div class="empty">Connecting to the hub…</div>')
+    expect(c).not.toMatch(cjk)
   })
 })

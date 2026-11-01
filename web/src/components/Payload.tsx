@@ -1,4 +1,6 @@
+import { Fragment } from 'react'
 import { engineReasonLabel, riskLabel, riskTone } from '../format'
+import { splitVars, t } from '../i18n'
 import type { Payload as PayloadT, RequestView } from '../types'
 import { AskAnswers } from './AskForm'
 
@@ -23,28 +25,39 @@ function prettyArgs(args: unknown): string {
 export function RedactedWarning({ request: r }: { request: RequestView }) {
   let detail: string
   if (r.kind === 'permission' && r.payload.type === 'shell') {
-    detail =
-      '凭据等敏感值已换成 <redacted>。不在引号里的值只隐藏到空格或 shell 符号（; | & 等）为止；引号里的值、注释和 heredoc 正文整段隐藏，' +
-      '可能连带盖住其中的命令。'
+    detail = t(
+      '凭据等敏感值已换成 <redacted>。不在引号里的值只隐藏到空格或 shell 符号（; | & 等）为止；引号里的值、注释和 heredoc 正文整段隐藏，可能连带盖住其中的命令。',
+    )
   } else if (r.kind === 'webhook') {
-    detail = '标题或描述里的凭据等敏感值已换成 <redacted>。'
+    detail = t('标题或描述里的凭据等敏感值已换成 <redacted>。')
   } else {
-    detail = '凭据等敏感值已换成 <redacted>。'
+    detail = t('凭据等敏感值已换成 <redacted>。')
   }
-  const where = r.kind === 'webhook' ? '去来源系统' : '去终端'
+  // 去哪核对、能不能记住：整句按种类取（英文语序不同，不拿“去终端”拼）
+  let check: string
+  if (r.kind === 'webhook') check = t('拿不准就去来源系统核对原文再决定。')
+  else if (r.kind === 'permission') check = t('拿不准就去终端核对原文再决定。这类请求不能“记住”。')
+  else check = t('拿不准就去终端核对原文再决定。')
   return (
     <div className="banner warn loud" role="alert">
-      <strong className="banner-title">含被隐藏的部分，下面展示的不是原文</strong>
+      <strong className="banner-title">{t('含被隐藏的部分，下面展示的不是原文')}</strong>
       <p>{detail}</p>
       {r.kind === 'permission' && (
         <p>
-          引擎是按原文定级的：<span className={`tag ${riskTone(r.risk)}`}>{riskLabel(r.risk)}</span>
-          {r.engine_reason && <>，理由：{engineReasonLabel(r.engine_reason)}</>}
+          {splitVars(
+            r.engine_reason ? t('引擎是按原文定级的：{risk}，理由：{reason}') : t('引擎是按原文定级的：{risk}'),
+            {
+              risk: (
+                <span key="risk" className={`tag ${riskTone(r.risk)}`}>
+                  {riskLabel(r.risk)}
+                </span>
+              ),
+              reason: <Fragment key="reason">{engineReasonLabel(r.engine_reason)}</Fragment>,
+            },
+          )}
         </p>
       )}
-      <p>
-        拿不准就{where}核对原文再决定。{r.kind === 'permission' && '这类请求不能“记住”。'}
-      </p>
+      <p>{check}</p>
     </div>
   )
 }
@@ -60,7 +73,7 @@ export function Payload({ payload: p }: { payload: PayloadT }) {
       return (
         <>
           <dl className="kv">
-            <dt>路径</dt>
+            <dt>{t('路径')}</dt>
             <dd className="mono">{p.path}</dd>
           </dl>
           {p.diff_preview && <pre className="block mono">{p.diff_preview}</pre>}
@@ -69,7 +82,7 @@ export function Payload({ payload: p }: { payload: PayloadT }) {
     case 'network':
       return (
         <dl className="kv">
-          <dt>请求</dt>
+          <dt>{t('请求')}</dt>
           <dd className="mono">
             {p.method ? p.method + ' ' : ''}
             {p.url}
@@ -80,9 +93,9 @@ export function Payload({ payload: p }: { payload: PayloadT }) {
       return (
         <>
           <dl className="kv">
-            <dt>服务</dt>
+            <dt>{t('服务')}</dt>
             <dd className="mono">{p.server}</dd>
-            <dt>工具</dt>
+            <dt>{t('工具')}</dt>
             <dd className="mono">{p.tool}</dd>
           </dl>
           {p.args !== undefined && p.args !== null && <pre className="block mono">{prettyArgs(p.args)}</pre>}

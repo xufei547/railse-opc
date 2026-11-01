@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ApiError } from './api'
 import {
   canConfirm,
@@ -6,6 +6,8 @@ import {
   classifyError,
   decideBody,
   doneMessage,
+  draftLead,
+  draftScope,
   draftShown,
   goneMessage,
   initSheet,
@@ -17,9 +19,11 @@ import {
   retryable,
   scopeOptions,
   sheetReducer,
+  sheetTitle,
   type SheetAction,
   type SheetState,
 } from './decide'
+import { setLang } from './i18n'
 import type { Draft, RequestView } from './types'
 
 function req(over: Partial<RequestView> = {}): RequestView {
@@ -446,5 +450,130 @@ describe('keepDecided', () => {
   it('换了一条请求时取新的', () => {
     const other = { request: req({ id: 'r2', state: 'pending' }), audit: [] }
     expect(keepDecided(a({ state: 'approved' }), other)).toBe(other)
+  })
+})
+
+describe('decide 的英文', () => {
+  beforeEach(() => setLang('en'))
+  afterEach(() => setLang('zh'))
+  const han = /[　-〿一-鿿＀-￯]/
+  const ask = (over: Partial<RequestView>) =>
+    req({ kind: 'ask', tool_name: 'AskUserQuestion', payload: { type: '' }, risk: '', decided_by: 'user', ...over })
+
+  it('不能记住的原因、备注说明、范围', () => {
+    expect(rememberBlock(req({ kind: 'webhook' }))).toBe("Webhook requests can't be remembered")
+    expect(rememberBlock(req({ kind: 'question' }))).toBe("This kind of request can't be remembered")
+    expect(rememberBlock(req({ has_redacted: true }))).toBe("Requests with hidden parts can't be remembered")
+    expect(noteHint(req())).toBe("Note (only kept in the audit log; the agent won't see it)")
+    expect(noteHint(req({ kind: 'webhook' }))).toBe('Note (kept in the audit log and sent back to the source system)')
+    expect(scopeOptions(req())).toEqual([
+      { scope: 'project', label: 'Project blog', disabled: false },
+      { scope: 'global', label: 'All projects', disabled: false },
+    ])
+    expect(scopeOptions(req({ project_root: '', project: '' }))[0]).toEqual({ scope: 'project', label: 'Project', disabled: true })
+  })
+
+  it('决定成功的提示以 Approved / Denied 开头', () => {
+    expect(doneMessage(req({ state: 'approved' }))).toBe('Approved; the decision is on its way to the agent')
+    expect(doneMessage(req({ state: 'approved', rule_id: 'learned-net-1' }))).toBe('Approved, and remembered as rule learned-net-1; the decision is on its way to the agent')
+    expect(doneMessage(req({ state: 'denied' }))).toBe('Denied; the decision is on its way to the agent')
+    expect(doneMessage(req({ state: 'denied', rule_id: 'user-deny-x', delivered_at: '2026-10-23T10:00:05Z' }))).toBe('Denied, and remembered as rule user-deny-x; delivered to the agent')
+    expect(doneMessage(req({ state: 'approved', kind: 'webhook' }))).toBe('Approved; sending it back to the source')
+    expect(doneMessage(req({ state: 'approved', kind: 'webhook', delivered_at: '2026-10-23T10:00:05Z' }))).toBe('Approved; sent back to the source')
+    expect(doneMessage(req({ state: 'approved', delivered_at: '2026-10-23T10:00:05Z' }))).toBe('Approved; delivered to the agent')
+  })
+
+  it('提问作答与交回终端的提示', () => {
+    expect(doneMessage(ask({ state: 'answered' }))).toBe('Answered; the answer is on its way to the agent')
+    expect(doneMessage(ask({ state: 'answered', delivered_at: '2026-10-31T10:00:05Z' }))).toBe('Answered; delivered to the agent')
+    expect(doneMessage(ask({ state: 'passthrough' }))).toBe('Handed back to the terminal; the agent will ask you there')
+  })
+
+  it('别处有了结果、你的决定已生效', () => {
+    expect(goneMessage(req({ state: 'cancelled', decided_by: 'terminal' }))).toBe(
+      'This request was already handled elsewhere: Cancelled (The agent moved on; nothing for you to do)',
+    )
+    expect(goneMessage(req({ state: 'expired', decided_by: '' }))).toBe('This request was already handled elsewhere: Expired')
+    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }), 'allow')).toBe('Your decision took effect: Approved')
+    expect(goneMessage(req({ state: 'approved', decided_by: 'user' }), 'deny')).toBe('This request was already handled elsewhere: Approved (You approved)')
+  })
+
+  it('outcomeView 的标题', () => {
+    const approved = req({ state: 'approved', decided_by: 'user' })
+    expect(outcomeView({ kind: 'done', request: approved }, approved)).toEqual({ tone: 'ok', title: 'Done', text: 'Approved; the decision is on its way to the agent' })
+    expect(outcomeView({ kind: 'gone', message: 'x', attempted: 'allow' }, approved)).toMatchObject({ tone: 'ok', title: 'Your decision took effect' })
+    expect(outcomeView({ kind: 'gone', message: 'x', attempted: 'deny' }, approved)).toEqual({
+      tone: 'warn',
+      title: "Didn't take effect",
+      text: 'This request was already handled elsewhere: Approved (You approved)',
+    })
+    expect(outcomeView({ kind: 'gone', message: 'Request expired' }, null)).toEqual({ tone: 'warn', title: "Didn't take effect", text: 'Request expired' })
+  })
+
+  it('别处已有结果时不露 hub 的中文原文', () => {
+    const hubTexts = ['请求已经处理过', '请求已过期', '机器已吊销，请求已取消']
+    for (const message of hubTexts) {
+      // 重拉到了结果：用结果句（哪怕不是用户自己决定的）
+      const settled = outcomeView({ kind: 'gone', message, attempted: 'allow' }, req({ state: 'cancelled', decided_by: 'machine_revoked' }))
+      expect(settled.text).toBe('This request was already handled elsewhere: Cancelled (This machine has been revoked)')
+      expect(JSON.stringify(settled)).not.toMatch(han)
+      // 还没重拉：不带结果的那一句
+      const pending = outcomeView({ kind: 'gone', message }, null)
+      expect(pending.text).toBe('This request was already handled elsewhere')
+      expect(JSON.stringify(pending)).not.toMatch(han)
+    }
+    expect(outcomeView({ kind: 'gone', message: '请求已过期' }, req({ state: 'expired', decided_by: '' })).text).toBe('This request was already handled elsewhere: Expired')
+    // 请求还是 pending 时，网页自己给的英文提示照用
+    expect(outcomeView({ kind: 'gone', message: 'Request expired' }, req())).toMatchObject({ text: 'Request expired' })
+  })
+
+  it('所有提示都没有中文', () => {
+    const views = [
+      outcomeView({ kind: 'done', request: ask({ state: 'answered' }) }, null),
+      outcomeView({ kind: 'gone', message: 'x', attempted: 'answer', sent: { q: 'A' } }, ask({ state: 'passthrough' })),
+      doneMessage(req({ state: 'expired' })),
+      goneMessage(req({ state: 'cancelled', decided_by: 'machine_revoked' }), 'allow'),
+    ]
+    expect(JSON.stringify(views)).not.toMatch(han)
+  })
+})
+
+describe('面板标题与草案摘要（整句按语言取）', () => {
+  afterEach(() => setLang('zh'))
+  const shell = req({ payload: { type: 'shell', command: 'git push' } })
+  const hook = req({ kind: 'webhook', payload: { type: 'other', tool: 'webhook' } })
+  const ask = req({ kind: 'ask', payload: { type: '' } })
+
+  it('中文与原来逐字相同', () => {
+    expect(sheetTitle('allow', shell)).toBe('批准这次命令')
+    expect(sheetTitle('deny', req({ payload: { type: 'file_write', path: '/a' } }))).toBe('拒绝这次文件改动')
+    expect(sheetTitle('allow', req())).toBe('批准这次访问')
+    expect(sheetTitle('deny', req({ payload: { type: 'mcp', server: 'fs', tool: 'w' } }))).toBe('拒绝这次MCP 调用')
+    expect(sheetTitle('allow', hook)).toBe('批准这次请求')
+    expect(sheetTitle('deny', ask)).toBe('拒绝这次操作')
+    expect(draftLead('allow', 'shell')).toBe('将放行命令')
+    expect(draftLead('deny', 'network')).toBe('将拒绝访问')
+    expect(draftLead('allow', 'mcp')).toBe('将放行MCP 调用')
+    expect(draftLead('deny', 'file_write')).toBe('将拒绝文件改动')
+    expect(draftLead('allow', 'something')).toBe('将放行')
+    expect(draftScope('project', 'blog')).toBe('（仅项目 blog）')
+    expect(draftScope('global', 'blog')).toBe('（所有项目）')
+  })
+
+  it('英文', () => {
+    setLang('en')
+    expect(sheetTitle('allow', shell)).toBe('Approve this command')
+    expect(sheetTitle('deny', req({ payload: { type: 'file_write', path: '/a' } }))).toBe('Deny this file edit')
+    expect(sheetTitle('allow', req())).toBe('Approve this network access')
+    expect(sheetTitle('deny', req({ payload: { type: 'mcp', server: 'fs', tool: 'w' } }))).toBe('Deny this MCP call')
+    expect(sheetTitle('allow', hook)).toBe('Approve this request')
+    expect(sheetTitle('deny', ask)).toBe('Deny this action')
+    expect(draftLead('allow', 'shell')).toBe('Will allow commands matching')
+    expect(draftLead('deny', 'network')).toBe('Will deny network access matching')
+    expect(draftLead('allow', 'mcp')).toBe('Will allow MCP calls matching')
+    expect(draftLead('deny', 'file_write')).toBe('Will deny file edits matching')
+    expect(draftLead('allow', 'something')).toBe('Will allow')
+    expect(draftScope('project', 'blog')).toBe(' (project blog only)')
+    expect(draftScope('global', 'blog')).toBe(' (all projects)')
   })
 })

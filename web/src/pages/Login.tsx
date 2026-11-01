@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import { ApiError, hub } from '../api'
 import { safeNext } from '../auth'
+import { t } from '../i18n'
 
 export function Login() {
   const [password, setPassword] = useState('')
@@ -18,10 +19,10 @@ export function Login() {
       await hub.login(password)
       navigate(safeNext(params.get('next')), { replace: true })
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) setError('密码不对')
-      else if (err instanceof ApiError && err.status === 503) setError('hub 还没有设置密码，或正忙，请稍后再试；没设过密码的请在服务器上运行 railse hub password')
-      else if (err instanceof ApiError && err.status === 429) setError('试得太频繁，一分钟后再试')
-      else setError(err instanceof Error ? err.message : '登录失败')
+      if (err instanceof ApiError && err.status === 401) setError(t('密码不对'))
+      else if (err instanceof ApiError && err.status === 503) setError(t('hub 还没有设置密码，或正忙，请稍后再试；没设过密码的请在服务器上运行 railse hub password'))
+      else if (err instanceof ApiError && err.status === 429) setError(t('试得太频繁，一分钟后再试'))
+      else setError(err instanceof Error ? err.message : t('登录失败'))
     } finally {
       setBusy(false)
     }
@@ -42,12 +43,12 @@ export function Login() {
         aria-hidden="true"
       />
       <label className="field">
-        <span>密码</span>
+        <span>{t('密码')}</span>
         <input className="input" type="password" name="password" autoComplete="current-password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
       </label>
       {error && <div className="error" role="alert">{error}</div>}
       <button className="btn primary block" type="submit" disabled={busy || password === ''}>
-        {busy ? '正在登录…' : '登录'}
+        {busy ? t('正在登录…') : t('登录')}
       </button>
     </form>
   )

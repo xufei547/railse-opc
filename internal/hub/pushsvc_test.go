@@ -488,7 +488,7 @@ func TestPushBrokenSubscriptionRemoved(t *testing.T) {
 	body, _ := subscribeJSON(t, f.srv.URL+"/p/good")
 	subscribe(t, h, ck, body)
 	// 库里的 keys 是可解析的 JSON，但不是合法的 P-256 点
-	if _, err := h.st.UpsertPushSubscription(f.srv.URL+"/p/bad", "AAAA", "AAAA", ""); err != nil {
+	if _, err := h.st.UpsertPushSubscription(f.srv.URL+"/p/bad", "AAAA", "AAAA", "", "zh"); err != nil {
 		t.Fatal(err)
 	}
 	h.srv.announceNew(store.Request{ID: "b1", Kind: "webhook", Title: "x", CreatedAt: store.Now()})
@@ -532,13 +532,13 @@ func TestPushMessagePermissionVerbs(t *testing.T) {
 	} {
 		r := perm
 		r.Risk = c.risk
-		if m := decode(pushMessage(r, pushWho{Tool: "claude"})); m.Title != c.want {
+		if m := decode(pushMessage(r, pushWho{Tool: "claude"}, "zh")); m.Title != c.want {
 			t.Errorf("风险 %q：标题 %q，要 %q", c.risk, m.Title, c.want)
 		}
 	}
 	perm.Risk = "network"
 	for tool, want := range map[string]string{"claude": "Claude Code 要联网", "codex": "Codex 要联网", "gemini": "Gemini CLI 要联网", "": "Agent 要联网", "cursor": "Agent 要联网"} {
-		if m := decode(pushMessage(perm, pushWho{Tool: tool})); m.Title != want {
+		if m := decode(pushMessage(perm, pushWho{Tool: tool}, "zh")); m.Title != want {
 			t.Errorf("tool %q：标题 %q，要 %q", tool, m.Title, want)
 		}
 	}
@@ -550,7 +550,7 @@ func TestPushMessagePermissionWhereAndBody(t *testing.T) {
 	decode := decodePush(t)
 	perm := store.Request{ID: "r1", Kind: "permission", ToolName: "Bash", Risk: "network",
 		Payload: policy.Payload{Type: policy.PayloadShell, Command: "  curl\n\thttps://example.com "}}
-	m := decode(pushMessage(perm, pushWho{Tool: "claude", Project: "blog", Machine: "xufeideMacBook-Air.local"}))
+	m := decode(pushMessage(perm, pushWho{Tool: "claude", Project: "blog", Machine: "xufeideMacBook-Air.local"}, "zh"))
 	if m.ID != "r1" || m.Kind != "permission" || m.Title != "Claude Code 要联网 · blog" || m.Body != "curl https://example.com\n点开批准或拒绝" || m.URL != "/r/r1" {
 		t.Fatalf("单机: %+v", m)
 	}
@@ -566,7 +566,7 @@ func TestPushMessagePermissionWhereAndBody(t *testing.T) {
 		{pushWho{Tool: "codex", Machine: "mac.local", Many: true}, "Codex 要联网 · mac"},
 		{pushWho{Tool: "codex", Project: "blog", Many: true}, "Codex 要联网 · blog"},
 	} {
-		if m := decode(pushMessage(perm, c.w)); m.Title != c.want {
+		if m := decode(pushMessage(perm, c.w, "zh")); m.Title != c.want {
 			t.Errorf("%+v：标题 %q，要 %q", c.w, m.Title, c.want)
 		}
 	}
@@ -586,14 +586,14 @@ func TestPushMessagePermissionWhereAndBody(t *testing.T) {
 	} {
 		r := perm
 		r.ToolName, r.Payload = c.tool, c.pl
-		m := decode(pushMessage(r, pushWho{Tool: "claude"}))
+		m := decode(pushMessage(r, pushWho{Tool: "claude"}, "zh"))
 		if m.Body != c.want || strings.Contains(m.Body, "other") {
 			t.Errorf("%s：正文 %q，要 %q", c.pl.Type, m.Body, c.want)
 		}
 	}
 	long := perm
 	long.Payload.Command = strings.Repeat("x", 500)
-	m = decode(pushMessage(long, pushWho{Tool: "claude"}))
+	m = decode(pushMessage(long, pushWho{Tool: "claude"}, "zh"))
 	if first, second, ok := strings.Cut(m.Body, "\n"); !ok || first != strings.Repeat("x", pushSummaryLen) || second != "点开批准或拒绝" {
 		t.Fatalf("摘要应截到 %d 个字符、第二行仍在: %q", pushSummaryLen, m.Body)
 	}
@@ -603,24 +603,24 @@ func TestPushMessagePermissionWhereAndBody(t *testing.T) {
 func TestPushMessageQuestionAndWebhook(t *testing.T) {
 	decode := decodePush(t)
 	q := store.Request{ID: "q1", Kind: "question", Title: "要不要\n继续？"}
-	m := decode(pushMessage(q, pushWho{Tool: "gemini", Project: "blog", Machine: "mac.local", Many: true}))
+	m := decode(pushMessage(q, pushWho{Tool: "gemini", Project: "blog", Machine: "mac.local", Many: true}, "zh"))
 	if m.Title != "Gemini CLI 在终端等你回答 · blog · mac" || m.Body != "要不要 继续？" || m.URL != "/r/q1" || m.Kind != "question" {
 		t.Fatalf("question: %+v", m)
 	}
-	if m := decode(pushMessage(q, pushWho{Tool: "claude", Project: "blog", Machine: "mac"})); m.Title != "Claude Code 在终端等你回答 · blog" {
+	if m := decode(pushMessage(q, pushWho{Tool: "claude", Project: "blog", Machine: "mac"}, "zh")); m.Title != "Claude Code 在终端等你回答 · blog" {
 		t.Fatalf("question 单机: %+v", m)
 	}
-	if m := decode(pushMessage(q, pushWho{})); m.Title != "Agent 在终端等你回答" {
+	if m := decode(pushMessage(q, pushWho{}, "zh")); m.Title != "Agent 在终端等你回答" {
 		t.Fatalf("question 查不到会话: %+v", m)
 	}
 	wh := store.Request{ID: "w1", Kind: "webhook", Title: "部署到生产"}
-	if m := decode(pushMessage(wh, pushWho{Project: "x", Machine: "mac", Many: true})); m.Title != "工作流等你批准" || m.Body != "部署到生产" || m.URL != "/r/w1" {
+	if m := decode(pushMessage(wh, pushWho{Project: "x", Machine: "mac", Many: true}, "zh")); m.Title != "工作流等你批准" || m.Body != "部署到生产" || m.URL != "/r/w1" {
 		t.Fatalf("webhook: %+v", m)
 	}
 	// id 里的特殊字符在 url 里转义
 	odd := wh
 	odd.ID = "a/b?c"
-	if m := decode(pushMessage(odd, pushWho{})); m.ID != "a/b?c" || m.URL != "/r/a%2Fb%3Fc" {
+	if m := decode(pushMessage(odd, pushWho{}, "zh")); m.ID != "a/b?c" || m.URL != "/r/a%2Fb%3Fc" {
 		t.Fatalf("转义: %+v", m)
 	}
 }
@@ -668,7 +668,7 @@ func TestPushMessageLooksUpToolAndMachines(t *testing.T) {
 		Payload: policy.Payload{Type: policy.PayloadShell, Command: "curl https://example.com"}, ProjectRoot: "/p/blog"}
 	title := func() string {
 		t.Helper()
-		b, err := h.srv.push.message(r)
+		b, err := pushMessage(r, h.srv.push.who(r), "zh")
 		return decodePush(t)(b, err).Title
 	}
 	if got := title(); got != "Codex 要联网 · blog" {
@@ -708,31 +708,33 @@ func TestPushMessageLooksUpToolAndMachines(t *testing.T) {
 func TestPushMessageWorstCase(t *testing.T) {
 	long := strings.Repeat("\x01\"\\ \U0001F600<&>\n", 1000)
 	id := strings.Repeat("a", maxRequestIDLen)
-	for _, kind := range []string{"permission", "question", "webhook"} {
-		r := store.Request{ID: id, Kind: kind, ToolName: long, Payload: policy.Payload{Type: policy.PayloadShell, Command: long}, Risk: long, Title: long, ProjectRoot: "/" + long}
-		b, err := pushMessage(r, pushWho{Tool: long, Project: projectName(r.ProjectRoot), Machine: long, Many: true})
-		if err != nil {
-			t.Fatalf("%s: %v", kind, err)
-		}
-		if len(b) > push.MaxPlaintext || !utf8.Valid(b) {
-			t.Fatalf("%s: 载荷 %d 字节", kind, len(b))
-		}
-		var m map[string]string
-		if err := json.Unmarshal(b, &m); err != nil || m["id"] != id || m["url"] != "/r/"+id || m["kind"] != kind {
-			t.Fatalf("%s: %v %v", kind, m, err)
-		}
-		if strings.ContainsAny(m["title"], "\x01\n ") {
-			t.Fatalf("%s: 标题不应带控制字符与换行: %q", kind, m["title"])
-		}
-		body := m["body"]
-		if kind == "permission" {
-			// 正文只有规整之后拼上的那一个换行，第二行是固定提示
-			first, second, ok := strings.Cut(body, "\n")
-			if !ok || second != "点开批准或拒绝" || strings.ContainsAny(first, "\x01\n ") {
-				t.Fatalf("%s: 正文 %q", kind, body)
+	for _, lang := range []string{"zh", "en"} {
+		for _, kind := range []string{"permission", "question", "webhook"} {
+			r := store.Request{ID: id, Kind: kind, ToolName: long, Payload: policy.Payload{Type: policy.PayloadShell, Command: long}, Risk: long, Title: long, ProjectRoot: "/" + long}
+			b, err := pushMessage(r, pushWho{Tool: long, Project: projectName(r.ProjectRoot), Machine: long, Many: true}, lang)
+			if err != nil {
+				t.Fatalf("%s/%s: %v", lang, kind, err)
 			}
-		} else if strings.ContainsAny(body, "\x01\n ") {
-			t.Fatalf("%s: 正文不应带控制字符与换行: %q", kind, body)
+			if len(b) > push.MaxPlaintext || !utf8.Valid(b) {
+				t.Fatalf("%s/%s: 载荷 %d 字节", lang, kind, len(b))
+			}
+			var m map[string]string
+			if err := json.Unmarshal(b, &m); err != nil || m["id"] != id || m["url"] != "/r/"+id || m["kind"] != kind {
+				t.Fatalf("%s/%s: %v %v", lang, kind, m, err)
+			}
+			if strings.ContainsAny(m["title"], "\x01\n ") {
+				t.Fatalf("%s/%s: 标题不应带控制字符与换行: %q", lang, kind, m["title"])
+			}
+			body := m["body"]
+			if kind == "permission" {
+				// 正文只有规整之后拼上的那一个换行，第二行是固定提示
+				first, second, ok := strings.Cut(body, "\n")
+				if !ok || second != pushCopies[lang].tapApprove || strings.ContainsAny(first, "\x01\n ") {
+					t.Fatalf("%s/%s: 正文 %q", lang, kind, body)
+				}
+			} else if strings.ContainsAny(body, "\x01\n ") {
+				t.Fatalf("%s/%s: 正文不应带控制字符与换行: %q", lang, kind, body)
+			}
 		}
 	}
 }
@@ -1157,13 +1159,15 @@ func TestRunListenFailureStopsPushWorker(t *testing.T) {
 func TestPushMessageZeroWidthPadding(t *testing.T) {
 	r := store.Request{ID: "r1", Kind: "permission", ToolName: "Bash", Risk: "destructive",
 		Payload: policy.Payload{Type: policy.PayloadShell, Command: strings.Repeat("\u200b", 640) + strings.Repeat(" \t\n", 700) + "rm -rf ~/x"}}
-	b, err := pushMessage(r, pushWho{Tool: "claude"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]string
-	if err := json.Unmarshal(b, &m); err != nil || m["body"] != "rm -rf ~/x\n点开批准或拒绝" {
-		t.Fatalf("摘要: %q %v", m["body"], err)
+	for _, lang := range []string{"zh", "en"} {
+		b, err := pushMessage(r, pushWho{Tool: "claude"}, lang)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]string
+		if err := json.Unmarshal(b, &m); err != nil || m["body"] != "rm -rf ~/x\n"+pushCopies[lang].tapApprove {
+			t.Fatalf("%s 摘要: %q %v", lang, m["body"], err)
+		}
 	}
 	// 截断后不留尾随空格
 	if got := clean("abcd efgh", 5); got != "abcd" {
@@ -1242,21 +1246,21 @@ func TestPushDeliverStopsOnCancel(t *testing.T) {
 func TestPushMessageAsk(t *testing.T) {
 	decode := decodePush(t)
 	one := store.Request{ID: "a1", Kind: "ask", ToolName: "AskUserQuestion", Ask: testAsk("用方案\nA 还是 B？")}
-	m := decode(pushMessage(one, pushWho{Tool: "claude", Project: "blog", Machine: "mac.local", Many: true}))
+	m := decode(pushMessage(one, pushWho{Tool: "claude", Project: "blog", Machine: "mac.local", Many: true}, "zh"))
 	if m.Kind != "ask" || m.Title != "Claude Code 在问你 · blog · mac" || m.Body != "用方案 A 还是 B？\n点开回答" || m.URL != "/r/a1" {
 		t.Fatalf("一道题: %+v", m)
 	}
-	if m := decode(pushMessage(one, pushWho{})); m.Title != "Agent 在问你" {
+	if m := decode(pushMessage(one, pushWho{}, "zh")); m.Title != "Agent 在问你" {
 		t.Fatalf("查不到会话: %+v", m)
 	}
 	three := one
 	three.Ask = testAsk("用方案 A 还是 B？", "要不要写测试？", "部署到哪？")
-	if m := decode(pushMessage(three, pushWho{Tool: "claude"})); m.Title != "Claude Code 在问你" || m.Body != "用方案 A 还是 B？ 等 3 题\n点开回答" {
+	if m := decode(pushMessage(three, pushWho{Tool: "claude"}, "zh")); m.Title != "Claude Code 在问你" || m.Body != "用方案 A 还是 B？ 等 3 题\n点开回答" {
 		t.Fatalf("三道题: %+v", m)
 	}
 	long := one
 	long.Ask = testAsk(strings.Repeat("问", 500), "第二题")
-	m = decode(pushMessage(long, pushWho{Tool: "claude"}))
+	m = decode(pushMessage(long, pushWho{Tool: "claude"}, "zh"))
 	if first, second, ok := strings.Cut(m.Body, "\n"); !ok || first != strings.Repeat("问", pushSummaryLen)+" 等 2 题" || second != "点开回答" {
 		t.Fatalf("题面应截到 %d 个字符、仍带题数与第二行: %q", pushSummaryLen, m.Body)
 	}
@@ -1299,7 +1303,121 @@ func TestAskProjectInViewAndPushTitle(t *testing.T) {
 	if v := h.srv.view(r); v.Project != "blog" {
 		t.Fatalf("请求视图的 project = %q，应为 blog", v.Project)
 	}
-	if m := decodePush(t)(h.srv.push.message(r)); m.Title != "Claude Code 在问你 · blog" {
+	if m := decodePush(t)(pushMessage(r, h.srv.push.who(r), "zh")); m.Title != "Claude Code 在问你 · blog" {
 		t.Fatalf("推送标题 = %q", m.Title)
+	}
+}
+
+func TestNormalizeLang(t *testing.T) {
+	for in, want := range map[string]string{"": "zh", "zh": "zh", "zh-CN": "zh", "ZH-tw": "zh", "en": "en", "en-US": "en", "fr": "en", " en ": "en"} {
+		if got := normalizeLang(in); got != want {
+			t.Errorf("normalizeLang(%q) = %q，想要 %q", in, got, want)
+		}
+	}
+}
+
+func TestTestPushMessageByLang(t *testing.T) {
+	decode := decodePush(t)
+	zh := decode(testPushMessage("zh"), nil)
+	en := decode(testPushMessage("en"), nil)
+	if zh.Body != "通知正常" || en.Body != "Notifications are working" || zh.Title != "Railse" || en.Title != "Railse" {
+		t.Fatalf("zh=%+v en=%+v", zh, en)
+	}
+}
+
+// 订阅接口的 lang 入库前收成 zh / en（缺省与 zh* 为 zh），测试推送按订阅语言发出。
+func TestPushSubscribeLang(t *testing.T) {
+	f := newFakePushEndpoint(t)
+	h, ck := pushHub(t, f)
+	for i, c := range []struct {
+		name string
+		lang any // nil 表示不带 lang 字段
+		want string
+	}{{"en", "en", "en"}, {"缺省", nil, "zh"}, {"zh-CN", "zh-CN", "zh"}} {
+		ep := f.srv.URL + "/p/lang" + string(rune('a'+i))
+		body, _ := subscribeJSON(t, ep)
+		var m map[string]any
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatal(err)
+		}
+		if c.lang != nil {
+			m["lang"] = c.lang
+		}
+		subscribe(t, h, ck, mustJSON(t, m))
+		sub, err := h.st.GetPushSubscription(ep)
+		if err != nil || sub.Lang != c.want {
+			t.Fatalf("%s: Lang=%q err=%v，应为 %q", c.name, sub.Lang, err, c.want)
+		}
+		if c.want == "en" { // 英文订阅的测试推送：端点收到一条，正文是英文
+			chk := mustJSON(t, map[string]string{"endpoint": ep})
+			if resp := doReq(t, "POST", h.http.URL+"/api/push/test", chk, "application/json", ck); resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("test push: %d", resp.StatusCode)
+			}
+			if f.count() != 1 {
+				t.Fatalf("端点收到 %d 次", f.count())
+			}
+		}
+	}
+	// 端点收到的是加密载荷，正文只能在组装处验：按订阅语言选文案
+	if m := decodePush(t)(testPushMessage("en"), nil); m.Body != "Notifications are working" {
+		t.Fatalf("en 正文: %q", m.Body)
+	}
+	if m := decodePush(t)(testPushMessage("zh"), nil); m.Body != "通知正常" {
+		t.Fatalf("zh 正文: %q", m.Body)
+	}
+}
+
+func TestPushMessageEnglish(t *testing.T) {
+	decode := decodePush(t)
+	perm := store.Request{ID: "r1", Kind: "permission", Risk: "network", ToolName: "Bash", Payload: policy.Payload{Type: policy.PayloadShell, Command: "curl https://example.com"}}
+	m := decode(pushMessage(perm, pushWho{Tool: "claude", Project: "blog", Machine: "xufeideMacBook-Air.local"}, "en"))
+	if m.Title != "Claude Code wants to use the network · blog" || m.Body != "curl https://example.com\nOpen to approve or deny" {
+		t.Fatalf("%+v", m)
+	}
+	m = decode(pushMessage(perm, pushWho{Tool: "gemini", Project: "blog", Machine: "mac.local", Many: true}, "en"))
+	if m.Title != "Gemini CLI wants to use the network · blog · mac" {
+		t.Fatalf("%+v", m)
+	}
+	if m := decode(pushMessage(perm, pushWho{}, "en")); m.Title != "Agent wants to use the network" {
+		t.Fatalf("%+v", m)
+	}
+	ask := store.Request{ID: "r2", Kind: "ask", Ask: &proto.Ask{Questions: []proto.Question{{Question: "Plan A or B?"}, {Question: "q2"}, {Question: "q3"}}}}
+	m = decode(pushMessage(ask, pushWho{Tool: "claude", Project: "blog"}, "en"))
+	if m.Title != "Claude Code is asking you · blog" || m.Body != "Plan A or B? (+2 more)\nOpen to answer" {
+		t.Fatalf("%+v", m)
+	}
+	one := store.Request{ID: "r2b", Kind: "ask", Ask: &proto.Ask{Questions: []proto.Question{{Question: "Plan A or B?"}}}}
+	if m := decode(pushMessage(one, pushWho{Tool: "claude"}, "en")); m.Body != "Plan A or B?\nOpen to answer" {
+		t.Fatalf("%+v", m)
+	}
+	q := store.Request{ID: "r3", Kind: "question", Title: "what next?"}
+	m = decode(pushMessage(q, pushWho{Tool: "codex", Project: "blog"}, "en"))
+	if m.Title != "Codex is waiting for you in the terminal · blog" || m.Body != "what next?" {
+		t.Fatalf("%+v", m)
+	}
+	wh := store.Request{ID: "r4", Kind: "webhook", Title: "deploy?"}
+	m = decode(pushMessage(wh, pushWho{}, "en"))
+	if m.Title != "A workflow is waiting for your approval" || m.Body != "deploy?" {
+		t.Fatalf("%+v", m)
+	}
+}
+
+func TestPushMessageEnglishVerbs(t *testing.T) {
+	decode := decodePush(t)
+	want := map[string]string{
+		"read":             "Claude Code wants to read files",
+		"write_in_project": "Claude Code wants to edit files in the project",
+		"unknown":          "Claude Code wants to run an unfamiliar command",
+		"write_outside":    "Claude Code wants to edit files outside the project",
+		"network":          "Claude Code wants to use the network",
+		"outward":          "Claude Code wants to push or publish",
+		"destructive":      "Claude Code wants to do something irreversible",
+		"":                 "Claude Code wants to do something",
+	}
+	for risk, title := range want {
+		m := decode(pushMessage(store.Request{ID: "r", Kind: "permission", Risk: risk, ToolName: "x"}, pushWho{Tool: "claude"}, "en"))
+		if m.Title != title {
+			t.Errorf("risk %q: title %q，想要 %q", risk, m.Title, title)
+		}
 	}
 }

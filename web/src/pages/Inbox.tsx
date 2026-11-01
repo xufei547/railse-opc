@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { Banner } from '../components/Banner'
 import { RequestCard } from '../components/RequestCard'
+import { lang, splitVars, t } from '../i18n'
 import { pauseCopy } from '../manage'
 import { usePush } from '../push'
 import { isIOS, isStandalone } from '../pwa'
@@ -36,20 +37,20 @@ export function Inbox() {
   return (
     <>
       <header className="topbar">
-        <h1>收件箱</h1>
+        <h1>{t('收件箱')}</h1>
         <span
           className={`dot ${state.connected ? 'on' : ''}`}
           role="img"
-          aria-label={state.connected ? '实时连接正常' : '实时连接断开'}
-          title={state.connected ? '实时连接正常' : '实时连接断开'}
+          aria-label={state.connected ? t('实时连接正常') : t('实时连接断开')}
+          title={state.connected ? t('实时连接正常') : t('实时连接断开')}
         />
       </header>
       <div className="page">
         {!state.connected && state.loaded && (
           <Banner tone="info">
-            实时连接断开，正在重连；新请求可能晚到。
+            {t('实时连接断开，正在重连；新请求可能晚到。')}
             <button type="button" className="btn" onClick={() => void reload()}>
-              刷新
+              {t('刷新')}
             </button>
           </Banner>
         )}
@@ -57,32 +58,40 @@ export function Inbox() {
           <Banner tone="warn">
             {state.error}
             <button type="button" className="btn" onClick={() => void reload()}>
-              重试
+              {t('重试')}
             </button>
           </Banner>
         )}
         {state.status?.paused && (
           <Banner tone="info">
-            {pauseCopy.banner}
-            <Link to="/settings">去设置</Link>
+            {pauseCopy().banner}
+            {/* 英文句子与后面的链接之间要空格，中文不要 */}
+            {lang() === 'en' && ' '}
+            <Link to="/settings">{t('去设置')}</Link>
           </Banner>
         )}
         {push.status === 'stale' && (
           <Banner tone="warn">
-            通知已失效，新审批不会推送到这台设备。<Link to="/settings">去设置重新开启</Link>
+            {splitVars(t('通知已失效，新审批不会推送到这台设备。{link}'), {
+              link: (
+                <Link key="link" to="/settings">
+                  {t('去设置重新开启')}
+                </Link>
+              ),
+            })}
           </Banner>
         )}
         {showGuide && (
           <Banner tone="info">
-            在 iPhone 上要先用 Safari 的“分享 → 添加到主屏幕”，再从主屏幕图标打开，才能收到通知。
+            {t('在 iPhone 上要先用 Safari 的“分享 → 添加到主屏幕”，再从主屏幕图标打开，才能收到通知。')}
             <button type="button" className="btn" onClick={dismissGuide}>
-              知道了
+              {t('知道了')}
             </button>
           </Banner>
         )}
         {state.questions.length > 0 && (
           <section>
-            <h2 className="section-title">等你回答</h2>
+            <h2 className="section-title">{t('等你回答')}</h2>
             {state.questions.map((q) => (
               <RequestCard key={q.id} request={q} />
             ))}
@@ -90,7 +99,7 @@ export function Inbox() {
         )}
         {groups.length > 0 && (
           <section>
-            <h2 className="section-title">待处理</h2>
+            <h2 className="section-title">{t('待处理')}</h2>
             {groups.map((g) => (
               <div key={g.key}>
                 <div className="group-title">
@@ -104,8 +113,8 @@ export function Inbox() {
             ))}
           </section>
         )}
-        {!state.loaded && !state.error && <div className="empty">加载中…</div>}
-        {empty && <div className="empty">没有等你处理的事</div>}
+        {!state.loaded && !state.error && <div className="empty">{t('加载中…')}</div>}
+        {empty && <div className="empty">{t('没有等你处理的事')}</div>}
       </div>
     </>
   )

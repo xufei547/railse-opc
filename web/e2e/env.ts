@@ -33,9 +33,12 @@ export function readEnv(): E2EEnv {
   return JSON.parse(raw) as E2EEnv
 }
 
-/** 子进程的环境：HOME、RAILSE_HOME、RAILSE_HUB_HOME 都指向临时目录。 */
+/**
+ * 子进程的环境：HOME、RAILSE_HOME、RAILSE_HUB_HOME 都指向临时目录。
+ * RAILSE_LANG 钉住 e2e 起的 hub、守护进程、钩子的命令行语言（免得随本机 LANG 变）；网页语言只看浏览器的 locale，不受影响。
+ */
 export function childEnv(env: Pick<E2EEnv, 'home' | 'agentDir' | 'hubDir'>): NodeJS.ProcessEnv {
-  return { ...process.env, HOME: env.home, RAILSE_HOME: env.agentDir, RAILSE_HUB_HOME: env.hubDir }
+  return { ...process.env, HOME: env.home, RAILSE_HOME: env.agentDir, RAILSE_HUB_HOME: env.hubDir, RAILSE_LANG: 'zh' }
 }
 
 function alive(pid: number): boolean {

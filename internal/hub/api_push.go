@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,8 +18,15 @@ const (
 	maxPushSubscriptions = 20
 )
 
-// testPushMessage 是 POST /api/push/test 发的那一条。
-var testPushMessage = []byte(`{"id":"test","kind":"test","title":"Railse","body":"通知正常","url":"/"}`)
+// testPushMessage 是 POST /api/push/test 发的那一条，按订阅的语言组正文。
+func testPushMessage(lang string) []byte {
+	body := "通知正常"
+	if lang == "en" {
+		body = "Notifications are working"
+	}
+	b, _ := json.Marshal(pushPayload{ID: "test", Kind: "test", Title: "Railse", Body: body, URL: "/"})
+	return b
+}
 
 // pushRoutes 注册 /api/push/*。全部要登录 cookie；写接口先过 sameOrigin（与 apiRoutes 一致）。
 // 响应只用这里拼的 map，从不编码 store.PushSubscription：订阅密钥与 VAPID 私钥不经任何接口返回。
@@ -54,6 +62,8 @@ type subscribeBody struct {
 		P256dh string `json:"p256dh"`
 		Auth   string `json:"auth"`
 	} `json:"keys"`
+	// Lang 是网页当前语言（空是旧网页），入库前过 normalizeLang。
+	Lang string `json:"lang"`
 }
 
 type endpointBody struct {
@@ -99,7 +109,7 @@ func (s *Server) handlePushSubscribe(w http.ResponseWriter, r *http.Request) {
 		s.internalErr(w, "查推送订阅", err)
 		return
 	}
-	sub, err := s.store.UpsertPushSubscription(body.Endpoint, body.Keys.P256dh, body.Keys.Auth, truncate(r.UserAgent(), pushUserAgentMax))
+	sub, err := s.store.UpsertPushSubscription(body.Endpoint, body.Keys.P256dh, body.Keys.Auth, truncate(r.UserAgent(), pushUserAgentMax), normalizeLang(body.Lang))
 	if err != nil {
 		s.internalErr(w, "登记推送订阅", err)
 		return
@@ -169,7 +179,7 @@ func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 		s.internalErr(w, "读 VAPID 密钥", err)
 		return
 	}
-	out, _ := s.push.sendOne(r.Context(), sub, testPushMessage, push.Options{TTL: pushTestTTL, Urgency: "high"})
+	out, _ := s.push.sendOne(r.Context(), sub, testPushMessage(normalizeLang(sub.Lang)), push.Options{TTL: pushTestTTL, Urgency: "high"})
 	s.audit("", "user", "", "push_test", map[string]any{"ok": out == pushSent, "origin": pushOrigin(sub.Endpoint)})
 	switch out {
 	case pushSent:

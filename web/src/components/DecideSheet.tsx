@@ -4,6 +4,8 @@ import {
   canConfirm,
   classifyError,
   decideBody,
+  draftLead,
+  draftScope,
   draftShown,
   goneMessage,
   initSheet,
@@ -13,8 +15,10 @@ import {
   retryable,
   scopeOptions,
   sheetReducer,
+  sheetTitle,
   type Verdict,
 } from '../decide'
+import { t } from '../i18n'
 import { inertSiblings } from '../modal'
 import type { RequestView } from '../types'
 
@@ -29,8 +33,6 @@ interface Props {
    */
   onDone: (updated: RequestView | null, message?: string) => void
 }
-
-const payloadNames: Record<string, string> = { shell: '命令', file_write: '文件改动', network: '访问', mcp: 'MCP 调用' }
 
 export function DecideSheet({ request, action, onClose, onDone }: Props) {
   const [s, dispatch] = useReducer(sheetReducer, undefined, () => initSheet(request, action))
@@ -70,7 +72,7 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
       },
       (e: unknown) => {
         if (!alive) return
-        const c = classifyError(e, '生成草案失败')
+        const c = classifyError(e, t('生成草案失败'))
         if (c.gone) onDoneRef.current(null, c.message)
         else dispatch({ type: 'draft_error', seq, message: c.message, retryable: retryable(e) })
       },
@@ -95,7 +97,7 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
       const updated = await hub.decide(request.id, body)
       onDoneRef.current(updated)
     } catch (e) {
-      const c = classifyError(e, '决定失败')
+      const c = classifyError(e, t('决定失败'))
       if (c.gone) onDoneRef.current(null, c.message)
       else dispatch({ type: 'failed', message: c.message })
     } finally {
@@ -103,8 +105,7 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
     }
   }
 
-  const verb = action === 'allow' ? '批准' : '拒绝'
-  const what = payloadNames[request.payload.type] ?? (request.kind === 'webhook' ? '请求' : '操作')
+  const allow = action === 'allow'
   const block = rememberBlock(request)
   const shown = draftShown(s)
   const close = () => {
@@ -125,16 +126,14 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
           if (isEscape({ key: e.key, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode })) close()
         }}
       >
-        <h2 id="sheet-title">
-          {verb}这次{what}
-        </h2>
+        <h2 id="sheet-title">{sheetTitle(action, request)}</h2>
         <label className="field">
           <span>{noteHint(request)}</span>
           <textarea className="input" value={note} maxLength={1000} disabled={s.busy} onChange={(e) => setNote(e.target.value)} />
         </label>
         <label className="switch">
           <span>
-            记住：以后同类的{action === 'allow' ? '自动放行' : '自动拒绝'}
+            {allow ? t('记住：以后同类的自动放行') : t('记住：以后同类的自动拒绝')}
             {block && <span className="sub line">{block}</span>}
           </span>
           <input
@@ -147,8 +146,8 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
         {s.remember && (
           <div className="draft">
             <div className="row">
-              <span>范围</span>
-              <span className="seg" role="group" aria-label="记住的范围">
+              <span>{t('范围')}</span>
+              <span className="seg" role="group" aria-label={t('记住的范围')}>
                 {scopeOptions(request).map((o) => (
                   <button
                     key={o.scope}
@@ -168,7 +167,7 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
                 {s.draftError}
                 {s.draftRetryable && (
                   <button type="button" className="btn small" onClick={() => dispatch({ type: 'retry' })}>
-                    重试
+                    {t('重试')}
                   </button>
                 )}
               </div>
@@ -176,17 +175,16 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
             {shown && (
               <>
                 <p className="draft-summary">
-                  将{shown.summary.action === 'allow' ? '放行' : '拒绝'}
-                  {payloadNames[shown.summary.payload] ?? ''} <code className="mono">{shown.summary.anchor}</code>
-                  {shown.scope === 'project' ? `（仅项目 ${request.project}）` : '（所有项目）'}
+                  {draftLead(shown.summary.action, shown.summary.payload)} <code className="mono">{shown.summary.anchor}</code>
+                  {draftScope(shown.scope, request.project)}
                 </p>
                 <details>
-                  <summary>规则原文 {shown.rule_id}</summary>
+                  <summary>{t('规则原文 {id}', { id: shown.rule_id })}</summary>
                   <pre className="block mono">{shown.yaml}</pre>
                 </details>
               </>
             )}
-            {!shown && !s.draftError && <div className="sub">正在生成草案…</div>}
+            {!shown && !s.draftError && <div className="sub">{t('正在生成草案…')}</div>}
           </div>
         )}
         {s.error && (
@@ -196,7 +194,7 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
         )}
         <div className="btn-row">
           <button type="button" className="btn" onClick={close} disabled={s.busy}>
-            取消
+            {t('取消')}
           </button>
           <button
             type="button"
@@ -205,7 +203,7 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
             onClick={() => void confirm()}
             disabled={!canConfirm(s)}
           >
-            {s.busy ? '正在提交…' : s.remember ? `${verb}并记住` : verb}
+            {s.busy ? t('正在提交…') : s.remember ? (allow ? t('批准并记住') : t('拒绝并记住')) : allow ? t('批准') : t('拒绝')}
           </button>
         </div>
       </div>

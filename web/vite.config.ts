@@ -33,5 +33,5 @@ export default defineConfig({
       '/ws': { target: hub, ws: true, changeOrigin: true, headers: { Origin: hub } },
     },
   },
-  test: { environment: 'node', include: ['src/**/*.test.ts', 'src/**/*.test.tsx'] },
+  test: { environment: 'node', include: ['src/**/*.test.ts', 'src/**/*.test.tsx'], setupFiles: ['src/test-setup.ts'] },
 })
