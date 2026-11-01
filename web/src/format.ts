@@ -44,7 +44,7 @@ export function engineReasonLabel(reason: string): string {
 }
 
 // 守护进程写进本机审计、随历史行带上来的固定理由（internal/agent/server.go、requests.go）。
-const agentReasonsEn: Record<string, string> = {
+export const agentReasonsEn: Record<string, string> = {
   自动审批已暂停: 'Auto-approval is paused',
   '自动审批已暂停，交回终端处理': 'Auto-approval is paused; handed back to the terminal',
   '本机没有连接 hub，交回终端处理': "This machine isn't connected to a hub; handed back to the terminal",

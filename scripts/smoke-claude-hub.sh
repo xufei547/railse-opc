@@ -8,6 +8,8 @@
 # 临时项目没有 git 远端，git push 本身会失败，这是预期的：要验证的是审批链路（hub 里批准、决定送回钩子）。
 # 成功时删掉临时目录；失败时保留，并打印 hub.log、agent.log 的末尾。
 set -uo pipefail
+# 脚本按中文输出取接入码（接入码: …），钉死语言，免得英文 LANG 下取不到
+export RAILSE_LANG=zh
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Unix socket 路径有长度上限（macOS 104 字节）：临时目录放在 /tmp 下、名字取短
 WORK="$(mktemp -d /tmp/rs-smoke.XXXX)" || { echo "FAIL: 建不了临时目录"; exit 1; }

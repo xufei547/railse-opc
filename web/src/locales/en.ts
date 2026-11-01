@@ -5,7 +5,6 @@
 // 自己填 Your own answer · 让它在终端问我 Ask me in the terminal instead
 export const en: Record<string, string> = {
   跟随系统: 'Follow the system',
-  中文: 'Chinese',
   语言: 'Language',
   '通知的文字也跟着这个语言；换了之后这台设备的订阅会重新登记。': 'Notifications use this language too; changing it re-registers this device.',
   通知已开启: 'Notifications on',

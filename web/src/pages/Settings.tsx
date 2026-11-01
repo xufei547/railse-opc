@@ -226,7 +226,7 @@ export async function switchLanguage(
 
 const choices: { value: LangChoice; label: () => string }[] = [
   { value: 'auto', label: () => t('跟随系统') },
-  { value: 'zh', label: () => t('中文') },
+  { value: 'zh', label: () => '中文' }, // 语言名用本语言写，不翻
   { value: 'en', label: () => 'English' },
 ]
 

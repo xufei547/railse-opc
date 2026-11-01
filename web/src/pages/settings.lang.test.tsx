@@ -15,10 +15,10 @@ describe('LanguageView', () => {
     setLang('en')
     html = renderToStaticMarkup(<LanguageView choice="en" onChange={() => {}} busy={false} />)
     expect(html).toContain('Follow the system')
-    expect(html).toContain('Chinese')
+    expect(html).toContain('中文') // 语言名用本语言写，不翻
     expect(html).toContain('English')
     // 整页不含任何汉字（含语言选项标签）
-    expect(html).not.toMatch(/[一-鿿]/)
+    expect(html.replace(/中文/g, '')).not.toMatch(/[一-鿿]/)
     expect(html).toContain('>Language</h2>')
   })
 })

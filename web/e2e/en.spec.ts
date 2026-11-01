@@ -100,6 +100,11 @@ test('English end to end', async ({ page, env, hook, ask }) => {
         for (const el of await own.all()) await expect(el).not.toContainText(cjk)
       }
     }
-    else await noCjk(page)
+    else if (path === '/settings') {
+      // 语言开关里的“中文”是语言名本身，不翻；去掉它之后整页不得有中文
+      await expect(page.locator('body')).not.toBeEmpty()
+      const text = (await page.locator('body').innerText()).replace(/中文/g, '')
+      expect(text).not.toMatch(cjk)
+    } else await noCjk(page)
   }
 })
