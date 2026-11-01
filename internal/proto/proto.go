@@ -110,6 +110,8 @@ type Response struct {
 	Answers   map[string]string `json:"answers,omitempty"`
 	// DecidedBy 是谁作的决定（rule:<id>、user、classifier、dedup、hub_unreachable、timeout…），钩子据此决定要不要在终端提示。
 	DecidedBy string `json:"decided_by,omitempty"`
+	// Trigger 是引擎定级时起决定作用的那一处（哪一段、什么性质），钩子用它拼 ask 的理由；只在 Decision 为 ask 时填。
+	Trigger *policy.Trigger `json:"trigger,omitempty"`
 }
 
 // Event 是只展示不操作的事件，Kind 为 question、done 或 session_end。

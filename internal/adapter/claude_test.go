@@ -281,3 +281,29 @@ func TestClaudeRenderPreToolUse(t *testing.T) {
 		t.Errorf("空理由: %s", out.Stdout)
 	}
 }
+
+func TestClaudePreToolUseCarriesDescription(t *testing.T) {
+	a, _ := Get("claude")
+	raw := sample(t, "claude/pretooluse-bash-default.json")
+	in, err := a.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.Payload.Description != "Print hi-default" {
+		t.Fatalf("description 没带上：%q", in.Payload.Description)
+	}
+	// 超长的说明截断到 200 字节内，且不切坏字符
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["tool_input"] = map[string]any{"command": "echo", "description": strings.Repeat("长", 200)}
+	raw, _ = json.Marshal(m)
+	in, err = a.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(in.Payload.Description); n > 200 || n == 0 || !utf8.ValidString(in.Payload.Description) {
+		t.Fatalf("说明应截到 200 字节内：%d", n)
+	}
+}

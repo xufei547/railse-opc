@@ -20,6 +20,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hookclient"
 	"github.com/xufei547/railse-opc/internal/i18n"
+	"github.com/xufei547/railse-opc/internal/policy"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -449,9 +450,9 @@ func TestHookClaudePreToolUse(t *testing.T) {
 	if code != 0 || out != "" {
 		t.Fatalf("auto 下的联网应不表态: code=%d out=%q", code, out)
 	}
-	// 没接 hub（LocalDecider）：硬底线要 Claude 在终端里强制问（ask），不说“连不上 hub”的回退提示
+	// 没接 hub（LocalDecider）：硬底线要 Claude 在终端里强制问（ask），理由由钩子拼，不说“连不上 hub”的回退提示
 	out, errOut, code := runHookWith(t, claudePreToolUse(repo, "git push origin main", "auto"), "claude", "--socket", sock)
-	if code != 0 || out != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：连不上 hub，这类操作要你亲自确认"}}`+"\n" ||
+	if code != 0 || out != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：已发到手机，也可以在这里直接批"}}`+"\n" ||
 		strings.Contains(errOut, "hub") {
 		t.Fatalf("没接 hub: code=%d out=%q err=%q", code, out, errOut)
 	}
@@ -511,5 +512,43 @@ func TestHookHubUnreachableNote(t *testing.T) {
 	_, stderr, _ = runHookWith(t, claudePreToolUse("/tmp/p", "git push origin main", "auto"), "claude", "--socket", sock)
 	if stderr != "" {
 		t.Fatalf("过期不提示: %q", stderr)
+	}
+}
+
+// PreToolUse 的硬底线回 ask 时，钩子把触发点拼进确认框的理由；没有触发点只说已发手机。
+func TestHookPreToolUseAskReasonHasTrigger(t *testing.T) {
+	resp := proto.Response{V: proto.Version, Decision: "ask", DecidedBy: "ask", Reason: "已交终端确认，同时送手机",
+		Trigger: &policy.Trigger{Segment: "rm -rf after", Why: policy.WhyDelete}}
+	if got, want := askReason(resp), "命令里的「rm -rf after」会删除文件，删了不可恢复。已发到手机，也可以在这里直接批"; got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	resp.Trigger = &policy.Trigger{Why: policy.WhyUnknown}
+	if got := askReason(resp); got != "这条命令不在已知名单里。已发到手机，也可以在这里直接批" {
+		t.Fatalf("没有段：%q", got)
+	}
+	resp.Trigger = nil
+	if got := askReason(resp); got != "已发到手机，也可以在这里直接批" {
+		t.Fatalf("没有触发点：%q", got)
+	}
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	resp.Trigger = &policy.Trigger{Segment: "rm -rf after", Why: policy.WhyDelete}
+	if got := askReason(resp); got != `"rm -rf after" deletes files and can't be undone. Sent to your phone; you can also answer here` {
+		t.Fatalf("英文：%q", got)
+	}
+	resp.Trigger = &policy.Trigger{Why: policy.WhyUnknown}
+	if got := askReason(resp); got != "Isn't on the known-command list. Sent to your phone; you can also answer here" {
+		t.Fatalf("英文没有段：%q", got)
+	}
+}
+
+// 每个 Why 短语都有英文（它们经 i18n.Lookup 动态查，TestCatalogComplete 扫不到）。
+func TestTriggerWhysHaveEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	for _, w := range policy.AllWhys {
+		if i18n.Lookup(w) == w {
+			t.Errorf("Why 短语缺英文：%q", w)
+		}
 	}
 }

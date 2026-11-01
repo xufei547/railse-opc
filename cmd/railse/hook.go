@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/xufei547/railse-opc/internal/adapter"
 	"github.com/xufei547/railse-opc/internal/agent"
@@ -172,7 +174,26 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 	if (resp.Decision == "passthrough" || resp.Decision == "ask") && resp.DecidedBy == "hub_unreachable" && in.Source != "" {
 		fmt.Fprintln(stderr, "railse hook: "+i18n.T("连不上 hub，交回 Claude 自己的确认"))
 	}
-	return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: resp.Decision, Reason: resp.Reason}))
+	reason := resp.Reason
+	if resp.Decision == "ask" && in.Source == proto.SourcePreToolUse {
+		reason = askReason(resp)
+	}
+	return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: resp.Decision, Reason: reason}))
+}
+
+// askReason 把守护进程回的 ask 拼成 Claude 确认框里给人看的一句话（渲染时加 "Railse：" 前缀）：触发段、性质、已发手机。
+// Why 是中文键，按终端语言查英文表（i18n.Lookup，查不到原样）；没有段时性质打头，英文首字母大写。
+func askReason(resp proto.Response) string {
+	tail := i18n.T("已发到手机，也可以在这里直接批")
+	if resp.Trigger == nil {
+		return tail
+	}
+	why := i18n.Lookup(resp.Trigger.Why)
+	if resp.Trigger.Segment == "" {
+		r, n := utf8.DecodeRuneInString(why)
+		return fmt.Sprintf(i18n.T("%s。%s"), string(unicode.ToUpper(r))+why[n:], tail)
+	}
+	return fmt.Sprintf(i18n.T("命令里的「%s」会%s。%s"), resp.Trigger.Segment, why, tail)
 }
 
 // localizeReason 把守护进程回传的拒绝原因翻成终端语言：守护进程（launchd、systemd 下）未必知道用户的语言，钩子知道，

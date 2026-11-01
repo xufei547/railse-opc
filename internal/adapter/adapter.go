@@ -268,6 +268,7 @@ var urlRe = regexp.MustCompile(`https?://[^\s'"<>]+`)
 // toolInput 是各家 tool_input 里可能出现的字段，缺的留空。
 type toolInput struct {
 	Command      string `json:"command"`
+	Description  string `json:"description"`
 	FilePath     string `json:"file_path"`
 	Path         string `json:"path"`
 	NotebookPath string `json:"notebook_path"`
@@ -295,7 +296,8 @@ func mapTool(cli, toolName string, raw json.RawMessage, cwd string) (policy.Payl
 		if err != nil {
 			return policy.Payload{}, err
 		}
-		return policy.Payload{Type: policy.PayloadShell, Command: ti.Command, Cwd: cwd}, nil
+		// description 是 Claude Code 自己写的一句话说明，给手机卡片用；Codex、Gemini 没有这一项
+		return policy.Payload{Type: policy.PayloadShell, Command: ti.Command, Cwd: cwd, Description: clip(ti.Description, 200)}, nil
 	case "Edit", "Write", "MultiEdit", "NotebookEdit", "write_file", "replace", "apply_patch":
 		ti, err := decodeToolInput(raw)
 		if err != nil {
