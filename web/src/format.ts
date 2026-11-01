@@ -45,30 +45,30 @@ export function engineReasonLabel(reason: string): string {
 
 // 守护进程写进本机审计、随历史行带上来的固定理由（internal/agent/server.go、requests.go）。
 const agentReasonsEn: Record<string, string> = {
-  自动审批已暂停: 'Auto-approval paused',
-  '自动审批已暂停，交回终端处理': 'Auto-approval paused; handed back to the terminal',
+  自动审批已暂停: 'Auto-approval is paused',
+  '自动审批已暂停，交回终端处理': 'Auto-approval is paused; handed back to the terminal',
   '本机没有连接 hub，交回终端处理': "This machine isn't connected to a hub; handed back to the terminal",
   '等待过期，交回终端处理': 'Timed out; handed back to the terminal',
-  '守护进程正在停止，交回终端处理': 'The daemon was stopping; handed back to the terminal',
+  '守护进程正在停止，交回终端处理': 'The daemon is stopping; handed back to the terminal',
   钩子进程在决定前退出: 'The hook exited before a decision was made',
   // internal/agent/hubdecider.go:18-29
-  'Gemini 只能拒绝不能放行，交回原生确认框': "Gemini can only deny here, not allow; handed back to Gemini's own prompt",
-  '没有配置 hub，交回终端处理': 'No hub configured; handed back to the terminal',
+  'Gemini 只能拒绝不能放行，交回原生确认框': "Gemini hooks can deny but not approve; handed back to Gemini's own prompt",
+  '没有配置 hub，交回终端处理': 'No hub is set up; handed back to the terminal',
   '连不上 hub，交回终端处理': "Couldn't reach the hub; handed back to the terminal",
   'hub 拒绝了本机密钥，交回终端处理': "The hub rejected this machine's key; handed back to the terminal",
   '无法送往 hub，交回终端处理': "Couldn't send it to the hub; handed back to the terminal",
   '与 hub 断线超过宽限，交回终端处理': 'Lost the hub connection for too long; handed back to the terminal',
   'hub 没有给出有效决定，交回终端处理': "The hub didn't return a valid decision; handed back to the terminal",
   'hub 版本太旧，不认识提问，交回终端处理': 'The hub is too old to handle questions; handed back to the terminal',
-  已在手机上批准: 'Approved on the phone',
-  已在手机上拒绝: 'Denied on the phone',
-  已在手机上回答: 'Answered on the phone',
-  在手机上选了在终端回答: 'Chose on the phone to answer in the terminal',
+  已在手机上批准: 'Approved on your phone',
+  已在手机上拒绝: 'Denied on your phone',
+  已在手机上回答: 'Answered on your phone',
+  在手机上选了在终端回答: 'You chose on your phone to answer in the terminal',
   // internal/agent/server.go:433
-  '决定来源给的答案不完整，交回终端处理': "The answer was incomplete; handed back to the terminal",
-  '决定来源出错，交回终端处理': 'Error while deciding; handed back to the terminal',
+  '决定来源给的答案不完整，交回终端处理': 'The answer was incomplete; handed back to the terminal',
+  '决定来源出错，交回终端处理': 'Something went wrong while deciding; handed back to the terminal',
   '脱敏后有题面相同的题，分不清答的是哪道，交回终端处理':
-    "After redaction two questions read the same, so the answers couldn't be matched; handed back to the terminal",
+    "Two questions read the same after redaction, so answers can't be matched; handed back to the terminal",
 }
 
 /**
@@ -80,7 +80,7 @@ function engineReasonEn(reason: string): string {
   const m = /^无规则命中，按 (\S+) 默认询问$/.exec(reason)
   if (m) {
     const risk = m[1] ?? ''
-    return `No rule matched, so it asks (default for ${risks()[risk]?.[0] ?? risk})`
+    return `No rule matched; ${risks()[risk]?.[0] ?? risk} asks by default`
   }
   const fixed = agentReasonsEn[reason]
   if (fixed) return fixed
@@ -126,7 +126,7 @@ export function stateLabel(state: string): string {
   return states()[state] ?? state
 }
 
-const kinds = (): Record<string, string> => ({ permission: t('审批'), question: t('等你回答'), done: t('完成'), webhook: 'webhook', ask: t('提问') })
+const kinds = (): Record<string, string> => ({ permission: t('审批'), question: t('等你回答'), done: t('完成'), webhook: lang() === 'en' ? 'Webhook' : 'webhook', ask: t('提问') })
 
 export function kindLabel(kind: string): string {
   return kinds()[kind] ?? kind
@@ -238,9 +238,10 @@ export function absoluteTime(iso: string, now: Date = new Date()): string {
 
 const auditActions = (): Record<string, string> => ({
   request_pending: t('登记'),
-  allow: t('批准'),
-  deny: t('拒绝'),
-  answer: t('回答'),
+  // 英文时间线记的是“提交了什么”，不和按钮共用词；中文仍用共用键
+  allow: lang() === 'en' ? 'Approval submitted' : t('批准'),
+  deny: lang() === 'en' ? 'Denial submitted' : t('拒绝'),
+  answer: lang() === 'en' ? 'Answer submitted' : t('回答'),
   rule_learned: t('学到规则'),
   rule_learn_rolled_back: t('撤销学到的规则'),
   push_sent: t('推送到手机'),

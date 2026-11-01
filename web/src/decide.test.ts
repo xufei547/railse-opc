@@ -510,6 +510,23 @@ describe('decide 的英文', () => {
     expect(outcomeView({ kind: 'gone', message: 'Request expired' }, null)).toEqual({ tone: 'warn', title: "Didn't take effect", text: 'Request expired' })
   })
 
+  it('别处已有结果时不露 hub 的中文原文', () => {
+    const hubTexts = ['请求已经处理过', '请求已过期', '机器已吊销，请求已取消']
+    for (const message of hubTexts) {
+      // 重拉到了结果：用结果句（哪怕不是用户自己决定的）
+      const settled = outcomeView({ kind: 'gone', message, attempted: 'allow' }, req({ state: 'cancelled', decided_by: 'machine_revoked' }))
+      expect(settled.text).toBe('This request was already handled elsewhere: Cancelled (This machine has been revoked)')
+      expect(JSON.stringify(settled)).not.toMatch(han)
+      // 还没重拉：不带结果的那一句
+      const pending = outcomeView({ kind: 'gone', message }, null)
+      expect(pending.text).toBe('This request was already handled elsewhere')
+      expect(JSON.stringify(pending)).not.toMatch(han)
+    }
+    expect(outcomeView({ kind: 'gone', message: '请求已过期' }, req({ state: 'expired', decided_by: '' })).text).toBe('This request was already handled elsewhere: Expired')
+    // 请求还是 pending 时，网页自己给的英文提示照用
+    expect(outcomeView({ kind: 'gone', message: 'Request expired' }, req())).toMatchObject({ text: 'Request expired' })
+  })
+
   it('所有提示都没有中文', () => {
     const views = [
       outcomeView({ kind: 'done', request: ask({ state: 'answered' }) }, null),

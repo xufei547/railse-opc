@@ -148,7 +148,7 @@ export default async function globalSetup() {
     if (root.status !== 200 || !(root.headers.get('content-type') ?? '').startsWith('text/html')) {
       throw new Error(`hub 的 / 回 ${root.status}：二进制里没有网页构建（先 npm run build 再 go build）`)
     }
-    const tok = /接入码: (\S+)/.exec(runBin(paths, ['hub', 'token', '--dir', hubDir]))?.[1]
+    const tok = /(?:接入码|Enroll token): (\S+)/.exec(runBin(paths, ['hub', 'token', '--dir', hubDir]))?.[1]
     if (!tok) throw new Error('railse hub token 的输出里没有接入码')
     runBin(paths, ['agent', 'enroll', '--dir', agentDir, '--hub', baseURL, '--token', tok, '--name', 'e2e-mac'])
     const agent = startDaemon('agent', paths.bin, ['agent', 'run', '--dir', agentDir], env0, base)

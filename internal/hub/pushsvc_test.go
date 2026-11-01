@@ -708,31 +708,33 @@ func TestPushMessageLooksUpToolAndMachines(t *testing.T) {
 func TestPushMessageWorstCase(t *testing.T) {
 	long := strings.Repeat("\x01\"\\ \U0001F600<&>\n", 1000)
 	id := strings.Repeat("a", maxRequestIDLen)
-	for _, kind := range []string{"permission", "question", "webhook"} {
-		r := store.Request{ID: id, Kind: kind, ToolName: long, Payload: policy.Payload{Type: policy.PayloadShell, Command: long}, Risk: long, Title: long, ProjectRoot: "/" + long}
-		b, err := pushMessage(r, pushWho{Tool: long, Project: projectName(r.ProjectRoot), Machine: long, Many: true}, "zh")
-		if err != nil {
-			t.Fatalf("%s: %v", kind, err)
-		}
-		if len(b) > push.MaxPlaintext || !utf8.Valid(b) {
-			t.Fatalf("%s: 载荷 %d 字节", kind, len(b))
-		}
-		var m map[string]string
-		if err := json.Unmarshal(b, &m); err != nil || m["id"] != id || m["url"] != "/r/"+id || m["kind"] != kind {
-			t.Fatalf("%s: %v %v", kind, m, err)
-		}
-		if strings.ContainsAny(m["title"], "\x01\n ") {
-			t.Fatalf("%s: 标题不应带控制字符与换行: %q", kind, m["title"])
-		}
-		body := m["body"]
-		if kind == "permission" {
-			// 正文只有规整之后拼上的那一个换行，第二行是固定提示
-			first, second, ok := strings.Cut(body, "\n")
-			if !ok || second != "点开批准或拒绝" || strings.ContainsAny(first, "\x01\n ") {
-				t.Fatalf("%s: 正文 %q", kind, body)
+	for _, lang := range []string{"zh", "en"} {
+		for _, kind := range []string{"permission", "question", "webhook"} {
+			r := store.Request{ID: id, Kind: kind, ToolName: long, Payload: policy.Payload{Type: policy.PayloadShell, Command: long}, Risk: long, Title: long, ProjectRoot: "/" + long}
+			b, err := pushMessage(r, pushWho{Tool: long, Project: projectName(r.ProjectRoot), Machine: long, Many: true}, lang)
+			if err != nil {
+				t.Fatalf("%s/%s: %v", lang, kind, err)
 			}
-		} else if strings.ContainsAny(body, "\x01\n ") {
-			t.Fatalf("%s: 正文不应带控制字符与换行: %q", kind, body)
+			if len(b) > push.MaxPlaintext || !utf8.Valid(b) {
+				t.Fatalf("%s/%s: 载荷 %d 字节", lang, kind, len(b))
+			}
+			var m map[string]string
+			if err := json.Unmarshal(b, &m); err != nil || m["id"] != id || m["url"] != "/r/"+id || m["kind"] != kind {
+				t.Fatalf("%s/%s: %v %v", lang, kind, m, err)
+			}
+			if strings.ContainsAny(m["title"], "\x01\n ") {
+				t.Fatalf("%s/%s: 标题不应带控制字符与换行: %q", lang, kind, m["title"])
+			}
+			body := m["body"]
+			if kind == "permission" {
+				// 正文只有规整之后拼上的那一个换行，第二行是固定提示
+				first, second, ok := strings.Cut(body, "\n")
+				if !ok || second != pushCopies[lang].tapApprove || strings.ContainsAny(first, "\x01\n ") {
+					t.Fatalf("%s/%s: 正文 %q", lang, kind, body)
+				}
+			} else if strings.ContainsAny(body, "\x01\n ") {
+				t.Fatalf("%s/%s: 正文不应带控制字符与换行: %q", lang, kind, body)
+			}
 		}
 	}
 }
@@ -1157,13 +1159,15 @@ func TestRunListenFailureStopsPushWorker(t *testing.T) {
 func TestPushMessageZeroWidthPadding(t *testing.T) {
 	r := store.Request{ID: "r1", Kind: "permission", ToolName: "Bash", Risk: "destructive",
 		Payload: policy.Payload{Type: policy.PayloadShell, Command: strings.Repeat("\u200b", 640) + strings.Repeat(" \t\n", 700) + "rm -rf ~/x"}}
-	b, err := pushMessage(r, pushWho{Tool: "claude"}, "zh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]string
-	if err := json.Unmarshal(b, &m); err != nil || m["body"] != "rm -rf ~/x\n点开批准或拒绝" {
-		t.Fatalf("摘要: %q %v", m["body"], err)
+	for _, lang := range []string{"zh", "en"} {
+		b, err := pushMessage(r, pushWho{Tool: "claude"}, lang)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]string
+		if err := json.Unmarshal(b, &m); err != nil || m["body"] != "rm -rf ~/x\n"+pushCopies[lang].tapApprove {
+			t.Fatalf("%s 摘要: %q %v", lang, m["body"], err)
+		}
 	}
 	// 截断后不留尾随空格
 	if got := clean("abcd efgh", 5); got != "abcd" {
@@ -1379,7 +1383,7 @@ func TestPushMessageEnglish(t *testing.T) {
 	}
 	ask := store.Request{ID: "r2", Kind: "ask", Ask: &proto.Ask{Questions: []proto.Question{{Question: "Plan A or B?"}, {Question: "q2"}, {Question: "q3"}}}}
 	m = decode(pushMessage(ask, pushWho{Tool: "claude", Project: "blog"}, "en"))
-	if m.Title != "Claude Code is asking you · blog" || m.Body != "Plan A or B? and 2 more\nOpen to answer" {
+	if m.Title != "Claude Code is asking you · blog" || m.Body != "Plan A or B? (+2 more)\nOpen to answer" {
 		t.Fatalf("%+v", m)
 	}
 	one := store.Request{ID: "r2b", Kind: "ask", Ask: &proto.Ask{Questions: []proto.Question{{Question: "Plan A or B?"}}}}

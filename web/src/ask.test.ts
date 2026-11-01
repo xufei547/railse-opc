@@ -297,6 +297,16 @@ describe('sendAsk 的英文兜底', () => {
   })
 })
 
+describe('sendAsk 英文下 gone 不露 hub 的中文', () => {
+  afterEach(() => setLang('zh'))
+  it('409、404 的 hub 原文换成英文句；400 等仍带 hub 文案', async () => {
+    setLang('en')
+    for (const [status, msg] of [[409, '请求已经处理过'], [409, '请求已过期'], [409, '机器已吊销，请求已取消'], [404, '没有这条请求']] as const) {
+      expect(await sendAsk(() => Promise.reject(new ApiError(status, msg))), msg).toEqual({ gone: 'This request was already handled elsewhere' })
+    }
+  })
+})
+
 describe('answerLabel', () => {
   const fruit: Question = { question: '苹果还是香蕉？', options: [{ label: 'Apple' }, { label: 'Banana' }] }
   const many: Question = { question: '要哪些？', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }] }

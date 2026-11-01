@@ -509,7 +509,7 @@ var pushCopies = map[string]pushCopy{
 		verbs: map[string]string{"network": "use the network", "outward": "push or publish", "destructive": "do something irreversible", "write_outside": "edit files outside the project",
 			"unknown": "run an unfamiliar command", "write_in_project": "edit files in the project", "read": "read files"},
 		fallbackVerb: "do something",
-		more:         func(n int) string { return fmt.Sprintf(" and %d more", n-1) },
+		more:         func(n int) string { return fmt.Sprintf(" (+%d more)", n-1) },
 	},
 }
 

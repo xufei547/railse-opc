@@ -145,8 +145,20 @@ export function decideBody(s: SheetState, note: string): DecideBody | null {
  * 不解析文案。不是 ApiError 的（程序错误，多半是英文）用兜底文案。
  */
 export function classifyError(e: unknown, fallback: string): { gone: boolean; message: string } {
-  if (e instanceof ApiError) return { gone: e.status === 409 || e.status === 404, message: e.message }
+  if (e instanceof ApiError) {
+    const gone = e.status === 409 || e.status === 404
+    return { gone, message: gone ? goneText(e.message) : e.message }
+  }
   return { gone: false, message: fallback }
+}
+
+/**
+ * “已经答不了”（409、404）时给用户看的文案。英文下 hub 的原文是中文（请求已过期、已经处理过、机器已吊销……），
+ * 换成不带结果的一句（还没重拉到结果时用）；网页自己给的英文提示、中文界面下的原文照旧。
+ */
+function goneText(message: string): string {
+  if (lang() === 'en' && /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/.test(message)) return t('这条请求已在别处处理')
+  return message
 }
 
 /** 出错后值不值得重试：4xx（记不住、坏请求）是确定的结果；连不上、超时（status 0）、5xx 与其他错误可以再试。 */
@@ -305,10 +317,12 @@ export function outcomeView(o: Outcome, current: RequestView | null): OutcomeVie
     return { tone: 'ok', title: t('已生效'), text: doneMessage(r) }
   }
   if (current && sameUserDecision(current, o.attempted, o.sent)) return { tone: 'ok', title: t('你的决定已生效'), text: doneMessage(current) }
-  if (current && o.attempted && current.decided_by === 'user' && current.state !== 'pending') {
+  // 英文时请求只要不是 pending 了，就用网页自己的英文句，不露 hub 的中文原文；中文仍只在用户自己做的决定上走 goneMessage
+  const settled = current && current.state !== 'pending'
+  if (settled && ((o.attempted && current.decided_by === 'user') || lang() === 'en')) {
     return { tone: 'warn', title: t('没有生效'), text: goneMessage(current, o.attempted, o.sent) }
   }
-  return { tone: 'warn', title: t('没有生效'), text: o.message }
+  return { tone: 'warn', title: t('没有生效'), text: goneText(o.message) }
 }
 
 /** 按键是不是要关面板的 Esc。输入法组字时的 Esc 是取消候选（isComposing，或 Safari 的 keyCode 229），不能关面板丢掉备注。 */

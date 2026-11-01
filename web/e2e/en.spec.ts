@@ -32,6 +32,7 @@ test('English end to end', async ({ page, env, hook, ask }) => {
   await expect(page.getByLabel('Password')).toBeVisible()
   await noCjk(page)
   await login(page, env, 'en')
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en')
   await noCjk(page)
 
   // 审批

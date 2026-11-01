@@ -8,6 +8,9 @@ import { en } from './locales/en'
 //   - 键不在 en 里 → 报错并列出；
 //   - en 里没人用的键 → 只打印。
 // 只认裸的 t(：前面不能是字母、数字、点、$、下划线（避开 .at(、split( 之类）。
+// 扫描前先去掉注释，免得注释里的示例（写成 t 加括号）被当成调用。取舍：不做完整的词法分析，
+// 只剥 /* */ 块注释，以及行首或空白后面的 // 行注释（"https://x" 里的 // 前面是冒号，不会误伤）；
+// 字符串里恰好有“空白 + //”或 /* 的键会被误剥，目前没有，真出现了测试会报缺键，到时再改这里。
 
 const root = join(__dirname)
 
@@ -22,6 +25,13 @@ function files(dir: string, out: string[] = []): string[] {
     }
   }
   return out
+}
+
+/** 去掉块注释与行注释，换行保留（报错的行号不变）。 */
+export function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ''))
+    .replace(/(^|\s)\/\/[^\n]*/g, '$1')
 }
 
 function keysIn(src: string, file: string, problems: string[]): string[] {
@@ -85,7 +95,7 @@ describe('英文表完整', () => {
     const used = new Map<string, string>()
     for (const f of files(root)) {
       const rel = relative(root, f)
-      for (const k of keysIn(readFileSync(f, 'utf8'), rel, problems)) {
+      for (const k of keysIn(stripComments(readFileSync(f, 'utf8')), rel, problems)) {
         if (!used.has(k)) used.set(k, rel)
       }
     }
@@ -94,6 +104,27 @@ describe('英文表完整', () => {
     if (missing.length) problems.push(`英文表缺 ${missing.length} 条，请补进 src/locales/en.ts：\n${missing.join('\n')}`)
     const unused = Object.keys(en).filter((k) => !used.has(k))
     if (unused.length) console.log(`英文表里没人用的键（${unused.length}）：\n${unused.map((k) => JSON.stringify(k)).join('\n')}`)
+    expect(problems).toEqual([])
+  })
+})
+
+describe('键与值的占位符一致', () => {
+  it('每条词条里 {name} 的集合，键与值必须相同', () => {
+    const names = (x: string) => [...new Set([...x.matchAll(/\{(\w+)\}/g)].map((m) => m[1]))].sort().join(',')
+    const bad = Object.entries(en)
+      .filter(([k, v]) => names(k) !== names(v))
+      .map(([k, v]) => `${JSON.stringify(k)} → ${JSON.stringify(v)}`)
+    expect(bad).toEqual([])
+  })
+})
+
+describe('stripComments 自测', () => {
+  it('剥块注释与行注释，保留换行与字符串里的 URL', () => {
+    const src = ["// t('a')", "x = 1 // t('b')", "/* t('c')", "t('d') */ t('e')", "u = 'https://x.y' + t('f')"].join('\n')
+    const out = stripComments(src)
+    expect(out.split('\n')).toHaveLength(5)
+    const problems: string[] = []
+    expect(keysIn(out, 'x.ts', problems)).toEqual(['e', 'f'])
     expect(problems).toEqual([])
   })
 })

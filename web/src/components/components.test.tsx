@@ -8,7 +8,7 @@ import { AskFormView } from './AskForm'
 import { ConfirmSheet } from './Confirm'
 import { DecideSheet } from './DecideSheet'
 import { RequestSummary, StatusLine } from './Explain'
-import { RequestContent } from './Payload'
+import { RedactedWarning, RequestContent } from './Payload'
 import { AuditList, RequestAttrs, RequestDetails } from './RequestAttrs'
 import { RequestCard } from './RequestCard'
 import { ResultToast } from './ResultToast'
@@ -517,6 +517,31 @@ describe('ResultToast', () => {
   })
   it('页面还有批准、拒绝栏时浮在它上面', () => {
     expect(renderToStaticMarkup(<ResultToast view={{ tone: 'warn', title: '没有生效', text: 'x' }} onClose={noop} raised />)).toMatch(/class="toast banner warn raised"/)
+  })
+})
+
+// 标签换成 |，再还原 HTML 转义，整段文字好逐字比
+const plain = (html: string) =>
+  html.replace(/<[^>]+>/g, '|').replace(/\|+/g, '|').replace(/^\||\|$/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+
+describe('RedactedWarning', () => {
+  afterEach(() => setLang('zh'))
+  const cjk = /[　-〿一-鿿＀-￯]/
+
+  it('中文：整段文字逐字（有理由、无理由）', () => {
+    expect(plain(renderToStaticMarkup(<RedactedWarning request={req({ has_redacted: true })} />))).toBe(
+      '含被隐藏的部分，下面展示的不是原文|凭据等敏感值已换成 <redacted>。不在引号里的值只隐藏到空格或 shell 符号（; | & 等）为止；引号里的值、注释和 heredoc 正文整段隐藏，可能连带盖住其中的命令。|引擎是按原文定级的：|对外|，理由：无规则命中|拿不准就去终端核对原文再决定。这类请求不能“记住”。',
+    )
+    expect(plain(renderToStaticMarkup(<RedactedWarning request={req({ has_redacted: true, engine_reason: '' })} />))).toBe(
+      '含被隐藏的部分，下面展示的不是原文|凭据等敏感值已换成 <redacted>。不在引号里的值只隐藏到空格或 shell 符号（; | & 等）为止；引号里的值、注释和 heredoc 正文整段隐藏，可能连带盖住其中的命令。|引擎是按原文定级的：|对外|拿不准就去终端核对原文再决定。这类请求不能“记住”。',
+    )
+  })
+
+  it('英文：有理由、无理由都没有中文', () => {
+    setLang('en')
+    for (const r of [req({ has_redacted: true, engine_reason: '无规则命中，按 outward 默认询问' }), req({ has_redacted: true, engine_reason: '' }), webhook({ has_redacted: true })]) {
+      expect(renderToStaticMarkup(<RedactedWarning request={r} />)).not.toMatch(cjk)
+    }
   })
 })
 

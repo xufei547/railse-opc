@@ -356,7 +356,7 @@ describe('format 的英文', () => {
     expect(stateLabel('approved')).toBe('Approved')
     expect(stateLabel('denied')).toBe('Denied')
     expect(stateLabel('auto_allowed')).toBe('Auto-approved')
-    expect(stateLabel('passthrough')).toBe('Back to terminal')
+    expect(stateLabel('passthrough')).toBe('Handed back')
     expect(stateLabel('mystery')).toBe('mystery')
     for (const k of ['permission', 'question', 'done', 'webhook', 'ask']) expect(kindLabel(k), k).not.toMatch(han)
     expect(kindLabel('permission')).toBe('Approval')
@@ -364,8 +364,10 @@ describe('format 的英文', () => {
     expect(kindLabel('ask')).toBe('Question')
     const actions = ['request_pending', 'allow', 'deny', 'answer', 'rule_learned', 'rule_learn_rolled_back', 'push_sent', 'webhook_callback', 'undeliverable', 'cancelled_resend', 'approved', 'expired']
     for (const a of actions) expect(auditLabel(a), a).not.toMatch(han)
-    expect(auditLabel('allow')).toBe('Approve')
-    expect(auditLabel('deny')).toBe('Deny')
+    expect(auditLabel('allow')).toBe('Approval submitted')
+    expect(auditLabel('deny')).toBe('Denial submitted')
+    expect(auditLabel('answer')).toBe('Answer submitted')
+    expect(kindLabel('webhook')).toBe('Webhook')
     expect(auditLabel('approved')).toBe('Approved')
     expect(auditLabel('brand_new')).toBe('brand_new')
     expect(actorLabel('user')).toBe('You')
@@ -374,9 +376,9 @@ describe('format 的英文', () => {
   })
 
   it('依据', () => {
-    expect(decidedByLabel({ decided_by: 'user', rule_id: '', state: 'answered' })).toBe('Answered on the phone')
-    expect(decidedByLabel({ decided_by: 'user', rule_id: '', state: 'approved' })).toBe('Decided on the phone')
-    expect(decidedByLabel({ decided_by: 'user', rule_id: 'learned-git-push', state: 'approved' })).toBe('Decided on the phone (remembered as learned-git-push)')
+    expect(decidedByLabel({ decided_by: 'user', rule_id: '', state: 'answered' })).toBe('Answered on your phone')
+    expect(decidedByLabel({ decided_by: 'user', rule_id: '', state: 'approved' })).toBe('Decided on your phone')
+    expect(decidedByLabel({ decided_by: 'user', rule_id: 'learned-git-push', state: 'approved' })).toBe('Decided on your phone (remembered as learned-git-push)')
     expect(decidedByLabel({ decided_by: 'rule:user-deny-x', rule_id: '', state: 'auto_denied' })).toBe('Rule user-deny-x')
     const sources = ['terminal', 'timeout', 'hub_unreachable', 'gemini', 'paused', 'shutdown', 'resend', 'agent_restart', 'machine_revoked', 'error']
     for (const decided_by of sources) expect(decidedByLabel({ decided_by, rule_id: '', state: 'cancelled' }), decided_by).not.toMatch(han)
@@ -384,11 +386,11 @@ describe('format 的英文', () => {
   })
 
   it('engineReasonLabel：照中文前缀解析，输出英文；不认识的原样', () => {
-    expect(engineReasonLabel('无规则命中，按 outward 默认询问')).toBe('No rule matched, so it asks (default for Outward)')
-    expect(engineReasonLabel('无规则命中，按 weird 默认询问')).toBe('No rule matched, so it asks (default for weird)')
+    expect(engineReasonLabel('无规则命中，按 outward 默认询问')).toBe('No rule matched; Outward asks by default')
+    expect(engineReasonLabel('无规则命中，按 weird 默认询问')).toBe('No rule matched; weird asks by default')
     expect(engineReasonLabel('命中规则 user-network-ask')).toBe('Matched rule user-network-ask')
-    expect(engineReasonLabel('自动审批已暂停')).toBe('Auto-approval paused')
-    expect(engineReasonLabel('自动审批已暂停，交回终端处理')).toBe('Auto-approval paused; handed back to the terminal')
+    expect(engineReasonLabel('自动审批已暂停')).toBe('Auto-approval is paused')
+    expect(engineReasonLabel('自动审批已暂停，交回终端处理')).toBe('Auto-approval is paused; handed back to the terminal')
     expect(engineReasonLabel('等待过期，交回终端处理')).toBe('Timed out; handed back to the terminal')
     expect(engineReasonLabel('脱敏后题目超出上限（x），交回终端处理')).toBe('Handed back to the terminal')
     expect(engineReasonLabel('答案不合规: x')).toBe("The answer didn't fit the questions; handed back to the terminal")
@@ -398,25 +400,25 @@ describe('format 的英文', () => {
 
   it('engineReasonLabel：守护进程固定理由（hubdecider.go、server.go）逐条有英文且无汉字', () => {
     const cases: [string, string][] = [
-      ['Gemini 只能拒绝不能放行，交回原生确认框', "Gemini can only deny here, not allow; handed back to Gemini's own prompt"],
-      ['没有配置 hub，交回终端处理', 'No hub configured; handed back to the terminal'],
+      ['Gemini 只能拒绝不能放行，交回原生确认框', "Gemini hooks can deny but not approve; handed back to Gemini's own prompt"],
+      ['没有配置 hub，交回终端处理', 'No hub is set up; handed back to the terminal'],
       ['连不上 hub，交回终端处理', "Couldn't reach the hub; handed back to the terminal"],
       ['hub 拒绝了本机密钥，交回终端处理', "The hub rejected this machine's key; handed back to the terminal"],
       ['无法送往 hub，交回终端处理', "Couldn't send it to the hub; handed back to the terminal"],
       ['与 hub 断线超过宽限，交回终端处理', 'Lost the hub connection for too long; handed back to the terminal'],
       ['hub 没有给出有效决定，交回终端处理', "The hub didn't return a valid decision; handed back to the terminal"],
       ['hub 版本太旧，不认识提问，交回终端处理', 'The hub is too old to handle questions; handed back to the terminal'],
-      ['已在手机上批准', 'Approved on the phone'],
-      ['已在手机上拒绝', 'Denied on the phone'],
-      ['已在手机上回答', 'Answered on the phone'],
-      ['在手机上选了在终端回答', 'Chose on the phone to answer in the terminal'],
-      ['自动审批已暂停，交回终端处理', 'Auto-approval paused; handed back to the terminal'],
-      ['脱敏后有题面相同的题，分不清答的是哪道，交回终端处理', "After redaction two questions read the same, so the answers couldn't be matched; handed back to the terminal"],
+      ['已在手机上批准', 'Approved on your phone'],
+      ['已在手机上拒绝', 'Denied on your phone'],
+      ['已在手机上回答', 'Answered on your phone'],
+      ['在手机上选了在终端回答', 'You chose on your phone to answer in the terminal'],
+      ['自动审批已暂停，交回终端处理', 'Auto-approval is paused; handed back to the terminal'],
+      ['脱敏后有题面相同的题，分不清答的是哪道，交回终端处理', "Two questions read the same after redaction, so answers can't be matched; handed back to the terminal"],
       ['决定来源给的答案不完整，交回终端处理', 'The answer was incomplete; handed back to the terminal'],
       ['钩子进程在决定前退出', 'The hook exited before a decision was made'],
-      ['守护进程正在停止，交回终端处理', 'The daemon was stopping; handed back to the terminal'],
+      ['守护进程正在停止，交回终端处理', 'The daemon is stopping; handed back to the terminal'],
       ['等待过期，交回终端处理', 'Timed out; handed back to the terminal'],
-      ['决定来源出错，交回终端处理', 'Error while deciding; handed back to the terminal'],
+      ['决定来源出错，交回终端处理', 'Something went wrong while deciding; handed back to the terminal'],
     ]
     for (const [zh, en] of cases) {
       expect(engineReasonLabel(zh), zh).toBe(en)

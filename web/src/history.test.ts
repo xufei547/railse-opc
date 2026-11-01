@@ -89,7 +89,7 @@ describe('history 的英文', () => {
       ['answered', 'Answered'],
       ['auto_allowed', 'Auto-approved'],
       ['auto_denied', 'Auto-denied'],
-      ['passthrough', 'Back to terminal'],
+      ['passthrough', 'Handed back'],
       ['expired', 'Expired'],
       ['cancelled', 'Cancelled'],
       ['recorded', 'Terminal questions and finished turns'],
