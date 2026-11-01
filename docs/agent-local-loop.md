@@ -121,15 +121,15 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | --- | --- |
 | 规则放行（内置只读、项目内改动；你记住的放行） | allow |
 | 规则拒绝 | deny |
-| 定不了，对外或不可逆 | 送手机；没接 hub、hub 不可达、等待过期时回 `ask` |
-| 定不了，联网、项目外改动、无法判断 | 不表态（审计 `passthrough`、`decided_by: classifier`），先让 Claude 自己的 allow 列表、auto 的分类器处理；Claude 要问人时 `PermissionRequest` 再送手机。`~/.railse/settings.yaml` 写 `claude_undecided: phone` 则在这里直接送手机 |
+| 定不了，对外或不可逆 | 立刻回 `ask`（0.2.2 起不在这里等手机）：终端弹确认框，随后的 `PermissionRequest` 送手机，谁先答谁算 |
+| 定不了，联网、项目外改动、无法判断 | 不表态（审计 `passthrough`、`decided_by: classifier`），先让 Claude 自己的 allow 列表、auto 的分类器处理；Claude 要问人时 `PermissionRequest` 再送手机。`~/.railse/settings.yaml` 写 `claude_undecided: phone` 则与上一行一样回 `ask` |
 
 - **本机设置 `~/.railse/settings.yaml`。** 目前只有 `claude_undecided: classifier | phone`（默认 `classifier`）。不放 `rules.yaml`：那份由 hub 下发覆盖，解析时也拒绝未知字段。守护进程启动、`railse agent reload` 与 SIGHUP 时读；读不了、有未知字段或值不对时按默认值跑，reload 回报错。
-- **`ask` 只给送不到手机的硬底线。** 实测 `permissionDecision: "ask"` 在 auto 模式下也强制让人确认，不回分类器（[findings](superpowers/specs/2026-11-01-pretooluse-ask-findings.md)）。对外与不可逆两档在没接 hub、hub 不可达、等待过期时输出 `ask`（理由“Railse：连不上 hub，这类操作要你亲自确认”），任何模式都如此，`claude -p` 下等于拒绝；其余交回终端一律输出空，免得比 auto 模式更吵。
-- **同一调用不问两次。** 守护进程记 10 分钟内 `PreToolUse` 处理过的调用（键是 `tool_use_id`，以及会话 + 工具 + 载荷的哈希；`PermissionRequest` 不带 `tool_use_id`，靠后者对上）。`PreToolUse` 送过手机而交回了终端（hub 不可达、过期等）的，随后同一调用的 `PermissionRequest` 直接不表态（审计 `decided_by: dedup`），不再等第二次；中间三级不表态的，`PermissionRequest` 是 Claude 自己升级成要问人，照常送手机。
+- **硬底线：终端与手机同屏（0.2.2 起）。** 实测（[findings](superpowers/specs/2026-11-01-pretooluse-ask-findings.md)）`permissionDecision: "ask"` 在 auto 模式下也强制让人确认，不回分类器；交互式终端里弹出带理由的确认框，并且照样触发 `PermissionRequest`。所以对外与不可逆两档在 `PreToolUse` 不等任何东西，立刻输出 `ask`，不看 hub 状态；理由由钩子按终端语言拼：“Railse：命令里的「rm -rf after」会删除文件，删了不可恢复。已发到手机，也可以在这里直接批”（引擎给出触发点：哪一段、什么性质）。随后的 `PermissionRequest` 按老路送手机：手机先答 → 输出 allow/deny，终端框关闭；终端先答 → Claude 结束钩子，守护进程向 hub 取消这一条；hub 不可达等 → 不表态，框还在。`claude -p` 下 `ask` 等于拒绝，Claude 收到理由文本。中间三级交回终端一律输出空，免得比 auto 模式更吵。
+- **不再去重。** 0.2.1 的去重表已删：`PreToolUse` 从此不把任何请求送手机，`PermissionRequest` 来的每一条都该送（硬底线是约好的第二步，中间三级是 Claude 自己升级成要问人）。两条审计靠会话 + 载荷对上（`tool_use_id` 只有 `PreToolUse` 有）。
 - **放行是终局。** `PreToolUse` 回 allow 时 Claude Code 跳过它自己的权限检查（含 auto 的分类器），所以内置放行只覆盖只读与项目内改动两档；`settings.json` 里你写的 deny 规则仍先于钩子生效。
 - **失败即不表态。** 守护进程不在、hub 30 秒不可达、解析失败、超时，钩子都输出空（硬底线例外，见上一条），Claude 照自己的流程走；hub 不可达时 stderr 多一行 `railse hook: 连不上 hub，交回 Claude 自己的确认`。
-- 审计的 Claude 审批条目多三个字段：`source`（`pretooluse` / `permissionrequest`）、`permission_mode`、`tool_use_id`。
+- 审计的 Claude 审批条目多三个字段：`source`（`pretooluse` / `permissionrequest`）、`permission_mode`、`tool_use_id`。0.2.2 起硬底线的 `PreToolUse` 条目为 `action: ask`、`state: asked`、`decided_by: ask`；引擎定级有触发点的审批条目多一个 `trigger`（`{segment, why}`，段已脱敏），随审计上报 hub。
 
 ## 手机上答选择题
 

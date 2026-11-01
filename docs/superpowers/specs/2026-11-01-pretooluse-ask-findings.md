@@ -16,7 +16,7 @@ PreToolUse 匹配 `Bash`，钩子输出 `{"hookSpecificOutput":{"hookEventName":
 | `--permission-mode default` | `echo hi-default` | 同上 |
 | 对照：auto，PreToolUse 钩子不输出 | `echo hi-control` | 照常执行，输出 `hi-control`，`permission_denials` 为空 |
 
-`-p` 下没人能答，弹框等于拒绝。对照说明 auto 的分类器本会放行 `echo`，所以 `ask` **不是**回到分类器，而是强制要人确认，`permissionDecisionReason` 作为提示给到 Claude。另外：PreToolUse 返回 `ask` 后，**PermissionRequest 钩子没有触发**（记录日志为空）——至少在 `-p` 下，`ask` 直接进 Claude 自己的确认，不经 PermissionRequest；交互式终端是否相同未测，由真机验收第 4 条覆盖。
+`-p` 下没人能答，弹框等于拒绝。对照说明 auto 的分类器本会放行 `echo`，所以 `ask` **不是**回到分类器，而是强制要人确认，`permissionDecisionReason` 作为提示给到 Claude。另外：PreToolUse 返回 `ask` 后，**PermissionRequest 钩子没有触发**（记录日志为空）——至少在 `-p` 下，`ask` 直接进 Claude 自己的确认，不经 PermissionRequest；交互式终端不同，见文末“2026-11-02 补记”：那里 PermissionRequest 照样触发，本条结论只限 `-p`。
 
 据此计划里的 `ASK_OR_EMPTY` 取 **`ask`**，但只用于“手机上选了交回终端”（`decided_by: terminal`/`user` 的 passthrough）：
 
@@ -48,3 +48,13 @@ PermissionRequest（同一调用）：
 ```
 
 auto + `ask` 的结果（节选）：`"permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_017CB1nP5FKw6ZctCM8TyRSw","tool_input":{"command":"echo hi-auto",…}}]`，`"result":"The command didn't print hi-auto. The Bash tool returned this error instead, verbatim: railse test …"`。
+
+## 2026-11-02 补记：交互式终端
+
+做法：expect 驱动交互式 `claude --permission-mode auto`（Claude Code 2.1.280；去掉 `CLAUDECODE` 等环境变量，默认模型，`--setting-sources project --settings <临时文件>` 只装测试钩子）。`--model haiku` 进不了 auto 模式，所以用默认模型。
+
+- PreToolUse 回 `ask`：终端显示 “Bash command … / Hook PreToolUse:Bash requires confirmation for this command: <reason> / Do you want to proceed? 1. Yes 2. No”。
+- **PermissionRequest 钩子触发**：输入是同一份 `tool_input`，`permission_mode: auto`，没有 `tool_use_id`。所以结论一里“ask 之后 PermissionRequest 不触发”只在 `-p` 下成立。
+- 钩子阻塞等待时，终端只有 “⏺ Bash(…) ⎿ Waiting… (running PreToolUse hook · Ns)”，不显示理由，也看不出在等手机；回 deny 时显示 `Error: PreToolUse:Bash hook error: <理由>`。
+
+v0.2.2 据此改为：硬底线在 PreToolUse 立刻回 `ask`（理由含触发点），PermissionRequest 那一条送手机，谁先答谁算（设计见 `2026-11-02-railse-opc-v0.2.2-two-screens-design.md`）。
