@@ -373,7 +373,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"hub 没有给出有效决定，交回终端处理":        "The hub didn't return a valid decision; handed back to the terminal",
 	"hub 版本太旧，不认识提问，交回终端处理":      "The hub is too old to handle questions; handed back to the terminal",
 	"请求格式错误":                     "Malformed request",
-	"auto 模式下交给 Claude 的分类器":     "Left to Claude's classifier in auto mode",
+	"交给 Claude 自己的权限流程":          "Left to Claude's own permission flow",
 	"刚才已交回终端，这次不再问":              "Already handed back to the terminal; not asking again",
 	"自动审批已暂停，交回终端处理":             "Auto-approval is paused; handed back to the terminal",
 	"自动审批已暂停":                    "Auto-approval is paused",

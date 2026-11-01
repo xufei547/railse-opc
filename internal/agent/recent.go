@@ -18,7 +18,7 @@ const (
 
 // PreToolUse 处理过的调用在去重表里的结局。
 const (
-	recentClassifier = "classifier" // 因权限模式不表态，交给了 Claude 的分类器
+	recentClassifier = "classifier" // 中间三级不表态，交给了 Claude 自己的流程（allow 列表、分类器）
 	recentTerminal   = "terminal"   // 送过手机（或想送），最后交回了终端
 )
 

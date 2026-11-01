@@ -42,7 +42,7 @@ Railse 把这些归成一件事：**每条审批先过一遍规则，规则定�
 
 | | 能批 | 只能拒 | 只能提醒 | 能在手机上答题 | auto / yolo 模式下生效 |
 |---|---|---|---|---|---|
-| Claude Code | 是 | — | 等你说话、完成 | 是（`AskUserQuestion`） | 是：对外与不可逆任何模式都到手机；联网、项目外改动、无法判断默认交给 Claude 自己的分类器 |
+| Claude Code | 是 | — | 等你说话、完成 | 是（`AskUserQuestion`） | 是：对外与不可逆任何模式都到手机（连不上 hub 时终端强制确认）；联网、项目外改动、无法判断先交给 Claude 自己，它要问时再到手机 |
 | Codex | 是（交互会话） | — | 完成 | 否 | 看 Codex 自己的 `approval_policy` |
 | Gemini CLI | 否 | 是 | 问题、完成 | 否 | 否（yolo 跳过钩子） |
 
@@ -124,7 +124,7 @@ railse setup all --local-hub
 ## 现状与限制
 
 - v0.2.1，作者自用中。
-- Claude Code 在 auto（以及 `bypassPermissions`、`dontAsk`）模式下，联网、项目外改动、没见过的命令默认交给 Claude 自己的分类器，不到手机；对外与不可逆照样到手机。想让它们也到手机，在 `~/.railse/settings.yaml` 写 `claude_auto_mode: phone`，再 `railse agent reload`。
+- Claude Code 的联网、项目外改动、没见过的命令，Railse 不论哪种权限模式都先交给 Claude 自己：你在 Claude 里配的 allow 列表、auto 模式的分类器放行的就直接跑，Claude 要问人时才到手机；对外与不可逆一律到手机，连不上 hub 时在终端强制确认。想让它们也一律到手机，在 `~/.railse/settings.yaml` 写 `claude_undecided: phone`，再 `railse agent reload`。
 - Railse 在 `PreToolUse` 放行（内置的只读、项目内改动，或你「记住」的放行规则）时，Claude Code 会跳过它自己的权限检查；你在 Claude 的 `settings.json` 里写的 deny 规则仍先生效。
 - 从 0.2.0 升级的：重跑一次 `railse setup hooks --claude`，Claude 的 `PreToolUse` 钩子才会匹配 Bash 等工具（`railse doctor` 的 `hooks.claude` 会提示）；不重跑的话 auto 模式下的审批照旧绕过 Railse。
 - Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。

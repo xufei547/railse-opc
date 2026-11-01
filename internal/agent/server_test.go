@@ -823,8 +823,8 @@ func preToolUse(cwd, cmd, mode, id string) proto.Request {
 	return r
 }
 
-// auto 模式下中间三级不表态、硬底线仍送 Decider；default 模式下中间三级送 Decider。
-func TestPreToolUseModeBranches(t *testing.T) {
+// 中间三级任何模式都不表态（交给 Claude 自己的流程），硬底线任何模式都送 Decider，规则照旧。
+func TestPreToolUseUndecidedIgnoresMode(t *testing.T) {
 	var mu sync.Mutex
 	sent := map[string]bool{}
 	dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
@@ -838,12 +838,15 @@ func TestPreToolUseModeBranches(t *testing.T) {
 		name, cmd, mode, wantDecision, wantBy string
 	}{
 		{"auto 读 本地放行", "git status", "auto", "allow", "rule:"},
+		{"default 读 本地放行", "git status", "default", "allow", "rule:"},
 		{"auto 联网 不表态", "curl https://x.example/", "auto", "passthrough", "classifier"},
 		{"auto 往外发 送手机", "git push origin main", "auto", "deny", "user"},
 		{"auto 破坏性 送手机", "rm -rf /tmp/x", "auto", "deny", "user"},
+		{"default 往外发 送手机", "git push origin dev", "default", "deny", "user"},
 		{"auto 没见过的命令 不表态", "frobnicate --all", "auto", "passthrough", "classifier"},
-		{"default 联网 送手机", "curl https://x.example/", "default", "deny", "user"},
-		{"acceptEdits 联网 送手机", "curl https://x.example/", "acceptEdits", "deny", "user"},
+		{"default 联网 不表态", "curl https://x.example/", "default", "passthrough", "classifier"},
+		{"acceptEdits 联网 不表态", "curl https://x.example/", "acceptEdits", "passthrough", "classifier"},
+		{"plan 没见过的命令 不表态", "frobnicate --all", "plan", "passthrough", "classifier"},
 		{"bypass 联网 不表态", "curl https://x.example/", "bypassPermissions", "passthrough", "classifier"},
 		{"dontAsk 联网 不表态", "curl https://x.example/", "dontAsk", "passthrough", "classifier"},
 	}
@@ -854,8 +857,10 @@ func TestPreToolUseModeBranches(t *testing.T) {
 			t.Errorf("%s: decision=%s by=%s，想要 %s/%s（理由 %s，风险 %s）", c.name, resp.Decision, resp.DecidedBy, c.wantDecision, c.wantBy, resp.Reason, resp.Risk)
 		}
 	}
-	if sent["curl https://x.example/|auto"] {
-		t.Error("auto 模式下的联网不该送 Decider")
+	for k := range sent {
+		if strings.HasPrefix(k, "curl ") || strings.HasPrefix(k, "frobnicate ") {
+			t.Errorf("中间三级不该送 Decider：%s", k)
+		}
 	}
 	// 没有来源的（PermissionRequest、Codex）不看模式：auto 下的联网照样送
 	r := permission(env.repo, "curl https://y.example/")
@@ -867,7 +872,7 @@ func TestPreToolUseModeBranches(t *testing.T) {
 	}
 	var sawClassifier bool
 	for _, e := range readAudit(t, env.cfg.AuditPath) {
-		if e.DecidedBy == "classifier" && e.State == "passthrough" && e.Source == "pretooluse" && e.PermissionMode == "auto" && e.ToolUseID != "" {
+		if e.DecidedBy == "classifier" && e.State == "passthrough" && e.Source == "pretooluse" && e.PermissionMode == "default" && e.ToolUseID != "" {
 			sawClassifier = true
 		}
 	}
@@ -876,17 +881,21 @@ func TestPreToolUseModeBranches(t *testing.T) {
 	}
 }
 
-// settings.yaml 的 claude_auto_mode: phone 让 auto 模式下中间三级也送手机；reload 后改回默认。
-func TestPreToolUseAutoModePhoneSetting(t *testing.T) {
+// settings.yaml 的 claude_undecided: phone 让中间三级在 PreToolUse 直接送手机（任何模式）；reload 后改回默认。
+func TestPreToolUseUndecidedPhoneSetting(t *testing.T) {
 	dec := fixedDecider{out: Outcome{Action: "allow", DecidedBy: "user", Reason: "已在手机上批准"}}
 	env := startServer(t, dec, func(c *Config) {
 		os.MkdirAll(filepath.Dir(c.SettingsPath), 0o700)
-		os.WriteFile(c.SettingsPath, []byte("claude_auto_mode: phone\n"), 0o600)
+		os.WriteFile(c.SettingsPath, []byte("claude_undecided: phone\n"), 0o600)
 	})
 	var resp proto.Response
 	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, preToolUse(env.repo, "curl https://x.example/", "auto", "toolu_p")), &resp)
 	if resp.Decision != "allow" || resp.DecidedBy != "user" {
 		t.Fatalf("resp=%+v", resp)
+	}
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, preToolUse(env.repo, "frobnicate --all", "default", "toolu_d")), &resp)
+	if resp.Decision != "allow" || resp.DecidedBy != "user" {
+		t.Fatalf("default 模式也应送手机：%+v", resp)
 	}
 	os.Remove(env.cfg.SettingsPath)
 	var rep proto.ControlReply
@@ -899,15 +908,15 @@ func TestPreToolUseAutoModePhoneSetting(t *testing.T) {
 		t.Fatalf("reload 后应回默认：%+v", resp)
 	}
 	// 写坏了：reload 报错，按默认值跑
-	os.WriteFile(env.cfg.SettingsPath, []byte("claude_auto_mode: sometimes\n"), 0o600)
+	os.WriteFile(env.cfg.SettingsPath, []byte("claude_undecided: sometimes\n"), 0o600)
 	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "reload"}), &rep)
-	if rep.OK || !strings.Contains(rep.Error, "claude_auto_mode") {
+	if rep.OK || !strings.Contains(rep.Error, "claude_undecided") {
 		t.Fatalf("坏设置应报错：%+v", rep)
 	}
 }
 
 // PreToolUse 送手机后交回终端，同一调用的 PermissionRequest 不再送手机；
-// PreToolUse 因模式不表态的，同一调用的 PermissionRequest 照常送手机。
+// PreToolUse 因中间三级不表态的，同一调用的 PermissionRequest 照常送手机。
 func TestPreToolUseThenPermissionRequestDedup(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
@@ -945,10 +954,10 @@ func TestPreToolUseThenPermissionRequestDedup(t *testing.T) {
 	if count() != 2 {
 		t.Fatalf("别的会话不该去重：calls=%d", count())
 	}
-	// 因模式不表态的（curl 在 auto 下），PermissionRequest 要送手机
+	// 中间三级不表态的（curl），Claude 升级成提问时 PermissionRequest 要送手机
 	roundTrip(t, sock, preToolUse(env.repo, "curl https://x.example/", "auto", "toolu_c"))
 	if count() != 2 {
-		t.Fatalf("auto 下的联网不该送手机：calls=%d", count())
+		t.Fatalf("PreToolUse 的联网不该送手机：calls=%d", count())
 	}
 	pr3 := permission(env.repo, "curl https://x.example/")
 	pr3.Source, pr3.PermissionMode = proto.SourcePermissionRequest, "auto"

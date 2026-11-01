@@ -56,7 +56,7 @@ What each CLI supports:
 
 | | Can approve | Deny only | Reminders only | Answer questions on the phone | Works in auto / yolo mode |
 |---|---|---|---|---|---|
-| Claude Code | yes | — | waiting for you, finished | yes (`AskUserQuestion`) | yes: outward and destructive always reach the phone; network, writes outside the project and unknown commands are left to Claude's own classifier by default |
+| Claude Code | yes | — | waiting for you, finished | yes (`AskUserQuestion`) | yes: outward and destructive always reach the phone (the terminal asks you to confirm if the hub can't be reached); network, writes outside the project and unknown commands go to Claude first and reach the phone only when Claude asks |
 | Codex | yes (interactive sessions) | — | finished | no | depends on Codex's own `approval_policy` |
 | Gemini CLI | no | yes | questions, finished | no | no (yolo skips hooks) |
 
@@ -156,7 +156,7 @@ The docs under `docs/` are in Chinese.
 ## Status and limitations
 
 - This is v0.2.1, and the author is dogfooding it.
-- In Claude Code's auto mode (and `bypassPermissions`, `dontAsk`), network calls, writes outside the project and commands Railse hasn't seen are left to Claude's own classifier by default and don't reach the phone; outward and destructive actions still do. To send those to the phone too, put `claude_auto_mode: phone` in `~/.railse/settings.yaml` and run `railse agent reload`.
+- For Claude Code, network calls, writes outside the project and commands Railse hasn't seen are left to Claude first, in every permission mode: whatever your Claude allow list or auto mode's classifier lets through just runs, and only when Claude decides to ask does it reach the phone. Outward and destructive actions always reach the phone, and if the hub can't be reached the terminal asks you to confirm. To send all of them to the phone, put `claude_undecided: phone` in `~/.railse/settings.yaml` and run `railse agent reload`.
 - When Railse allows a call at `PreToolUse` (the built-in read-only and in-project rules, or an allow rule you remembered), Claude Code skips its own permission checks; deny rules in Claude's `settings.json` still apply first.
 - Upgrading from 0.2.0: rerun `railse setup hooks --claude` once so Claude's `PreToolUse` hook also matches Bash and the other tools (`railse doctor` reports it under `hooks.claude`); until then approvals in auto mode still bypass Railse.
 - Most docs under `docs/` are in Chinese for now; the CLI and the phone web app are in both languages.

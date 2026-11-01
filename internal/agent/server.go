@@ -89,7 +89,7 @@ func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Lo
 func (s *Server) ReloadSettings() error {
 	st, err := LoadSettings(s.cfg.SettingsPath)
 	if err != nil {
-		s.log.Printf("本机设置读不了，按默认值（claude_auto_mode: %s）: %v", st.ClaudeAutoMode, err)
+		s.log.Printf("本机设置读不了，按默认值（claude_undecided: %s）: %v", st.ClaudeUndecided, err)
 	}
 	s.settings.Store(&st)
 	return err
@@ -100,11 +100,6 @@ var noPhone = map[string]bool{"no_hub": true, hubUnreachable: true, "timeout": t
 
 // reasonAskInTerminal 是硬底线没能送到手机、改由终端确认时给 Claude 看的理由（钩子加 “Railse：” 前缀）。
 const reasonAskInTerminal = "连不上 hub，这类操作要你亲自确认"
-
-// lenientMode 报告 Claude Code 的权限模式是否是用户要求少打扰的那几种：auto（分类器放行）、bypassPermissions、dontAsk。
-func lenientMode(mode string) bool {
-	return mode == "auto" || mode == "bypassPermissions" || mode == "dontAsk"
-}
 
 // SetAuditSink 设置审计转发目标；nil（包括装着 nil 指针的接口值）表示只写本地。可在 Serve 运行中随时调用。
 func (s *Server) SetAuditSink(sink AuditSink) {
@@ -412,11 +407,10 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 				break
 			}
 		}
-		if req.Source == proto.SourcePreToolUse && d.Risk < policy.RiskOutward && lenientMode(req.PermissionMode) &&
-			s.settings.Load().ClaudeAutoMode != ClaudeAutoPhone {
-			// auto、bypassPermissions、dontAsk 下中间三级交给 Claude 自己的分类器，Railse 不比它更吵；
-			// 分类器若决定要问人，会再来一条 PermissionRequest，那时照常送手机。往外发与破坏性不看模式。
-			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", recentClassifier, "auto 模式下交给 Claude 的分类器"
+		if req.Source == proto.SourcePreToolUse && d.Risk < policy.RiskOutward && s.settings.Load().ClaudeUndecided != UndecidedPhone {
+			// 中间三级不看模式，先让 Claude 自己的 allow 列表与分类器（auto 模式）处理，Railse 不比它更吵；
+			// Claude 若决定要问人，会再来一条 PermissionRequest，那时照常送手机。往外发与破坏性不走这里。
+			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", recentClassifier, "交给 Claude 自己的权限流程"
 			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
 			s.recent.remember(keys, recentClassifier)
 			break
