@@ -21,12 +21,14 @@ test: gofmt lint
 	RAILSE_LANG=zh go test ./... -race
 	cd web && npm ci && npm run check
 
-# gofmt 查入库的与新建还没 git add 的 Go 文件（git ls-files -co --exclude-standard），不查 .gitignore 里的：
+# gofmt 查入库的与新建还没 git add 的 Go 文件（git ls-files -co --exclude-standard），不查 .gitignore 里的。
+# 用 go.mod 里 go 行的那个版本跑 gofmt（GOTOOLCHAIN=go<版本> go run cmd/gofmt），不用 PATH 上的 gofmt：
+# gofmt 在 1.26 与 1.27 之间对长对齐块的处理不同，本机与 CI 必须同一版本（CI 装的就是 go.mod 里的版本）。
 # 主 checkout 下的 .claude/worktrees、web/node_modules 里的不算。
 # 有要格式化的文件就列出并失败；gofmt 读不了、解析不了（语法错误等，它的报错在上面）同样失败。
 gofmt:
 	@files="$$(git ls-files -co --exclude-standard '*.go')" && [ -n "$$files" ] || { echo "gofmt: git ls-files 没有列出 Go 文件（不在 git 仓库里？）"; exit 1; }; \
-	out="$$(gofmt -l $$files)" || { echo "gofmt 出错（见上面的报错：语法错误，或文件读不了，例如删了但还没 git rm）"; exit 1; }; \
+	out="$$(GOTOOLCHAIN=go$$(sed -n 's/^go //p' go.mod) go run cmd/gofmt -l $$files)" || { echo "gofmt 出错（见上面的报错：语法错误，或文件读不了，例如删了但还没 git rm）"; exit 1; }; \
 	if [ -n "$$out" ]; then echo "gofmt -l 有输出，请先格式化:"; echo "$$out"; exit 1; fi
 
 # golangci-lint（配置见 .golangci.yml：standard 一组加 gofmt；测试文件不查 errcheck）
