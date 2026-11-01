@@ -34,6 +34,12 @@ PreToolUse 对硬底线**不再等任何东西**，立刻输出 `ask`，理由�
 
 去重表（`internal/agent/recent.go`，v0.2.1 加的）**整个删掉**：PreToolUse 从此不再把任何请求送手机，PermissionRequest 来的每一条都该送（硬底线是约好的第二步，中间三级是 Claude 自己升级成提问），没有"同一件事问两次"的情形了。`claude_undecided: phone` 时中间三级走同一机制（ask + PermissionRequest），不再在 PreToolUse 里等。（计划写作时改定，原稿是加 `recentAsked` 状态。）
 
+
+**2026-11-02 真机验收补记（2.1 的边界）**：
+
+- 终端 CLI 的 auto、default、bypassPermissions 三种模式下 ask 都弹确认框，PermissionRequest 照样触发；终端按 Yes 后 hub 记 cancelled/terminal；手机批准后终端框关闭。`-p` 下 ask 等于拒绝，Claude 收到的正文是带触发点的理由（里面"已发到手机"一句在 `-p` 下并不成立，因为 PermissionRequest 不触发；已知的措辞瑕疵，不改）。
+- **Claude Code 桌面应用（SDK 宿主）**：ask 交给宿主的权限回调，auto 模式下是宿主自己的分类器，不一定经人；命令执行后宿主**不结束** PermissionRequest 钩子进程，手机上留下待决卡片直到过期。实施计划 Task 9 加 PostToolUse / Stop / SessionEnd 事件让守护进程主动取消同会话挂着的请求。
+
 **模式的边界**（验收时逐一记录，写进 hub.md 的能力矩阵）：
 
 - `default` / `acceptEdits` / `plan` / `auto`：如上。
@@ -109,6 +115,20 @@ Edit / Write / WebFetch 没有 description，不补。Codex / Gemini 的载荷�
 6. `--permission-mode bypassPermissions` 下 `git push --dry-run`：记录表现，写进 hub.md。
 7. `claude -p` 下同一条：被拒，Claude 收到的文本含触发点。
 8. 老 hub（0.2.1）配新守护进程：卡片照常，只是没有触发点与说明；新 hub 配老守护进程同理。
+
+
+**2026-11-02 验收结果（rc1 = 分支 `claude/v0-2-2-two-screens-5635ac` 至 `8afc9bc`，本机 hub 升到 v5）**：
+
+| 条 | 结果 |
+|---|---|
+| 1 auto / default | 通过。终端框第一行是 Claude 的说明 "Dry-run push of main to origin"，理由为「git push --dry-run origin main」会把代码推到远程仓库 + 已发到手机；default 模式手机批准后终端显示 "Allowed by PermissionRequest hook"，命令执行，hub 记 approved/user 并 delivered |
+| 2 终端先答 | 通过。终端按 Yes 后命令执行，hub 记 cancelled/terminal |
+| 3 hub 停掉 | 通过。PreToolUse 立刻 ask，终端框照常；PermissionRequest 在 1 秒内按 hub_unreachable 交回终端（宽限早已用完），框仍在，不卡 |
+| 4 四条真实命令 | 通过（ssh 那条是密钥文件，见实施报告偏离 2） |
+| 6 bypassPermissions | 弹框，与 auto 相同；手机批准后终端框关闭、命令执行（这一条由作者在手机上批的） |
+| 7 `-p` | 通过。被拒，正文是带触发点的理由；"已发到手机"一句在 `-p` 下不成立，已知措辞瑕疵 |
+| 8 新老混跑 | 未测（本机两端同时升级） |
+| 新发现 | 桌面应用（SDK 宿主）里 PermissionRequest 钩子不随宿主裁决结束，留下孤儿进程与手机死卡片 → Task 9（`f19e69d`）。rc2 在桌面会话里复测：命令跑完后守护进程待决归零、无孤儿进程，hub 记 cancelled/terminal，审计"已在终端处理，取消等待" |
 
 ## 4 文档
 
