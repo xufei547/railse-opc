@@ -40,7 +40,7 @@ Railse 把这些归成一件事：**每条审批先过一遍规则，规则定�
 
 7. **Claude Code 的选择题可以在手机上答。** 它用 `AskUserQuestion` 问你时，题目不过规则，直接推到手机，选一个选项或自己填一句，agent 立刻继续，终端不再弹选项；也可以点「让它在终端问我」，交回终端。没接 hub、hub 连不上、等过期，终端照常问。
 
-除了审批和选择题，agent 停下来等你说下一句话、以及完成，也会进收件箱，告诉你去哪台机器哪个目录的终端处理；n8n 这类工作流的人工审批节点可以通过 hub 的 webhook 接进来，和 agent 的审批排在同一个收件箱里。
+除了审批和选择题，agent 停下来等你说下一句话、以及完成，也会进收件箱，告诉你去哪台机器哪个目录的终端处理；n8n 这类工作流的人工审批节点可以通过 hub 的 webhook 接进来，和 agent 的审批排在同一个收件箱里。做法见 [docs/integrations/n8n.md](docs/integrations/n8n.md)。
 
 <p align="center"><img src="assets/demo.gif" width="390" alt="演示：手机网页上登录；Claude Code 要跑 curl，规则定不了，请求出现在收件箱；批准时勾上「记住」；规则页多了一条「学来的」规则"></p>
 
