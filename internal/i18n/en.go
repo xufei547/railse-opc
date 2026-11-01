@@ -364,6 +364,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"在手机上选了在终端回答":                "You chose on your phone to answer in the terminal",
 	"Gemini 只能拒绝不能放行，交回原生确认框":    "Gemini hooks can deny but not approve; handed back to Gemini's own prompt",
 	"没有配置 hub，交回终端处理":            "No hub is set up; handed back to the terminal",
+	"连不上 hub，交回 Claude 自己的确认":    "hub unreachable, falling back to Claude's own prompt",
 	"连不上 hub，交回终端处理":             "Couldn't reach the hub; handed back to the terminal",
 	"hub 拒绝了本机密钥，交回终端处理":         "The hub rejected this machine's key; handed back to the terminal",
 	"无法送往 hub，交回终端处理":            "Couldn't send it to the hub; handed back to the terminal",

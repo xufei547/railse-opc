@@ -203,7 +203,7 @@ func fakeDaemon(t *testing.T, reply string) (sock string, lines func() []string)
 }
 
 // 钩子发给守护进程的是 ask 请求；守护进程的答复不是带答案的 answer 时（旧守护进程、出错）一律不输出，
-// 绝不能对 PreToolUse 写出审批的 JSON。
+// 答题类 PreToolUse 不写审批的 JSON。
 func TestHookClaudeAskOnlyRendersAnswer(t *testing.T) {
 	for _, reply := range []string{
 		`{"v":1,"decision":"allow"}`,

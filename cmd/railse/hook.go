@@ -160,12 +160,17 @@ func readStdin(ctx context.Context, stdin io.Reader) ([]byte, error) {
 }
 
 // hookPermission 把审批请求交给守护进程等答复（见 awaitReply），按答复渲染 allow、deny，其余不作决定。
+// Claude 的请求带上来源钩子事件、权限模式与工具调用编号；连不上 hub 而不作决定时在 stderr 说一句，
+// 让人知道这次是 Claude 自己在把关。
 func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.Client, in adapter.Input, stdout, stderr io.Writer) int {
 	req := proto.Request{Kind: "permission", Session: in.Session, ToolName: in.ToolName, Payload: in.Payload,
 		Source: in.Source, PermissionMode: in.PermissionMode, ToolUseID: in.ToolUseID}
 	resp, err := awaitReply(ctx, ad, client, req)
 	if err != nil {
 		return passthrough(stderr, err.Error())
+	}
+	if resp.Decision == "passthrough" && resp.DecidedBy == "hub_unreachable" && in.Source != "" {
+		fmt.Fprintln(stderr, "railse hook: "+i18n.T("连不上 hub，交回 Claude 自己的确认"))
 	}
 	return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: resp.Decision, Reason: resp.Reason}))
 }
