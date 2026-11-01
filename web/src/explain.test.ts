@@ -609,7 +609,15 @@ describe('触发点与 description', () => {
       engine_reason: '无规则命中，按 destructive 默认询问',
       trigger: { segment: 'rm -rf after', why: '删除文件，删了不可恢复' },
     })
-    expect(explainRequest(r).why).toBe('命令里的「rm -rf after」会删除文件，删了不可恢复。这是不可逆的操作。规则永远不会自动放行，要你决定。')
+    expect(explainRequest(r).why).toBe('命令里的「rm -rf after」会删除文件，删了不可恢复。规则永远不会自动放行，要你决定。')
+  })
+  it('联网、不在名单、不可逆这三种性质不加“会”，规则句也不再复述', () => {
+    const net = req({ risk: 'network', trigger: { segment: 'curl https://x.example/', why: '要联网' } })
+    expect(explainRequest(net).why).toBe('命令里的「curl https://x.example/」要联网。规则默认不自动放行联网操作，要你决定。')
+    const unk = req({ risk: 'unknown', trigger: { segment: 'frobnicate --all', why: '这条命令不在已知名单里' } })
+    expect(explainRequest(unk).why).toBe('命令里的「frobnicate --all」不在已知名单里。规则判断不了，要你决定。')
+    const des = req({ risk: 'destructive', trigger: { segment: 'shred x', why: '不可逆的操作' } })
+    expect(explainRequest(des).why).toBe('命令里的「shred x」是不可逆的操作。规则永远不会自动放行，要你决定。')
   })
   it('trigger 没有段时只说性质', () => {
     const r = req({ risk: 'unknown', trigger: { why: '这条命令不在已知名单里' } })

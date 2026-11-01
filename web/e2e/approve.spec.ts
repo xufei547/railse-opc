@@ -21,7 +21,7 @@ test('登录、看到请求、批准并记住、规则多一条；再拒绝一�
   const explain = page.locator('section.explain')
   await expect(explain.locator('.headline')).toHaveText('Claude Code 想访问网址 api.example.com')
   await expect(explain.locator('.where')).toHaveText('项目 repo，机器 e2e-mac')
-  await expect(explain.locator('.why')).toHaveText('这条要联网。规则默认不自动放行联网操作，要你决定。')
+  await expect(explain.locator('.why')).toHaveText('命令里的「curl https://api.example.com/v1/x」要联网。规则默认不自动放行联网操作，要你决定。')
   await expect(page.locator('ul.next li')).toHaveCount(3)
   await expect(page.locator('details.more')).not.toHaveAttribute('open')
   await expect(page.locator('details.more summary')).toHaveText('详情')

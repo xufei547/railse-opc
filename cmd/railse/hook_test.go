@@ -527,6 +527,17 @@ func TestHookPreToolUseAskReasonHasTrigger(t *testing.T) {
 	if got := askReason(resp); got != "这条命令不在已知名单里。已发到手机，也可以在这里直接批" {
 		t.Fatalf("没有段：%q", got)
 	}
+	// 联网、不在名单、不可逆三条不加“会”
+	for why, want := range map[string]string{
+		policy.WhyNetwork:     "命令里的「curl https://x.example/」要联网。已发到手机，也可以在这里直接批",
+		policy.WhyUnknown:     "命令里的「curl https://x.example/」不在已知名单里。已发到手机，也可以在这里直接批",
+		policy.WhyDestructive: "命令里的「curl https://x.example/」是不可逆的操作。已发到手机，也可以在这里直接批",
+	} {
+		resp.Trigger = &policy.Trigger{Segment: "curl https://x.example/", Why: why}
+		if got := askReason(resp); got != want {
+			t.Fatalf("%s: got %q\nwant %q", why, got, want)
+		}
+	}
 	resp.Trigger = nil
 	if got := askReason(resp); got != "已发到手机，也可以在这里直接批" {
 		t.Fatalf("没有触发点：%q", got)

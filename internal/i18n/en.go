@@ -900,6 +900,7 @@ Switched to a new key and deleted %d push subscriptions. Every phone has to turn
 	"已发到手机，也可以在这里直接批": "Sent to your phone; you can also answer here",
 	"%s。%s":          "%s. %s",
 	"命令里的「%s」会%s。%s": `"%s" %s. %s`,
+	"命令里的「%s」%s。%s":  `"%s" %s. %s`,
 
 	// internal/policy/trigger.go 的 Why 短语（经 i18n.Lookup 动态查）。动词短语，接在引号括起的命令段后面；
 	// 与 web/src/format.ts 的 triggerWhysEn 一字不差（web/src/i18n.sync.test.ts 核对）

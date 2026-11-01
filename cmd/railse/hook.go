@@ -17,6 +17,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hookclient"
 	"github.com/xufei547/railse-opc/internal/i18n"
+	"github.com/xufei547/railse-opc/internal/policy"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -204,6 +205,14 @@ func askReason(resp proto.Response) string {
 	if resp.Trigger.Segment == "" {
 		r, n := utf8.DecodeRuneInString(why)
 		return fmt.Sprintf(i18n.T("%s。%s"), string(unicode.ToUpper(r))+why[n:], tail)
+	}
+	// 中文里多数性质是动作，前面加“会”；联网、不在名单、不可逆三条不是动作，换个说法。英文的性质都是动词短语，两种模板一样。
+	switch resp.Trigger.Why {
+	case policy.WhyNetwork, policy.WhyUnknown, policy.WhyDestructive:
+		if i18n.Lang() == i18n.ZH {
+			why = map[string]string{policy.WhyNetwork: "要联网", policy.WhyUnknown: "不在已知名单里", policy.WhyDestructive: "是不可逆的操作"}[resp.Trigger.Why]
+		}
+		return fmt.Sprintf(i18n.T("命令里的「%s」%s。%s"), resp.Trigger.Segment, why, tail)
 	}
 	return fmt.Sprintf(i18n.T("命令里的「%s」会%s。%s"), resp.Trigger.Segment, why, tail)
 }

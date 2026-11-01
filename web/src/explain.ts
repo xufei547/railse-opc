@@ -505,6 +505,7 @@ function permissionWhy(r: RequestView): string {
       reason = t('规则定不了，要你决定。')
   }
   // 中文句子之间不空格，英文要
+  if (r.trigger) reason = ruleLineWithTrigger(r.risk) || reason
   if (paused) reason = isEn() ? `${pausedLine} ${reason}` : pausedLine + reason
   if (!r.trigger) return reason
   return isEn() ? `${triggerLine(r.trigger)} ${reason}` : triggerLine(r.trigger) + reason
@@ -514,7 +515,29 @@ function permissionWhy(r: RequestView): string {
 function triggerLine(tr: Trigger): string {
   const why = triggerWhyLabel(tr.why)
   if (!tr.segment) return isEn() ? `${upperFirst(why)}.` : `${why}。`
-  return isEn() ? `"${tr.segment}" ${why}.` : `命令里的「${tr.segment}」会${why}。`
+  if (isEn()) return `"${tr.segment}" ${why}.`
+  // 中文：多数性质是动作，前面加“会”；联网、不在名单、不可逆这三条不是动作，换个说法
+  const plain: Record<string, string> = { 要联网: '要联网', 这条命令不在已知名单里: '不在已知名单里', 不可逆的操作: '是不可逆的操作' }
+  const tail = plain[tr.why]
+  return tail ? `命令里的「${tr.segment}」${tail}。` : `命令里的「${tr.segment}」会${why}。`
+}
+
+// 有触发点时规则那一句不再复述“这条要联网”“这是不可逆的操作”（触发句已经说了），只说规则为什么不放行。
+function ruleLineWithTrigger(risk: string): string {
+  switch (risk) {
+    case 'network':
+      return t('规则默认不自动放行联网操作，要你决定。')
+    case 'outward':
+      return t('规则永远不会自动放行这类操作，要你决定。')
+    case 'destructive':
+      return t('规则永远不会自动放行，要你决定。')
+    case 'write_outside':
+      return t('规则默认不自动放行，要你决定。')
+    case 'unknown':
+      return t('规则判断不了，要你决定。')
+    default:
+      return ''
+  }
 }
 
 /** 去掉结尾的 /（只剩 / 时保留），比较目录用。 */

@@ -129,6 +129,12 @@ export const en: Record<string, string> = {
   '要改项目目录之外的文件。规则默认不自动放行，要你决定。': "This edits files outside the project directory. Rules don't allow that automatically by default, so it's up to you.",
   '这条命令不在已知名单里，规则判断不了，要你决定。': "This command isn't on the known list, so the rules can't judge it. It's up to you.",
   '这个操作不在已知名单里，规则判断不了，要你决定。': "This action isn't on the known list, so the rules can't judge it. It's up to you.",
+  // explain.ts：有触发点时规则那一句的短版
+  '规则默认不自动放行联网操作，要你决定。': "By default, rules don't auto-approve network access, so it's up to you.",
+  '规则永远不会自动放行这类操作，要你决定。': "Only a hand-written rule can allow this automatically, so it's up to you.",
+  '规则永远不会自动放行，要你决定。': "Only a hand-written rule can allow this automatically, so it's up to you.",
+  '规则默认不自动放行，要你决定。': "Rules don't allow that automatically by default, so it's up to you.",
+  '规则判断不了，要你决定。': "The rules can't judge it, so it's up to you.",
   '规则定不了，要你决定。': "The rules can't decide this, so it's up to you.",
   '{cli} 在终端等你回答': '{cli} is waiting for you in the terminal',
   在终端等你回答: 'Waiting for you in the terminal',
