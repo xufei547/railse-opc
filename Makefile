@@ -32,8 +32,10 @@ gofmt:
 	if [ -n "$$out" ]; then echo "gofmt -l 有输出，请先格式化:"; echo "$$out"; exit 1; fi
 
 # golangci-lint（配置见 .golangci.yml：standard 一组加 gofmt；测试文件不查 errcheck）
+# 同 gofmt 目标，用 go.mod 里 go 行的版本编译并运行：它内置的 gofmt 随编译它的 Go 走，PATH 上是 1.27 时会把
+# 1.26 格式化过的长对齐块（如 internal/i18n/en.go）报成未格式化，本机与 CI 必须同一版本。
 lint:
-	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+	GOTOOLCHAIN=go$$(sed -n 's/^go //p' go.mod) go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
 # 校验 .goreleaser.yaml
 release-check:
