@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -279,5 +280,57 @@ func TestClaudeRenderPreToolUse(t *testing.T) {
 	out = claude{}.Render(Decision{Source: SourcePreToolUse, Action: "allow"})
 	if !strings.Contains(string(out.Stdout), `"permissionDecisionReason":"Railse：已放行"`) {
 		t.Errorf("空理由: %s", out.Stdout)
+	}
+}
+
+func TestClaudePreToolUseCarriesDescription(t *testing.T) {
+	a, _ := Get("claude")
+	raw := sample(t, "claude/pretooluse-bash-default.json")
+	in, err := a.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.Payload.Description != "Print hi-default" {
+		t.Fatalf("description 没带上：%q", in.Payload.Description)
+	}
+	// 超长的说明截断到 200 字节内，且不切坏字符
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["tool_input"] = map[string]any{"command": "echo", "description": strings.Repeat("长", 200)}
+	raw, _ = json.Marshal(m)
+	in, err = a.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(in.Payload.Description); n > 200 || n == 0 || !utf8.ValidString(in.Payload.Description) {
+		t.Fatalf("说明应截到 200 字节内：%d", n)
+	}
+}
+
+// PostToolUse 是事件：工具跑完了，带会话、工具名、与审批同一算法的载荷和 tool_use_id；AskUserQuestion 与别的工具忽略。
+func TestClaudeParsePostToolUse(t *testing.T) {
+	a, _ := Get("claude")
+	raw := `{"session_id":"s1","prompt_id":"p1","cwd":"/p","permission_mode":"auto","hook_event_name":"PostToolUse","tool_name":"Bash",` +
+		`"tool_input":{"command":"git push origin main","description":"Push"},"tool_response":{"stdout":"ok"},"tool_use_id":"toolu_9"}`
+	in, err := a.Parse([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := policy.Payload{Type: policy.PayloadShell, Command: "git push origin main", Cwd: "/p", Description: "Push"}
+	if in.Kind != KindToolDone || in.ToolName != "Bash" || in.ToolUseID != "toolu_9" || in.Session.CLISessionID != "s1" || !reflect.DeepEqual(in.Payload, want) {
+		t.Fatalf("PostToolUse: %+v", in)
+	}
+	// 与同一调用的 PermissionRequest 算出的载荷相同（守护进程靠它对上）
+	pr := strings.Replace(raw, `"hook_event_name":"PostToolUse"`, `"hook_event_name":"PermissionRequest"`, 1)
+	if p, err := a.Parse([]byte(pr)); err != nil || !reflect.DeepEqual(p.Payload, in.Payload) {
+		t.Fatalf("载荷应与 PermissionRequest 一致: %+v %v", p.Payload, err)
+	}
+	for _, tool := range []string{"AskUserQuestion", "mcp__github__get_issue"} {
+		other := strings.Replace(raw, `"tool_name":"Bash"`, `"tool_name":"`+tool+`"`, 1)
+		if in, err := a.Parse([]byte(other)); err != nil || in.Kind != KindIgnore {
+			t.Fatalf("%s 应忽略: %+v %v", tool, in, err)
+		}
 	}
 }

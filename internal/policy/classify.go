@@ -1,33 +1,65 @@
 package policy
 
-// Classify 给统一载荷定风险等级，不看任何规则。总是返回七档之一，空载荷与未知类型为 unknown。
-// 没有项目根时 fail closed（见 Context.ProjectRoot，项目根太宽时按没有处理，见 Context.Root）：没有改动在项目内，
-// write_in_project 一律按 write_outside，包括不做路径分析、默认改动工作目录的命令（git commit、make）。
+import "strings"
+
+// Classify 给统一载荷定风险等级，不看任何规则，见 ClassifyTrace。
 func Classify(p Payload, ctx Context) Risk {
-	ctx = ctx.normalized()
-	risk := classify(p, ctx)
-	if ctx.ProjectRoot == "" && risk == RiskWriteInProject {
-		return RiskWriteOutside
-	}
-	return risk
+	r, _ := ClassifyTrace(p, ctx)
+	return r
 }
 
-func classify(p Payload, ctx Context) Risk {
+// ClassifyTrace 定级并给出触发点（nil 表示 read 或 write_in_project，没有可说的）。总是返回七档之一，空载荷与未知类型为 unknown。
+// 没有项目根时 fail closed（见 Context.ProjectRoot，项目根太宽时按没有处理，见 Context.Root）：没有改动在项目内，
+// write_in_project 一律按 write_outside，包括不做路径分析、默认改动工作目录的命令（git commit、make），触发点也说"改项目外的文件"。
+func ClassifyTrace(p Payload, ctx Context) (Risk, *Trigger) {
+	ctx = ctx.normalized()
+	risk, trig := classifyTrace(p, ctx)
+	if ctx.ProjectRoot == "" && risk == RiskWriteInProject {
+		return RiskWriteOutside, &Trigger{Segment: segmentFor(p), Why: WhyWriteOutside}
+	}
+	return risk, trig
+}
+
+// segmentFor 是非 shell 载荷（或 shell 没有触发段时）给人看的那一处：路径、网址或 server/tool。
+func segmentFor(p Payload) string {
+	switch p.Type {
+	case PayloadShell:
+		return compactSegment(p.Command)
+	case PayloadFileWrite:
+		return p.Path
+	case PayloadNetwork:
+		return p.URL
+	case PayloadMCP:
+		return strings.TrimSuffix(p.Server+"/"+p.Tool, "/")
+	}
+	return ""
+}
+
+func classifyTrace(p Payload, ctx Context) (Risk, *Trigger) {
 	cwd := p.Cwd
 	if cwd == "" {
 		cwd = ctx.ProjectRoot
 	}
 	switch p.Type {
 	case PayloadShell:
-		return classifyShell(p.Command, cwd, ctx)
+		return classifyShellTrace(p.Command, cwd, ctx)
 	case PayloadFileWrite:
 		if p.Path == "" {
-			return RiskUnknown
+			return RiskUnknown, &Trigger{Why: WhyUnknown}
 		}
-		return maxRisk(RiskWriteInProject, literalPathRisk(p.Path, cwd, ctx))
+		r := maxRisk(RiskWriteInProject, literalPathRisk(p.Path, cwd, ctx))
+		switch r {
+		case RiskDestructive:
+			return r, &Trigger{Segment: p.Path, Why: WhySensitive}
+		case RiskWriteOutside:
+			return r, &Trigger{Segment: p.Path, Why: WhyWriteOutside}
+		case RiskUnknown:
+			return r, &Trigger{Segment: p.Path, Why: WhyUnknown}
+		}
+		return r, nil
 	case PayloadMCP, PayloadNetwork:
-		return RiskNetwork
+		return RiskNetwork, &Trigger{Segment: segmentFor(p), Why: WhyNetwork}
 	default:
-		return RiskUnknown
+		return RiskUnknown, &Trigger{Why: WhyUnknown}
 	}
 }

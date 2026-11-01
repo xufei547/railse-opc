@@ -22,6 +22,8 @@ type Payload struct {
 	// shell
 	Command string `json:"command,omitempty"`
 	Cwd     string `json:"cwd,omitempty"` // shell 与 file_write 共用
+	// shell：agent 自己写的一句话说明（Claude Code 的 tool_input.description），给人看，不参与定级；已截断、随载荷脱敏
+	Description string `json:"description,omitempty"`
 
 	// file_write
 	Path        string `json:"path,omitempty"`

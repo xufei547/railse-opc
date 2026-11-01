@@ -823,7 +823,7 @@ func preToolUse(cwd, cmd, mode, id string) proto.Request {
 	return r
 }
 
-// 中间三级任何模式都不表态（交给 Claude 自己的流程），硬底线任何模式都送 Decider，规则照旧。
+// 中间三级任何模式都不表态（交给 Claude 自己的流程），硬底线任何模式都回 ask、不送 Decider，规则照旧。
 func TestPreToolUseUndecidedIgnoresMode(t *testing.T) {
 	var mu sync.Mutex
 	sent := map[string]bool{}
@@ -840,9 +840,9 @@ func TestPreToolUseUndecidedIgnoresMode(t *testing.T) {
 		{"auto 读 本地放行", "git status", "auto", "allow", "rule:"},
 		{"default 读 本地放行", "git status", "default", "allow", "rule:"},
 		{"auto 联网 不表态", "curl https://x.example/", "auto", "passthrough", "classifier"},
-		{"auto 往外发 送手机", "git push origin main", "auto", "deny", "user"},
-		{"auto 破坏性 送手机", "rm -rf /tmp/x", "auto", "deny", "user"},
-		{"default 往外发 送手机", "git push origin dev", "default", "deny", "user"},
+		{"auto 往外发 回 ask", "git push origin main", "auto", "ask", "ask"},
+		{"auto 破坏性 回 ask", "rm -rf /tmp/x", "auto", "ask", "ask"},
+		{"default 往外发 回 ask", "git push origin dev", "default", "ask", "ask"},
 		{"auto 没见过的命令 不表态", "frobnicate --all", "auto", "passthrough", "classifier"},
 		{"default 联网 不表态", "curl https://x.example/", "default", "passthrough", "classifier"},
 		{"acceptEdits 联网 不表态", "curl https://x.example/", "acceptEdits", "passthrough", "classifier"},
@@ -857,11 +857,11 @@ func TestPreToolUseUndecidedIgnoresMode(t *testing.T) {
 			t.Errorf("%s: decision=%s by=%s，想要 %s/%s（理由 %s，风险 %s）", c.name, resp.Decision, resp.DecidedBy, c.wantDecision, c.wantBy, resp.Reason, resp.Risk)
 		}
 	}
+	mu.Lock()
 	for k := range sent {
-		if strings.HasPrefix(k, "curl ") || strings.HasPrefix(k, "frobnicate ") {
-			t.Errorf("中间三级不该送 Decider：%s", k)
-		}
+		t.Errorf("PreToolUse 不该送 Decider：%s", k)
 	}
+	mu.Unlock()
 	// 没有来源的（PermissionRequest、Codex）不看模式：auto 下的联网照样送
 	r := permission(env.repo, "curl https://y.example/")
 	r.PermissionMode = "auto"
@@ -881,7 +881,8 @@ func TestPreToolUseUndecidedIgnoresMode(t *testing.T) {
 	}
 }
 
-// settings.yaml 的 claude_undecided: phone 让中间三级在 PreToolUse 直接送手机（任何模式）；reload 后改回默认。
+// settings.yaml 的 claude_undecided: phone 让中间三级在 PreToolUse 回 ask（任何模式），由随后的 PermissionRequest 送手机；
+// reload 后改回默认。
 func TestPreToolUseUndecidedPhoneSetting(t *testing.T) {
 	dec := fixedDecider{out: Outcome{Action: "allow", DecidedBy: "user", Reason: "已在手机上批准"}}
 	env := startServer(t, dec, func(c *Config) {
@@ -890,12 +891,12 @@ func TestPreToolUseUndecidedPhoneSetting(t *testing.T) {
 	})
 	var resp proto.Response
 	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, preToolUse(env.repo, "curl https://x.example/", "auto", "toolu_p")), &resp)
-	if resp.Decision != "allow" || resp.DecidedBy != "user" {
+	if resp.Decision != "ask" || resp.DecidedBy != decidedByAsk || resp.Trigger == nil || resp.Trigger.Why != policy.WhyNetwork {
 		t.Fatalf("resp=%+v", resp)
 	}
 	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, preToolUse(env.repo, "frobnicate --all", "default", "toolu_d")), &resp)
-	if resp.Decision != "allow" || resp.DecidedBy != "user" {
-		t.Fatalf("default 模式也应送手机：%+v", resp)
+	if resp.Decision != "ask" || resp.DecidedBy != decidedByAsk {
+		t.Fatalf("default 模式也应回 ask：%+v", resp)
 	}
 	os.Remove(env.cfg.SettingsPath)
 	var rep proto.ControlReply
@@ -915,100 +916,228 @@ func TestPreToolUseUndecidedPhoneSetting(t *testing.T) {
 	}
 }
 
-// PreToolUse 送手机后交回终端，同一调用的 PermissionRequest 不再送手机；
-// PreToolUse 因中间三级不表态的，同一调用的 PermissionRequest 照常送手机。
-func TestPreToolUseThenPermissionRequestDedup(t *testing.T) {
+// PreToolUse 的硬底线立刻回 ask（带触发点），不送 Decider；随后同一调用的 PermissionRequest 照常送手机，手机的决定原样回。
+func TestPreToolUseAskThenPermissionRequestGoesToPhone(t *testing.T) {
 	var mu sync.Mutex
-	calls := 0
+	var sent []PendingRequest
 	dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
 		mu.Lock()
-		calls++
+		sent = append(sent, pr)
 		mu.Unlock()
-		return Outcome{Action: "passthrough", DecidedBy: hubUnreachable, Reason: "连不上 hub，交回终端处理"}, nil
+		return Outcome{Action: "allow", DecidedBy: "user", Reason: "已在手机上批准"}, nil
 	})
-	count := func() int { mu.Lock(); defer mu.Unlock(); return calls }
 	env := startServer(t, dec, nil)
 	sock := env.cfg.SocketPath
-	var resp proto.Response
-	json.Unmarshal(roundTrip(t, sock, preToolUse(env.repo, "git push origin main", "default", "toolu_same")), &resp)
-	if resp.Decision != "ask" || resp.DecidedBy != hubUnreachable || resp.Reason != reasonAskInTerminal {
-		t.Fatalf("PreToolUse 的硬底线连不上 hub 应回 ask: %+v", resp)
-	}
-	// 2.1.280 的 PermissionRequest 没有 tool_use_id：按会话 + 载荷对上
-	pr := permission(env.repo, "git push origin main")
-	pr.Source, pr.PermissionMode = proto.SourcePermissionRequest, "default"
-	json.Unmarshal(roundTrip(t, sock, pr), &resp)
-	if count() != 1 || resp.Decision != "passthrough" || resp.DecidedBy != "dedup" {
-		t.Fatalf("calls=%d resp=%+v", count(), resp)
-	}
-	// 带同一 tool_use_id 的也认
-	pr.ToolUseID = "toolu_same"
-	json.Unmarshal(roundTrip(t, sock, pr), &resp)
-	if count() != 1 || resp.DecidedBy != "dedup" {
-		t.Fatalf("按 id 去重失败：calls=%d resp=%+v", count(), resp)
-	}
-	// 别的会话的同一命令不算
-	other := pr
-	other.ToolUseID, other.Session.CLISessionID = "", "s2"
-	json.Unmarshal(roundTrip(t, sock, other), &resp)
-	if count() != 2 {
-		t.Fatalf("别的会话不该去重：calls=%d", count())
-	}
-	// 中间三级不表态的（curl），Claude 升级成提问时 PermissionRequest 要送手机
-	roundTrip(t, sock, preToolUse(env.repo, "curl https://x.example/", "auto", "toolu_c"))
-	if count() != 2 {
-		t.Fatalf("PreToolUse 的联网不该送手机：calls=%d", count())
-	}
-	pr3 := permission(env.repo, "curl https://x.example/")
-	pr3.Source, pr3.PermissionMode = proto.SourcePermissionRequest, "auto"
-	json.Unmarshal(roundTrip(t, sock, pr3), &resp)
-	if count() != 3 {
-		t.Fatalf("分类器升级成提问后应送手机：calls=%d resp=%+v", count(), resp)
-	}
-	var dedup int
-	for _, e := range readAudit(t, env.cfg.AuditPath) {
-		if e.DecidedBy == "dedup" && e.Source == "permissionrequest" {
-			dedup++
+	for _, mode := range []string{"default", "auto", "bypassPermissions"} {
+		var resp proto.Response
+		json.Unmarshal(roundTrip(t, sock, preToolUse(env.repo, "git push origin main", mode, "toolu_"+mode)), &resp)
+		if resp.Decision != "ask" || resp.DecidedBy != decidedByAsk || resp.Reason != reasonAsked {
+			t.Fatalf("%s：硬底线应立刻回 ask：%+v", mode, resp)
+		}
+		if resp.Trigger == nil || resp.Trigger.Why != policy.WhyPush || resp.Trigger.Segment != "git push origin main" {
+			t.Fatalf("%s：ask 应带触发点：%+v", mode, resp.Trigger)
 		}
 	}
-	if dedup != 2 {
-		t.Fatalf("审计里应有两条 dedup：%d", dedup)
+	mu.Lock()
+	n := len(sent)
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("PreToolUse 不该送 Decider：%d", n)
+	}
+	pr := permission(env.repo, "git push origin main")
+	pr.Source, pr.PermissionMode = proto.SourcePermissionRequest, "auto"
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, sock, pr), &resp)
+	if resp.Decision != "allow" || resp.DecidedBy != "user" {
+		t.Fatalf("PermissionRequest 应送手机并照回：%+v", resp)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 1 || sent[0].Trigger == nil || sent[0].Trigger.Why != policy.WhyPush {
+		t.Fatalf("送手机的请求应带触发点：%+v", sent)
+	}
+	var asked, approved int
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		switch {
+		case e.Source == "pretooluse" && e.State == "asked" && e.Action == "ask" && e.DecidedBy == decidedByAsk && e.Trigger != nil:
+			asked++
+		case e.Source == "permissionrequest" && e.State == "approved" && e.Trigger != nil:
+			approved++
+		}
+	}
+	if asked != 3 || approved != 1 {
+		t.Fatalf("审计：asked=%d approved=%d", asked, approved)
 	}
 }
 
-// 硬底线送不到手机（没接 hub、hub 不可达、过期）时 PreToolUse 回 ask；中间三级、别的失败、PermissionRequest 照旧交回终端。
-func TestPreToolUseHardFloorAskWhenNoPhone(t *testing.T) {
-	cases := []struct {
-		name   string
-		dec    Decider
-		cmd    string
-		source string
-		want   string
-		wantBy string
-	}{
-		{"没接 hub", LocalDecider{}, "git push origin main", proto.SourcePreToolUse, "ask", "no_hub"},
-		{"hub 不可达", fixedDecider{out: Outcome{Action: "passthrough", DecidedBy: hubUnreachable}}, "rm -rf /tmp/x", proto.SourcePreToolUse, "ask", hubUnreachable},
-		{"出错", fixedDecider{err: errors.New("坏了")}, "git push origin main", proto.SourcePreToolUse, "passthrough", "error"},
-		{"没接 hub 的 PermissionRequest", LocalDecider{}, "git push origin main", proto.SourcePermissionRequest, "passthrough", "no_hub"},
-		{"没接 hub 的 Codex", LocalDecider{}, "git push origin main", "", "passthrough", "no_hub"},
-	}
-	for _, c := range cases {
-		env := startServer(t, c.dec, nil)
-		r := permission(env.repo, c.cmd)
-		r.Source, r.PermissionMode = c.source, "auto"
+// 硬底线的 ask 不看 hub 状态：没接 hub、hub 不可达、出错一样回 ask（终端框在，PermissionRequest 那一条再按老规矩交回终端）。
+func TestPreToolUseAskRegardlessOfHub(t *testing.T) {
+	for name, dec := range map[string]Decider{
+		"没接 hub":  LocalDecider{},
+		"hub 不可达": fixedDecider{out: Outcome{Action: "passthrough", DecidedBy: hubUnreachable}},
+		"出错":      fixedDecider{err: errors.New("坏了")},
+	} {
+		env := startServer(t, dec, nil)
 		var resp proto.Response
-		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, r), &resp)
-		if resp.Decision != c.want || resp.DecidedBy != c.wantBy {
-			t.Errorf("%s: %+v", c.name, resp)
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, preToolUse(env.repo, "rm -rf /tmp/x", "auto", "toolu_1")), &resp)
+		if resp.Decision != "ask" || resp.DecidedBy != decidedByAsk {
+			t.Fatalf("%s：%+v", name, resp)
+		}
+		pr := permission(env.repo, "rm -rf /tmp/x")
+		pr.Source = proto.SourcePermissionRequest
+		resp = proto.Response{}
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, pr), &resp)
+		if resp.Decision != "passthrough" {
+			t.Fatalf("%s：PermissionRequest 应交回终端：%+v", name, resp)
 		}
 	}
-	// 等待过期
-	env := startServer(t, &blockingDecider{release: make(chan struct{})}, nil)
-	r := preToolUse(env.repo, "git push origin main", "default", "toolu_t")
-	r.DeadlineSeconds = 1
+}
+
+// 规则能定的照旧：内建只读规则在 PreToolUse 仍直接 allow，不回 ask、不带触发点。
+func TestPreToolUseRuleAllowUnchanged(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
 	var resp proto.Response
-	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, r), &resp)
-	if resp.Decision != "ask" || resp.DecidedBy != "timeout" {
-		t.Errorf("过期: %+v", resp)
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, preToolUse(env.repo, "git status", "auto", "toolu_r")), &resp)
+	if resp.Decision != "allow" || !strings.HasPrefix(resp.DecidedBy, "rule:") || resp.Trigger != nil {
+		t.Fatalf("只读命令应由规则放行：%+v", resp)
+	}
+}
+
+// causeDecider 一直等到 ctx 结束，记下取消原因；started 在每条请求进来时收到一次。
+type causeDecider struct {
+	started chan string
+	mu      sync.Mutex
+	causes  map[string]error
+}
+
+func newCauseDecider() *causeDecider {
+	return &causeDecider{started: make(chan string, 8), causes: map[string]error{}}
+}
+
+func (d *causeDecider) Decide(ctx context.Context, pr PendingRequest) (Outcome, error) {
+	d.started <- pr.Req.Payload.Command
+	<-ctx.Done()
+	d.mu.Lock()
+	d.causes[pr.Req.Payload.Command] = context.Cause(ctx)
+	d.mu.Unlock()
+	return Outcome{}, ctx.Err()
+}
+
+func (d *causeDecider) cause(cmd string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.causes[cmd]
+}
+
+// toolDone 是 PostToolUse 来的事件：工具已经跑完。
+func toolDone(cwd, session, cmd string) proto.Event {
+	return proto.Event{V: proto.Version, Kind: "tool_done", Session: proto.Session{Tool: "claude", CLISessionID: session, Cwd: cwd},
+		ToolName: "Bash", Payload: &policy.Payload{Type: policy.PayloadShell, Command: cmd, Cwd: cwd}, ToolUseID: "toolu_x"}
+}
+
+// 桌面应用不结束 PermissionRequest 钩子：同会话同载荷的 tool_done 取消挂着的审批，钩子收到 passthrough，审计 cancelled/terminal，
+// Decider 的 ctx 以 errSettledElsewhere 取消（HubDecider 据此告诉 hub cancel(terminal)）；tool_done 本身不写审计。
+func TestToolDoneCancelsPendingPermission(t *testing.T) {
+	dec := newCauseDecider()
+	env := startServer(t, dec, nil)
+	pr := permission(env.repo, "git push origin main")
+	pr.Source, pr.PermissionMode = proto.SourcePermissionRequest, "auto"
+	got := make(chan proto.Response, 1)
+	go func() {
+		var resp proto.Response
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, pr), &resp)
+		got <- resp
+	}()
+	<-dec.started
+	var ack proto.EventAck
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, toolDone(env.repo, "s1", "git push origin main")), &ack)
+	if !ack.OK {
+		t.Fatalf("ack: %+v", ack)
+	}
+	select {
+	case resp := <-got:
+		if resp.Decision != "passthrough" || resp.DecidedBy != "terminal" || resp.Reason != reasonSettledElsewhere {
+			t.Fatalf("钩子应收到 passthrough: %+v", resp)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("tool_done 没有取消挂着的审批")
+	}
+	if c := dec.cause("git push origin main"); !errors.Is(c, errSettledElsewhere) {
+		t.Fatalf("Decider 的取消原因: %v", c)
+	}
+	var cancelled, toolDoneRows int
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		if e.Kind == "permission" && e.State == "cancelled" && e.DecidedBy == "terminal" && e.Reason == reasonSettledElsewhere {
+			cancelled++
+		}
+		if e.Kind == "tool_done" {
+			toolDoneRows++
+		}
+	}
+	if cancelled != 1 || toolDoneRows != 0 {
+		t.Fatalf("审计：cancelled=%d tool_done=%d", cancelled, toolDoneRows)
+	}
+}
+
+// 别的载荷、别的会话的 tool_done 不动挂着的审批。
+func TestToolDoneOtherCallUnaffected(t *testing.T) {
+	dec := newCauseDecider()
+	env := startServer(t, dec, nil)
+	pr := permission(env.repo, "git push origin main")
+	pr.Source = proto.SourcePermissionRequest
+	go func() { roundTrip(t, env.cfg.SocketPath, pr) }()
+	<-dec.started
+	roundTrip(t, env.cfg.SocketPath, toolDone(env.repo, "s1", "git push origin dev"))
+	roundTrip(t, env.cfg.SocketPath, toolDone(env.repo, "s2", "git push origin main"))
+	time.Sleep(200 * time.Millisecond)
+	if n := env.srv.pending.Count(); n != 1 {
+		t.Fatalf("不相干的 tool_done 不该取消：pending=%d", n)
+	}
+}
+
+// 一轮结束（done）取消该会话全部待决，含答题；别的会话的不动。
+func TestDoneCancelsSessionPending(t *testing.T) {
+	dec := newCauseDecider()
+	env := startServer(t, dec, nil)
+	sock := env.cfg.SocketPath
+	results := make(chan proto.Response, 3)
+	send := func(r proto.Request) {
+		go func() {
+			var resp proto.Response
+			json.Unmarshal(roundTrip(t, sock, r), &resp)
+			results <- resp
+		}()
+		<-dec.started
+	}
+	a := permission(env.repo, "git push origin main")
+	a.Source = proto.SourcePermissionRequest
+	send(a)
+	send(askReq("用哪个方案？"))
+	other := permission(env.repo, "git push origin dev")
+	other.Session.CLISessionID = "s2"
+	send(other)
+	roundTrip(t, sock, proto.Event{V: proto.Version, Kind: "done", Session: proto.Session{Tool: "claude", CLISessionID: "s1"}, Message: "DONE"})
+	for i := 0; i < 2; i++ {
+		select {
+		case resp := <-results:
+			if resp.Decision != "passthrough" || resp.DecidedBy != "terminal" {
+				t.Fatalf("应交回终端: %+v", resp)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("done 没有取消会话里挂着的请求")
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := env.srv.pending.Count(); n != 1 {
+		t.Fatalf("别的会话应还在等：pending=%d", n)
+	}
+	var done int
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		if e.Kind == "done" && e.State == "recorded" {
+			done++
+		}
+	}
+	if done != 1 {
+		t.Fatalf("done 事件照旧写审计：%d", done)
 	}
 }

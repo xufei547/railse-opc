@@ -34,6 +34,14 @@ export interface Payload {
   args?: unknown
   url?: string
   method?: string
+  /** shell：agent 自己写的一句话说明（Claude Code 的 tool_input.description），原文不翻译；没有时没有这个键。 */
+  description?: string
+}
+
+/** 引擎定级时起决定作用的那一处：哪一段（已脱敏）、什么性质（固定中文短语，英文见 format.ts 的 triggerWhysEn）。 */
+export interface Trigger {
+  segment?: string
+  why: string
 }
 
 /** 请求视图：/api/inbox、/api/requests、/api/requests/{id}、decide 的返回与 /ws/client 推送的请求。 */
@@ -64,6 +72,8 @@ export interface RequestView {
   project: string
   /** 载荷里有被脱敏抹掉的部分：展示的不是原文，必须醒目告警。 */
   has_redacted: boolean
+  /** 引擎的触发点；read、write_in_project 与老 hub、老守护进程送来的没有这个键。 */
+  trigger?: Trigger
   /** 提问（kind 为 ask）的题目；别的种类没有这个键。 */
   ask?: { questions: Question[] }
   /** 提问作答后的答案：题面 → 用户答的原文；没答时没有这个键。 */

@@ -100,7 +100,11 @@ func runPolicyEval(args []string, stdout, stderr io.Writer) int {
 
 	p.Cwd = absCwd
 	d := eng.Evaluate(p, policy.Context{ProjectRoot: absProject, HomeDir: home, MachineID: "local"})
-	fmt.Fprintf(stdout, "%s\t%s\t%s\n", d.Action, d.Risk, localizeReason(proto.Response{RuleID: d.RuleID, Reason: d.Reason}))
+	trig := "" // 第四列：触发段｜性质，没有触发点为空
+	if d.Trigger != nil {
+		trig = d.Trigger.Segment + "｜" + i18n.Lookup(d.Trigger.Why)
+	}
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", d.Action, d.Risk, localizeReason(proto.Response{RuleID: d.RuleID, Reason: d.Reason}), trig)
 	return 0
 }
 

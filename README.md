@@ -42,7 +42,7 @@ Railse 把这些归成一件事：**每条审批先过一遍规则，规则定�
 
 | | 能批 | 只能拒 | 只能提醒 | 能在手机上答题 | auto / yolo 模式下生效 |
 |---|---|---|---|---|---|
-| Claude Code | 是 | — | 等你说话、完成 | 是（`AskUserQuestion`） | 是：对外与不可逆任何模式都到手机（连不上 hub 时终端强制确认）；联网、项目外改动、无法判断先交给 Claude 自己，它要问时再到手机 |
+| Claude Code | 是 | — | 等你说话、完成 | 是（`AskUserQuestion`） | 是：对外与不可逆任何模式都先到手机，终端同时弹确认框，谁先答谁算；联网、项目外改动、无法判断先交给 Claude 自己，它要问时再到手机 |
 | Codex | 是（交互会话） | — | 完成 | 否 | 看 Codex 自己的 `approval_policy` |
 | Gemini CLI | 否 | 是 | 问题、完成 | 否 | 否（yolo 跳过钩子） |
 
@@ -123,10 +123,11 @@ railse setup all --local-hub
 
 ## 现状与限制
 
-- v0.2.1，作者自用中。
-- Claude Code 的联网、项目外改动、没见过的命令，Railse 不论哪种权限模式都先交给 Claude 自己：你在 Claude 里配的 allow 列表、auto 模式的分类器放行的就直接跑，Claude 要问人时才到手机；对外与不可逆一律到手机，连不上 hub 时在终端强制确认。想让它们也一律到手机，在 `~/.railse/settings.yaml` 写 `claude_undecided: phone`，再 `railse agent reload`。
+- v0.2.2，作者自用中。
+- Claude Code 的联网、项目外改动、没见过的命令，Railse 不论哪种权限模式都先交给 Claude 自己：你在 Claude 里配的 allow 列表、auto 模式的分类器放行的就直接跑，Claude 要问人时才到手机；对外与不可逆一律到手机，终端同时弹 Claude 自己的确认框（理由以「Railse：」开头，写明命令里哪一段、什么性质），两边任选其一答；连不上 hub 时只剩终端那一个。想让它们也一律到手机，在 `~/.railse/settings.yaml` 写 `claude_undecided: phone`，再 `railse agent reload`。
 - Railse 在 `PreToolUse` 放行（内置的只读、项目内改动，或你「记住」的放行规则）时，Claude Code 会跳过它自己的权限检查；你在 Claude 的 `settings.json` 里写的 deny 规则仍先生效。
 - 从 0.2.0 升级的：重跑一次 `railse setup hooks --claude`，Claude 的 `PreToolUse` 钩子才会匹配 Bash 等工具（`railse doctor` 的 `hooks.claude` 会提示）；不重跑的话 auto 模式下的审批照旧绕过 Railse。
+- 从 0.2.1 升级的：hub 的库升到 v5（请求多一列触发点），守护进程与 hub 都要升；升级后 `git push`、`rm -rf` 这类操作终端会弹 Claude 自己的确认框，理由以「Railse：」开头，手机上同一条也在，两边任选其一答。重跑一次 `railse setup hooks --claude` 补上 `PostToolUse` 钩子（`railse doctor` 的 `hooks.claude` 会提示）：Claude Code 桌面应用里在本机处理掉的审批，靠它把手机上的卡片收掉，不补的话要等过期。
 - Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。
 - 手机上只能答 Claude Code 的选择题（`AskUserQuestion`）。Codex、Gemini 的提问，以及 agent 停下来等你说下一句话的，仍只提醒，要回终端。
 - 从 0.2 之前升级的：命令行、手机网页、推送文案都跟系统语言走（`RAILSE_LANG` → 数据目录的 `lang` 文件 → `LANG`，zh 开头算中文，其余英文）。**终端里没有设 `LANG` 的，升级后先跑一次 `railse lang zh`**，不然命令行会变英文；手机网页在设置里可以单独切。hub 的库第一次被 0.2 打开时从 v3 升到 v4（推送订阅加语言列），不能降级，升级前先备份 hub 数据目录。

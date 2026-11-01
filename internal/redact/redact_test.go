@@ -1284,3 +1284,14 @@ func TestBareValueStopsAtFormFeedAndLoneCR(t *testing.T) {
 		}
 	}
 }
+
+func TestPayloadRedactsDescription(t *testing.T) {
+	p := policy.Payload{Type: policy.PayloadShell, Command: "echo hi", Description: "Deploy with token=abcdef0123456789abcdef"}
+	out := Payload(p)
+	if !strings.Contains(out.Description, "<redacted>") || strings.Contains(out.Description, "abcdef0123456789") {
+		t.Fatalf("Description 应脱敏：%q", out.Description)
+	}
+	if p.Description == out.Description {
+		t.Fatal("应返回副本")
+	}
+}

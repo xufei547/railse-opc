@@ -874,3 +874,35 @@ func TestAnsweredIsDeliverable(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestTriggerRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("m", RandomToken(), "/h")
+	r := newReq(m.ID, "r1", "rm -rf after")
+	r.Trigger = &policy.Trigger{Segment: "rm -rf after", Why: policy.WhyDelete}
+	if err := s.InsertRequest(r); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetRequest("r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Trigger == nil || *got.Trigger != *r.Trigger {
+		t.Fatalf("trigger 没存好：%+v", got.Trigger)
+	}
+	if err := s.InsertRequest(newReq(m.ID, "r2", "git status")); err != nil {
+		t.Fatal(err)
+	}
+	got2, err := s.GetRequest("r2")
+	if err != nil || got2.Trigger != nil {
+		t.Fatalf("没有触发点应为 nil：%+v, %v", got2.Trigger, err)
+	}
+	var col string
+	if err := s.db.QueryRow("SELECT trigger FROM requests WHERE id = 'r2'").Scan(&col); err != nil || col != "" {
+		t.Fatalf("没有触发点时列为空串：%q, %v", col, err)
+	}
+	b, _ := json.Marshal(got2)
+	if strings.Contains(string(b), `"trigger"`) {
+		t.Fatalf("没有触发点时 JSON 不该有 trigger 键：%s", b)
+	}
+}

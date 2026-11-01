@@ -59,6 +59,21 @@ func TestPolicyEvalOtherTypes(t *testing.T) {
 	}
 }
 
+func TestPolicyEvalPrintsTrigger(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := run([]string{"policy", "eval", "--cwd", t.TempDir(), "rm -rf after"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	line := strings.TrimSpace(out.String())
+	if cols := strings.Split(line, "\t"); len(cols) != 4 || cols[3] != "rm -rf after｜删除文件，删了不可恢复" {
+		t.Fatalf("应有第 4 列 触发段｜性质：%q", line)
+	}
+	out.Reset()
+	if code := run([]string{"policy", "eval", "--cwd", t.TempDir(), "git status"}, &out, &errb); code != 0 || !strings.HasSuffix(out.String(), "\t\n") {
+		t.Fatalf("没有触发点时第 4 列为空：%q", out.String())
+	}
+}
+
 func TestPolicyEvalUsageErrors(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "missing.yaml")

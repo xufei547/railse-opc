@@ -423,6 +423,22 @@ func TestHookChecks(t *testing.T) {
 		!strings.Contains(c.Hint, "setup hooks") || !strings.Contains(c.Hint, "--claude") {
 		t.Fatalf("缺 PreToolUse: %+v", c)
 	}
+	// 缺 PostToolUse（0.2.2 以前的安装）：审批照常，只是桌面应用里终端处理掉的审批手机上要等过期才消失，warn
+	var noPost map[string]any
+	json.Unmarshal(doc, &noPost)
+	delete(noPost["hooks"].(map[string]any), "PostToolUse")
+	noPostDoc, _ := json.Marshal(noPost)
+	writeFile(t, local, noPostDoc)
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "缺 PostToolUse") || !strings.Contains(c.Hint, "--claude") {
+		t.Fatalf("缺 PostToolUse: %+v", c)
+	}
+	// PreToolUse 与 PostToolUse 都缺：仍是 warn，两句都说
+	delete(noPost["hooks"].(map[string]any), "PreToolUse")
+	noBoth, _ := json.Marshal(noPost)
+	writeFile(t, local, noBoth)
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "缺 PostToolUse") || !strings.Contains(c.Detail, "缺 PreToolUse：") {
+		t.Fatalf("缺 PreToolUse 与 PostToolUse: %+v", c)
+	}
 	// 缺 PreToolUse 的同时还缺别的事件：照旧 fail，细节里两样都说
 	delete(old["hooks"].(map[string]any), "Stop")
 	both, _ := json.Marshal(old)
@@ -457,7 +473,12 @@ func TestHookChecks(t *testing.T) {
 		t.Fatalf("PreToolUse 超时不够: %+v", c)
 	}
 	// 0.2.0 的旧匹配器（只有 AskUserQuestion）：auto 模式下审批进不了 Railse，warn 并给重装命令
-	oldMatcher := strings.Replace(string(doc), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"`, `"matcher": "AskUserQuestion"`, 1)
+	// 只改 PreToolUse 的（PostToolUse 用同一个匹配器，排在它前面）
+	var om map[string]any
+	json.Unmarshal(doc, &om)
+	om["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)["matcher"] = "AskUserQuestion"
+	omb, _ := json.MarshalIndent(om, "", "  ")
+	oldMatcher := string(omb)
 	writeFile(t, local, []byte(oldMatcher))
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "PreToolUse 只匹配 AskUserQuestion：auto 模式下审批进不了 Railse") ||
 		!strings.Contains(c.Hint, "setup hooks") || !strings.Contains(c.Hint, "--claude") {

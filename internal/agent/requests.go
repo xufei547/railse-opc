@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"sort"
@@ -35,8 +36,12 @@ type PendingRequest struct {
 	ProjectRoot  string
 	Redacted     policy.Payload
 	EngineReason string
+	Trigger      *policy.Trigger // 引擎的触发点，触发段已脱敏；答题与没有触发点的为 nil
 	Created      time.Time
 	Deadline     time.Time
+
+	// settle 由 await 填：以给定原因取消这条请求的等待（tool_done、done、session_end 用）；没登记过的为 nil
+	settle context.CancelCauseFunc
 }
 
 // Decider 在引擎答 ask 之后给出审批的最终结论，也给答题请求（kind ask）等来答案。ctx 取消表示钩子已消失或守护进程正在停止，到期表示过期。
@@ -122,6 +127,45 @@ func (p *Pending) HasSession(cliSessionID string) bool {
 		}
 	}
 	return false
+}
+
+// payloadKey 是“工具 + 载荷 JSON”的 SHA-256，用来把 PostToolUse 的 tool_done 与同一调用的审批对上
+// （PermissionRequest 没有 tool_use_id；算法同 v0.2.1 去重表的会话 + 载荷键）。两边的载荷都是钩子用同一个 mapTool 算的原文。
+func payloadKey(toolName string, p policy.Payload) string {
+	b, _ := json.Marshal(p)
+	sum := sha256.Sum256(append([]byte(toolName+"\x00"), b...))
+	return hex.EncodeToString(sum[:])
+}
+
+// CancelMatching 以 cause 取消会话 cliSessionID 里载荷键为 key 的审批（不含答题），返回取消的条数。
+func (p *Pending) CancelMatching(cliSessionID, key string, cause error) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, pr := range p.m {
+		if pr.Kind != "ask" && pr.settle != nil && pr.Req.Session.CLISessionID == cliSessionID && payloadKey(pr.Req.ToolName, pr.Req.Payload) == key {
+			pr.settle(cause)
+			n++
+		}
+	}
+	return n
+}
+
+// CancelSession 以 cause 取消会话 cliSessionID 里全部待决的审批与答题，返回取消的条数。空会话 id 不取消任何请求。
+func (p *Pending) CancelSession(cliSessionID string, cause error) int {
+	if cliSessionID == "" {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, pr := range p.m {
+		if pr.settle != nil && pr.Req.Session.CLISessionID == cliSessionID {
+			pr.settle(cause)
+			n++
+		}
+	}
+	return n
 }
 
 // NewID 生成 32 个十六进制字符的随机 id。

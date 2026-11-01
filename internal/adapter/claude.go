@@ -14,6 +14,7 @@ func init() { register(claude{}) }
 // claude 对应 Claude Code 2.1.x 的钩子：PreToolUse 的 Bash、文件写、WebFetch 与 PermissionRequest 都是审批（前者任何权限模式
 // 都触发，后者只在 Claude 自己决定要问人时触发，留作 MCP 等其余工具的兜底），Notification 为 question，Stop 为 done，
 // PreToolUse 的 AskUserQuestion 为 ask（答案经 updatedInput 回填）；PermissionRequest 的 AskUserQuestion 无效，一律忽略。
+// PostToolUse 为 tool_done（工具已跑完，清掉同一调用挂着的审批）。
 type claude struct{}
 
 func (claude) Name() string         { return "claude" }
@@ -82,6 +83,18 @@ func (claude) Parse(stdin []byte) (Input, error) {
 			return Input{}, err
 		}
 		in.Kind, in.ToolName, in.Ask, in.RawToolInput = KindAsk, h.ToolName, &ask, h.ToolInput
+	case "PostToolUse":
+		// 工具已经跑完：桌面应用（SDK 宿主）在 PreToolUse 回 ask 后自己裁决，却不结束同一调用的 PermissionRequest 钩子，
+		// 守护进程靠这个事件把它取消。只认审批的那几样工具；载荷与 PermissionRequest 同一算法，守护进程按它对上
+		if !preToolUseTools[h.ToolName] || h.SessionID == "" {
+			in.Kind = KindIgnore
+			break
+		}
+		p, err := mapTool("claude", h.ToolName, h.ToolInput, h.Cwd)
+		if err != nil {
+			return Input{}, err
+		}
+		in.Kind, in.ToolName, in.Payload, in.ToolUseID = KindToolDone, h.ToolName, p, h.ToolUseID
 	case "Notification":
 		switch h.NotificationType {
 		case "permission_prompt", "idle_prompt":

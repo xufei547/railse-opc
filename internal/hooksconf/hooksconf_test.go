@@ -75,6 +75,7 @@ func TestSameOurs(t *testing.T) {
 		`{"hooks":{"Stop":[{"hooks":[{"command":"/opt/railse hook claude","type":"command"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}],` +
 			`"Notification":[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]},{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}],` +
 			`"PreToolUse":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"}],` +
+			`"PostToolUse":[{"hooks":[{"command":"/opt/railse hook claude","type":"command"}],"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"}],` +
 			`"PermissionRequest":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":""}]}}`,
 	}
 	for _, b := range same {
@@ -248,7 +249,7 @@ func TestPlanSocketAndParseCommand(t *testing.T) {
 	if st := ins.Events["PermissionRequest"]; !st.Present || st.Program != "/opt/railse" || st.Socket != sock {
 		t.Fatalf("Inspect 应报出 socket: %+v\n%s", st, doc)
 	}
-	if strings.Count(string(doc), "hook claude") != 5 {
+	if strings.Count(string(doc), "hook claude") != 6 {
 		t.Fatalf("重装后每个事件只应有一条: %s", doc)
 	}
 }
@@ -295,7 +296,7 @@ func TestPlan(t *testing.T) {
 	quoted := `'/my apps/railse'`
 	claude := Plan("claude", bin, "")
 	pr := claude["PermissionRequest"]
-	if len(claude) != 5 || len(pr) != 1 || pr[0].Matcher == nil || *pr[0].Matcher != "" ||
+	if len(claude) != 6 || len(pr) != 1 || pr[0].Matcher == nil || *pr[0].Matcher != "" ||
 		pr[0].Hooks[0].Command != quoted+" hook claude" || pr[0].Hooks[0].Timeout != 86400 || pr[0].Hooks[0].Type != "command" {
 		t.Fatalf("Claude: %+v", claude)
 	}
@@ -340,6 +341,23 @@ func TestPlanClaudePreToolUse(t *testing.T) {
 		}
 		if _, ok := Expected(cli)["PreToolUse"]; ok {
 			t.Errorf("%s 的 Expected 不应有 PreToolUse", cli)
+		}
+	}
+}
+
+func TestPlanClaudePostToolUse(t *testing.T) {
+	// PostToolUse 只发事件（工具跑完了，清掉同会话挂着的审批）：匹配器同 PreToolUse，不等，timeout 省略
+	b, _ := json.Marshal(Plan("claude", "/opt/railse", "")["PostToolUse"])
+	want := `[{"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch","hooks":[{"type":"command","command":"/opt/railse hook claude"}]}]`
+	if string(b) != want {
+		t.Fatalf("PostToolUse 的 JSON: %s", b)
+	}
+	if v, ok := Expected("claude")["PostToolUse"]; !ok || v != 0 {
+		t.Fatalf("Expected: %v", Expected("claude"))
+	}
+	for _, cli := range []string{"codex", "gemini"} {
+		if _, ok := Plan(cli, "/opt/railse", "")["PostToolUse"]; ok {
+			t.Errorf("%s 不应有 PostToolUse", cli)
 		}
 	}
 }

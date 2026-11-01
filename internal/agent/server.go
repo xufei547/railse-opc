@@ -31,6 +31,14 @@ const maxNonGitLogged = 1024
 // errHookGone 是钩子连接断开时取消请求 ctx 的原因，用来和守护进程关停区分开。
 var errHookGone = errors.New("钩子连接已断开")
 
+// errSettledElsewhere 是本机已经处理掉、不必再等的请求的取消原因：同一调用的工具已经跑完（tool_done），或这一轮、会话已经结束
+// （done、session_end）。Claude Code 桌面应用（SDK 宿主）在 PreToolUse 回 ask 后用自己的权限回调裁决，却不结束同一调用的
+// PermissionRequest 钩子，不清掉的话它会挂到过期，手机上一直留着一张卡片。
+var errSettledElsewhere = errors.New("已在终端处理")
+
+// reasonSettledElsewhere 是这类取消写进审计、回给钩子的理由。
+const reasonSettledElsewhere = "已在终端处理，取消等待"
+
 // hubUnreachable 是 Decider 在 hub 连不上（HubGrace 内没重连上）时填的 DecidedBy。
 // 这时钩子收 passthrough，本机审计记 expired（设计 3.2：等待作废，不是“根本没去等”）。
 const hubUnreachable = "hub_unreachable"
@@ -68,9 +76,8 @@ type Server struct {
 	nonGitMu     sync.Mutex
 	nonGitLogged map[string]struct{}
 
-	// settings 是本机设置（settings.yaml），reload 时整份换掉；recent 是 PreToolUse 的去重表。
+	// settings 是本机设置（settings.yaml），reload 时整份换掉。
 	settings atomic.Pointer[Settings]
-	recent   *recent
 
 	mu      sync.Mutex
 	closed  bool
@@ -80,7 +87,7 @@ type Server struct {
 
 // New 组装服务。唯一的 IO 是读本机设置 settings.yaml，读坏了记日志、按默认值跑。
 func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Logger) *Server {
-	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now(), recent: newRecent()}
+	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now()}
 	_ = s.ReloadSettings() // 读坏了它自己记日志
 	return s
 }
@@ -95,11 +102,12 @@ func (s *Server) ReloadSettings() error {
 	return err
 }
 
-// noPhone 是“请求没能送到手机上的人”的 DecidedBy：没接 hub、hub 不可达、等待过期。
-var noPhone = map[string]bool{"no_hub": true, hubUnreachable: true, "timeout": true}
-
-// reasonAskInTerminal 是硬底线没能送到手机、改由终端确认时给 Claude 看的理由（钩子加 “Railse：” 前缀）。
-const reasonAskInTerminal = "连不上 hub，这类操作要你亲自确认"
+// decidedByAsk 与 reasonAsked：PreToolUse 来的硬底线不在守护进程里等，回 ask 让 Claude 在终端弹确认框并触发 PermissionRequest，
+// 那一条再送手机；终端与手机同时显示，谁先答谁算。确认框里的理由由钩子按终端语言用触发点重拼（见 cmd/railse 的 askReason）。
+const (
+	decidedByAsk = "ask"
+	reasonAsked  = "已交终端确认，同时送手机"
+)
 
 // SetAuditSink 设置审计转发目标；nil（包括装着 nil 指针的接口值）表示只写本地。可在 Serve 运行中随时调用。
 func (s *Server) SetAuditSink(sink AuditSink) {
@@ -277,7 +285,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		if resp.Decision != "" { // 钩子已消失时 resp 为空，不写回
 			s.reply(conn, kind, resp)
 		}
-	case "question", "done", "session_end":
+	case "question", "done", "session_end", "tool_done":
 		var ev proto.Event
 		if err := proto.Decode(line, &ev); err != nil {
 			s.reply(conn, kind, proto.EventAck{V: proto.Version, OK: false, Error: err.Error()})
@@ -398,42 +406,40 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
 			break
 		}
-		keys := s.recent.keys(req)
-		if req.Source == proto.SourcePermissionRequest {
-			if out, ok := s.recent.lookup(keys); ok && out == recentTerminal {
-				// 同一调用的 PreToolUse 已经送过手机（或因 hub 不可达等没送成）并交回了终端：这次是 Claude 自己在问，不再打扰手机
-				entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "dedup", "刚才已交回终端，这次不再问"
-				resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
+		if req.Source == proto.SourcePreToolUse {
+			if d.Risk >= policy.RiskOutward || s.settings.Load().ClaudeUndecided == UndecidedPhone {
+				// 硬底线（或设置成一律送手机）：不在这里等手机。回 ask 让 Claude 弹终端确认框并触发 PermissionRequest，
+				// 那一条按老路送 hub；终端里同时能看到命令与触发点，谁先答谁算。不看 hub 状态：hub 不可达时
+				// PermissionRequest 交回终端，确认框还在（见 docs/superpowers/specs/2026-11-02-railse-opc-v0.2.2-two-screens-design.md §2.1）。
+				entry.Action, entry.State, entry.DecidedBy, entry.Reason, entry.Trigger = "ask", "asked", decidedByAsk, reasonAsked, redactTrigger(d.Trigger)
+				resp.Decision, resp.DecidedBy, resp.Reason, resp.Trigger = "ask", decidedByAsk, reasonAsked, entry.Trigger
 				break
 			}
-		}
-		if req.Source == proto.SourcePreToolUse && d.Risk < policy.RiskOutward && s.settings.Load().ClaudeUndecided != UndecidedPhone {
 			// 中间三级不看模式，先让 Claude 自己的 allow 列表与分类器（auto 模式）处理，Railse 不比它更吵；
-			// Claude 若决定要问人，会再来一条 PermissionRequest，那时照常送手机。往外发与破坏性不走这里。
-			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", recentClassifier, "交给 Claude 自己的权限流程"
+			// Claude 若决定要问人，会再来一条 PermissionRequest，那时照常送手机。
+			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "classifier", "交给 Claude 自己的权限流程"
 			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
-			s.recent.remember(keys, recentClassifier)
 			break
 		}
-		resp = s.waitDecision(ctx, id, req, d, pctx.ProjectRoot, redacted, entry)
-		if req.Source == proto.SourcePreToolUse && resp.Decision == "passthrough" {
-			s.recent.remember(keys, recentTerminal)
-			if d.Risk >= policy.RiskOutward && noPhone[resp.DecidedBy] {
-				// 硬底线没能送到手机：不表态的话 auto 模式的分类器会直接放行 git push、rm -rf；
-				// 回 ask 让 Claude 在终端里强制问人（-p 下等于拒绝）。审计照旧记交回终端的那一条。
-				resp.Decision, resp.Reason = "ask", reasonAskInTerminal
-			}
-		}
-		return resp
+		entry.Trigger = redactTrigger(d.Trigger)
+		return s.waitDecision(ctx, id, req, d, pctx.ProjectRoot, redacted, entry)
 	}
 	s.writeAudit(entry)
 	return resp
 }
 
+// redactTrigger 对触发段脱敏（它是命令原文的一部分，可能带凭据），返回副本；nil 原样。
+func redactTrigger(t *policy.Trigger) *policy.Trigger {
+	if t == nil {
+		return nil
+	}
+	return &policy.Trigger{Segment: redact.String(t.Segment), Why: t.Why}
+}
+
 // waitDecision 登记审批请求并等 Decider（见 await），把结论映射成 allow、deny 或交回终端。
 // projectRoot、redacted 与引擎理由随请求登记，hub 客户端上报时只用脱敏后的载荷。
 func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request, d policy.Decision, projectRoot string, redacted policy.Payload, entry AuditEntry) proto.Response {
-	pr := &PendingRequest{ID: id, Kind: "permission", Req: req, Risk: d.Risk, ProjectRoot: projectRoot, Redacted: redacted, EngineReason: d.Reason}
+	pr := &PendingRequest{ID: id, Kind: "permission", Req: req, Risk: d.Risk, ProjectRoot: projectRoot, Redacted: redacted, EngineReason: d.Reason, Trigger: entry.Trigger}
 	out, resp, ok := s.await(ctx, pr, entry, proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String()})
 	if !ok {
 		return resp
@@ -498,9 +504,13 @@ func (s *Server) await(ctx context.Context, pr *PendingRequest, entry AuditEntry
 	}
 	now := time.Now()
 	pr.Created, pr.Deadline = now, now.Add(wait)
+	// 取消句柄存进待决表：tool_done、done、session_end 事件靠它以 errSettledElsewhere 取消（见 handleEvent）
+	sctx, settle := context.WithCancelCause(ctx)
+	defer settle(nil)
+	pr.settle = settle
 	s.pending.Add(pr)
 	defer s.pending.Remove(pr.ID)
-	dctx, cancel := context.WithDeadline(ctx, pr.Deadline)
+	dctx, cancel := context.WithDeadline(sctx, pr.Deadline)
 	defer cancel()
 	out, err := s.decider.Decide(dctx, *pr)
 	switch {
@@ -510,6 +520,11 @@ func (s *Server) await(ctx context.Context, pr *PendingRequest, entry AuditEntry
 		entry.State, entry.DecidedBy, entry.Reason = "cancelled", "terminal", "钩子进程在决定前退出"
 		s.writeAudit(entry)
 		return Outcome{}, proto.Response{}, false // 对方已不在，不写回
+	case errors.Is(context.Cause(sctx), errSettledElsewhere):
+		// 本机已经处理掉了（宿主自己裁决、工具已跑完，或这一轮已结束）：钩子要收到答复才会退出，回 passthrough；
+		// 宿主已经裁决过，不会再弹框。HubDecider 据同一原因告诉 hub cancel(terminal)。
+		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "cancelled", "terminal", reasonSettledElsewhere
+		resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
 	case ctx.Err() != nil:
 		// 守护进程正在停止，钩子还在等：明确交回终端。
 		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "shutdown", "守护进程正在停止，交回终端处理"
@@ -565,6 +580,22 @@ func (s *Server) writeAudit(e AuditEntry) {
 // 消息先按文本语境脱敏再写审计：Gemini 的 ToolPermission 通知会拼进完整命令，
 // last_assistant_message、prompt_response 也可能原样带出凭据。
 func (s *Server) handleEvent(ev proto.Event) proto.EventAck {
+	switch ev.Kind {
+	case "tool_done":
+		// 工具已经跑完：同一调用还挂着的审批不用等了。按会话 + 工具 + 载荷对上（PermissionRequest 没有 tool_use_id）。
+		// 事件本身不写审计（每次工具调用一条太多），只记它引起的取消。
+		if ev.Payload != nil {
+			if n := s.pending.CancelMatching(ev.Session.CLISessionID, payloadKey(ev.ToolName, *ev.Payload), errSettledElsewhere); n > 0 {
+				s.log.Printf("会话 %q 的工具已跑完，取消 %d 条挂着的审批", clipText(ev.Session.CLISessionID, hubLogFieldMax), n)
+			}
+		}
+		return proto.EventAck{V: proto.Version, OK: true}
+	case "done", "session_end":
+		// 这一轮或会话已经结束：这个会话里挂着的审批与答题都不会再有人等，取消掉
+		if n := s.pending.CancelSession(ev.Session.CLISessionID, errSettledElsewhere); n > 0 {
+			s.log.Printf("会话 %q 的这一轮已结束，取消 %d 条挂着的请求", clipText(ev.Session.CLISessionID, hubLogFieldMax), n)
+		}
+	}
 	state := "recorded"
 	if ev.Kind == "question" && s.pending.HasSession(ev.Session.CLISessionID) {
 		state = "suppressed"

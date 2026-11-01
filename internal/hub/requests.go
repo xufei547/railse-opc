@@ -171,6 +171,7 @@ func cleanEntry(e agent.AuditEntry) agent.AuditEntry {
 	e.RuleID = truncate(e.RuleID, maxFieldLen)
 	e.DecidedBy = truncate(e.DecidedBy, maxFieldLen)
 	e.Reason = redactText(e.Reason, maxTextLen)
+	e.Trigger = cleanTrigger(e.Trigger)
 	e.Message = redactText(e.Message, maxTextLen)
 	e.Note = redactText(e.Note, maxTextLen) // 与 Decide 的备注上限一致
 	e.Ask = e.Ask.MapText(func(s string) string { return redactText(s, maxAskTextLen) })
@@ -285,7 +286,7 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 	expires := store.FormatTime(created.Add(time.Duration(deadline) * time.Second))
 	r := store.Request{ID: p.RequestID, MachineID: m.ID, SessionID: s.upsertSession(m.ID, sess, projectName(root)), Kind: body.Kind,
 		ToolName: toolName, Payload: body.Payload, Ask: body.Ask, PayloadHash: body.Hash, Risk: body.Risk, ProjectRoot: root,
-		EngineReason: body.EngineReason, State: "pending", TurnID: sess.TurnID, CLISessionID: sess.CLISessionID,
+		EngineReason: body.EngineReason, Trigger: body.Trigger, State: "pending", TurnID: sess.TurnID, CLISessionID: sess.CLISessionID,
 		CreatedAt: store.FormatTime(created), ExpiresAt: &expires}
 	if err := s.store.InsertRequest(r); err != nil {
 		s.log.Printf("登记请求 %q: %v", p.RequestID, err)
@@ -354,6 +355,14 @@ func sameRequest(r store.Request, p wire.PendingRequest) bool {
 		truncate(p.Session.CLISessionID, maxFieldLen) == r.CLISessionID
 }
 
+// cleanTrigger 给守护进程送来的触发点兜底：段再脱敏、截断，性质截断（它是固定短语，网页按它查英文）；nil 原样。返回副本。
+func cleanTrigger(t *policy.Trigger) *policy.Trigger {
+	if t == nil {
+		return nil
+	}
+	return &policy.Trigger{Segment: redactText(t.Segment, maxFieldLen), Why: truncate(t.Why, maxFieldLen)}
+}
+
 // pendingBody 是待决请求里按种类不同的部分：审批的载荷、风险与引擎理由，或提问的题目；Hash 是去重与重发比对用的哈希。
 type pendingBody struct {
 	Kind         string
@@ -362,6 +371,7 @@ type pendingBody struct {
 	Hash         string
 	Risk         string
 	EngineReason string
+	Trigger      *policy.Trigger
 }
 
 // readPending 按种类读出守护进程送来的待决请求：没有 kind（旧守护进程）或 permission 是审批，载荷再脱敏（守护进程已脱敏，
@@ -372,7 +382,7 @@ func readPending(p wire.PendingRequest) (pendingBody, error) {
 	case "", "permission":
 		payload := redact.Payload(p.Payload)
 		return pendingBody{Kind: "permission", Payload: payload, Hash: store.PayloadHash(payload), Risk: truncate(p.Risk, maxFieldLen),
-			EngineReason: redactText(p.EngineReason, maxTextLen)}, nil
+			EngineReason: redactText(p.EngineReason, maxTextLen), Trigger: cleanTrigger(p.Trigger)}, nil
 	case "ask":
 		if err := checkAsk(p.Ask); err != nil {
 			return pendingBody{}, err
@@ -1011,7 +1021,7 @@ func (s *Server) applyAgentFinal(m store.Machine, e agent.AuditEntry, ts time.Ti
 	}
 	created := store.FormatTime(ts)
 	r := store.Request{ID: e.RequestID, MachineID: m.ID, SessionID: s.upsertSession(m.ID, e.Session, ""), Kind: e.Kind, ToolName: e.ToolName,
-		Risk: e.Risk, EngineReason: e.Reason, State: e.State, DecidedBy: e.DecidedBy, RuleID: e.RuleID, TurnID: e.Session.TurnID,
+		Risk: e.Risk, EngineReason: e.Reason, Trigger: e.Trigger, State: e.State, DecidedBy: e.DecidedBy, RuleID: e.RuleID, TurnID: e.Session.TurnID,
 		CLISessionID: e.Session.CLISessionID, CreatedAt: created, DecidedAt: &created}
 	switch {
 	case e.Kind == "ask":

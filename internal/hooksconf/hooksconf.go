@@ -82,7 +82,9 @@ func Plan(cli, bin, socket string) map[string][]Group {
 			"PermissionRequest": {{Matcher: strp(""), Hooks: []Entry{{Type: "command", Command: cmd, Timeout: 86400}}}},
 			// PreToolUse 任何权限模式都触发：选择题（AskUserQuestion）只能在这里代答，Bash、文件写、WebFetch 在这里审批
 			// （auto 模式下 PermissionRequest 根本不触发）；其余工具（MCP、Task 等）留给 PermissionRequest 兜底
-			"PreToolUse":   {{Matcher: strp(ClaudePreToolUseMatcher), Hooks: []Entry{{Type: "command", Command: cmd, Timeout: 86400}}}},
+			"PreToolUse": {{Matcher: strp(ClaudePreToolUseMatcher), Hooks: []Entry{{Type: "command", Command: cmd, Timeout: 86400}}}},
+			// PostToolUse 只发事件不等：工具跑完了，守护进程清掉同一调用还挂着的审批（桌面应用不结束 PermissionRequest 钩子）
+			"PostToolUse":  {{Matcher: strp(ClaudePreToolUseMatcher), Hooks: []Entry{{Type: "command", Command: cmd}}}},
 			"Notification": one("", 0),
 			"Stop":         one("", 0),
 			"SessionEnd":   one("", 0),
@@ -327,7 +329,7 @@ func Merge(existing []byte, bin string, entries map[string][]Group) ([]byte, err
 func Expected(cli string) map[string]int {
 	switch cli {
 	case "claude":
-		return map[string]int{"PermissionRequest": 86400, "PreToolUse": 86400, "Notification": 0, "Stop": 0, "SessionEnd": 0}
+		return map[string]int{"PermissionRequest": 86400, "PreToolUse": 86400, "PostToolUse": 0, "Notification": 0, "Stop": 0, "SessionEnd": 0}
 	case "codex":
 		return map[string]int{"PermissionRequest": 86400, "Stop": 0, "SessionEnd": 0}
 	case "gemini":

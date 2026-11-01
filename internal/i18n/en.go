@@ -514,6 +514,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"%s（超时 %d，要 ≥ %d）":                                 "%s (timeout %d, needs ≥ %d)",
 	"PreToolUse 只匹配 %s：auto 模式下审批进不了 Railse":           "PreToolUse only matches %s: in auto mode approvals bypass Railse",
 	"缺 PreToolUse：Claude Code 的选择题进不了手机":               "missing PreToolUse: Claude Code's questions can't reach your phone",
+	"缺 PostToolUse：桌面应用里已在本机处理的审批，手机上要等过期才消失":          "missing PostToolUse: in the desktop app, requests already handled on this machine stay on your phone until they expire",
 	"缺 %s":                                                       "missing %s",
 	"超时不够：%s":                                                    "timeout too short: %s",
 	"换过安装路径就重新 %s":                                               "If you moved the install, run %s again",
@@ -894,4 +895,28 @@ Switched to a new key and deleted %d push subscriptions. Every phone has to turn
 
 	// cmd/railse/localhub.go（与 internal/hub/auth.go 的 SetPassword 同步）
 	"密码至少 8 个字符": "The password must be at least 8 characters",
+
+	// cmd/railse/hook.go（askReason：PreToolUse 回 ask 时确认框里的理由）
+	"已发到手机，也可以在这里直接批": "Sent to your phone; you can also answer here",
+	"%s。%s":          "%s. %s",
+	"命令里的「%s」会%s。%s": `"%s" %s. %s`,
+
+	// internal/policy/trigger.go 的 Why 短语（经 i18n.Lookup 动态查）。动词短语，接在引号括起的命令段后面；
+	// 与 web/src/format.ts 的 triggerWhysEn 一字不差（web/src/i18n.sync.test.ts 核对）
+	"删除文件，删了不可恢复":        "deletes files and can't be undone",
+	"结束进程":               "kills processes",
+	"以管理员权限运行":           "runs with admin rights",
+	"读写敏感文件（密钥、配置或开机自启）": "touches a sensitive file (keys, config or startup items)",
+	"把脚本直接交给解释器执行":       "feeds a script straight into an interpreter",
+	"下载脚本并直接执行":          "downloads a script and runs it",
+	"删表或删库":              "drops a table or database",
+	"强制推送，会覆盖远程历史":       "force-pushes and overwrites remote history",
+	"把代码推到远程仓库":          "pushes code to a remote",
+	"发布或部署到外部":           "publishes or deploys outside",
+	"向外发送数据":             "sends data out",
+	"要联网":                "needs the network",
+	"改项目外的文件":            "writes outside the project",
+	"这条命令不在已知名单里":        "isn't on the known-command list",
+	"不可逆的操作":             "can't be undone",
+	"影响仓库之外的人和系统":        "affects people and systems outside the repo",
 }

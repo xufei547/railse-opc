@@ -20,6 +20,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hookclient"
 	"github.com/xufei547/railse-opc/internal/i18n"
+	"github.com/xufei547/railse-opc/internal/policy"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -449,9 +450,9 @@ func TestHookClaudePreToolUse(t *testing.T) {
 	if code != 0 || out != "" {
 		t.Fatalf("auto 下的联网应不表态: code=%d out=%q", code, out)
 	}
-	// 没接 hub（LocalDecider）：硬底线要 Claude 在终端里强制问（ask），不说“连不上 hub”的回退提示
+	// 没接 hub（LocalDecider）：硬底线要 Claude 在终端里强制问（ask），理由由钩子拼，不说“连不上 hub”的回退提示
 	out, errOut, code := runHookWith(t, claudePreToolUse(repo, "git push origin main", "auto"), "claude", "--socket", sock)
-	if code != 0 || out != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：连不上 hub，这类操作要你亲自确认"}}`+"\n" ||
+	if code != 0 || out != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：命令里的「git push origin main」会把代码推到远程仓库。已发到手机，也可以在这里直接批"}}`+"\n" ||
 		strings.Contains(errOut, "hub") {
 		t.Fatalf("没接 hub: code=%d out=%q err=%q", code, out, errOut)
 	}
@@ -492,8 +493,9 @@ func TestHookHubUnreachableNote(t *testing.T) {
 	// 硬底线：守护进程回 ask，钩子输出 ask，stderr 提示照旧
 	sock, _ = fakeDaemon(t, `{"v":1,"decision":"ask","decided_by":"hub_unreachable","reason":"连不上 hub，这类操作要你亲自确认"}`)
 	stdout, stderr, _ = runHookWith(t, claudePreToolUse("/tmp/p", "git push origin main", "auto"), "claude", "--socket", sock)
-	if !strings.Contains(stdout, `"permissionDecision":"ask"`) || !strings.Contains(stderr, "连不上 hub") {
-		t.Fatalf("硬底线 ask: stdout=%q stderr=%q", stdout, stderr)
+	if !strings.Contains(stdout, `"permissionDecision":"ask"`) || !strings.Contains(stdout, "Railse：连不上 hub，这类操作要你亲自确认") ||
+		strings.Contains(stdout, "已发到手机") || !strings.Contains(stderr, "连不上 hub") {
+		t.Fatalf("老守护进程的硬底线 ask 照原话，不说已发到手机: stdout=%q stderr=%q", stdout, stderr)
 	}
 	sock, _ = fakeDaemon(t, reply)
 	_, stderr, _ = runHookWith(t, claudePermission("/tmp/p", "git push origin main"), "claude", "--socket", sock)
@@ -511,5 +513,64 @@ func TestHookHubUnreachableNote(t *testing.T) {
 	_, stderr, _ = runHookWith(t, claudePreToolUse("/tmp/p", "git push origin main", "auto"), "claude", "--socket", sock)
 	if stderr != "" {
 		t.Fatalf("过期不提示: %q", stderr)
+	}
+}
+
+// PreToolUse 的硬底线回 ask 时，钩子把触发点拼进确认框的理由；没有触发点只说已发手机。
+func TestHookPreToolUseAskReasonHasTrigger(t *testing.T) {
+	resp := proto.Response{V: proto.Version, Decision: "ask", DecidedBy: "ask", Reason: "已交终端确认，同时送手机",
+		Trigger: &policy.Trigger{Segment: "rm -rf after", Why: policy.WhyDelete}}
+	if got, want := askReason(resp), "命令里的「rm -rf after」会删除文件，删了不可恢复。已发到手机，也可以在这里直接批"; got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	resp.Trigger = &policy.Trigger{Why: policy.WhyUnknown}
+	if got := askReason(resp); got != "这条命令不在已知名单里。已发到手机，也可以在这里直接批" {
+		t.Fatalf("没有段：%q", got)
+	}
+	resp.Trigger = nil
+	if got := askReason(resp); got != "已发到手机，也可以在这里直接批" {
+		t.Fatalf("没有触发点：%q", got)
+	}
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	resp.Trigger = &policy.Trigger{Segment: "rm -rf after", Why: policy.WhyDelete}
+	if got := askReason(resp); got != `"rm -rf after" deletes files and can't be undone. Sent to your phone; you can also answer here` {
+		t.Fatalf("英文：%q", got)
+	}
+	resp.Trigger = &policy.Trigger{Why: policy.WhyUnknown}
+	if got := askReason(resp); got != "Isn't on the known-command list. Sent to your phone; you can also answer here" {
+		t.Fatalf("英文没有段：%q", got)
+	}
+}
+
+// 每个 Why 短语都有英文（它们经 i18n.Lookup 动态查，TestCatalogComplete 扫不到）。
+func TestTriggerWhysHaveEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	for _, w := range policy.AllWhys {
+		if i18n.Lookup(w) == w {
+			t.Errorf("Why 短语缺英文：%q", w)
+		}
+	}
+}
+
+// PostToolUse 当事件发给守护进程（tool_done，带工具名、载荷与 tool_use_id），钩子什么都不输出。
+func TestHookClaudePostToolUseSendsToolDone(t *testing.T) {
+	sock, lines := fakeDaemon(t, `{"v":1,"ok":true}`)
+	in := `{"session_id":"s1","prompt_id":"p1","cwd":"/tmp/p","permission_mode":"auto","hook_event_name":"PostToolUse","tool_name":"Bash",` +
+		`"tool_input":{"command":"git push origin main","description":"Push"},"tool_response":{},"tool_use_id":"toolu_7"}`
+	stdout, stderr, code := runHookWith(t, in, "claude", "--socket", sock)
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	got := lines()
+	if len(got) != 1 {
+		t.Fatalf("应发一条事件: %q", got)
+	}
+	var ev proto.Event
+	json.Unmarshal([]byte(got[0]), &ev)
+	if ev.Kind != "tool_done" || ev.ToolName != "Bash" || ev.ToolUseID != "toolu_7" || ev.Payload == nil || ev.Payload.Command != "git push origin main" ||
+		ev.Session.CLISessionID != "s1" {
+		t.Fatalf("事件: %s", got[0])
 	}
 }

@@ -283,6 +283,7 @@ func Payload(p policy.Payload) policy.Payload {
 	out.Command = String(p.Command)
 	out.Path = redact(p.Path, textRules)
 	out.DiffPreview = Text(p.DiffPreview)
+	out.Description = Text(p.Description)
 	out.URL = redact(p.URL, urlRules)
 	if len(p.Args) > 0 {
 		out.Args = args(p.Args)

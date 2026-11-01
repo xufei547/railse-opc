@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS requests (
   decided_at    TEXT,
   delivered_at  TEXT,
   ask           TEXT NOT NULL DEFAULT '', -- ask 用，JSON（proto.Ask，守护进程已脱敏），其余种类为空串
-  answers       TEXT NOT NULL DEFAULT ''  -- answered 的 ask 用，JSON 对象：题面 → 答案（原文，重连补发要原样下发），其余为空串
+  answers       TEXT NOT NULL DEFAULT '', -- answered 的 ask 用，JSON 对象：题面 → 答案（原文，重连补发要原样下发），其余为空串
+  trigger       TEXT NOT NULL DEFAULT ''  -- 引擎的触发点（哪一段、什么性质），JSON {"segment","why"}，段已脱敏；没有为空串
 );
 CREATE INDEX IF NOT EXISTS requests_state_created ON requests (state, created_at);
 CREATE INDEX IF NOT EXISTS requests_machine_created ON requests (machine_id, created_at);
