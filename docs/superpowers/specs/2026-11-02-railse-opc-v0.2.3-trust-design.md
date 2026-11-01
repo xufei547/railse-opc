@@ -34,7 +34,7 @@ type Trust struct {
 }
 ```
 
-时长：默认 2 小时，最长 24 小时，最短 5 分钟。**守护进程是执行者**，放行表在它内存里，同时落 `~/.railse/state.json`（重启不丢，过期的启动时清掉）。hub 是**展示与远程控制**：存一份副本，手机上看、撤、建。两边同步见 2.5。
+时长：默认 2 小时，最长 24 小时，最短 5 分钟。**守护进程是执行者**，放行表在它内存里，同时落 `~/.railse/trusts.json`（独立于 state.json；重启不丢，过期的启动时清掉）。（计划写作时改定：原稿写进 state.json。）hub 是**展示与远程控制**：存一份副本，手机上看、撤、建。两边同步见 2.5。
 
 ### 2.2 判定
 
@@ -81,7 +81,7 @@ railse trust revoke <id> | --all
 照"总开关"的样子做，不照"规则"的样子（规则是 hub 单向下发，放行要双向）：
 
 - wire 新增 `trusts` 帧（hub → 守护进程，整台机器的放行快照）和 `trust` 帧（守护进程 → hub，一条变更：set / revoke / expired）。`welcome` 带快照。
-- 守护进程收到快照：hub 来的（`created_by: phone`）以 hub 为准替换；本机来的（cli / env）本机为准，并立刻把 hub 没有的本机条目补发给 hub。
+- 守护进程收到快照（计划写作时精确化）：快照里有的条目写入/覆盖并标"已同步"；本机**已同步**却不在快照里的，删掉（被手机撤了）；本机**未同步**的（断线期间 cli / env 建的）保留，并逐条补发给 hub。本机建的条目只有等 hub 的快照回来才算同步。
 - 没接 hub / hub 不可达：本机条目照常生效；手机建的条目在断线期间仍按守护进程手里的副本生效直到过期（不因断线失效，也不因断线延长）。
 - hub 存 `trusts` 表（schema v6：`id, machine_id, scope, tool, cli_session_id, project_root, until, created_at, created_by, note, revoked_at`），每分钟清过期的；`GET /api/trusts`、`DELETE /api/trusts/{id}` 给网页用；hub 收到 `DELETE` 就推新快照给那台机器。
 - 旧 hub 配新守护进程：welcome 里没有 `trusts` 能力声明，守护进程不发 `trust` 帧，只用本机条目，手机上看不到也建不了（面板不显示开关：网页看 `/api/version` 的能力）。新 hub 配旧守护进程：hub 不下发快照，手机上的开关不显示（按机器的 `agent_version` 判断）。
