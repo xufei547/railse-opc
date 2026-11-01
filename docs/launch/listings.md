@@ -35,6 +35,12 @@
   - [Railse](https://github.com/xufei547/railse-opc) - Self-hosted approval inbox for Gemini CLI, Claude Code and Codex: hooks route every tool call through risk-based rules; for Gemini CLI that means deny rules plus phone notifications for questions and completion, with approvals from the phone for Claude Code and Codex.
   ```
 
+## 已提交（2026-11-01）
+
+- awesome-codex-cli：https://github.com/RoggeOhta/awesome-codex-cli/pull/533
+- awesome-gemini-cli：https://github.com/Piebald-AI/awesome-gemini-cli/pull/303
+- 两个仓库都已 star。awesome-claude-code 等 11 月 9 日后你本人填表。
+
 ## 跳过的
 
 - ithiria894/awesome-claude-code-hooks：29 star，今年 3 月后没更新。
