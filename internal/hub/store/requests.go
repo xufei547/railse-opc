@@ -59,6 +59,8 @@ type Request struct {
 	// Ask 与 Answers 只有 ask 有，JSON 里没有时省略。
 	Ask     *proto.Ask        `json:"ask,omitempty"`
 	Answers map[string]string `json:"answers,omitempty"`
+	// Trigger 是引擎的触发点（哪一段、什么性质，段已脱敏），只有审批可能有；老守护进程送来的没有，JSON 里省略。
+	Trigger *policy.Trigger `json:"trigger,omitempty"`
 }
 
 // PayloadHash 是载荷 JSON 的 SHA-256，用于去重，与 InsertRequest 存的哈希一致。
@@ -129,7 +131,7 @@ func (s *Store) SessionTool(id string) (string, error) {
 	return tool, nil
 }
 
-const requestCols = "id, machine_id, session_id, kind, tool_name, payload, payload_hash, risk, project_root, engine_reason, state, decided_by, decision_note, rule_id, turn_id, cli_session_id, title, callback, created_at, expires_at, decided_at, delivered_at, ask, answers"
+const requestCols = "id, machine_id, session_id, kind, tool_name, payload, payload_hash, risk, project_root, engine_reason, state, decided_by, decision_note, rule_id, turn_id, cli_session_id, title, callback, created_at, expires_at, decided_at, delivered_at, ask, answers, trigger"
 
 // InsertRequest 插入一条请求。PayloadHash 为空时按存下的载荷 JSON 计算（ask 按题目，见 AskHash）；CreatedAt 为空时用 Now()。
 // CreatedAt、ExpiresAt、DecidedAt、DeliveredAt 给了就必须是 FormatTime 的输出，否则返回错误。
@@ -177,6 +179,14 @@ func (s *Store) insertRequest(r Request, suffix string) (sql.Result, error) {
 		}
 		answers = string(b)
 	}
+	var trigger string
+	if r.Trigger != nil {
+		b, err := json.Marshal(r.Trigger)
+		if err != nil {
+			return nil, fmt.Errorf("序列化触发点: %w", err)
+		}
+		trigger = string(b)
+	}
 	if r.PayloadHash == "" {
 		r.PayloadHash = hashJSON(hashed)
 	}
@@ -199,19 +209,19 @@ func (s *Store) insertRequest(r Request, suffix string) (sql.Result, error) {
 	if r.SessionID != "" {
 		sessionID = r.SessionID
 	}
-	return s.db.Exec("INSERT INTO requests("+requestCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"+suffix,
+	return s.db.Exec("INSERT INTO requests("+requestCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"+suffix,
 		r.ID, r.MachineID, sessionID, r.Kind, r.ToolName, string(payload), r.PayloadHash, r.Risk, r.ProjectRoot, r.EngineReason,
 		r.State, r.DecidedBy, r.DecisionNote, r.RuleID, r.TurnID, r.CLISessionID, r.Title, r.Callback, r.CreatedAt, r.ExpiresAt, r.DecidedAt, r.DeliveredAt,
-		ask, answers)
+		ask, answers, trigger)
 }
 
 func scanRequest(row interface{ Scan(...any) error }) (Request, error) {
 	var r Request
-	var payload, ask, answers string
+	var payload, ask, answers, trigger string
 	var sessionID sql.NullString
 	err := row.Scan(&r.ID, &r.MachineID, &sessionID, &r.Kind, &r.ToolName, &payload, &r.PayloadHash, &r.Risk, &r.ProjectRoot, &r.EngineReason,
 		&r.State, &r.DecidedBy, &r.DecisionNote, &r.RuleID, &r.TurnID, &r.CLISessionID, &r.Title, &r.Callback, &r.CreatedAt, &r.ExpiresAt, &r.DecidedAt, &r.DeliveredAt,
-		&ask, &answers)
+		&ask, &answers, &trigger)
 	if err != nil {
 		return Request{}, err
 	}
@@ -228,6 +238,12 @@ func scanRequest(row interface{ Scan(...any) error }) (Request, error) {
 	if answers != "" {
 		if err := json.Unmarshal([]byte(answers), &r.Answers); err != nil {
 			return Request{}, fmt.Errorf("解析答案: %w", err)
+		}
+	}
+	if trigger != "" {
+		r.Trigger = &policy.Trigger{}
+		if err := json.Unmarshal([]byte(trigger), r.Trigger); err != nil {
+			return Request{}, fmt.Errorf("解析触发点: %w", err)
 		}
 	}
 	return r, nil

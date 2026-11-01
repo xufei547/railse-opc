@@ -1863,3 +1863,45 @@ func TestWriteDecideErrNotAsk(t *testing.T) {
 		t.Fatalf("ErrNotAsk 应回 400 与不是提问: %d %s", w.Code, w.Body)
 	}
 }
+
+// 守护进程送来的触发点：段再脱敏后入库，请求视图带 trigger；审计补的历史行也带。
+func TestPendingAndHistoryCarryTrigger(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	id, secret := enrollMachine(t, h, "mac")
+	c := dialAgent(t, h, secret, wire.Hello{Proto: wire.Proto, MachineID: id})
+	defer c.close()
+	c.recv(5 * time.Second)
+	f := pendingFrame("tr1", "s1", "t1", "deploy")
+	f.Trigger = &policy.Trigger{Segment: "deploy token=abcdef0123456789abcdef", Why: policy.WhyDeploy}
+	c.send(f)
+	c.send(pendingFrame("tr2", "s2", "t2", "old"))
+	waitFor(t, "两条登记", func() bool { n, _ := h.st.CountPending(); return n == 2 })
+	var detail struct {
+		Request struct {
+			Trigger *policy.Trigger `json:"trigger"`
+		} `json:"request"`
+	}
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/requests/tr1", nil, "", ck), &detail)
+	tr := detail.Request.Trigger
+	if tr == nil || tr.Why != policy.WhyDeploy || !strings.Contains(tr.Segment, "<redacted>") || strings.Contains(tr.Segment, "abcdef0123456789") {
+		t.Fatalf("视图里的触发点: %+v", tr)
+	}
+	var raw struct {
+		Request map[string]any `json:"request"`
+	}
+	decodeBody(t, doReq(t, "GET", h.http.URL+"/api/requests/tr2", nil, "", ck), &raw)
+	if _, ok := raw.Request["trigger"]; ok {
+		t.Fatalf("老守护进程没有触发点，视图不该有 trigger: %+v", raw.Request)
+	}
+
+	p := policy.Payload{Type: policy.PayloadShell, Command: "echo hi > /tmp/x", Cwd: "/p"}
+	e, _ := json.Marshal(agent.AuditEntry{TS: time.Now(), RequestID: "auto-tr", Kind: "permission", Session: proto.Session{Tool: "claude", CLISessionID: "s1", Cwd: "/p"},
+		ToolName: "Bash", Payload: &p, Risk: "write_outside", Action: "allow", State: "auto_allowed", RuleID: "u1", DecidedBy: "rule:u1",
+		Trigger: &policy.Trigger{Segment: "echo hi > /tmp/x", Why: policy.WhyWriteOutside}})
+	c.send(wire.Audit{T: wire.TAudit, Entries: []json.RawMessage{e}})
+	waitFor(t, "历史行", func() bool { _, err := h.st.GetRequest("auto-tr"); return err == nil })
+	if r := getReq(t, h.st, "auto-tr"); r.Trigger == nil || r.Trigger.Why != policy.WhyWriteOutside || r.Trigger.Segment != "echo hi > /tmp/x" {
+		t.Fatalf("历史行的触发点: %+v", r.Trigger)
+	}
+}
