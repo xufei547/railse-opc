@@ -95,6 +95,12 @@ func (s *Server) ReloadSettings() error {
 	return err
 }
 
+// noPhone 是“请求没能送到手机上的人”的 DecidedBy：没接 hub、hub 不可达、等待过期。
+var noPhone = map[string]bool{"no_hub": true, hubUnreachable: true, "timeout": true}
+
+// reasonAskInTerminal 是硬底线没能送到手机、改由终端确认时给 Claude 看的理由（钩子加 “Railse：” 前缀）。
+const reasonAskInTerminal = "连不上 hub，这类操作要你亲自确认"
+
 // lenientMode 报告 Claude Code 的权限模式是否是用户要求少打扰的那几种：auto（分类器放行）、bypassPermissions、dontAsk。
 func lenientMode(mode string) bool {
 	return mode == "auto" || mode == "bypassPermissions" || mode == "dontAsk"
@@ -418,6 +424,11 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		resp = s.waitDecision(ctx, id, req, d, pctx.ProjectRoot, redacted, entry)
 		if req.Source == proto.SourcePreToolUse && resp.Decision == "passthrough" {
 			s.recent.remember(keys, recentTerminal)
+			if d.Risk >= policy.RiskOutward && noPhone[resp.DecidedBy] {
+				// 硬底线没能送到手机：不表态的话 auto 模式的分类器会直接放行 git push、rm -rf；
+				// 回 ask 让 Claude 在终端里强制问人（-p 下等于拒绝）。审计照旧记交回终端的那一条。
+				resp.Decision, resp.Reason = "ask", reasonAskInTerminal
+			}
 		}
 		return resp
 	}

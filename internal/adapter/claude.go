@@ -118,10 +118,9 @@ func (claude) Render(d Decision) Output {
 	return Output{Stdout: b, ExitCode: 0}
 }
 
-// renderPreToolUse 把审批决定渲染成 PreToolUse 输出：allow、deny 带 Railse 前缀的理由，其余不作决定（stdout 为空），
-// Claude 照自己的权限流程走（auto 模式交给分类器，其余模式该问就问）。
-// 不输出 permissionDecision "ask"：2.1.280 实测它在 auto 模式下也强制让人确认、不回分类器（见
-// docs/superpowers/specs/2026-11-01-pretooluse-ask-findings.md），用在“不表态”上会比 auto 模式更吵。
+// renderPreToolUse 把审批决定渲染成 PreToolUse 输出：allow、deny、ask 带 Railse 前缀的理由，其余不作决定（stdout 为空），
+// Claude 照自己的权限流程走。ask 只给守护进程明确要求的硬底线（送不到手机时）：2.1.280 实测它在任何模式下都强制让人
+// 确认、不回分类器（见 docs/superpowers/specs/2026-11-01-pretooluse-ask-findings.md），用在一般的不表态上会比 auto 模式更吵。
 func renderPreToolUse(d Decision) Output {
 	var decision, reason string
 	switch d.Action {
@@ -129,6 +128,8 @@ func renderPreToolUse(d Decision) Output {
 		decision, reason = "allow", allowMessage(d.Reason)
 	case "deny":
 		decision, reason = "deny", denyMessage(d.Reason)
+	case "ask":
+		decision, reason = "ask", allowMessage(d.Reason)
 	default:
 		return passthrough()
 	}

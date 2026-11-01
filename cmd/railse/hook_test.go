@@ -449,9 +449,10 @@ func TestHookClaudePreToolUse(t *testing.T) {
 	if code != 0 || out != "" {
 		t.Fatalf("auto 下的联网应不表态: code=%d out=%q", code, out)
 	}
-	// 没接 hub（LocalDecider）：硬底线交回终端，不表态，也不说连不上 hub
+	// 没接 hub（LocalDecider）：硬底线要 Claude 在终端里强制问（ask），不说“连不上 hub”的回退提示
 	out, errOut, code := runHookWith(t, claudePreToolUse(repo, "git push origin main", "auto"), "claude", "--socket", sock)
-	if code != 0 || out != "" || strings.Contains(errOut, "hub") {
+	if code != 0 || out != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：连不上 hub，这类操作要你亲自确认"}}`+"\n" ||
+		strings.Contains(errOut, "hub") {
 		t.Fatalf("没接 hub: code=%d out=%q err=%q", code, out, errOut)
 	}
 	var sources []string
@@ -484,9 +485,15 @@ func TestHookClaudePreToolUseRequest(t *testing.T) {
 func TestHookHubUnreachableNote(t *testing.T) {
 	reply := `{"v":1,"decision":"passthrough","decided_by":"hub_unreachable","reason":"连不上 hub，交回终端处理"}`
 	sock, _ := fakeDaemon(t, reply)
-	stdout, stderr, _ := runHookWith(t, claudePreToolUse("/tmp/p", "git push origin main", "auto"), "claude", "--socket", sock)
+	stdout, stderr, _ := runHookWith(t, claudePreToolUse("/tmp/p", "curl https://x.y", "auto"), "claude", "--socket", sock)
 	if stdout != "" || stderr != "railse hook: 连不上 hub，交回 Claude 自己的确认\n" {
 		t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
+	}
+	// 硬底线：守护进程回 ask，钩子输出 ask，stderr 提示照旧
+	sock, _ = fakeDaemon(t, `{"v":1,"decision":"ask","decided_by":"hub_unreachable","reason":"连不上 hub，这类操作要你亲自确认"}`)
+	stdout, stderr, _ = runHookWith(t, claudePreToolUse("/tmp/p", "git push origin main", "auto"), "claude", "--socket", sock)
+	if !strings.Contains(stdout, `"permissionDecision":"ask"`) || !strings.Contains(stderr, "连不上 hub") {
+		t.Fatalf("硬底线 ask: stdout=%q stderr=%q", stdout, stderr)
 	}
 	sock, _ = fakeDaemon(t, reply)
 	_, stderr, _ = runHookWith(t, claudePermission("/tmp/p", "git push origin main"), "claude", "--socket", sock)

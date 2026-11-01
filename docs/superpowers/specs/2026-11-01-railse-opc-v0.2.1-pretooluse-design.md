@@ -68,9 +68,11 @@ PreToolUse 返回 `allow` 会让 Claude **跳过自己的权限系统**（包括
 - 用户 `settings.json` 里的 deny 规则 Claude 仍会先于钩子生效（deny 优先），不受影响。
 - "记住"学来的 allow 规则现在在 auto 模式下也是终局决定，网页上"记住"的说明加一句"记住后 Claude 自己的检查也会跳过"。
 
-### 2.6 失败即不表态
+### 2.6 失败即不表态；硬底线送不到手机时要终端确认
 
-守护进程不在、hub 30 秒不可达、解析失败、超时：PreToolUse 输出空，Claude 照常自己处理；与现在 `PermissionRequest` 的 fail-open 一致。硬底线请求在 hub 不可达时同样不表态（不能因为 Railse 坏了把人挡在终端外），但在终端打一行 `railse hook: hub unreachable, falling back to Claude's own prompt`（为此 `proto.Response` 加 `decided_by` 字段，钩子据此判断）。
+守护进程不在、hub 30 秒不可达、解析失败、超时：PreToolUse 输出空，Claude 照常自己处理；与现在 `PermissionRequest` 的 fail-open 一致。
+
+例外（2026-11-01 实施后改定）：对外（outward）与不可逆（destructive）两档在**没接 hub、hub 不可达、等待过期**这三种情况下，PreToolUse 输出 `permissionDecision: "ask"`，理由 `Railse：连不上 hub，这类操作要你亲自确认`，任何模式都如此。原因：Task 1 实测 `ask` 在 auto 模式下也强制让人确认；不表态的话 auto 的分类器会直接放行 `git push`、`rm -rf`（实测没接 hub 时 `rm -rf` 被执行）。`ask` 不把人挡在终端外，人在就能批；`-p` 下等于拒绝，可以接受。守护进程不在、钩子解析失败、守护进程出错或停止时仍输出空（钩子拿不到守护进程的判断）。hub 不可达时终端照旧打一行 `railse hook: hub unreachable, falling back to Claude's own prompt`（为此 `proto.Response` 加 `decided_by` 字段，钩子据此判断）。
 
 ## 3 顺带的三件小事
 

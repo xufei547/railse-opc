@@ -125,10 +125,10 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | 定不了，联网、项目外改动、无法判断 | 送手机 | 不表态，交给 Claude 的分类器（审计 `passthrough`、`decided_by: classifier`）；`~/.railse/settings.yaml` 写 `claude_auto_mode: phone` 则送手机 |
 
 - **本机设置 `~/.railse/settings.yaml`。** 目前只有 `claude_auto_mode: classifier | phone`（默认 `classifier`）。不放 `rules.yaml`：那份由 hub 下发覆盖，解析时也拒绝未知字段。守护进程启动、`railse agent reload` 与 SIGHUP 时读；读不了、有未知字段或值不对时按默认值跑，reload 回报错。
-- **不输出 `ask`。** 实测 `permissionDecision: "ask"` 在 auto 模式下也强制让人确认，不回分类器（[findings](superpowers/specs/2026-11-01-pretooluse-ask-findings.md)）；用在不表态上会比 auto 模式更吵，所以交回终端一律输出空。
+- **`ask` 只给送不到手机的硬底线。** 实测 `permissionDecision: "ask"` 在 auto 模式下也强制让人确认，不回分类器（[findings](superpowers/specs/2026-11-01-pretooluse-ask-findings.md)）。对外与不可逆两档在没接 hub、hub 不可达、等待过期时输出 `ask`（理由“Railse：连不上 hub，这类操作要你亲自确认”），任何模式都如此，`claude -p` 下等于拒绝；其余交回终端一律输出空，免得比 auto 模式更吵。
 - **同一调用不问两次。** 守护进程记 10 分钟内 `PreToolUse` 处理过的调用（键是 `tool_use_id`，以及会话 + 工具 + 载荷的哈希；`PermissionRequest` 不带 `tool_use_id`，靠后者对上）。`PreToolUse` 送过手机而交回了终端（hub 不可达、过期等）的，随后同一调用的 `PermissionRequest` 直接不表态（审计 `decided_by: dedup`），不再等第二次；因模式不表态的，`PermissionRequest` 是 Claude 自己升级成要问人，照常送手机。
 - **放行是终局。** `PreToolUse` 回 allow 时 Claude Code 跳过它自己的权限检查（含 auto 的分类器），所以内置放行只覆盖只读与项目内改动两档；`settings.json` 里你写的 deny 规则仍先于钩子生效。
-- **失败即不表态。** 守护进程不在、hub 30 秒不可达、解析失败、超时，钩子都输出空，Claude 照自己的流程走；hub 不可达时 stderr 多一行 `railse hook: 连不上 hub，交回 Claude 自己的确认`。
+- **失败即不表态。** 守护进程不在、hub 30 秒不可达、解析失败、超时，钩子都输出空（硬底线例外，见上一条），Claude 照自己的流程走；hub 不可达时 stderr 多一行 `railse hook: 连不上 hub，交回 Claude 自己的确认`。
 - 审计的 Claude 审批条目多三个字段：`source`（`pretooluse` / `permissionrequest`）、`permission_mode`、`tool_use_id`。
 
 ## 手机上答选择题

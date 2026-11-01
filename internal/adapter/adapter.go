@@ -236,7 +236,7 @@ func marshalNoEscape(v any) ([]byte, error) {
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
-// allowMessage 是 PreToolUse 放行时给 agent 看的理由，带 Railse 前缀；理由为空时用固定文案。
+// allowMessage 是 PreToolUse 放行（或要求终端确认）时给 agent 看的理由，带 Railse 前缀；理由为空时用固定文案。
 func allowMessage(reason string) string {
 	if reason == "" {
 		return i18n.T("Railse：已放行")

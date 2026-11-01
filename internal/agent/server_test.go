@@ -922,8 +922,8 @@ func TestPreToolUseThenPermissionRequestDedup(t *testing.T) {
 	sock := env.cfg.SocketPath
 	var resp proto.Response
 	json.Unmarshal(roundTrip(t, sock, preToolUse(env.repo, "git push origin main", "default", "toolu_same")), &resp)
-	if resp.Decision != "passthrough" || resp.DecidedBy != hubUnreachable {
-		t.Fatalf("PreToolUse: %+v", resp)
+	if resp.Decision != "ask" || resp.DecidedBy != hubUnreachable || resp.Reason != reasonAskInTerminal {
+		t.Fatalf("PreToolUse 的硬底线连不上 hub 应回 ask: %+v", resp)
 	}
 	// 2.1.280 的 PermissionRequest 没有 tool_use_id：按会话 + 载荷对上
 	pr := permission(env.repo, "git push origin main")
@@ -964,5 +964,42 @@ func TestPreToolUseThenPermissionRequestDedup(t *testing.T) {
 	}
 	if dedup != 2 {
 		t.Fatalf("审计里应有两条 dedup：%d", dedup)
+	}
+}
+
+// 硬底线送不到手机（没接 hub、hub 不可达、过期）时 PreToolUse 回 ask；中间三级、别的失败、PermissionRequest 照旧交回终端。
+func TestPreToolUseHardFloorAskWhenNoPhone(t *testing.T) {
+	cases := []struct {
+		name   string
+		dec    Decider
+		cmd    string
+		source string
+		want   string
+		wantBy string
+	}{
+		{"没接 hub", LocalDecider{}, "git push origin main", proto.SourcePreToolUse, "ask", "no_hub"},
+		{"hub 不可达", fixedDecider{out: Outcome{Action: "passthrough", DecidedBy: hubUnreachable}}, "rm -rf /tmp/x", proto.SourcePreToolUse, "ask", hubUnreachable},
+		{"出错", fixedDecider{err: errors.New("坏了")}, "git push origin main", proto.SourcePreToolUse, "passthrough", "error"},
+		{"没接 hub 的 PermissionRequest", LocalDecider{}, "git push origin main", proto.SourcePermissionRequest, "passthrough", "no_hub"},
+		{"没接 hub 的 Codex", LocalDecider{}, "git push origin main", "", "passthrough", "no_hub"},
+	}
+	for _, c := range cases {
+		env := startServer(t, c.dec, nil)
+		r := permission(env.repo, c.cmd)
+		r.Source, r.PermissionMode = c.source, "auto"
+		var resp proto.Response
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, r), &resp)
+		if resp.Decision != c.want || resp.DecidedBy != c.wantBy {
+			t.Errorf("%s: %+v", c.name, resp)
+		}
+	}
+	// 等待过期
+	env := startServer(t, &blockingDecider{release: make(chan struct{})}, nil)
+	r := preToolUse(env.repo, "git push origin main", "default", "toolu_t")
+	r.DeadlineSeconds = 1
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, r), &resp)
+	if resp.Decision != "ask" || resp.DecidedBy != "timeout" {
+		t.Errorf("过期: %+v", resp)
 	}
 }

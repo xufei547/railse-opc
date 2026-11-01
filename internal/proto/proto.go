@@ -97,7 +97,8 @@ const (
 	SourcePermissionRequest = "permissionrequest"
 )
 
-// Response 是守护进程对请求的答复。Decision 为 allow、deny、passthrough 或 answer。
+// Response 是守护进程对请求的答复。Decision 为 allow、deny、passthrough、answer，或 ask（只回 PreToolUse 来的硬底线：
+// 送不到手机时要 Claude 在终端里强制问人）。
 // Decision 为 answer 时带 Answers：问题原文 → 答案（多选题的各个答案用逗号连接）。
 type Response struct {
 	V         int               `json:"v"`

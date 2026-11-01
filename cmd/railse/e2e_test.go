@@ -41,7 +41,12 @@ func TestEndToEndClaudeSamples(t *testing.T) {
 	if code != 0 || !strings.Contains(out, `"behavior":"allow"`) {
 		t.Fatalf("touch 应放行: %d %q", code, out)
 	}
-	for _, f := range []string{"claude/2.1.280/Notification.permission_prompt.json", "claude/2.1.280/Stop.json", "claude/2.1.280/SessionEnd.json", "claude/2.1.280/PreToolUse.json"} {
+	// PreToolUse 的 git push 是硬底线，没接 hub 时要 Claude 在终端里强制问
+	out, _, code = runHookWith(t, sampleWithCwd(t, "claude/2.1.280/PreToolUse.json", repo), "claude", "--socket", sock)
+	if code != 0 || !strings.Contains(out, `"permissionDecision":"ask"`) {
+		t.Fatalf("PreToolUse 的 git push 应回 ask: %d %q", code, out)
+	}
+	for _, f := range []string{"claude/2.1.280/Notification.permission_prompt.json", "claude/2.1.280/Stop.json", "claude/2.1.280/SessionEnd.json"} {
 		out, _, code = runHookWith(t, sampleWithCwd(t, f, repo), "claude", "--socket", sock)
 		if code != 0 || out != "" {
 			t.Fatalf("%s: %d %q", f, code, out)

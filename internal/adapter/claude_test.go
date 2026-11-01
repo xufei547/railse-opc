@@ -260,10 +260,11 @@ func TestClaudeRenderPreToolUse(t *testing.T) {
 	cases := map[string]string{
 		"allow":       `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Railse：命中规则 r1"}}`,
 		"deny":        `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Railse：已在手机上拒绝"}}`,
+		"ask":         `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：连不上 hub"}}`,
 		"passthrough": ``, // 不表态：ask 在 auto 下会强制弹框，见 Task 1 实测
 	}
 	for action, want := range cases {
-		reason := map[string]string{"allow": "命中规则 r1", "deny": "已在手机上拒绝"}[action]
+		reason := map[string]string{"allow": "命中规则 r1", "deny": "已在手机上拒绝", "ask": "连不上 hub"}[action]
 		out := claude{}.Render(Decision{Source: SourcePreToolUse, Action: action, Reason: reason})
 		if string(out.Stdout) != want || out.ExitCode != 0 {
 			t.Errorf("%s: got %s want %s", action, out.Stdout, want)

@@ -169,7 +169,7 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 	if err != nil {
 		return passthrough(stderr, err.Error())
 	}
-	if resp.Decision == "passthrough" && resp.DecidedBy == "hub_unreachable" && in.Source != "" {
+	if (resp.Decision == "passthrough" || resp.Decision == "ask") && resp.DecidedBy == "hub_unreachable" && in.Source != "" {
 		fmt.Fprintln(stderr, "railse hook: "+i18n.T("连不上 hub，交回 Claude 自己的确认"))
 	}
 	return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: resp.Decision, Reason: resp.Reason}))
