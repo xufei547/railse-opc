@@ -10,3 +10,7 @@ internal/hub/webui/dist/*
 .superpowers/
 spike/
 /web/.e2e/
+
+# deep-research 的中间笔记
+research_notes/
+reports/
