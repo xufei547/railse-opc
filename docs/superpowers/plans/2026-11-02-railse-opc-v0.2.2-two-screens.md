@@ -1186,3 +1186,85 @@ Expected：四条 destructive 的第四列分别是 `删除文件，删了不可
 - 类型名核对：`policy.Trigger{Segment, Why}`、`policy.AllWhys`、`Payload.Description`、`proto.Response.Trigger`、`AuditEntry.Trigger`、`PendingRequest.Trigger`、`wire.PendingRequest.Trigger`、`store.Request.Trigger`、网页 `Trigger`/`RequestView.trigger`/`Payload.description`、`triggerWhysEn`、`triggerWhyLabel`、`askReason`、`decidedByAsk`、`reasonAsked` 在各任务中一致。
 - 核查记录（2026-11-02 写计划时，本机 0.2.1）：`railse policy eval 'rm -rf src/old'`（项目内）= destructive；`cat > scratch/t.py <<'EOF'…`（项目内）= unknown。所以临时目录规则对 `rm -rf` 与 heredoc 写文件都没有作用，删去。
 - 去重表删除后 `settings.go` 的 `UndecidedPhone` 仍有用（中间三级也走 ask + PermissionRequest）。
+
+## 实施报告
+
+分支 `claude/v0-2-2-two-screens-5635ac`（worktree `jovial-wilbur-8cb5f7`），从 main `6bb2bac` 切出。未推送、未合并、未打 tag。每个提交都过 `make test`。
+
+### 提交
+
+| 任务 | 提交 | 说明 |
+|---|---|---|
+| 准备 | `0ac1747` | docs: v0.2.2 设计与计划（从主工作区原样复制两份新文件与总设计的一行决策） |
+| Task 1 | `60f66dc` | policy: 定级记下触发点，Decision 带 Trigger |
+| Task 2 | `83cfc11` | policy: 载荷加 description 并随载荷脱敏 |
+| Task 3 | `d1b5678` | hook: description 进载荷；ask 理由按终端语言拼触发点；policy eval 第四列 |
+| Task 4 | `fb8243b` | agent: 硬底线在 PreToolUse 立刻回 ask，PermissionRequest 送手机；删去重表；审计与上报带触发点 |
+| 补丁 | `bc3bbd9` | hook: 只对本版守护进程的 ask 重拼理由，老守护进程“连不上 hub”的 ask 照原话 |
+| Task 5 | `2f753ff` | hub: requests 加 trigger 列（schema v5），请求视图与补历史行带触发点 |
+| Task 6 | `e0e197e` | web: 卡片第一行用 Claude 的说明，“为什么”说触发点；Why 短语两份英文一致 |
+| Task 7 | `c896a3b` | docs: 同屏说法、模式边界表、trigger 字段、0.2.2 升级说明、ask 实测补记 |
+| Task 8 修正 | `e89ea6a` | policy: 只在这一段本身是 sudo/doas 时说“以管理员权限运行” |
+| Task 8 | （本提交） | 实施报告 |
+
+### 偏离计划之处
+
+1. **语料 Segment 列按实际分段改了两行**（没改分段器、没改风险列）：`S=/x; …; cd $S && rm -rf after && echo started` 的触发段是 `rm -rf after`（`&&` 两侧是两段），不是 `cd $S && rm -rf after`；ssh 那行原文超过 80 字，Segment 是截断后的 `ssh -i ~/Downloads/canda.pem ubuntu@3.98.138.128 'date -u; sudo journalctl -u c…'`。风险列全部与分类器一致，没有需要停下的行。
+2. **ssh 里的 sudo 不是触发点（Task 8 自检发现，`e89ea6a` 修正）。** 计划的 `explainSegment` 按 `seg.text` 里的 ` sudo ` 猜“以管理员权限运行”。核查：`ssh u@h 'date; sudo journalctl'` 只定 network，远端的 sudo 分类器不看；`ssh -i ~/k.pem u@h 'uptime'` 定 destructive，是 `-i` 的 `.pem` 密钥文件抬的档。所以作者那条真实命令真正的触发点是密钥文件，原实现会误说成管理员权限。改为只认本段命令名是 sudo/doas；语料该行的 Why 改成“读写敏感文件（密钥、配置或开机自启）”，另加 `ssh u@h 'date; sudo journalctl'`（network）与 `sudo ls /root`（以管理员权限运行）两行。**设计 §3 第 4 条的预期因此要改：ssh 那条的触发点是“读写敏感文件”，不是“以管理员权限运行”。** 若希望远端 sudo 也算硬底线，那是分类器的改动，留 v0.2.3 决定。
+3. **Why 短语的 16 条英文在 Task 3 就加进了 `en.go`**（计划放在 Task 6）：Task 3 的英文 `askReason` 测试要用到。另加 `TestTriggerWhysHaveEnglish`（`cmd/railse/hook_test.go`），逐条核对 `policy.AllWhys` 在英文下都查得到——它们经 `i18n.Lookup` 动态查，`TestCatalogComplete` 扫不到。
+4. **没有段时英文句首大写**：`askReason` 与网页 `triggerLine` 在没有 Segment 时把性质短语首字母大写（“Isn't on the known-command list. …”），中文不受影响。
+5. **老守护进程兼容（`bc3bbd9`）**：计划的 `hookPermission` 对 PreToolUse 的所有 `ask` 都改用 `askReason`。钩子与守护进程是同一个二进制，但升级后守护进程可能还没重启：0.2.1 守护进程回的 `ask`（`decided_by: hub_unreachable`，“连不上 hub，这类操作要你亲自确认”）会被说成“已发到手机”，与事实不符。改为只在 `decided_by == "ask"` 时重拼，其余照 `localizeReason` 翻原话；`TestHookHubUnreachableNote` 加了断言。
+6. **`TestPreToolUseAskRegardlessOfHub` 多一种“出错”**（Decider 返回错误），同样回 ask；`TestPreToolUseUndecidedIgnoresMode` 的“PreToolUse 不该送 Decider”断言收紧成一条都不许送。`TestEvaluateCarriesTrigger` 是新增的（引擎三个返回都带 Trigger）。
+7. **hub 侧**：触发点的兜底清洗抽成 `cleanTrigger`（段 `redactText` 至 256 字、性质截断），`readPending` 与 `cleanEntry`（审计）共用，所以补历史行拿到的就是清洗过的。审计里 PreToolUse 的 `state: asked` 不是 hub 的请求状态，`applyAgentFinal` 走 default 分支只进审计表，不建请求行（与计划一致，未改代码）。
+8. **SQLite 列名 `trigger`**：TRIGGER 是关键字，但 SQLite 允许当列名用，实测建表、迁移、读写都正常，保留计划的列名。
+9. **Task 2 的哈希说明**：`store.PayloadHash` 把 description 算进哈希，同一命令换了说明算不同载荷；hub 的 15 分钟重发去重只对 Codex 有意义，Claude 同一次调用的 description 稳定，可接受。
+10. **文档**：仓库没有 CHANGELOG 文件，设计 §4 提到的 CHANGELOG 没写；另顺手更新了 `docs/web.md` 说明卡一段（description 与触发句）。
+11. **`make e2e`（Playwright）没跑**：门禁只跑了 `make test`。
+12. 设计 §2.5（会话临时目录按项目内）按计划未做。
+
+### `make test`（最后一次，`e89ea6a` 之后）
+
+```
+ok  	github.com/xufei547/railse-opc/cmd/railse	83.584s
+ok  	github.com/xufei547/railse-opc/internal/adapter	2.366s
+ok  	github.com/xufei547/railse-opc/internal/agent	52.214s
+ok  	github.com/xufei547/railse-opc/internal/hub	95.360s
+ok  	github.com/xufei547/railse-opc/internal/hub/store	15.117s
+ok  	github.com/xufei547/railse-opc/internal/hub/wire	6.638s
+ok  	github.com/xufei547/railse-opc/internal/i18n	8.317s
+ok  	github.com/xufei547/railse-opc/internal/policy	7.469s
+ok  	github.com/xufei547/railse-opc/internal/proto	5.983s
+ok  	github.com/xufei547/railse-opc/internal/redact	67.955s
+（其余包 ok / cached）
+ Test Files  27 passed (27)
+      Tests  796 passed (796)
+```
+
+gofmt、lint、vet 都过（退出码 0）。
+
+### Task 8 自检输出
+
+自检的五条命令写在一个脚本里由 `sh <脚本> $TMPDIR/railse-022` 跑（直接在 Bash 工具里写这些命令会被本机 Railse 当成硬底线送手机，上一轮就是这样被结束的）。`e89ea6a` 之后的实际输出：
+
+```
+ask	destructive	无规则命中，按 destructive 默认询问	rm -rf after｜删除文件，删了不可恢复
+ask	destructive	无规则命中，按 destructive 默认询问	pkill -f test_overlap.py｜结束进程
+ask	destructive	无规则命中，按 destructive 默认询问	ssh -i ~/k.pem u@h 'sudo journalctl -u x'｜读写敏感文件（密钥、配置或开机自启）
+ask	destructive	无规则命中，按 destructive 默认询问	python - <<'EOF'｜删表或删库
+ask	outward	无规则命中，按 outward 默认询问	git push origin main｜pushes code to a remote
+```
+
+- heredoc 那条：`hasSQLDrop` 排在“把脚本直接交给解释器执行”之前，又因 heredoc 时 `pipedSegments` 不标管道，所以是“删表或删库”。
+- ssh 那条：触发点是密钥文件，见偏离第 2 条。
+
+### 留给真机验收（设计 §3，第 5 条已删；Claude Code 2.1.280，本机 hub）
+
+1. `default` 与 `auto` 各一次 `git push --dry-run origin main`：终端弹确认框，理由含「git push」与“已发到手机”；手机同时收到卡片，第一行是 Claude 的说明，“为什么”一句写触发点；手机批准后终端框消失、命令执行。
+2. 同上，改在终端按 Yes：命令执行，手机卡片消失，hub 里这条为 `cancelled`。
+3. 停掉本机 hub 再跑一次：终端弹框、不卡，理由仍在；终端答后正常。
+4. 用 `railse policy eval` 跑今天的四条真实命令：触发点分别是删除文件、结束进程、**读写敏感文件（ssh 的 `-i` 密钥；不是管理员权限，见偏离第 2 条）**、删表或删库。
+6. `--permission-mode bypassPermissions` 下 `git push --dry-run`：记录表现，填进 `docs/hub.md` 模式边界表的最后一行。
+7. `claude -p` 下同一条：被拒，Claude 收到的文本含触发点。
+8. 老 hub（0.2.1）配新守护进程：卡片照常，只是没有触发点与说明；新 hub 配老守护进程同理。另外：升级后守护进程还没重启时，PreToolUse 的硬底线理由应是老话“连不上 hub…”或按老逻辑等手机，不应出现“已发到手机”而手机上没有（偏离第 5 条）。
+
+升级提醒：hub 库 v4 → v5 不能降级，验收前先备份 `~/.railse-hub`。
