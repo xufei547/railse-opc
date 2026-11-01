@@ -389,6 +389,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 
 	// internal/adapter/adapter.go（ValidateAsk 也被守护进程与 hub 调用，那里随各自进程的语言）
 	"Railse：已拒绝": "Railse: denied",
+	"Railse：已放行": "Railse: allowed",
 	"Railse：":    "Railse: ",
 	"AskUserQuestion 的题目不合规: 没有题目":                                "invalid AskUserQuestion: no questions",
 	"AskUserQuestion 的题目不合规: 有 %d 题，最多 %d 题":                      "invalid AskUserQuestion: %d questions, at most %d",

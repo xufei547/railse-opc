@@ -161,11 +161,13 @@ func readStdin(ctx context.Context, stdin io.Reader) ([]byte, error) {
 
 // hookPermission 把审批请求交给守护进程等答复（见 awaitReply），按答复渲染 allow、deny，其余不作决定。
 func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.Client, in adapter.Input, stdout, stderr io.Writer) int {
-	resp, err := awaitReply(ctx, ad, client, proto.Request{Kind: "permission", Session: in.Session, ToolName: in.ToolName, Payload: in.Payload})
+	req := proto.Request{Kind: "permission", Session: in.Session, ToolName: in.ToolName, Payload: in.Payload,
+		Source: in.Source, PermissionMode: in.PermissionMode, ToolUseID: in.ToolUseID}
+	resp, err := awaitReply(ctx, ad, client, req)
 	if err != nil {
 		return passthrough(stderr, err.Error())
 	}
-	return writeOutput(stdout, ad.Render(adapter.Decision{Action: resp.Decision, Reason: resp.Reason}))
+	return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: resp.Decision, Reason: resp.Reason}))
 }
 
 // localizeReason 把守护进程回传的拒绝原因翻成终端语言：守护进程（launchd、systemd 下）未必知道用户的语言，钩子知道，

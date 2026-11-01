@@ -83,7 +83,19 @@ type Request struct {
 	Payload         policy.Payload `json:"payload"`
 	Ask             *Ask           `json:"ask,omitempty"`
 	DeadlineSeconds int            `json:"deadline_seconds"`
+	// Source 是审批来自哪个钩子事件：pretooluse 或 permissionrequest；空按 permissionrequest（旧钩子、Codex）。
+	Source string `json:"source,omitempty"`
+	// PermissionMode 是 Claude Code 当时的权限模式（default、acceptEdits、plan、auto、bypassPermissions、dontAsk），原样透传。
+	PermissionMode string `json:"permission_mode,omitempty"`
+	// ToolUseID 是 Claude Code 给这次工具调用的编号，只有 PreToolUse 带，用来认出同一调用。
+	ToolUseID string `json:"tool_use_id,omitempty"`
 }
+
+// 审批请求的来源钩子事件。
+const (
+	SourcePreToolUse        = "pretooluse"
+	SourcePermissionRequest = "permissionrequest"
+)
 
 // Response 是守护进程对请求的答复。Decision 为 allow、deny、passthrough 或 answer。
 // Decision 为 answer 时带 Answers：问题原文 → 答案（多选题的各个答案用逗号连接）。
@@ -95,6 +107,8 @@ type Response struct {
 	RequestID string            `json:"request_id,omitempty"`
 	Risk      string            `json:"risk,omitempty"`
 	Answers   map[string]string `json:"answers,omitempty"`
+	// DecidedBy 是谁作的决定（rule:<id>、user、classifier、dedup、hub_unreachable、timeout…），钩子据此决定要不要在终端提示。
+	DecidedBy string `json:"decided_by,omitempty"`
 }
 
 // Event 是只展示不操作的事件，Kind 为 question、done 或 session_end。

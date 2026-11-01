@@ -113,13 +113,22 @@ func TestClaudeParseAskRejected(t *testing.T) {
 func TestClaudeParseAskIgnored(t *testing.T) {
 	a, _ := Get("claude")
 	for name, raw := range map[string][]byte{
-		"PreToolUse 别的工具":                   askHook("PreToolUse", "Bash", `{"command":"ls"}`),
+		"PreToolUse 不认识的工具 Foo":             askHook("PreToolUse", "Foo", `{"command":"ls"}`),
+		"PreToolUse 的 MCP 工具":               askHook("PreToolUse", "mcp__fs__read", `{}`),
 		"PermissionRequest+AskUserQuestion": askHook("PermissionRequest", "AskUserQuestion", askToolInput),
 	} {
 		in, err := a.Parse(raw)
 		if err != nil || in.Kind != KindIgnore {
 			t.Errorf("%s 应忽略: %v %+v", name, err, in)
 		}
+	}
+}
+
+func TestClaudeParsePreToolUseBashFromAskHook(t *testing.T) {
+	a, _ := Get("claude")
+	in, err := a.Parse(askHook("PreToolUse", "Bash", `{"command":"ls"}`))
+	if err != nil || in.Kind != KindPermission || in.ToolName != "Bash" || in.Payload.Command != "ls" || in.Source != SourcePreToolUse {
+		t.Fatalf("PreToolUse 的 Bash 应是审批: %v %+v", err, in)
 	}
 }
 
