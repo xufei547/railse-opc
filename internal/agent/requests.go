@@ -35,6 +35,7 @@ type PendingRequest struct {
 	ProjectRoot  string
 	Redacted     policy.Payload
 	EngineReason string
+	Trigger      *policy.Trigger // 引擎的触发点，触发段已脱敏；答题与没有触发点的为 nil
 	Created      time.Time
 	Deadline     time.Time
 }

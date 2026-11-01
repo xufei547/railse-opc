@@ -21,11 +21,12 @@ type AuditEntry struct {
 	Ask       *proto.Ask        `json:"ask,omitempty"` // 仅 ask：脱敏后的题目
 	Risk      string            `json:"risk,omitempty"`
 	Action    string            `json:"action,omitempty"`  // allow、deny、passthrough、answer
-	State     string            `json:"state"`             // auto_allowed、auto_denied、approved、denied、answered、passthrough、cancelled、expired、recorded、suppressed
+	State     string            `json:"state"`             // auto_allowed、auto_denied、approved、denied、answered、passthrough、asked、cancelled、expired、recorded、suppressed
 	Answers   map[string]string `json:"answers,omitempty"` // 仅 answered：脱敏后的题面 → 脱敏后的答案
 	RuleID    string            `json:"rule_id,omitempty"`
 	Reason    string            `json:"reason,omitempty"`
-	Note      string            `json:"note,omitempty"` // 用户在手机上的备注，只进审计，不回给钩子
+	Trigger   *policy.Trigger   `json:"trigger,omitempty"` // 引擎的触发点（触发段已脱敏）
+	Note      string            `json:"note,omitempty"`    // 用户在手机上的备注，只进审计，不回给钩子
 	DecidedBy string            `json:"decided_by,omitempty"`
 	Message   string            `json:"message,omitempty"`
 	// 仅 Claude 的审批：来源钩子事件（pretooluse、permissionrequest）、权限模式、工具调用编号；同一调用的两次事件靠它们对上。

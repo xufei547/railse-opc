@@ -84,18 +84,19 @@ func (w Welcome) Has(f string) bool { return slices.Contains(w.Features, f) }
 // Kind 为空表示审批（旧守护进程不发这个键）；为 ask 时是要人答的题：带 Ask（已脱敏），ToolName 为 AskUserQuestion，
 // Payload 为零值、Risk 为空。新字段都可选，不提协议版本。
 type PendingRequest struct {
-	T               string         `json:"t"`
-	RequestID       string         `json:"request_id"`
-	Kind            string         `json:"kind,omitempty"`
-	Ask             *proto.Ask     `json:"ask,omitempty"`
-	Session         proto.Session  `json:"session"`
-	ToolName        string         `json:"tool_name"`
-	Payload         policy.Payload `json:"payload"`
-	Risk            string         `json:"risk"`
-	ProjectRoot     string         `json:"project_root"`
-	EngineReason    string         `json:"engine_reason"`
-	DeadlineSeconds int            `json:"deadline_seconds"`
-	CreatedAt       time.Time      `json:"created_at"`
+	T               string          `json:"t"`
+	RequestID       string          `json:"request_id"`
+	Kind            string          `json:"kind,omitempty"`
+	Ask             *proto.Ask      `json:"ask,omitempty"`
+	Session         proto.Session   `json:"session"`
+	ToolName        string          `json:"tool_name"`
+	Payload         policy.Payload  `json:"payload"`
+	Risk            string          `json:"risk"`
+	ProjectRoot     string          `json:"project_root"`
+	EngineReason    string          `json:"engine_reason"`
+	Trigger         *policy.Trigger `json:"trigger,omitempty"` // 引擎的触发点（触发段已脱敏），老守护进程没有
+	DeadlineSeconds int             `json:"deadline_seconds"`
+	CreatedAt       time.Time       `json:"created_at"`
 }
 
 // Cancel 表示钩子在决定前退出。

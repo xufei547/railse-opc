@@ -68,9 +68,8 @@ type Server struct {
 	nonGitMu     sync.Mutex
 	nonGitLogged map[string]struct{}
 
-	// settings 是本机设置（settings.yaml），reload 时整份换掉；recent 是 PreToolUse 的去重表。
+	// settings 是本机设置（settings.yaml），reload 时整份换掉。
 	settings atomic.Pointer[Settings]
-	recent   *recent
 
 	mu      sync.Mutex
 	closed  bool
@@ -80,7 +79,7 @@ type Server struct {
 
 // New 组装服务。唯一的 IO 是读本机设置 settings.yaml，读坏了记日志、按默认值跑。
 func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Logger) *Server {
-	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now(), recent: newRecent()}
+	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now()}
 	_ = s.ReloadSettings() // 读坏了它自己记日志
 	return s
 }
@@ -95,11 +94,12 @@ func (s *Server) ReloadSettings() error {
 	return err
 }
 
-// noPhone 是“请求没能送到手机上的人”的 DecidedBy：没接 hub、hub 不可达、等待过期。
-var noPhone = map[string]bool{"no_hub": true, hubUnreachable: true, "timeout": true}
-
-// reasonAskInTerminal 是硬底线没能送到手机、改由终端确认时给 Claude 看的理由（钩子加 “Railse：” 前缀）。
-const reasonAskInTerminal = "连不上 hub，这类操作要你亲自确认"
+// decidedByAsk 与 reasonAsked：PreToolUse 来的硬底线不在守护进程里等，回 ask 让 Claude 在终端弹确认框并触发 PermissionRequest，
+// 那一条再送手机；终端与手机同时显示，谁先答谁算。确认框里的理由由钩子按终端语言用触发点重拼（见 cmd/railse 的 askReason）。
+const (
+	decidedByAsk = "ask"
+	reasonAsked  = "已交终端确认，同时送手机"
+)
 
 // SetAuditSink 设置审计转发目标；nil（包括装着 nil 指针的接口值）表示只写本地。可在 Serve 运行中随时调用。
 func (s *Server) SetAuditSink(sink AuditSink) {
@@ -398,42 +398,40 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
 			break
 		}
-		keys := s.recent.keys(req)
-		if req.Source == proto.SourcePermissionRequest {
-			if out, ok := s.recent.lookup(keys); ok && out == recentTerminal {
-				// 同一调用的 PreToolUse 已经送过手机（或因 hub 不可达等没送成）并交回了终端：这次是 Claude 自己在问，不再打扰手机
-				entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "dedup", "刚才已交回终端，这次不再问"
-				resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
+		if req.Source == proto.SourcePreToolUse {
+			if d.Risk >= policy.RiskOutward || s.settings.Load().ClaudeUndecided == UndecidedPhone {
+				// 硬底线（或设置成一律送手机）：不在这里等手机。回 ask 让 Claude 弹终端确认框并触发 PermissionRequest，
+				// 那一条按老路送 hub；终端里同时能看到命令与触发点，谁先答谁算。不看 hub 状态：hub 不可达时
+				// PermissionRequest 交回终端，确认框还在（见 docs/superpowers/specs/2026-11-02-railse-opc-v0.2.2-two-screens-design.md §2.1）。
+				entry.Action, entry.State, entry.DecidedBy, entry.Reason, entry.Trigger = "ask", "asked", decidedByAsk, reasonAsked, redactTrigger(d.Trigger)
+				resp.Decision, resp.DecidedBy, resp.Reason, resp.Trigger = "ask", decidedByAsk, reasonAsked, entry.Trigger
 				break
 			}
-		}
-		if req.Source == proto.SourcePreToolUse && d.Risk < policy.RiskOutward && s.settings.Load().ClaudeUndecided != UndecidedPhone {
 			// 中间三级不看模式，先让 Claude 自己的 allow 列表与分类器（auto 模式）处理，Railse 不比它更吵；
-			// Claude 若决定要问人，会再来一条 PermissionRequest，那时照常送手机。往外发与破坏性不走这里。
-			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", recentClassifier, "交给 Claude 自己的权限流程"
+			// Claude 若决定要问人，会再来一条 PermissionRequest，那时照常送手机。
+			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "classifier", "交给 Claude 自己的权限流程"
 			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
-			s.recent.remember(keys, recentClassifier)
 			break
 		}
-		resp = s.waitDecision(ctx, id, req, d, pctx.ProjectRoot, redacted, entry)
-		if req.Source == proto.SourcePreToolUse && resp.Decision == "passthrough" {
-			s.recent.remember(keys, recentTerminal)
-			if d.Risk >= policy.RiskOutward && noPhone[resp.DecidedBy] {
-				// 硬底线没能送到手机：不表态的话 auto 模式的分类器会直接放行 git push、rm -rf；
-				// 回 ask 让 Claude 在终端里强制问人（-p 下等于拒绝）。审计照旧记交回终端的那一条。
-				resp.Decision, resp.Reason = "ask", reasonAskInTerminal
-			}
-		}
-		return resp
+		entry.Trigger = redactTrigger(d.Trigger)
+		return s.waitDecision(ctx, id, req, d, pctx.ProjectRoot, redacted, entry)
 	}
 	s.writeAudit(entry)
 	return resp
 }
 
+// redactTrigger 对触发段脱敏（它是命令原文的一部分，可能带凭据），返回副本；nil 原样。
+func redactTrigger(t *policy.Trigger) *policy.Trigger {
+	if t == nil {
+		return nil
+	}
+	return &policy.Trigger{Segment: redact.String(t.Segment), Why: t.Why}
+}
+
 // waitDecision 登记审批请求并等 Decider（见 await），把结论映射成 allow、deny 或交回终端。
 // projectRoot、redacted 与引擎理由随请求登记，hub 客户端上报时只用脱敏后的载荷。
 func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request, d policy.Decision, projectRoot string, redacted policy.Payload, entry AuditEntry) proto.Response {
-	pr := &PendingRequest{ID: id, Kind: "permission", Req: req, Risk: d.Risk, ProjectRoot: projectRoot, Redacted: redacted, EngineReason: d.Reason}
+	pr := &PendingRequest{ID: id, Kind: "permission", Req: req, Risk: d.Risk, ProjectRoot: projectRoot, Redacted: redacted, EngineReason: d.Reason, Trigger: entry.Trigger}
 	out, resp, ok := s.await(ctx, pr, entry, proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String()})
 	if !ok {
 		return resp

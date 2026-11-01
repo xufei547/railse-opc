@@ -452,7 +452,7 @@ func TestHookClaudePreToolUse(t *testing.T) {
 	}
 	// 没接 hub（LocalDecider）：硬底线要 Claude 在终端里强制问（ask），理由由钩子拼，不说“连不上 hub”的回退提示
 	out, errOut, code := runHookWith(t, claudePreToolUse(repo, "git push origin main", "auto"), "claude", "--socket", sock)
-	if code != 0 || out != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：已发到手机，也可以在这里直接批"}}`+"\n" ||
+	if code != 0 || out != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：命令里的「git push origin main」会把代码推到远程仓库。已发到手机，也可以在这里直接批"}}`+"\n" ||
 		strings.Contains(errOut, "hub") {
 		t.Fatalf("没接 hub: code=%d out=%q err=%q", code, out, errOut)
 	}
