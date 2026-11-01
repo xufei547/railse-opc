@@ -493,8 +493,9 @@ func TestHookHubUnreachableNote(t *testing.T) {
 	// 硬底线：守护进程回 ask，钩子输出 ask，stderr 提示照旧
 	sock, _ = fakeDaemon(t, `{"v":1,"decision":"ask","decided_by":"hub_unreachable","reason":"连不上 hub，这类操作要你亲自确认"}`)
 	stdout, stderr, _ = runHookWith(t, claudePreToolUse("/tmp/p", "git push origin main", "auto"), "claude", "--socket", sock)
-	if !strings.Contains(stdout, `"permissionDecision":"ask"`) || !strings.Contains(stderr, "连不上 hub") {
-		t.Fatalf("硬底线 ask: stdout=%q stderr=%q", stdout, stderr)
+	if !strings.Contains(stdout, `"permissionDecision":"ask"`) || !strings.Contains(stdout, "Railse：连不上 hub，这类操作要你亲自确认") ||
+		strings.Contains(stdout, "已发到手机") || !strings.Contains(stderr, "连不上 hub") {
+		t.Fatalf("老守护进程的硬底线 ask 照原话，不说已发到手机: stdout=%q stderr=%q", stdout, stderr)
 	}
 	sock, _ = fakeDaemon(t, reply)
 	_, stderr, _ = runHookWith(t, claudePermission("/tmp/p", "git push origin main"), "claude", "--socket", sock)

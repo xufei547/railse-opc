@@ -176,7 +176,13 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 	}
 	reason := resp.Reason
 	if resp.Decision == "ask" && in.Source == proto.SourcePreToolUse {
-		reason = askReason(resp)
+		// 只重拼本版守护进程“交终端确认、同时送手机”的 ask（decided_by 为 ask）；升级后还没重启的老守护进程
+		// 回的是“连不上 hub”的 ask，照它的原话翻，不能说已发到手机
+		if resp.DecidedBy == "ask" {
+			reason = askReason(resp)
+		} else {
+			reason = localizeReason(resp)
+		}
 	}
 	return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: resp.Decision, Reason: reason}))
 }
