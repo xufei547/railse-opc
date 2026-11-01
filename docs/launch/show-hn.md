@@ -7,7 +7,7 @@
 ```text
 Show HN: Railse – approve Claude Code/Codex/Gemini from your phone, rules first
 Show HN: Railse – a self-hosted approval inbox for your coding agents
-Show HN: Railse – rules auto-allow boring agent prompts, your phone gets the rest
+Show HN: Railse – rules auto-allow boring agent prompts, the phone gets the rest
 ```
 
 ## 正文（Show HN 正文只放链接与两三句）
