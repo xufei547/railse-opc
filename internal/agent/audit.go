@@ -28,6 +28,10 @@ type AuditEntry struct {
 	Note      string            `json:"note,omitempty"` // 用户在手机上的备注，只进审计，不回给钩子
 	DecidedBy string            `json:"decided_by,omitempty"`
 	Message   string            `json:"message,omitempty"`
+	// 仅 Claude 的审批：来源钩子事件（pretooluse、permissionrequest）、权限模式、工具调用编号；同一调用的两次事件靠它们对上。
+	Source         string `json:"source,omitempty"`
+	PermissionMode string `json:"permission_mode,omitempty"`
+	ToolUseID      string `json:"tool_use_id,omitempty"`
 }
 
 // Audit 是只追加的 JSONL 文件。

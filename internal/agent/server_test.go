@@ -808,3 +808,161 @@ func TestStatusReportsHub(t *testing.T) {
 		}
 	}
 }
+
+// deciderFunc 把函数当 Decider 用。
+type deciderFunc func(context.Context, PendingRequest) (Outcome, error)
+
+func (f deciderFunc) Decide(ctx context.Context, pr PendingRequest) (Outcome, error) {
+	return f(ctx, pr)
+}
+
+// preToolUse 是来自 PreToolUse 的审批请求。
+func preToolUse(cwd, cmd, mode, id string) proto.Request {
+	r := permission(cwd, cmd)
+	r.Source, r.PermissionMode, r.ToolUseID = proto.SourcePreToolUse, mode, id
+	return r
+}
+
+// auto 模式下中间三级不表态、硬底线仍送 Decider；default 模式下中间三级送 Decider。
+func TestPreToolUseModeBranches(t *testing.T) {
+	var mu sync.Mutex
+	sent := map[string]bool{}
+	dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
+		mu.Lock()
+		sent[pr.Req.Payload.Command+"|"+pr.Req.PermissionMode] = true
+		mu.Unlock()
+		return Outcome{Action: "deny", Reason: "已在手机上拒绝", DecidedBy: "user"}, nil
+	})
+	env := startServer(t, dec, nil)
+	cases := []struct {
+		name, cmd, mode, wantDecision, wantBy string
+	}{
+		{"auto 读 本地放行", "git status", "auto", "allow", "rule:"},
+		{"auto 联网 不表态", "curl https://x.example/", "auto", "passthrough", "classifier"},
+		{"auto 往外发 送手机", "git push origin main", "auto", "deny", "user"},
+		{"auto 破坏性 送手机", "rm -rf /tmp/x", "auto", "deny", "user"},
+		{"auto 没见过的命令 不表态", "frobnicate --all", "auto", "passthrough", "classifier"},
+		{"default 联网 送手机", "curl https://x.example/", "default", "deny", "user"},
+		{"acceptEdits 联网 送手机", "curl https://x.example/", "acceptEdits", "deny", "user"},
+		{"bypass 联网 不表态", "curl https://x.example/", "bypassPermissions", "passthrough", "classifier"},
+		{"dontAsk 联网 不表态", "curl https://x.example/", "dontAsk", "passthrough", "classifier"},
+	}
+	for i, c := range cases {
+		var resp proto.Response
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, preToolUse(env.repo, c.cmd, c.mode, fmt.Sprintf("toolu_%d", i))), &resp)
+		if resp.Decision != c.wantDecision || !strings.HasPrefix(resp.DecidedBy, c.wantBy) {
+			t.Errorf("%s: decision=%s by=%s，想要 %s/%s（理由 %s，风险 %s）", c.name, resp.Decision, resp.DecidedBy, c.wantDecision, c.wantBy, resp.Reason, resp.Risk)
+		}
+	}
+	if sent["curl https://x.example/|auto"] {
+		t.Error("auto 模式下的联网不该送 Decider")
+	}
+	// 没有来源的（PermissionRequest、Codex）不看模式：auto 下的联网照样送
+	r := permission(env.repo, "curl https://y.example/")
+	r.PermissionMode = "auto"
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, r), &resp)
+	if resp.Decision != "deny" {
+		t.Errorf("PermissionRequest 应送 Decider：%+v", resp)
+	}
+	var sawClassifier bool
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		if e.DecidedBy == "classifier" && e.State == "passthrough" && e.Source == "pretooluse" && e.PermissionMode == "auto" && e.ToolUseID != "" {
+			sawClassifier = true
+		}
+	}
+	if !sawClassifier {
+		t.Fatal("审计里没有 classifier 不表态的记录")
+	}
+}
+
+// settings.yaml 的 claude_auto_mode: phone 让 auto 模式下中间三级也送手机；reload 后改回默认。
+func TestPreToolUseAutoModePhoneSetting(t *testing.T) {
+	dec := fixedDecider{out: Outcome{Action: "allow", DecidedBy: "user", Reason: "已在手机上批准"}}
+	env := startServer(t, dec, func(c *Config) {
+		os.MkdirAll(filepath.Dir(c.SettingsPath), 0o700)
+		os.WriteFile(c.SettingsPath, []byte("claude_auto_mode: phone\n"), 0o600)
+	})
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, preToolUse(env.repo, "curl https://x.example/", "auto", "toolu_p")), &resp)
+	if resp.Decision != "allow" || resp.DecidedBy != "user" {
+		t.Fatalf("resp=%+v", resp)
+	}
+	os.Remove(env.cfg.SettingsPath)
+	var rep proto.ControlReply
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "reload"}), &rep)
+	if !rep.OK {
+		t.Fatalf("reload: %+v", rep)
+	}
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, preToolUse(env.repo, "curl https://x.example/", "auto", "toolu_q")), &resp)
+	if resp.Decision != "passthrough" || resp.DecidedBy != "classifier" {
+		t.Fatalf("reload 后应回默认：%+v", resp)
+	}
+	// 写坏了：reload 报错，按默认值跑
+	os.WriteFile(env.cfg.SettingsPath, []byte("claude_auto_mode: sometimes\n"), 0o600)
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "reload"}), &rep)
+	if rep.OK || !strings.Contains(rep.Error, "claude_auto_mode") {
+		t.Fatalf("坏设置应报错：%+v", rep)
+	}
+}
+
+// PreToolUse 送手机后交回终端，同一调用的 PermissionRequest 不再送手机；
+// PreToolUse 因模式不表态的，同一调用的 PermissionRequest 照常送手机。
+func TestPreToolUseThenPermissionRequestDedup(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return Outcome{Action: "passthrough", DecidedBy: hubUnreachable, Reason: "连不上 hub，交回终端处理"}, nil
+	})
+	count := func() int { mu.Lock(); defer mu.Unlock(); return calls }
+	env := startServer(t, dec, nil)
+	sock := env.cfg.SocketPath
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, sock, preToolUse(env.repo, "git push origin main", "default", "toolu_same")), &resp)
+	if resp.Decision != "passthrough" || resp.DecidedBy != hubUnreachable {
+		t.Fatalf("PreToolUse: %+v", resp)
+	}
+	// 2.1.280 的 PermissionRequest 没有 tool_use_id：按会话 + 载荷对上
+	pr := permission(env.repo, "git push origin main")
+	pr.Source, pr.PermissionMode = proto.SourcePermissionRequest, "default"
+	json.Unmarshal(roundTrip(t, sock, pr), &resp)
+	if count() != 1 || resp.Decision != "passthrough" || resp.DecidedBy != "dedup" {
+		t.Fatalf("calls=%d resp=%+v", count(), resp)
+	}
+	// 带同一 tool_use_id 的也认
+	pr.ToolUseID = "toolu_same"
+	json.Unmarshal(roundTrip(t, sock, pr), &resp)
+	if count() != 1 || resp.DecidedBy != "dedup" {
+		t.Fatalf("按 id 去重失败：calls=%d resp=%+v", count(), resp)
+	}
+	// 别的会话的同一命令不算
+	other := pr
+	other.ToolUseID, other.Session.CLISessionID = "", "s2"
+	json.Unmarshal(roundTrip(t, sock, other), &resp)
+	if count() != 2 {
+		t.Fatalf("别的会话不该去重：calls=%d", count())
+	}
+	// 因模式不表态的（curl 在 auto 下），PermissionRequest 要送手机
+	roundTrip(t, sock, preToolUse(env.repo, "curl https://x.example/", "auto", "toolu_c"))
+	if count() != 2 {
+		t.Fatalf("auto 下的联网不该送手机：calls=%d", count())
+	}
+	pr3 := permission(env.repo, "curl https://x.example/")
+	pr3.Source, pr3.PermissionMode = proto.SourcePermissionRequest, "auto"
+	json.Unmarshal(roundTrip(t, sock, pr3), &resp)
+	if count() != 3 {
+		t.Fatalf("分类器升级成提问后应送手机：calls=%d resp=%+v", count(), resp)
+	}
+	var dedup int
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		if e.DecidedBy == "dedup" && e.Source == "permissionrequest" {
+			dedup++
+		}
+	}
+	if dedup != 2 {
+		t.Fatalf("审计里应有两条 dedup：%d", dedup)
+	}
+}

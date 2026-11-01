@@ -434,6 +434,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 				} else {
 					logger.Printf("SIGHUP 重载规则：%d 条", rules.Count())
 				}
+				_ = srv.ReloadSettings() // 读坏了它自己记日志、按默认值跑
 			case <-hupCtx.Done():
 				return
 			}

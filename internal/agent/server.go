@@ -68,15 +68,36 @@ type Server struct {
 	nonGitMu     sync.Mutex
 	nonGitLogged map[string]struct{}
 
+	// settings 是本机设置（settings.yaml），reload 时整份换掉；recent 是 PreToolUse 的去重表。
+	settings atomic.Pointer[Settings]
+	recent   *recent
+
 	mu      sync.Mutex
 	closed  bool
 	stop    context.CancelFunc // Serve 运行时非空，取消全部连接
 	serving chan struct{}      // Serve 运行时非空，Serve 返回时关闭
 }
 
-// New 组装服务，不做 IO。
+// New 组装服务。唯一的 IO 是读本机设置 settings.yaml，读坏了记日志、按默认值跑。
 func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Logger) *Server {
-	return &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now()}
+	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now(), recent: newRecent()}
+	_ = s.ReloadSettings() // 读坏了它自己记日志
+	return s
+}
+
+// ReloadSettings 重读本机设置；读坏了记日志、换成默认值并返回错误（reload 命令回给用户）。
+func (s *Server) ReloadSettings() error {
+	st, err := LoadSettings(s.cfg.SettingsPath)
+	if err != nil {
+		s.log.Printf("本机设置读不了，按默认值（claude_auto_mode: %s）: %v", st.ClaudeAutoMode, err)
+	}
+	s.settings.Store(&st)
+	return err
+}
+
+// lenientMode 报告 Claude Code 的权限模式是否是用户要求少打扰的那几种：auto（分类器放行）、bypassPermissions、dontAsk。
+func lenientMode(mode string) bool {
+	return mode == "auto" || mode == "bypassPermissions" || mode == "dontAsk"
 }
 
 // SetAuditSink 设置审计转发目标；nil（包括装着 nil 指针的接口值）表示只写本地。可在 Serve 运行中随时调用。
@@ -358,24 +379,47 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 	id := NewID()
 	reported, d, pctx := s.evaluate(req)
 	redacted := redact.Payload(reported)
-	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "permission", Session: req.Session, ToolName: req.ToolName, Payload: &redacted, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason}
+	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "permission", Session: req.Session, ToolName: req.ToolName, Payload: &redacted, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason,
+		Source: req.Source, PermissionMode: req.PermissionMode, ToolUseID: req.ToolUseID}
 	resp := proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason}
 	switch d.Action {
 	case policy.ActionAllow:
 		entry.Action, entry.State, entry.DecidedBy = "allow", "auto_allowed", "rule:"+d.RuleID
-		resp.Decision = "allow"
+		resp.Decision, resp.DecidedBy = "allow", entry.DecidedBy
 	case policy.ActionDeny:
 		entry.Action, entry.State, entry.DecidedBy = "deny", "auto_denied", "rule:"+d.RuleID
-		resp.Decision = "deny"
+		resp.Decision, resp.DecidedBy = "deny", entry.DecidedBy
 	default:
 		if s.rules.Paused() {
 			// 总开关打开：用户 deny 仍由引擎处理，其余一律交回终端，不去打扰 hub。
 			// 只管审批：答题（handleAsk）不走这里，不看暂停开关，照样送 hub。
 			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "paused", "自动审批已暂停，交回终端处理"
-			resp.Decision, resp.Reason = "passthrough", entry.Reason
+			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
 			break
 		}
-		return s.waitDecision(ctx, id, req, d, pctx.ProjectRoot, redacted, entry)
+		keys := s.recent.keys(req)
+		if req.Source == proto.SourcePermissionRequest {
+			if out, ok := s.recent.lookup(keys); ok && out == recentTerminal {
+				// 同一调用的 PreToolUse 已经送过手机（或因 hub 不可达等没送成）并交回了终端：这次是 Claude 自己在问，不再打扰手机
+				entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "dedup", "刚才已交回终端，这次不再问"
+				resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
+				break
+			}
+		}
+		if req.Source == proto.SourcePreToolUse && d.Risk < policy.RiskOutward && lenientMode(req.PermissionMode) &&
+			s.settings.Load().ClaudeAutoMode != ClaudeAutoPhone {
+			// auto、bypassPermissions、dontAsk 下中间三级交给 Claude 自己的分类器，Railse 不比它更吵；
+			// 分类器若决定要问人，会再来一条 PermissionRequest，那时照常送手机。往外发与破坏性不看模式。
+			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", recentClassifier, "auto 模式下交给 Claude 的分类器"
+			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
+			s.recent.remember(keys, recentClassifier)
+			break
+		}
+		resp = s.waitDecision(ctx, id, req, d, pctx.ProjectRoot, redacted, entry)
+		if req.Source == proto.SourcePreToolUse && resp.Decision == "passthrough" {
+			s.recent.remember(keys, recentTerminal)
+		}
+		return resp
 	}
 	s.writeAudit(entry)
 	return resp
@@ -464,13 +508,13 @@ func (s *Server) await(ctx context.Context, pr *PendingRequest, entry AuditEntry
 	case ctx.Err() != nil:
 		// 守护进程正在停止，钩子还在等：明确交回终端。
 		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "shutdown", "守护进程正在停止，交回终端处理"
-		resp.Decision, resp.Reason = "passthrough", entry.Reason
+		resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
 	case errors.Is(dctx.Err(), context.DeadlineExceeded):
 		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "expired", "timeout", "等待过期，交回终端处理"
-		resp.Decision, resp.Reason = "passthrough", entry.Reason
+		resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
 	default:
 		entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "error", err.Error()
-		resp.Decision, resp.Reason = "passthrough", "决定来源出错，交回终端处理"
+		resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, "决定来源出错，交回终端处理"
 	}
 	s.writeAudit(entry)
 	return Outcome{}, resp, false
@@ -485,7 +529,7 @@ func applyOutcome(out Outcome, valid bool, resp *proto.Response, entry *AuditEnt
 	if !valid || unreachable {
 		action = "passthrough"
 	}
-	resp.Decision, resp.Reason, resp.RuleID = action, out.Reason, out.RuleID
+	resp.Decision, resp.Reason, resp.RuleID, resp.DecidedBy = action, out.Reason, out.RuleID, out.DecidedBy
 	entry.Action, entry.DecidedBy, entry.Reason, entry.RuleID, entry.Note = action, out.DecidedBy, out.Reason, out.RuleID, out.Note
 	switch {
 	case unreachable:
@@ -556,6 +600,9 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 	case "reload":
 		if err := s.rules.Reload(); err != nil {
 			return proto.ControlReply{V: proto.Version, OK: false, Error: err.Error()}
+		}
+		if err := s.ReloadSettings(); err != nil {
+			return proto.ControlReply{V: proto.Version, OK: false, Error: "规则已重载；本机设置读不了，按默认值: " + err.Error()}
 		}
 		s.writeAudit(AuditEntry{TS: time.Now(), Kind: "control", State: "recorded", Message: "reload"})
 		return ok
