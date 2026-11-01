@@ -11,7 +11,7 @@ function goCatalog(): Record<string, string> {
   const re = /^\s*"((?:\\.|[^"\\])*)":\s*"((?:\\.|[^"\\])*)",?\s*(?:\/\/.*)?$/gm
   let m: RegExpExecArray | null
   const unescape = (s: string) => s.replace(/\\(.)/g, (_, c: string) => (c === 'n' ? '\n' : c === 't' ? '\t' : c))
-  while ((m = re.exec(src))) out[unescape(m[1])] = unescape(m[2])
+  while ((m = re.exec(src))) out[unescape(m[1] ?? '')] = unescape(m[2] ?? '')
   return out
 }
 

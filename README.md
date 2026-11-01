@@ -115,9 +115,10 @@ railse setup all --local-hub
 
 ## 现状与限制
 
-- v0.1.5，作者自用中。
+- v0.2.0，作者自用中。
 - Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。
 - 手机上只能答 Claude Code 的选择题（`AskUserQuestion`）。Codex、Gemini 的提问，以及 agent 停下来等你说下一句话的，仍只提醒，要回终端。
+- 从 0.2 之前升级的：命令行、手机网页、推送文案都跟系统语言走（`RAILSE_LANG` → 数据目录的 `lang` 文件 → `LANG`，zh 开头算中文，其余英文）。**终端里没有设 `LANG` 的，升级后先跑一次 `railse lang zh`**，不然命令行会变英文；手机网页在设置里可以单独切。hub 的库第一次被 0.2 打开时从 v3 升到 v4（推送订阅加语言列），不能降级，升级前先备份 hub 数据目录。
 - 从 0.1.5 之前升级的：已经装过钩子的机器要重跑一次 `railse setup hooks --claude`，补上选择题用的 `PreToolUse` 钩子（`railse doctor` 的 `hooks.claude` 会提示）；hub 要先于或与守护进程同时升级，hub 还是旧版时选择题直接交回终端。本机 hub 与守护进程是分别托管的两个进程，重跑 `railse setup` 不会重启已在跑的本机 hub，升级后要自己重启它（macOS `launchctl kickstart -k gui/$(id -u)/dev.railse.hub`，Linux `systemctl --user restart railse-hub`），见 [docs/setup.md](docs/setup.md) 的「升级」。
 - Codex 的钩子只在交互会话里生效，`codex exec` 不触发；第一次使用前在 Codex 里跑 `/hooks` 审核一遍。
 - hub 单机单库（SQLite），不能多实例部署。
@@ -131,7 +132,7 @@ railse setup all --local-hub
 ```sh
 make test    # gofmt、golangci-lint、go vet、go test -race、网页检查
 make e2e     # 端到端：真实的 hub、守护进程与钩子（Playwright）
-make demo    # 重录 assets/demo.gif（要装 ffmpeg）
+make demo    # 重录 assets/demo.gif；DEMO_LANG=en make demo 录英文版 assets/demo.en.gif（要装 ffmpeg）
 ```
 
 要装的工具和提交方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。

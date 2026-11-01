@@ -24,7 +24,8 @@ export default defineConfig({
     viewport: size,
     isMobile: true,
     hasTouch: true,
-    locale: 'zh-CN',
+    // 中英两版：scripts/demo.sh 经 RAILSE_DEMO_LANG 选，页面语言跟浏览器语言走
+    locale: process.env.RAILSE_DEMO_LANG === 'en' ? 'en-US' : 'zh-CN',
     colorScheme: 'light',
     // 不设 size 时 Playwright 把录像缩到 800×800 以内
     video: { mode: 'on', size },

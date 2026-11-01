@@ -613,6 +613,7 @@ describe('英文（SSR）：页面里没有中文', () => {
     expect(html).toContain('<dt>Pending</dt><dd>2</dd>')
     expect(html).toContain('<dt>Uptime</dt><dd>1 day 2 hours</dd>')
     expect(html).toContain('>Language</h2>')
-    for (const h of [first, html]) expect(h).not.toMatch(cjk)
+    // 语言开关里的“中文”是语言名本身，不翻；去掉它之后整页不得有中文
+    for (const h of [first, html]) expect(h.replace(/中文/g, '')).not.toMatch(cjk)
   })
 })

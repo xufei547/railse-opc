@@ -47,16 +47,16 @@ Railse turns all of that into one rule: **every approval goes through the rules 
 
    Compound commands are split on `&&`, `;` and `|`, each part is rated, and the highest level wins. An allow rule has to match every part; a deny rule fires if any part matches.
 3. **What the rules can't decide goes to your phone.** The daemon sends the request to a hub you host yourself, the hub pushes a notification to your phone, and the page opens with one plain sentence on who wants to do what, where, and why you are being asked, then the command verbatim, with one button to approve and one to deny.
-4. **Approve once, not every time.** Turn on 记住 (remember) when you approve or deny, and a rule is created on the spot, scoped to this project by default or to all projects if you choose; you see the draft before it's saved. Rules live on the hub, so they follow you to other machines.
+4. **Approve once, not every time.** Turn on Remember when you approve or deny, and a rule is created on the spot, scoped to this project by default or to all projects if you choose; you see the draft before it's saved. Rules live on the hub, so they follow you to other machines.
 5. **The floor is hard-coded in the engine.** Outward and destructive actions can never be remembered as allowed. The only way to allow them is a hand-written rule that names the risk level explicitly. The engine checks this when rules are created and when they're imported, and the web app can't override it.
 6. **A Railse failure never blocks an agent or approves anything.** If the daemon isn't running, the hub can't be reached for 30 seconds, or a hook hits any error, the answer is "no decision": the CLI shows its own permission prompt, and the worst case is exactly what you had before installing Railse.
-7. **Claude Code's multiple-choice questions can be answered on your phone.** When it asks with `AskUserQuestion`, the question skips the rules and goes straight to your phone. You pick an option or type your own line and the agent continues at once, with no prompt in the terminal; or tap 让它在终端问我 (ask me in the terminal) to hand it back. With no hub, an unreachable hub or a timeout, the terminal asks as usual.
+7. **Claude Code's multiple-choice questions can be answered on your phone.** When it asks with `AskUserQuestion`, the question skips the rules and goes straight to your phone. You pick an option or type your own line and the agent continues at once, with no prompt in the terminal; or tap "Ask me in the terminal instead" to hand it back. With no hub, an unreachable hub or a timeout, the terminal asks as usual.
 
 Besides approvals and these questions, the inbox also shows when an agent stops to wait for your next message and when it finishes, telling you which machine and directory to go to in the terminal. Human-approval steps from workflows like n8n can be posted to the hub's webhook and show up in the same inbox as agent approvals.
 
-<p align="center"><img src="assets/demo.gif" width="390" alt="Demo: log in to the phone web app; Claude Code wants to run curl, no rule decides it, and the request shows up in the inbox; approve it with remember turned on; the rules page now has a learned rule"></p>
+<p align="center"><img src="assets/demo.en.gif" width="390" alt="Demo: log in to the phone web app; Claude Code wants to run curl, no rule decides it, and the request shows up in the inbox; approve it with Remember on; a multiple-choice question is answered on the phone; the rules page now has a learned rule"></p>
 
-The demo shows the phone web app, whose UI is in Chinese. Claude Code wants to run `curl`, no rule decides it, so it goes to the phone. Approving it with 记住 (remember) turned on adds a learned rule.
+In the demo, Claude Code wants to run `curl`; no rule decides it, so it goes to the phone. Approving with Remember on adds a learned rule, then a multiple-choice question from Claude Code is answered on the phone.
 
 ## Why not Claude Code's Remote Control?
 
@@ -147,10 +147,12 @@ The docs under `docs/` are in Chinese.
 
 ## Status and limitations
 
-- This is v0.1.5, and the author is dogfooding it.
+- This is v0.2.0, and the author is dogfooding it.
 - The phone web app, the CLI output and the docs under `docs/` are in Chinese only for now.
 - Gemini CLI hooks can deny but can't approve: rule denials still apply, and everything else goes back to Gemini's own prompt and never reaches the phone. Needs Gemini CLI 0.65.0 or later.
 - On the phone you can only answer Claude Code's multiple-choice questions (`AskUserQuestion`). Questions from Codex and Gemini, and an agent stopping to wait for your next message, are still reminders only: you go back to the terminal.
+- The project started in Chinese; the English UI is new in 0.2. If something reads oddly, open an issue with the sentence.
+- Upgrading from before 0.2: the CLI, the phone web app and the push copy now follow your system language (`RAILSE_LANG` → the `lang` file in the data directory → `LANG`; anything but zh* is English). To force one: `railse lang zh|en`; the phone has its own switch in Settings. The hub's database moves from v3 to v4 the first time 0.2 opens it (push subscriptions get a language column) and can't be downgraded, so back up the hub data directory first.
 - Upgrading from before 0.1.5: on machines that already have the hooks installed, rerun `railse setup hooks --claude` once to add the `PreToolUse` hook the questions need (`railse doctor` reports it under `hooks.claude`). Upgrade the hub before, or together with, the daemon; while the hub is still the old version, questions go straight back to the terminal. A local hub and the daemon are separately managed processes, and rerunning `railse setup` doesn't restart a local hub that's already running, so restart it yourself after upgrading (macOS: `launchctl kickstart -k gui/$(id -u)/dev.railse.hub`; Linux: `systemctl --user restart railse-hub`). See "升级" (upgrading) in [docs/setup.md](docs/setup.md).
 - Codex hooks only fire in interactive sessions (`codex exec` doesn't trigger them). Before the first use, review them with `/hooks` inside Codex.
 - The hub is one process with one SQLite database and can't run as multiple instances.
@@ -165,7 +167,7 @@ The docs under `docs/` are in Chinese.
 ```sh
 make test    # gofmt, golangci-lint, go vet, go test -race, web checks
 make e2e     # end-to-end with a real hub, daemon and hooks (Playwright)
-make demo    # re-records assets/demo.gif the same way (needs ffmpeg)
+make demo    # re-records assets/demo.gif (Chinese); DEMO_LANG=en make demo records assets/demo.en.gif (needs ffmpeg)
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) covers the required tools and how to send changes.

@@ -7,6 +7,14 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FFMPEG="${FFMPEG:-ffmpeg}"
+# DEMO_LANG=en 录英文版（assets/demo.en.gif）：hub、守护进程、钩子与页面都按英文跑；默认中文（assets/demo.gif）
+DEMO_LANG="${DEMO_LANG:-zh}"
+case "$DEMO_LANG" in
+  en) GIF=demo.en.gif ;;
+  zh) GIF=demo.gif ;;
+  *) echo "DEMO_LANG 只能是 zh 或 en，不是 $DEMO_LANG" >&2; exit 2 ;;
+esac
+export RAILSE_DEMO_LANG="$DEMO_LANG" RAILSE_LANG="$DEMO_LANG"
 
 if ! command -v "$FFMPEG" >/dev/null 2>&1; then
   echo "找不到 ffmpeg（FFMPEG=$FFMPEG）：先装上（macOS 上 brew install ffmpeg），或用 make demo FFMPEG=<ffmpeg 的路径> 指定" >&2
@@ -43,5 +51,5 @@ filters="fps=10,scale=390:-1:flags=lanczos,mpdecimate,fps=10,tpad=stop_mode=clon
   -lavfi "${filters}[v];[v][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" -loop 0 "$OUT/demo.gif"
 
 mkdir -p "$ROOT/assets"
-mv "$OUT/demo.gif" "$ROOT/assets/demo.gif"
-echo "已写 assets/demo.gif：$(wc -c <"$ROOT/assets/demo.gif" | tr -d ' ') 字节，${dur} 秒"
+mv "$OUT/demo.gif" "$ROOT/assets/$GIF"
+echo "已写 assets/$GIF：$(wc -c <"$ROOT/assets/$GIF" | tr -d ' ') 字节，${dur} 秒"
