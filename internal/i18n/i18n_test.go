@@ -126,3 +126,8 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+var verbRe = regexp.MustCompile(`%[-+# 0]*\d*(?:\.\d+)?[a-zA-Z%]`)
+
+// fmtVerbs 列出格式串里的 % 动词（%% 也算），测试用。
+func fmtVerbs(s string) []string { return verbRe.FindAllString(s, -1) }

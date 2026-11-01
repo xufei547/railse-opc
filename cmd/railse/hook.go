@@ -43,7 +43,7 @@ type parentGoneError struct{}
 func (parentGoneError) Error() string { return i18n.T("父进程（CLI）已退出") }
 
 // runHook 永远以“不作决定”收场（stdout 为空、退出 0），除非守护进程明确给了 allow、deny 或答题的答案。
-// 这里绝不打印环境变量，也只读界面语言用的几个（RAILSE_LANG、LC_ALL、LC_MESSAGES、LANG，见 internal/i18n）：CLI 会往钩子环境里注入令牌。
+// 这里绝不打印任何环境变量，只读：找守护进程 socket 与 lang 文件用的 RAILSE_HOME、HOME，以及界面语言用的 RAILSE_LANG、LC_ALL、LC_MESSAGES、LANG（见 internal/i18n）：CLI 会往钩子环境里注入令牌。
 // 从入口起就接管 SIGTERM、SIGINT、SIGHUP：任何阶段收到信号都不作决定并退出 0，进程不会被信号杀掉。
 func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 	defer func() {

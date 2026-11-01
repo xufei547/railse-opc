@@ -73,5 +73,5 @@ func foreignFlags(fs *flag.FlagSet, allowed []string) string {
 			bad = append(bad, "--"+f.Name)
 		}
 	})
-	return strings.Join(bad, "、")
+	return strings.Join(bad, i18n.T("、"))
 }

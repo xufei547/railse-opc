@@ -5,7 +5,6 @@ package i18n
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 )
@@ -122,8 +121,3 @@ func T(zh string) string {
 // Lookup 与 T 相同，但允许传变量：只用于守护进程回传给钩子的固定句子（见 cmd/railse/hook.go 的 localizeReason）。
 // 完整性测试不查它，所以它可能用到的每个固定句子都要手工列进 en.go。
 func Lookup(s string) string { return T(s) }
-
-var verbRe = regexp.MustCompile(`%[-+# 0]*\d*(?:\.\d+)?[a-zA-Z%]`)
-
-// fmtVerbs 列出格式串里的 % 动词（%% 也算），测试用。
-func fmtVerbs(s string) []string { return verbRe.FindAllString(s, -1) }

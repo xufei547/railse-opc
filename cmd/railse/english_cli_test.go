@@ -107,3 +107,14 @@ func TestHubPasswordTooShortChinese(t *testing.T) {
 		t.Fatalf("太短的密码: %d %q", code, errOut.String())
 	}
 }
+
+// 英文下同时给错多个不属于该子命令的标志：分隔符走英文表，报错里没有中文。
+func TestForeignFlagsEnglish(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	var out, errOut bytes.Buffer
+	code := run([]string{"agent", "status", "--dir", t.TempDir(), "--hub", "x", "--token", "y"}, &out, &errOut)
+	if code != 2 || !strings.Contains(errOut.String(), "--hub, --token") || hasCJK(out.String()+errOut.String()) {
+		t.Errorf("英文多余标志报错: %d %q", code, errOut.String())
+	}
+}
