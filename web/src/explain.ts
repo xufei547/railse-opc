@@ -1,9 +1,9 @@
 // 审批页说明卡与收件箱卡片用的人话：把一条请求说成“谁想做什么、在哪、为什么要你决定、批了拒了会怎样”。
 // 只为让人一眼看懂，不参与定级；该不该问你、风险几档，以 hub 给的 risk 为准。
 import { askQuestions } from './ask'
-import { clip, isRedacted } from './format'
+import { clip, isRedacted, triggerWhyLabel } from './format'
 import { lang, t } from './i18n'
-import type { RequestView } from './types'
+import type { RequestView, Trigger } from './types'
 
 export interface Explanation {
   /** 整句：“<CLI> 想<做什么>”。 */
@@ -433,6 +433,8 @@ const riskFloor: Record<string, number> = { destructive: 3, outward: 2, network:
 
 function permissionWhat(r: RequestView): string {
   const p = r.payload
+  // agent 自己写的说明最贴近它的意图，有就用它（原文，不翻译）
+  if (p.description) return clip(p.description, 100)
   switch (p.type) {
     case 'shell': {
       const command = p.command ?? ''
@@ -503,8 +505,16 @@ function permissionWhy(r: RequestView): string {
       reason = t('规则定不了，要你决定。')
   }
   // 中文句子之间不空格，英文要
-  if (!paused) return reason
-  return isEn() ? `${pausedLine} ${reason}` : pausedLine + reason
+  if (paused) reason = isEn() ? `${pausedLine} ${reason}` : pausedLine + reason
+  if (!r.trigger) return reason
+  return isEn() ? `${triggerLine(r.trigger)} ${reason}` : triggerLine(r.trigger) + reason
+}
+
+// 触发点那一句：有段说“命令里的「段」会<性质>”，没段只说性质。英文的性质是动词短语，接在引号后；没段时句首大写。
+function triggerLine(tr: Trigger): string {
+  const why = triggerWhyLabel(tr.why)
+  if (!tr.segment) return isEn() ? `${upperFirst(why)}.` : `${why}。`
+  return isEn() ? `"${tr.segment}" ${why}.` : `命令里的「${tr.segment}」会${why}。`
 }
 
 /** 去掉结尾的 /（只剩 / 时保留），比较目录用。 */
@@ -571,7 +581,14 @@ export function explainRequest(r: RequestView): Explanation {
     if (!isRedacted(r)) next.push(rememberLine(r))
   }
   // 英文的 what 句首大写（卡片第一行单独显示），接在 “wants to” 后面时小写；各个 what 都以动词开头
-  const headline = en ? `${cli} wants to ${lowerFirst(what)}` : `${cli} 想${what}`
+  // agent 自己的说明原样接在冒号后，不改大小写
+  const headline = r.payload.description
+    ? en
+      ? `${cli} wants to: ${what}`
+      : `${cli} 想：${what}`
+    : en
+      ? `${cli} wants to ${lowerFirst(what)}`
+      : `${cli} 想${what}`
   return { headline, what, where, why: pending ? permissionWhy(r) : '', next }
 }
 

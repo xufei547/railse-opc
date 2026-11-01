@@ -215,6 +215,32 @@ function outcomeTextEn(r: Pick<RequestView, 'kind' | 'state' | 'decided_by' | 'r
   return outcomeBy()[by] ?? ''
 }
 
+// 引擎触发点的性质（internal/policy/trigger.go 的 Why 常量，中文原文作键）。英文是动词短语，接在引号括起的命令段后面；
+// 与 internal/i18n/en.go 一字不差（i18n.sync.test.ts 核对）。
+export const triggerWhysEn: Record<string, string> = {
+  '删除文件，删了不可恢复': "deletes files and can't be undone",
+  结束进程: 'kills processes',
+  以管理员权限运行: 'runs with admin rights',
+  '读写敏感文件（密钥、配置或开机自启）': 'touches a sensitive file (keys, config or startup items)',
+  把脚本直接交给解释器执行: 'feeds a script straight into an interpreter',
+  下载脚本并直接执行: 'downloads a script and runs it',
+  删表或删库: 'drops a table or database',
+  '强制推送，会覆盖远程历史': 'force-pushes and overwrites remote history',
+  把代码推到远程仓库: 'pushes code to a remote',
+  发布或部署到外部: 'publishes or deploys outside',
+  向外发送数据: 'sends data out',
+  要联网: 'needs the network',
+  改项目外的文件: 'writes outside the project',
+  这条命令不在已知名单里: "isn't on the known-command list",
+  不可逆的操作: "can't be undone",
+  影响仓库之外的人和系统: 'affects people and systems outside the repo',
+}
+
+/** 触发点的性质按语言取；英文表里没有的（更新的守护进程）原样。 */
+export function triggerWhyLabel(why: string): string {
+  return lang() === 'en' ? (triggerWhysEn[why] ?? why) : why
+}
+
 /** 截到至多 max 个 UTF-16 单元再加省略号；不把代理对切成半个字符。卡片摘要用它，免得超长命令撑出一大块 DOM。 */
 export function clip(s: string, max: number): string {
   if (s.length <= max) return s

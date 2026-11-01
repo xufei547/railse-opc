@@ -600,3 +600,46 @@ describe('explain 的英文', () => {
     for (const r of reqs) expect(JSON.stringify(explainRequest(r))).not.toMatch(han)
   })
 })
+
+describe('触发点与 description', () => {
+  afterEach(() => setLang('zh'))
+  it('有 trigger 时"为什么"第一句说触发段与性质，第二句保留规则的说法', () => {
+    const r = req({
+      risk: 'destructive',
+      engine_reason: '无规则命中，按 destructive 默认询问',
+      trigger: { segment: 'rm -rf after', why: '删除文件，删了不可恢复' },
+    })
+    expect(explainRequest(r).why).toBe('命令里的「rm -rf after」会删除文件，删了不可恢复。这是不可逆的操作。规则永远不会自动放行，要你决定。')
+  })
+  it('trigger 没有段时只说性质', () => {
+    const r = req({ risk: 'unknown', trigger: { why: '这条命令不在已知名单里' } })
+    expect(explainRequest(r).why.startsWith('这条命令不在已知名单里。')).toBe(true)
+  })
+  it('没有 trigger（老 hub）维持原句', () => {
+    const r = req({ risk: 'destructive', engine_reason: '无规则命中，按 destructive 默认询问' })
+    expect(explainRequest(r).why).toBe('这是不可逆的操作。规则永远不会自动放行，要你决定。')
+  })
+  it('有 description 时整句与卡片第一行用它，超长截断', () => {
+    const r = req({
+      payload: { type: 'shell', command: 'rm -rf after && node ritual.mjs', description: 'Re-record the ritual clip after the fix' },
+    })
+    const e = explainRequest(r)
+    expect(e.headline).toBe('Claude Code 想：Re-record the ritual clip after the fix')
+    expect(e.what).toBe('Re-record the ritual clip after the fix')
+    const long = req({ payload: { type: 'shell', command: 'x', description: 'a'.repeat(150) } })
+    expect(explainRequest(long).what.length).toBeLessThanOrEqual(101)
+  })
+  it('英文：触发句与 description 句', () => {
+    setLang('en')
+    const r = req({
+      risk: 'destructive',
+      trigger: { segment: 'rm -rf after', why: '删除文件，删了不可恢复' },
+      payload: { type: 'shell', command: 'rm -rf after', description: 'Clean the output dir' },
+    })
+    const e = explainRequest(r)
+    expect(e.why.startsWith('"rm -rf after" deletes files and can\'t be undone. ')).toBe(true)
+    expect(e.headline).toBe('Claude Code wants to: Clean the output dir')
+    const bare = req({ risk: 'unknown', trigger: { why: '这条命令不在已知名单里' } })
+    expect(explainRequest(bare).why.startsWith("Isn't on the known-command list. ")).toBe(true)
+  })
+})
