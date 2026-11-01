@@ -14,10 +14,11 @@ import (
 
 // Decision 是引擎对一条请求的结论。
 type Decision struct {
-	Action Action `json:"action"`
-	Risk   Risk   `json:"risk"`
-	RuleID string `json:"rule_id,omitempty"` // 命中的规则，默认决定时为空
-	Reason string `json:"reason"`            // 给人看的依据
+	Action  Action   `json:"action"`
+	Risk    Risk     `json:"risk"`
+	RuleID  string   `json:"rule_id,omitempty"` // 命中的规则，默认决定时为空
+	Reason  string   `json:"reason"`            // 给人看的依据
+	Trigger *Trigger `json:"trigger,omitempty"` // 定级时起决定作用的那一处；read、write_in_project 为 nil
 }
 
 // Engine 持有编译好的规则。规则在 NewEngine 之后不再改动，Evaluate 可并发调用；
@@ -65,7 +66,7 @@ func (e *Engine) Paused() bool { return e.paused.Load() }
 // 范围是那个目录的规则也就不匹配。
 func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 	ctx = ctx.normalized()
-	risk := Classify(p, ctx)
+	risk, trig := ClassifyTrace(p, ctx)
 	var best *compiledRule
 	for i := range e.rules {
 		r := &e.rules[i]
@@ -81,12 +82,12 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 	}
 	// 暂停只停自动决定，命中的用户 deny 仍然生效；它压过一切，命中时必是 best。
 	if e.paused.Load() && (best == nil || !best.userDeny()) {
-		return Decision{Action: ActionAsk, Risk: risk, Reason: "自动审批已暂停"}
+		return Decision{Action: ActionAsk, Risk: risk, Reason: "自动审批已暂停", Trigger: trig}
 	}
 	if best != nil {
-		return Decision{Action: best.Action, Risk: risk, RuleID: best.ID, Reason: "命中规则 " + best.ID}
+		return Decision{Action: best.Action, Risk: risk, RuleID: best.ID, Reason: "命中规则 " + best.ID, Trigger: trig}
 	}
-	return Decision{Action: ActionAsk, Risk: risk, Reason: "无规则命中，按 " + risk.String() + " 默认询问"}
+	return Decision{Action: ActionAsk, Risk: risk, Reason: "无规则命中，按 " + risk.String() + " 默认询问", Trigger: trig}
 }
 
 // mayAllow 是底线：outward 只有 user 规则能放行；destructive 还要求规则显式写 risk: destructive。

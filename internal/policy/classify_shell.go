@@ -5,34 +5,143 @@ import (
 	"strings"
 )
 
-// classifyShell 给一条 shell 命令定级：拆段后逐段分类，取最高档。空命令为 unknown。
-// 跟踪 cd、pushd、popd 改变的工作目录，后面各段的相对路径按新目录解析；
-// 工作目录无法静态确定之后，后面每一段至少为 unknown。
+// classifyShell 给一条 shell 命令定级，见 classifyShellTrace。
 func classifyShell(command, cwd string, ctx Context) Risk {
+	r, _ := classifyShellTrace(command, cwd, ctx)
+	return r
+}
+
+// classifyShellTrace 给一条 shell 命令定级并记下触发点：拆段后逐段分类，取最高档；第一个把总档位抬到最终值的段就是触发段，
+// 它的性质由 explainSegment 按这一段的内容说。空命令为 unknown（没有段，触发点为空段的 WhyUnknown）。定为 read、
+// write_in_project 时没有触发点。跟踪 cd、pushd、popd 改变的工作目录，后面各段的相对路径按新目录解析；
+// 工作目录无法静态确定之后，后面每一段至少为 unknown。
+func classifyShellTrace(command, cwd string, ctx Context) (Risk, *Trigger) {
 	segs := splitSegments(command)
 	if len(segs) == 0 {
-		return RiskUnknown
+		return RiskUnknown, &Trigger{Why: WhyUnknown}
 	}
 	risk := RiskRead
+	var trig *Trigger
 	lost := false // 工作目录已无法静态确定
 	piped := pipedSegments(command)
-	for _, text := range segs {
+	for i, text := range segs {
 		seg := parseSegment(text)
 		r := classifySegment(seg, cwd, ctx)
-		if (piped[text] && readsScriptFromStdin(seg)) || runsSubstitution(seg) {
+		pipedScript := piped[text] && readsScriptFromStdin(seg)
+		subst := runsSubstitution(seg)
+		if pipedScript || subst {
 			r = RiskDestructive
 		}
 		if lost {
 			r = maxRisk(r, RiskUnknown)
 		}
-		risk = maxRisk(risk, r)
+		if r > risk {
+			risk = r
+			trig = &Trigger{Segment: compactSegment(text), Why: explainSegment(seg, r, pipedScript, subst, downloadBefore(segs, i, piped), cwd, ctx)}
+		}
 		next, ok := nextCwd(seg, cwd, ctx)
 		if !ok {
 			lost = true
 		}
 		cwd = next
 	}
-	return risk
+	if risk <= RiskWriteInProject {
+		return risk, nil
+	}
+	return risk, trig
+}
+
+// downloadBefore 报告第 i 段在管道里，且同一条管道往前有 curl 或 wget：curl … | sh 是"下载脚本并直接执行"。
+func downloadBefore(segs []string, i int, piped map[string]bool) bool {
+	for j := i - 1; j >= 0 && piped[segs[j+1]]; j-- {
+		argv := stripWrappers(parseSegment(segs[j]).argv)
+		if len(argv) > 0 {
+			if n := filepath.Base(argv[0]); n == "curl" || n == "wget" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// deployNames 是 explainSegment 里说成"发布或部署到外部"的命令（与网页 explain.ts 的 deploy 列表一致）。
+var deployNames = map[string]bool{"vercel": true, "fly": true, "flyctl": true, "kubectl": true, "terraform": true, "gh": true,
+	"npm": true, "pnpm": true, "yarn": true, "bun": true, "cargo": true}
+
+// explainSegment 用一句固定短语说这一段为什么定到 risk。按具体到笼统的顺序：管道脚本、命令替换、SQL、sudo、kill、
+// 删除、敏感路径、git push、往外发、部署，再按档位兜底。只说性质，不复述命令（Segment 另给）。
+func explainSegment(seg segment, risk Risk, pipedScript, subst, download bool, cwd string, ctx Context) string {
+	argv, flags := commandWords(seg)
+	name := ""
+	if len(argv) > 0 {
+		name = filepath.Base(argv[0])
+	}
+	words := map[string]bool{}
+	for _, a := range argv {
+		words[filepath.Base(a)] = true
+	}
+	destructive := risk == RiskDestructive
+	switch {
+	case pipedScript && download:
+		return WhyDownloadRun
+	case pipedScript, subst:
+		return WhyPipedScript
+	case hasSQLDrop(seg.text):
+		return WhySQLDrop
+	case destructive && (words["sudo"] || words["doas"] || strings.Contains(seg.text, " sudo ") || strings.HasPrefix(seg.text, "sudo ")):
+		return WhySudo
+	case destructive && (name == "kill" || name == "pkill" || name == "killall"):
+		return WhyKill
+	case destructive && (name == "rm" || name == "rmdir" || name == "shred" || name == "unlink" ||
+		(name == "git" && gitSubcommand(argv, flags, cwd, ctx) == "clean") || (name == "find" && words["-delete"])):
+		return WhyDelete
+	case destructive && sensitiveSegment(seg, argv, flags, cwd, ctx):
+		return WhySensitive
+	case name == "git" && gitSubcommand(argv, flags, cwd, ctx) == "push":
+		if destructive {
+			return WhyForcePush
+		}
+		return WhyPush
+	case risk == RiskOutward && (name == "curl" || name == "wget"):
+		return WhySendData
+	case risk == RiskOutward && deployNames[name]:
+		return WhyDeploy
+	}
+	switch risk {
+	case RiskDestructive:
+		return WhyDestructive
+	case RiskOutward:
+		return WhyOutward
+	case RiskNetwork:
+		return WhyNetwork
+	case RiskWriteOutside:
+		return WhyWriteOutside
+	default:
+		return WhyUnknown
+	}
+}
+
+// sensitiveSegment 报告这一段的参数、输入重定向或输出重定向里有敏感路径。
+func sensitiveSegment(seg segment, argv []string, flags []wordFlags, cwd string, ctx Context) bool {
+	if len(argv) > 0 {
+		args, argFlags := withoutMessages(argv[1:], flags[1:])
+		if touchesSensitiveWords(args, argFlags, cwd, ctx) {
+			return true
+		}
+	}
+	return touchesSensitiveWords(seg.inputs, seg.inputFlags, cwd, ctx) ||
+		touchesSensitiveWords(redirectPaths(seg.redirects), seg.redirectFlags, cwd, ctx)
+}
+
+// gitSubcommand 返回 git 的子命令：先剥掉子命令前的全局选项（git -C dir push 也认得出），没有子命令为空。
+func gitSubcommand(argv []string, flags []wordFlags, cwd string, ctx Context) string {
+	if spec, ok := leadingOptions["git"]; ok {
+		argv, _, _, _ = stripLeading(argv, flags, spec, cwd, ctx)
+	}
+	if len(argv) < 2 {
+		return ""
+	}
+	return argv[1]
 }
 
 func classifySegment(seg segment, cwd string, ctx Context) Risk {
