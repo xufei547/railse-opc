@@ -2,12 +2,12 @@
 
 发帖人：作者本人的 HN 账号 `xufei547`。时间：2026-11-12（周三）北京时间 20:00–22:00。发完 2 分钟内发作者首评。
 
-## 标题（≤ 80 字符，发帖前三选一）
+## 标题（≤ 80 个字符，按字符数不是字节数；发帖前三选一，推荐第二条最稳）
 
 ```text
 Show HN: Railse – approve Claude Code/Codex/Gemini from your phone, rules first
 Show HN: Railse – a self-hosted approval inbox for your coding agents
-Show HN: Railse – rules auto-allow the boring agent prompts, your phone gets the rest
+Show HN: Railse – rules auto-allow boring agent prompts, your phone gets the rest
 ```
 
 ## 正文（Show HN 正文只放链接与两三句）

@@ -2,7 +2,7 @@
 
 ## 前一天（11-11）
 
-- [ ] v0.2.0 已发布；README.en 指向 `assets/demo.en.gif`；`railse version` 为 0.2.0
+- [x] v0.2.0 已发布（2026-11-01）；README.en 指向 `assets/demo.en.gif`；`railse version` 为 0.2.0
 - [ ] `facts.md` 每行重新核对一遍，结论全部为"成立"或已按"改写"落实
 - [ ] `show-hn.md`、`qa.md`、`social.md`、`cn.md` 终稿
 - [ ] 作者 HN 账号 `xufei547`（2026-11-01 注册）可登录，年龄 ≥ 7 天；profile 的 about 里有一句介绍与仓库链接
