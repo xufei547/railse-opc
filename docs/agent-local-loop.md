@@ -131,7 +131,7 @@ railse trust revoke <id> | --all [--dir 目录]
 
 - **终端。** 不带 `--session` 放行当前目录所在的项目，项目根与守护进程同一套算法（git 仓库根，或家目录下的普通目录）；定不出项目根（家目录及其上级、系统目录、点开头的目录等）时报错、不放行。这台机器上各个 CLI 在这个项目里的请求都算，含之后新开的窗口。`--session` 放行一个 Claude Code 会话（钩子输入里的 `session_id`），只对 Claude 会话有意义。命令经本机 socket 发给守护进程（管理命令 `trust_set`、`trust_list`、`trust_revoke`，与 pause、resume 同一通道）；升级后没重启的旧守护进程不认，提示重启它。
 - **启动命令。** `RAILSE_TRUST=2h claude`：Claude 的 `PreToolUse` 钩子把这个环境变量原样带给守护进程（钩子不判断格式、不在 stderr 说话），守护进程第一次在这个会话里碰上定不了的请求时建一条会话放行（`created_by: env`，从那一刻起算）。只认 Claude `PreToolUse` 带来的、且要有会话 id；格式不对（不是 `30m`、`2h` 这类 Go 时长写法，或不是正数）只记 `agent.log`，按没有处理。**每个会话只建一次**：过期或被撤之后不再重建，要继续放行用 `railse trust --session` 或重开窗口；守护进程重启会忘掉见过哪些会话，那时还带着这个变量的会话会再建一条。
-- **手机。** 批准时打开“接下来一段时间都放行”，选这个会话或这个项目、30 分钟 / 2 小时 / 8 小时。hub 建好放行，先把快照推给守护进程、再下发 allow。要守护进程与 hub 都是 0.2.3 以上，见 [hub.md](hub.md) 的“限时放行”。
+- **手机。** 批准时打开“接下来一段时间都放行”，选这个会话或这个项目、30 分钟 / 2 小时 / 24 小时。hub 建好放行，先把快照推给守护进程、再下发 allow。要守护进程与 hub 都是 0.2.3 以上，见 [hub.md](hub.md) 的“限时放行”。
 
 看得见、撤得掉：`railse trust list`、`railse agent status` 的 `trusts: N`、`railse doctor` 的 `agent.trusts`（有生效中的报 ok、列条数，没有或守护进程没在跑 skip）；手机收件箱横幅与设置页“限时放行”一节。建、撤、到期各记一条审计 `kind: control`，`message` 为 `trust_set`、`trust_revoke`、`trust_expired`，`reason` 形如“项目 blog，到 11-02 15:30，cli 建”，随审计上报 hub。守护进程每分钟清一次到期的。
 

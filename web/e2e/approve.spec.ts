@@ -115,7 +115,7 @@ test('登录、看到请求、批准并记住、规则多一条；再拒绝一�
   await scope.getByRole('button', { name: '这个项目' }).click()
   await expect(scope.getByRole('button', { name: '这个项目' })).toHaveAttribute('aria-pressed', 'true')
   const minutes = dialog.getByRole('group', { name: '放行的时长' })
-  await minutes.getByRole('button', { name: '8 小时' }).click()
+  await minutes.getByRole('button', { name: '24 小时' }).click()
   await minutes.getByRole('button', { name: '2 小时' }).click()
   await expect(minutes.getByRole('button', { name: '2 小时' })).toHaveAttribute('aria-pressed', 'true')
   await dialog.getByTestId('confirm').click()

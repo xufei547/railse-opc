@@ -90,7 +90,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 - **帧。** hub → 守护进程是整台机器的快照 `{"t":"trusts","trusts":[…]}`（只含没撤、没过期的；每条同 `GET /api/trusts` 里的放行字段，不带机器名等展示字段），welcome 也带 `trusts`（没有时省略这个键；规则快照已接近单帧上限、带上放行就超限时 welcome 不带，紧跟着单发一帧 `trusts`）。手机建、手机撤、收下守护进程的变更之后都推一次。守护进程 → hub 是逐条变更 `{"t":"trust","op":"set|revoke|expired","trust":{…}}`：`set` 带整条（本机 `railse trust` 或 `RAILSE_TRUST` 建的，以及断线期间建的补发），`revoke`、`expired` 只看 `id`。hub 校验后入库或标撤（只认这台机器自己的；已撤、已到期的不复活；不合规的、超过 20 条的只记日志），**真的改了库才回推快照**，守护进程以快照里出现这条作为“hub 已收下”。
 - **守护进程怎么合并快照。** 快照里有的写入本机表并标已同步；本机已同步、却不在快照里的删掉（被手机撤了，本机审计 `trust_revoke`、`decided_by: hub`）；本机还没同步的保留并补发 `set`；本机撤掉的留墓碑到原到期时间，快照里还带着它时不复活、重发 `revoke`。
 - **审计。** hub 只审计自己发起的：手机批准时顺带建 `trust_set`（actor `user`，带请求 id）、手机撤销与吊销机器 `trust_revoke`（actor `user`）、到期清理 `trust_expired`（actor `system`），detail 是 `{"trust_id","scope","tool","cli_session_id","project_root","until","created_by"}`。守护进程报来的变更不在 hub 另记，守护进程自己的审计（`kind: control`，`message` 为 `trust_set`、`trust_revoke`、`trust_expired`）照常上报。
-- **网页。** 批准面板有“接下来一段时间都放行”开关（请求视图 `can_trust` 为 true、请求有会话编号或项目根时才显示，拒绝时不显示），范围“这个会话 / 这个项目”，时长 30 分钟 / 2 小时 / 8 小时；收件箱顶部在有放行时显示横幅“N 个放行生效中，最近的 HH:MM 到期”；设置页“限时放行”一节列出全部、可撤销。
+- **网页。** 批准面板有“接下来一段时间都放行”开关（请求视图 `can_trust` 为 true、请求有会话编号或项目根时才显示，拒绝时不显示），范围“这个会话 / 这个项目”，时长 30 分钟 / 2 小时 / 24 小时；收件箱顶部在有放行时显示横幅“N 个放行生效中，最近的 HH:MM 到期”；设置页“限时放行”一节列出全部、可撤销。
 
 ## API
 

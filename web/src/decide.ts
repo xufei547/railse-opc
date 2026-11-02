@@ -66,8 +66,8 @@ export function rememberBlock(r: RequestView): string | null {
   return null
 }
 
-/** 放行的时长按钮（分钟）：30 分钟、2 小时（默认，同 hub 与守护进程）、8 小时。 */
-export const trustMinutesOptions = [30, 120, 480] as const
+/** 放行的时长按钮（分钟）：30 分钟、2 小时（默认，同 hub 与守护进程）、24 小时（hub 与守护进程的上限）。 */
+export const trustMinutesOptions = [30, 120, 1440] as const
 const trustDefaultMinutes = 120
 
 /**
@@ -99,8 +99,8 @@ export function minutesLabel(m: number): string {
       return t('30 分钟')
     case 120:
       return t('2 小时')
-    case 480:
-      return t('8 小时')
+    case 1440:
+      return t('24 小时')
   }
   return t('{n} 分钟', { n: m })
 }

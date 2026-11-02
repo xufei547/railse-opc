@@ -70,7 +70,7 @@ In the demo, Claude Code wants to run `curl`; no rule decides it, so it goes to 
 
 When you're watching one window and don't want to approve every step, you can hand over a session or a project for a while (new in 0.2.3). Three ways in:
 
-- **Phone.** When you approve a request, turn on "Trust this for a while", pick this session or this project, and 30 minutes, 2 hours or 8 hours.
+- **Phone.** When you approve a request, turn on "Trust this for a while", pick this session or this project, and 30 minutes, 2 hours or 24 hours.
 - **Terminal.** `railse trust 2h` inside a project directory (2 hours by default) trusts that project: requests from every CLI on this machine working in it. `railse trust list` shows what's active; `railse trust revoke <id>` or `--all` ends it. `--session <session id>` trusts one Claude Code session instead.
 - **Launch command.** `RAILSE_TRUST=2h claude` trusts just that window, counted from the first action the rules can't decide.
 

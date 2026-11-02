@@ -459,7 +459,7 @@ export const en: Record<string, string> = {
   这个项目: 'This project',
   '30 分钟': '30 min',
   '2 小时': '2 hours',
-  '8 小时': '8 hours',
+  '24 小时': '24 hours',
   '{n} 分钟': '{n} min',
   已撤销放行: 'Trust revoked',
   这个范围里的请求恢复照常审批: 'Requests in this scope go through approval as usual again.',

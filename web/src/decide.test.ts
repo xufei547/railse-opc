@@ -602,8 +602,8 @@ describe('限时放行（批准时顺带）', () => {
   it('开关、范围、时长；不可选的范围、不能放行时与提交中不变', () => {
     let s = run(initSheet(trustable(), 'allow'), { type: 'trust', on: true })
     expect(s.trust).toBe(true)
-    s = run(s, { type: 'trust_scope', scope: 'project' }, { type: 'trust_minutes', minutes: 480 })
-    expect(s).toMatchObject({ trustScope: 'project', trustMinutes: 480 })
+    s = run(s, { type: 'trust_scope', scope: 'project' }, { type: 'trust_minutes', minutes: 1440 })
+    expect(s).toMatchObject({ trustScope: 'project', trustMinutes: 1440 })
     const noSession = initSheet(trustable({ cli_session_id: '' }), 'allow')
     expect(run(noSession, { type: 'trust_scope', scope: 'session' }).trustScope).toBe('project')
     const noProject = initSheet(trustable({ project_root: '', project: '' }), 'allow')
@@ -611,7 +611,7 @@ describe('限时放行（批准时顺带）', () => {
     expect(run(initSheet(req(), 'allow'), { type: 'trust', on: true }).trust).toBe(false)
     const busy = run(s, { type: 'submit' })
     expect(run(busy, { type: 'trust', on: false }).trust).toBe(true)
-    expect(run(busy, { type: 'trust_minutes', minutes: 30 }).trustMinutes).toBe(480)
+    expect(run(busy, { type: 'trust_minutes', minutes: 30 }).trustMinutes).toBe(1440)
   })
 
   it('decideBody：开着时带 trust {scope, minutes}，关着不带；可与记住同时带', () => {
@@ -637,10 +637,10 @@ describe('限时放行（批准时顺带）', () => {
     ])
     expect(trustScopeOptions(trustable({ cli_session_id: '' })).map((o) => o.disabled)).toEqual([true, false])
     expect(trustScopeOptions(trustable({ project_root: '' })).map((o) => o.disabled)).toEqual([false, true])
-    expect(trustMinutesOptions).toEqual([30, 120, 480])
-    expect(trustMinutesOptions.map(minutesLabel)).toEqual(['30 分钟', '2 小时', '8 小时'])
+    expect(trustMinutesOptions).toEqual([30, 120, 1440])
+    expect(trustMinutesOptions.map(minutesLabel)).toEqual(['30 分钟', '2 小时', '24 小时'])
     setLang('en')
     expect(trustScopeOptions(trustable()).map((o) => o.label)).toEqual(['This session', 'This project'])
-    expect(trustMinutesOptions.map(minutesLabel)).toEqual(['30 min', '2 hours', '8 hours'])
+    expect(trustMinutesOptions.map(minutesLabel)).toEqual(['30 min', '2 hours', '24 hours'])
   })
 })
