@@ -383,6 +383,16 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"决定来源出错，交回终端处理":              "Something went wrong while deciding; handed back to the terminal",
 	"决定来源给的答案不完整，交回终端处理":         "The answer was incomplete; handed back to the terminal",
 	"脱敏后有题面相同的题，分不清答的是哪道，交回终端处理": "Two questions read the same after redaction, so answers can't be matched; handed back to the terminal",
+	"限时放行中":                      "Within a time-limited trust",
+
+	// internal/agent/trust.go 与 server.go 的限时放行管理命令回给 railse trust 的固定错误（命令行用 i18n.Lookup 显示）；那边改了这里要一起改。
+	"放行范围只能是 session 或 project":                          "The trust scope must be session or project",
+	"session 范围要有 tool 与 cli_session_id，project 范围要有项目根": "A session trust needs a tool and a cli_session_id; a project trust needs a project root",
+	"同时生效的放行至多 20 条，先撤掉一些":                               "At most 20 trusts can be active at once; revoke some first",
+	"放行时长至少 5 分钟":                                        "A trust must last at least 5 minutes",
+	"时长格式不对（如 30m、2h、8h）":                                "Bad duration (use something like 30m, 2h, 8h)",
+	"缺少要建的放行":                                            "No trust to create",
+	"没有这条放行":                                             "No such trust",
 
 	// internal/hookclient/client.go
 	"守护进程无响应":      "the daemon isn't responding",

@@ -323,6 +323,7 @@ func TestLocalizeReasonFixedSentences(t *testing.T) {
 		"守护进程正在停止，交回终端处理",
 		"等待过期，交回终端处理",
 		"决定来源出错，交回终端处理",
+		"限时放行中",
 		// internal/agent/requests.go
 		"本机没有连接 hub，交回终端处理",
 		// internal/policy/engine.go

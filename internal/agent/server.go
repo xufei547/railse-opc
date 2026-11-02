@@ -79,16 +79,28 @@ type Server struct {
 	// settings 是本机设置（settings.yaml），reload 时整份换掉。
 	settings atomic.Pointer[Settings]
 
+	// trusts 是限时放行表（trusts.json），命中即放行引擎答 ask 的审批；trustChanged 是放行变更的回调（见 SetTrustChanged）。
+	trusts       *trusts
+	trustChanged atomic.Pointer[func(proto.Trust, string)]
+	// envSeen 是带过 RAILSE_TRUST 的会话（tool + cli_session_id → 第一次见到的时间），每个会话只建一次放行；由 envMu 保护。
+	envMu   sync.Mutex
+	envSeen map[string]time.Time
+
 	mu      sync.Mutex
 	closed  bool
 	stop    context.CancelFunc // Serve 运行时非空，取消全部连接
 	serving chan struct{}      // Serve 运行时非空，Serve 返回时关闭
 }
 
-// New 组装服务。唯一的 IO 是读本机设置 settings.yaml，读坏了记日志、按默认值跑。
+// New 组装服务。IO 只有读本机设置 settings.yaml 与放行表 trusts.json，读坏了记日志、按默认值（空表）跑。
 func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Logger) *Server {
 	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now()}
 	_ = s.ReloadSettings() // 读坏了它自己记日志
+	tr, err := newTrusts(cfg.TrustsPath, time.Now)
+	if err != nil {
+		logger.Printf("限时放行表读不了，按空表: %v", err)
+	}
+	s.trusts = tr
 	return s
 }
 
@@ -187,6 +199,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	s.stop, s.serving = cancel, done
 	s.mu.Unlock()
 	defer close(done)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.sweepTrusts(ctx)
+	}()
 	stopWatch := context.AfterFunc(ctx, func() { s.ln.Close() })
 	defer stopWatch()
 	for {
@@ -404,6 +421,17 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 			// 只管审批：答题（handleAsk）不走这里，不看暂停开关，照样送 hub。
 			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "paused", "自动审批已暂停，交回终端处理"
 			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
+			break
+		}
+		// 限时放行：只改引擎定不了的这一档（规则的 allow、deny 在上面已定，用户 deny 压过放行；暂停压过放行），
+		// 命中就本地放行，不弹终端框、不送手机。RAILSE_TRUST 只看 PreToolUse 带来的（Claude 每次调用先经它）。
+		if req.TrustFor != "" && req.Source == proto.SourcePreToolUse {
+			s.trustFromEnv(req)
+		}
+		if tr, ok := s.trusts.match(req.Session, pctx.ProjectRoot); ok {
+			entry.Action, entry.State, entry.DecidedBy = "allow", "auto_allowed", "trust:"+tr.ID
+			entry.Reason = fmt.Sprintf("限时放行（%s，剩 %s）", trustScopeLabel(tr), formatRemain(tr.Until.Sub(s.trusts.clock())))
+			resp.Decision, resp.DecidedBy, resp.Reason = "allow", entry.DecidedBy, reasonTrusted
 			break
 		}
 		if req.Source == proto.SourcePreToolUse {
@@ -642,6 +670,43 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 		}
 		s.writeAudit(AuditEntry{TS: time.Now(), Kind: "control", State: "recorded", Message: "reload"})
 		return ok
+	case "trust_set":
+		if c.Trust == nil {
+			return proto.ControlReply{V: proto.Version, OK: false, Error: "缺少要建的放行"}
+		}
+		tr := *c.Trust
+		if tr.Project != "" {
+			// 与审批时算项目根同一口径（解析符号链接），否则 macOS 上 /var 与 /private/var 对不上
+			tr.Project = CleanCwd(tr.Project)
+		}
+		if tr.CreatedBy == "" {
+			tr.CreatedBy = "cli"
+		}
+		tr, err := s.trusts.add(tr)
+		if tr.ID == "" {
+			return proto.ControlReply{V: proto.Version, OK: false, Error: err.Error()}
+		}
+		// 落盘失败也已生效（与 pause 一样），写审计、通知，回复 OK:false 说明重启后不会保留
+		s.trustEvent("trust_set", tr)
+		if err != nil {
+			s.log.Printf("写放行表: %v", err)
+			return proto.ControlReply{V: proto.Version, OK: false, Error: "已放行，但未能持久化: " + err.Error(), Trusts: []proto.Trust{tr}}
+		}
+		ok.Trusts = []proto.Trust{tr}
+		return ok
+	case "trust_list":
+		ok.Trusts = s.trusts.list()
+		return ok
+	case "trust_revoke":
+		gone := s.trusts.revoke(c.TrustID)
+		if len(gone) == 0 && c.TrustID != "all" {
+			return proto.ControlReply{V: proto.Version, OK: false, Error: "没有这条放行"}
+		}
+		for _, tr := range gone {
+			s.trustEvent("trust_revoke", tr)
+		}
+		ok.Trusts = s.trusts.list()
+		return ok
 	default:
 		return proto.ControlReply{V: proto.Version, OK: false, Error: "未知的管理命令 " + c.Op}
 	}
@@ -657,7 +722,7 @@ func (s *Server) status() *proto.Status {
 		hubState, hubURL = s.hubStatus()
 	}
 	return &proto.Status{Paused: paused, LocalPaused: local, HubPaused: hub, Rules: s.rules.Count(), Pending: s.pending.Count(), MachineID: s.cfg.MachineID, RulesPath: s.rules.Path(), Uptime: time.Since(s.start).Round(time.Second).String(),
-		Hub: hubState, HubURL: hubURL}
+		Hub: hubState, HubURL: hubURL, Trusts: len(s.trusts.list())}
 }
 
 // SetHubPaused 设置 hub 下发的总开关（hub 客户端收到 welcome、paused 帧时调用）。只改 hub 这一侧，

@@ -1141,3 +1141,161 @@ func TestDoneCancelsSessionPending(t *testing.T) {
 		t.Fatalf("done 事件照旧写审计：%d", done)
 	}
 }
+
+// writeUserDeny 把规则文件换成只有一条用户手写的 deny（按命令前缀），并让守护进程重载。
+func writeUserDeny(t *testing.T, env *testEnv, prefix string) {
+	t.Helper()
+	y := "version: 1\nrules:\n  - id: deny-user\n    source: user\n    scope: global\n    match: {payload: shell, command_prefix: \"" + prefix + "\"}\n    action: deny\n"
+	if err := os.WriteFile(env.cfg.RulesPath, []byte(y), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.srv.rules.Reload(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// askRequest 是一条在 cwd 里的提问（AskUserQuestion）。
+func askRequest(cwd string) proto.Request {
+	r := askReq("用哪个方案？")
+	r.Session.Cwd = cwd
+	return r
+}
+
+// 放行命中：引擎答 ask 的请求直接 allow，decided_by trust:<id>，不送 Decider；用户 deny 规则、暂停、提问不受影响。
+func TestTrustAllowsUndecided(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return Outcome{Action: "deny", DecidedBy: "user"}, nil
+	})
+	env := startServer(t, dec, nil)
+	sock := env.cfg.SocketPath
+	// 经管理命令建一条项目放行
+	var reply proto.ControlReply
+	json.Unmarshal(roundTrip(t, sock, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: env.repo, Until: time.Now().Add(time.Hour), CreatedBy: "cli"}}), &reply)
+	if !reply.OK || len(reply.Trusts) != 1 {
+		t.Fatalf("建放行：%+v", reply)
+	}
+	id := reply.Trusts[0].ID
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, sock, preToolUse(env.repo, "git push origin main", "auto", "toolu_t1")), &resp)
+	if resp.Decision != "allow" || resp.DecidedBy != "trust:"+id || resp.Reason != reasonTrusted {
+		t.Fatalf("硬底线在放行期间应直接 allow：%+v", resp)
+	}
+	pr := permission(env.repo, "rm -rf /tmp/x")
+	pr.Source = proto.SourcePermissionRequest
+	json.Unmarshal(roundTrip(t, sock, pr), &resp)
+	if resp.Decision != "allow" || resp.DecidedBy != "trust:"+id {
+		t.Fatalf("PermissionRequest 同样 allow：%+v", resp)
+	}
+	// 别的项目不受影响（用 PreToolUse：硬底线回 ask，不送 Decider）
+	resp = proto.Response{}
+	json.Unmarshal(roundTrip(t, sock, preToolUse(t.TempDir(), "git push origin main", "auto", "toolu_o")), &resp)
+	if resp.Decision != "ask" {
+		t.Fatalf("别的项目不该放行：%+v", resp)
+	}
+	// 用户 deny 规则仍 deny
+	writeUserDeny(t, env, "git push --force")
+	json.Unmarshal(roundTrip(t, sock, permission(env.repo, "git push --force origin main")), &resp)
+	if resp.Decision != "deny" || resp.RuleID != "deny-user" {
+		t.Fatalf("用户 deny 应压过放行：%+v", resp)
+	}
+	// 撤销后恢复
+	reply = proto.ControlReply{}
+	json.Unmarshal(roundTrip(t, sock, proto.Control{V: proto.Version, Kind: "control", Op: "trust_revoke", TrustID: id}), &reply)
+	if !reply.OK || len(reply.Trusts) != 0 {
+		t.Fatalf("撤销：%+v", reply)
+	}
+	json.Unmarshal(roundTrip(t, sock, preToolUse(env.repo, "git push origin main", "auto", "toolu_t2")), &resp)
+	if resp.Decision != "ask" {
+		t.Fatalf("撤销后硬底线应回 ask：%+v", resp)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("放行期间与 PreToolUse 都不该送 Decider：%d", calls)
+	}
+	var hits, set, revoked int
+	for _, e := range readAudit(t, env.cfg.AuditPath) {
+		switch {
+		case strings.HasPrefix(e.DecidedBy, "trust:") && e.State == "auto_allowed":
+			hits++
+			if !strings.HasPrefix(e.Reason, "限时放行（项目 ") {
+				t.Errorf("命中的审计理由应写明范围与剩余时间：%q", e.Reason)
+			}
+		case e.Kind == "control" && e.Message == "trust_set":
+			set++
+		case e.Kind == "control" && e.Message == "trust_revoke":
+			revoked++
+		}
+	}
+	if hits != 2 || set != 1 || revoked != 1 {
+		t.Fatalf("审计：hits=%d set=%d revoked=%d", hits, set, revoked)
+	}
+}
+
+// RAILSE_TRUST：钩子带 trust_for 时，第一次见到这个会话就建一条 session 放行（created_by env），之后的请求不再看它。
+func TestTrustForEnvCreatesSessionTrust(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	r := preToolUse(env.repo, "git push origin main", "auto", "toolu_e1")
+	r.TrustFor = "30m"
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, r), &resp)
+	if resp.Decision != "allow" || !strings.HasPrefix(resp.DecidedBy, "trust:") {
+		t.Fatalf("带 trust_for 的首条请求就应放行：%+v", resp)
+	}
+	var reply proto.ControlReply
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_list"}), &reply)
+	if len(reply.Trusts) != 1 || reply.Trusts[0].Scope != proto.TrustScopeSession || reply.Trusts[0].CreatedBy != "env" {
+		t.Fatalf("应有一条 env 建的会话放行：%+v", reply.Trusts)
+	}
+	// 同会话再来一条带不同时长的，不再建第二条
+	r2 := preToolUse(env.repo, "rm -rf /tmp/x", "auto", "toolu_e2")
+	r2.TrustFor = "8h"
+	roundTrip(t, env.cfg.SocketPath, r2)
+	reply = proto.ControlReply{}
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_list"}), &reply)
+	if len(reply.Trusts) != 1 {
+		t.Fatalf("同会话不该建第二条：%+v", reply.Trusts)
+	}
+	// 撤掉之后同会话再带 trust_for 也不重建：只认第一次见到
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_revoke", TrustID: "all"}), &reply)
+	r4 := preToolUse(env.repo, "git push origin main", "auto", "toolu_e4")
+	r4.TrustFor = "30m"
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, r4), &resp)
+	if resp.Decision != "ask" {
+		t.Fatalf("撤销后同会话不该再建：%+v", resp)
+	}
+	// 格式错的 trust_for：不建，请求按常规处理
+	env2 := startServer(t, LocalDecider{}, nil)
+	r3 := preToolUse(env2.repo, "git push origin main", "auto", "toolu_e3")
+	r3.TrustFor = "abc"
+	json.Unmarshal(roundTrip(t, env2.cfg.SocketPath, r3), &resp)
+	if resp.Decision != "ask" {
+		t.Fatalf("格式错的 trust_for 不该放行：%+v", resp)
+	}
+}
+
+// 暂停压过放行；提问不受放行影响。
+func TestTrustDoesNotOverridePauseOrAsk(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	sock := env.cfg.SocketPath
+	roundTrip(t, sock, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: env.repo, Until: time.Now().Add(time.Hour)}})
+	roundTrip(t, sock, proto.Control{V: proto.Version, Kind: "control", Op: "pause"})
+	var resp proto.Response
+	json.Unmarshal(roundTrip(t, sock, permission(env.repo, "git push origin main")), &resp)
+	if resp.Decision != "passthrough" || resp.DecidedBy != "paused" {
+		t.Fatalf("暂停时应交回终端：%+v", resp)
+	}
+	roundTrip(t, sock, proto.Control{V: proto.Version, Kind: "control", Op: "resume"})
+	// 提问照常送 Decider（LocalDecider 交回终端）
+	json.Unmarshal(roundTrip(t, sock, askRequest(env.repo)), &resp)
+	if resp.Decision != "passthrough" || strings.HasPrefix(resp.DecidedBy, "trust:") {
+		t.Fatalf("提问不受放行影响：%+v", resp)
+	}
+}
