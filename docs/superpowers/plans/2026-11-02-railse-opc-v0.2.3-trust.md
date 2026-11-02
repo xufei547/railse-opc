@@ -1101,3 +1101,132 @@ git commit -m "docs: 限时放行的用法、接口、帧与升级说明"
 - 设计 §2.1（记录）→ Task 1；§2.2（判定）→ Task 1；§2.3 三个入口 → 手机 Task 3 + 5，终端 Task 2，环境变量 Task 1 + 2；§2.4 可见与撤销 → Task 5（横幅、设置页）、Task 2（status、doctor）、Task 1/3（审计）；§2.5 同步 → Task 3 + 4（合并规则精确化为"已同步"标记）；§2.6 上限与安全 → Task 1（守护进程校验）、Task 3（hub 校验）；§3 真机验收留给主会话；§4 文档 → Task 6。
 - 名字一致性：`proto.Trust{ID, MachineID, Scope, Tool, CLISession, Project, Until, CreatedAt, CreatedBy, Note}`、`proto.TrustScopeSession/Project`、`proto.TrustMin/Max/Default/PerMachine`、`Request.TrustFor`、`Control.Trust/TrustID`、`ControlReply.Trusts`、`Status.Trusts`、`agent.trusts{add,revoke,list,match,sweep,markSynced,unsynced,applySnapshot}`、`agent.ParseTrustFor`、`Server.trustChanged`、`hookclient.Client.ControlMsg`、`wire.FeatureTrust/TTrusts/TTrust/Trusts/TrustChange`、`Hello.Features`、`Welcome.Trusts`、`store.{UpsertTrust,RevokeTrust,ListTrusts,ExpireTrusts}`、hub `{trustSupported,pushTrusts,createTrust,revokeTrust,applyAgentTrust,sweepTrusts}`、`DecideInput.Trust`、`requestView.CanTrust`、网页 `TrustView`、`SheetState.{trustable,trust,trustScope,trustMinutes}`、`hub.trusts()/revokeTrust()`。
 - 设计 §2.1 说"放行表落 `state.json`"，计划改为独立的 `trusts.json`（state.json 只有两个布尔，混在一起没必要）；设计 §2.3 的 `railse trust --session` 目前只对 Claude 的会话 id 有意义（Codex 的 PermissionRequest 也带 session id，但用户拿不到它），usage 里写明。
+
+---
+
+## 实施报告（2026-11-02）
+
+分支 `claude/v0-2-3-trust-1d5813`（worktree jovial-wilbur-8cb5f7），在 main（a8a337f）之上 8 个提交，未推送、未合并、未打 tag。
+
+| 任务 | 提交 | 内容 |
+|---|---|---|
+| 0 | `1cd37a8` | 计划与设计稿精确化（从主工作区原样复制） |
+| 1 | `e71adc0` | 守护进程放行表、命中即放行、管理命令、RAILSE_TRUST 首见建表、到期清理与审计 |
+| 2 | `fc020ec` | `railse trust` 子命令、钩子带 RAILSE_TRUST、`agent status` 与 doctor `agent.trusts` |
+| 3 | `c359425` | hub：schema v6 `trusts` 表、trust 能力与帧、`/api/trusts`、decide 带 trust |
+| 4 | `47608da` | 守护进程与 hub 双向同步（hello 声明能力、快照合并、本机变更上报、墓碑） |
+| 5 | `48bf77c` | 网页：批准面板开关、设置页"限时放行"一节、收件箱横幅、e2e |
+| 6 | `0d7472d` | 文档：README 两份、hub.md、agent-local-loop.md、setup.md、launch/qa.md |
+| 7 | 本提交 | 实施报告 |
+
+每个任务都先写失败测试再实现，每个提交都单独跑过 `make test`。
+
+### 安全底线的测试覆盖
+
+- 放行只改引擎答 ask 的结论：`TestTrustAllowsUndecided`（用户手写 deny 仍 deny、别的项目不放行、撤销后回 ask、放行期间不送 Decider）、`TestTrustDoesNotOverridePauseOrAsk`（暂停仍交回终端，提问照常送 Decider）。
+- 时长 5 分钟～24 小时、每机器至多 20 条：守护进程 `TestTrustsAddValidateAndClamp`、`TestParseTrustFor`；hub `internal/hub/trusts_test.go`（截断、拒短、满 20 条 400、scope/目标校验、decide 失败不落库不下发、先快照后 allow、老守护进程 400）。
+
+### 与计划不同之处
+
+**Task 1**
+1. 回给钩子（显示在 Claude 里）的理由是固定句"限时放行中"（有英文），带范围与剩余时长的那句只写审计：动态中文查不到英文，英文界面会漏中文。
+2. 剩余时长写成"1 小时 5 分 / 12 分钟"，不是 `Round(time.Minute)` 的 `1h0m0s`；审计里的到期时间带月日（最长 24 小时会跨天）。
+3. `revoke` 返回被撤条目列表（逐条审计、回调），`revoke all` 在空表上也成功。
+4. 过期条目只在清理时删除（启动时立刻清一次），保证每条到期都有 `trust_expired` 审计，停机期间到期的也有。
+5. **RAILSE_TRUST 每个会话只建一次**，过期或被撤后不再重建：按计划原写法，环境变量一直在，放行一过期下一条请求又建一条，`RAILSE_TRUST=5m` 就成了永久，违反验收第 4 条。见过的会话记在内存（7 天、至多 4096 个），守护进程重启会忘记。
+6. 下限留 1 分钟余量（Until 早于"此刻 + 4 分钟"才报错），因为调用方按"此刻 + 时长"算 Until，送到时已过去一点时间。
+7. 建项目放行时对项目根做 `CleanCwd`（macOS 上 `/var` 与 `/private/var`）。
+8. 错误分成"放行时长至少 5 分钟"与"时长格式不对"两句。
+9. 计划测试的两处修正："别的项目"一步改用 PreToolUse（原写法会送 Decider，与结尾"Decider 调用 0 次"矛盾）；复用的 `ControlReply` 每次反序列化前清零（`omitempty` 会残留上次的字段）。
+10. 回调是 `SetTrustChanged(fn)`，存 `atomic.Pointer`（清理 goroutine 与请求处理并发调用，裸字段过不了 `-race`）。
+11. 落盘失败时放行仍生效，回 `OK:false` 附"已放行，但未能持久化"，与 pause 一致。
+
+**Task 2**
+1. 时长显示与 Task 1 同口径（"2 小时 / 30 分钟"，英文 "2h / 30m"），不是 "2h0m0s"。
+2. `railse trust 1m` 不报错，截成 5 分钟（与 `ParseTrustFor` 的截断一致），输出显示截过的时长。
+3. 测试里的"系统目录"用 `/usr/bin`（`/private/tmp` 在豁免名单里）。复用现有 `startTestAgent`，没有 `startAgentForTest`。
+4. 建项目放行的输出带完整项目根路径（计划写"（这台机器）"），便于核对选中的根。
+5. list 里的备注与会话 id 去掉控制字符（可能来自手机）。
+6. doctor 无放行或守护进程没在跑时 Skip；`TestRunEnglishUnconfigured` 的 skipped 计数 14 → 15。
+7. 守护进程回"未知的管理命令"（升级后没重启的老守护进程）时提示重启；其余错误经 `i18n.Lookup`。
+8. **钩子不在 stderr 提示 RAILSE_TRUST 格式错误**（设计 §2.3 写的是钩子说一句）：按计划，钩子原样转给守护进程，格式错只在守护进程日志里。文档按实际写。
+
+**Task 3**
+1. store 接口：`UpsertTrust` 返回 `(bool, error)`，只覆盖同机器未撤的条目（别的机器占不了 id，撤过的不会被重发复活）；`RevokeTrust(machineID, id, reason)`；`ExpireTrusts()` 返回条目列表（逐条审计）；新增 `DeleteTrust`（批准落库失败时收回刚建的放行）。
+2. 放行在批准落库之前校验并入库（`trustMu` 持到快照与决定都排进队列），落库失败删除，防止并发突破 20 条上限；请求已决定/过期时不建，照旧 409。
+3. hub 收下守护进程的 trust 帧且确实改了库后回推快照（Task 4 "等快照回来才算同步"所需）。
+4. hub 只审计自己发起的建、撤、到期，守护进程报来的不重复审计。
+5. 额外：`/api/version` 带 `features: ["ask","trust"]`；吊销机器时撤掉其放行；hello 的 features 至多 16 条、每条 32 字节；规则快照接近单帧上限时 welcome 不带 `trusts`，紧跟单发一帧。
+6. 会话放行也记项目根，只供手机显示。
+7. hub 的新错误文案是中文常量（hub 不用 i18n，网页原样显示，en.ts 里本来就没有收录 hub 报错）。
+
+**Task 4**
+1. 接线为 `HubClient.SyncTrusts(srv)`：接表、hello 声明能力、装回调一次完成；没调用它的客户端不声明 trust。
+2. 回调只把变更排进队列，`trustLoop` 顺序发帧；换连接时清队列，靠重连后的快照对齐补发。
+3. **加了墓碑**（计划没有）：本机撤掉的条目留墓碑到原到期时间，防止断线期间撤销或 set/revoke 竞争时被 hub 快照复活；快照仍带着就不收并重发 revoke。
+4. 已同步标记与墓碑都落 `trusts.json`（每条多 `synced`/`revoked`），否则停机期间手机撤掉的条目重启后会被当成未同步补发并本地生效到过期。
+5. `applySnapshot(snap, complete) (revoked, resend)`；合并时不收已过期、目标不合规的，Until 超 24 小时截断，满 20 条不收新的；本机过期未清理的不算"被撤"。
+6. welcome 不带 `trusts` 键：welcome 加 768 KiB 余量仍不超单帧上限时按空快照处理（只可能是没有放行），否则按不完整处理（不删，等单发帧）。剩一个极端情况：规则 > 256 KiB 且手机离线期间撤光全部放行，本机条目会留到下一个快照或到期。
+7. 新增真 hub 端到端测试 `TestHubTrustEndToEnd`。
+
+**Task 5**
+1. 函数名按实际（`initSheet`/`sheetReducer`）；面板状态多 `trustable`、`hasSession`。
+2. 开关只看请求的 `can_trust === true`，不另读 `/api/version`（老 hub 没这个字段自然不显示）。
+3. 放行列表放全局 store（`StoreProvider` 在 status 条数 > 0 时拉 `/api/trusts`），横幅与设置页共用；只带 `trusts` 的 status 帧不会清掉 `paused`。
+4. 撤销不弹确认，失败用设置页现有的底部结果提示，不是 Banner。
+5. e2e 并进 `approve.spec.ts` 第一条用例末尾（单独一条会撞 hub 登录次数限制），并多验了"放行后同项目下一条命令直接放行、不进收件箱"；e2e 样本本来就带 `session_id`，`scripts/` 没改。
+
+**Task 6**
+1. README 没有单独的"规则"一节，"限时放行"放在"它怎么做"之后；能力矩阵每行是一个 CLI，所以加的是一列。
+2. setup.md 新增第 9 条"0.2.2 → 0.2.3"，原"从 0.1.0 升级"顺延为第 10 条；hub.md 顺手更正"七种帧"→"八种"、doctor 库版本 4 → 6。
+
+### 门禁（最终提交 0d7472d 上）
+
+- `make test`：exit 0。golangci-lint 0 issues，`go test -race` 17 个包全 ok，vitest 29 个文件 822 条通过。整个分支期间 `TestStringLinearOnAdversarialInput` 没有超时；`TestAgentRunWithoutHubClearsStaleHubPause` 在 Task 1 期间一次负载下的单独运行中失败过一次，单独连跑 3 次与 `make test` 均通过，判断为负载偶发、与改动无关。
+- `make e2e`：6 passed（含英文那条，本机没有出现漏中文）。
+
+### Task 7 自检脚本（实际输出）
+
+脚本写成文件后 `sh` 运行：临时目录（`/tmp/railse-trust.XXXXXX`，socket 路径长度所限）里编译二进制、`git init` 一个项目、临时 HOME、`railse agent run --foreground --dir` 起守护进程；不碰真实的 `~/.railse`、`~/.claude`；退出时停掉守护进程并删临时目录。输出（`0d7472d` 上）：
+
+```
+$ railse trust 30m
+已放行 项目 repo（/private/tmp/railse-trust.WbXvvw/repo），到 09:39（30 分钟）  id 541e81da4fb97cbc
+$ railse agent status | grep trusts
+trusts: 1
+$ railse hook claude（PreToolUse git push，放行期间）
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Railse：限时放行中"}}
+
+$ railse trust list
+541e81da4fb97cbc  项目 repo  剩 30 分钟  cli
+$ railse trust revoke --all
+已撤销
+$ railse hook claude（撤销后）
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Railse：命令里的「git push origin main」会把代码推到远程仓库。已发到手机，也可以在这里直接批"}}
+
+$ RAILSE_TRUST=5m railse hook claude（环境变量入口）
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"Railse：限时放行中"}}
+
+5e3c652c12478ff0  会话 claude sess-selfcheck  剩 5 分钟  env
+$ 审计里的放行相关行（decided_by / message）
+   1 "decided_by":"trust:541e81da4fb97cbc"
+   1 "decided_by":"trust:5e3c652c12478ff0"
+   1 "message":"trust_revoke"
+   2 "message":"trust_set"
+```
+
+结论：项目放行期间硬底线（`git push`）由 ask 变 allow、理由"限时放行中"；撤销后回 ask；`RAILSE_TRUST=5m` 建一条 `created_by env` 的会话放行并当条就放行；审计里有 2 条 `decided_by trust:<id>`、2 条 `trust_set`、1 条 `trust_revoke`。
+
+顺带观察（与本版无关，v0.2.2 起就有）：没接 hub 时 PreToolUse 硬底线回 ask 的理由仍写"已发到手机"，实际不会发；可留作后续文案修正。
+
+### 留给真机验收（设计 §3）
+
+1. 手机上批准一条 destructive，勾"这个会话 2 小时"：同一窗口再跑 `rm -rf <临时目录>`，终端不弹框、手机无卡片、命令直接跑，本机审计 `decided_by: trust:<id>`；另一个窗口同样命令仍弹框。
+2. 手机设置页看到这条放行并撤销：原窗口下一条 destructive 又弹框。
+3. 项目目录里 `railse trust 30m`：该项目所有窗口（含新开的）都放行；`railse trust list` 看得到；手机上也看得到。
+4. `RAILSE_TRUST=5m claude`：只这一个窗口放行，5 分钟后再跑硬底线又弹框（本实现每会话只建一次，过期不重建）。
+5. 停掉本机 hub：手机建的放行仍生效到过期；本机 `railse trust` 照常。
+6. 放行期间 `AskUserQuestion` 仍进手机；用户 deny 规则仍拒绝。
+7. 老 hub（0.2.2）配新守护进程：本机 `railse trust` 生效，手机上没有开关、不报错。
+
+升级提醒：hub 库 v5 → v6 不能降级，升级前先备份 `~/.railse-hub`；守护进程升级后要重启，否则 `railse trust` 会提示"未知的管理命令"。
