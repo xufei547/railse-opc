@@ -2,7 +2,7 @@
 
 ## 是什么
 
-`railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（PWA，由 hub 同源托管，见“网页”与 [web.md](web.md)）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对审批只能回答放行（allow）或拒绝（deny）；对 Claude Code 的选择题只能给出答案（填进选项的文字，不是命令）或交回终端；仍然没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、ping、pong、error 七种。自己填的答案是自由文本，Claude 会把它当作你的回答照着做：能登进网页的人可以借答题引导 agent，这与 hub 密码等于全部审批权是同一个信任边界（见“安全要点”）。
+`railse hub` 跑在云服务器上，是请求、规则、机器与审计的唯一真相。各机器的守护进程只向外连它（`/ws/agent`），手机网页（PWA，由 hub 同源托管，见“网页”与 [web.md](web.md)）也连它（REST 与 `/ws/client`），外部系统（如 n8n）经 webhook 往收件箱里提请求。hub 对审批只能回答放行（allow）或拒绝（deny）；对 Claude Code 的选择题只能给出答案（填进选项的文字，不是命令）或交回终端；仍然没有任何向机器下发命令的通道：发给守护进程的帧只有 welcome、decision、rules、paused、trusts、ping、pong、error 八种（trusts 是限时放行的快照，只是一张表，见“限时放行”）。自己填的答案是自由文本，Claude 会把它当作你的回答照着做：能登进网页的人可以借答题引导 agent，这与 hub 密码等于全部审批权是同一个信任边界（见“安全要点”）。
 
 hub 还托管手机网页（见“网页”），并能把新请求推到手机（Web Push，见“手机推送”）；TLS 可由 hub 内置的 ACME（Let's Encrypt）直出，也可交给反向代理（见“部署与反向代理”）；开机自启用 `railse setup autostart --hub`，安装、托管与体检的完整步骤见 [setup.md](setup.md)。
 
@@ -21,7 +21,7 @@ railse hub run --listen 127.0.0.1:8787 --public-url https://hub.example.com
 - `railse hub webhook-token` 生成 webhook 来源令牌，明文只显示这一次，再生成一次旧的就失效。
 - `railse hub vapid [--rotate]` 打印推送公钥（库里没有就生成，hub 第一次启动时也会生成）；`--rotate` 换新密钥并在同一事务里删除全部推送订阅，提示所有手机要重新开启通知。在跑的 hub 不用重启：下一次推送、下一次网页取公钥时就从库里读到新密钥。
 - **开机自启。** `railse setup autostart --hub -- <hub run 的参数>` 用 launchd（macOS）或 systemd 用户单元（Linux）托管 hub，退出后自动拉起。Linux 上直出 443/80 时装成系统单元，以普通用户运行、只给 `CAP_NET_BIND_SERVICE`，数据目录默认 `/var/lib/railse-hub`：`sudo /usr/local/bin/railse setup autostart --hub --system -- --acme-domain hub.example.com --acme-email me@example.com`（railse 先用 `curl … | sudo sh` 装进 `/usr/local/bin`，服务用户才执行得了；sudo 时写绝对路径，RHEL 系的 sudo 默认不在 `/usr/local/bin` 里找命令，见 [setup.md](setup.md)）。`--status` 看是否在跑，`--uninstall` 移除托管（数据目录保留），`--dry-run` 只打印。
-- **体检。** `railse doctor --hub-dir <数据目录>`（只读）检查数据目录与 `hub.db` 的权限、库版本（当前为 4）、网页密码、推送密钥、`acme/` 的权限与托管文件；不给 `--hub-dir` 时看 `$RAILSE_HUB_HOME`、`~/.railse-hub`，Linux 上再看 `/var/lib/railse-hub`。以跑 hub 的用户身份运行。各检查项见 [setup.md](setup.md) 的“railse doctor”。
+- **体检。** `railse doctor --hub-dir <数据目录>`（只读）检查数据目录与 `hub.db` 的权限、库版本（当前为 6）、网页密码、推送密钥、`acme/` 的权限与托管文件；不给 `--hub-dir` 时看 `$RAILSE_HUB_HOME`、`~/.railse-hub`，Linux 上再看 `/var/lib/railse-hub`。以跑 hub 的用户身份运行。各检查项见 [setup.md](setup.md) 的“railse doctor”。
 
 ## 网页
 
@@ -53,7 +53,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 
 `~/.railse/machine.json`（0600）存 `hub_url`、`machine_id`、`secret`（机器长期密钥）、`name`。已存在时 `enroll` 拒绝覆盖，换 hub 或重新接入要加 `--force`。文件损坏时守护进程拒绝启动（不会悄悄退回本地模式）；要退回本地闭环就删掉它再重启，残留的 hub 暂停随之清除。
 
-吊销：`DELETE /api/machines/{id}`（网页在第 4 份）。密钥立即失效，在线连接被断开，它仍 pending 的请求改为 `cancelled`（`decided_by: machine_revoked`），它的 question 不再列在收件箱里。
+吊销：`DELETE /api/machines/{id}`（网页在第 4 份）。密钥立即失效，在线连接被断开，它仍 pending 的请求改为 `cancelled`（`decided_by: machine_revoked`），它的 question 不再列在收件箱里，它生效中的限时放行全部撤掉（逐条审计 `trust_revoke`）。
 
 ## 接入后的行为
 
@@ -80,25 +80,37 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 - **断线与重连。** 守护进程重连退避 1、2、4、8、16、30 秒，连接稳定后归零；超过 60 秒收不到 hub 的任何帧就主动断开重连。重连时 hello 带上本机仍在等的请求：hub 补发其中已决定的；hub 里多出来的 pending 改为 `cancelled`（`decided_by: agent_restart`）。钩子在决定前退出 → hub 记 `cancelled/terminal`；本机等满期限 → `expired/timeout`；hub 自己每分钟把过了 `expires_at` 的 pending 标为 `expired/timeout`。Codex 15 分钟内重发同一请求（同会话、同回合、同工具、同载荷）时，旧的那条改为 `cancelled/resend`，收件箱只剩新的；提问的“同载荷”按整个提问内容算（每道题的题面、标题、选项文字与说明、是否多选都一样才算同一条），同一回合里两道不同的题各是各的。
 - **hub 结束请求会通知守护进程。** hub 自己结束一条守护进程的 pending（过期扫描、手机决定时发现已过期、被重发顶掉）时，立即对该机器发带 `request_id` 的 Error 帧“请求已在 hub 结束”，守护进程把它交回终端（本机审计记 `expired/hub_unreachable`），不再挂满本机期限。守护进程的时钟比 hub 慢时，hub 会按自己的时间更早判过期，也由此及时收尾。机器当时不在线的，重连后重发 pending 时 hub 回“请求已结束”，同样交回终端。
 
+## 限时放行（0.2.3 起）
+
+把一个 CLI 会话或一台机器上的一个项目在一段时间内整体放行：范围内引擎定不了（ask）的审批一律在本机放行，不弹终端框、不进手机。**放行期间 Railse 对该范围完全不把关，等同于 Claude Code 的 bypassPermissions 加上审计，到期自动失效，最长 24 小时。** 规则的拒绝、总开关暂停、选择题不受影响。判定与本机命令见 [agent-local-loop.md](agent-local-loop.md) 的“限时放行”。
+
+- **谁说了算。** 守护进程是执行者，放行表在它手里（`~/.railse/trusts.json`），hub 断线期间照常生效到期；hub 存一份副本给手机看、建、撤。时长 5 分钟～24 小时（hub 收到更长的截到 24 小时），每台机器同时生效至多 20 条。
+- **库。** schema v6 的 `trusts` 表：`id、machine_id、scope（session|project）、tool、cli_session_id、project_root、until_at、created_at、created_by（phone|cli|env）、note、revoked_at、revoke_reason（user|expired|agent）`。撤销与到期只标 `revoked_at`，不删行；hub 启动时与之后每分钟把到期的标撤（原因 `expired`）。
+- **能力声明。** hub 在 welcome 与 `GET /api/version` 的 `features` 里声明 `trust`；守护进程在 hello 的 `features` 里声明 `trust`。两边都声明了才同步：守护进程只给声明了的 hub 发 `trust` 帧；hub 只给声明了的守护进程发快照，只对它的审批让手机建放行（请求视图的 `can_trust`）。老 hub 配新守护进程：本机的 `railse trust`、`RAILSE_TRUST` 照常生效，手机上看不到、也没有开关；新 hub 配老守护进程：手机上没有开关。
+- **帧。** hub → 守护进程是整台机器的快照 `{"t":"trusts","trusts":[…]}`（只含没撤、没过期的；每条同 `GET /api/trusts` 里的放行字段，不带机器名等展示字段），welcome 也带 `trusts`（没有时省略这个键；规则快照已接近单帧上限、带上放行就超限时 welcome 不带，紧跟着单发一帧 `trusts`）。手机建、手机撤、收下守护进程的变更之后都推一次。守护进程 → hub 是逐条变更 `{"t":"trust","op":"set|revoke|expired","trust":{…}}`：`set` 带整条（本机 `railse trust` 或 `RAILSE_TRUST` 建的，以及断线期间建的补发），`revoke`、`expired` 只看 `id`。hub 校验后入库或标撤（只认这台机器自己的；已撤、已到期的不复活；不合规的、超过 20 条的只记日志），**真的改了库才回推快照**，守护进程以快照里出现这条作为“hub 已收下”。
+- **守护进程怎么合并快照。** 快照里有的写入本机表并标已同步；本机已同步、却不在快照里的删掉（被手机撤了，本机审计 `trust_revoke`、`decided_by: hub`）；本机还没同步的保留并补发 `set`；本机撤掉的留墓碑到原到期时间，快照里还带着它时不复活、重发 `revoke`。
+- **审计。** hub 只审计自己发起的：手机批准时顺带建 `trust_set`（actor `user`，带请求 id）、手机撤销与吊销机器 `trust_revoke`（actor `user`）、到期清理 `trust_expired`（actor `system`），detail 是 `{"trust_id","scope","tool","cli_session_id","project_root","until","created_by"}`。守护进程报来的变更不在 hub 另记，守护进程自己的审计（`kind: control`，`message` 为 `trust_set`、`trust_revoke`、`trust_expired`）照常上报。
+- **网页。** 批准面板有“接下来一段时间都放行”开关（请求视图 `can_trust` 为 true、请求有会话编号或项目根时才显示，拒绝时不显示），范围“这个会话 / 这个项目”，时长 30 分钟 / 2 小时 / 8 小时；收件箱顶部在有放行时显示横幅“N 个放行生效中，最近的 HH:MM 到期”；设置页“限时放行”一节列出全部、可撤销。
+
 ## API
 
 认证有三种：**cookie**（`POST /api/login` 换来的 `railse_session`）、**Bearer 机器密钥**（`machine.json` 的 `secret`）、**Bearer 来源令牌**（`railse hub webhook-token`）。标“同源”的接口在请求带 `Origin` 头时要求它的 host 与请求的 Host 相同，否则 403；不带 `Origin` 的（curl 等非浏览器客户端）放行。请求体一律限长、须是合法 UTF-8，且要在 10 秒内传完；整个请求（请求头加请求体）至多 30 秒收完（WebSocket 握手之后的长连接不受此限）。
 
 | 方法与路径 | 认证 | 用途与返回 |
 | --- | --- | --- |
-| `GET /api/version` | 无 | `{"version","agent_proto"}`：hub 的版本（开发构建为 `dev`）与守护进程帧协议号；doctor 与安装脚本用它确认 hub 可达、版本对得上 |
+| `GET /api/version` | 无 | `{"version","agent_proto","features"}`：hub 的版本（开发构建为 `dev`）、守护进程帧协议号与 hub 的能力（`["ask","trust"]`，同 welcome）；doctor 与安装脚本用它确认 hub 可达、版本对得上 |
 | `POST /api/login` | 无（每 IP 每分钟 5 次） | `{"password"}` → 204 并设 cookie；密码错 401，没设密码或忙 503，限速 429 |
 | `POST /api/logout` | 同源 | 删服务端会话、清 cookie → 204 |
 | `POST /api/enroll` | 接入码（每 IP 每分钟 5 次） | `{"token","name","home_dir"}` → `{"machine_id","secret"}`；接入码无效或过期 401 |
 | `GET /ws/agent` | Bearer 机器密钥 | 守护进程的 WebSocket；密钥无效或已吊销 401 |
 | `POST /api/webhook/approvals` | Bearer 来源令牌 | 见下文 webhook；没配令牌 503，令牌不对 401 |
-| `GET /api/status` | cookie | `{"paused","pending","rules_version","machines":[{"id","name","online","last_seen","revoked"}],"uptime","push_enabled","push_subscriptions"}`：`push_enabled` 是否配了 `--public-url`，`push_subscriptions` 订阅条数 |
+| `GET /api/status` | cookie | `{"paused","pending","rules_version","machines":[{"id","name","online","last_seen","revoked"}],"uptime","push_enabled","push_subscriptions"}`：`push_enabled` 是否配了 `--public-url`，`push_subscriptions` 订阅条数；另有 `trusts`：生效中的限时放行条数（读库出错按 0；网页据此决定拉不拉 `/api/trusts`，老 hub 没有这个键） |
 | `POST /api/pause`、`/api/resume` | cookie + 同源 | 改 hub 总开关并下发 → 204 |
 | `GET /api/inbox` | cookie | `{"pending":[…],"questions":[…]}`，都是请求视图、按创建时间倒序，没有时是空数组：`pending` 是全部待处理的审批和提问（至多 500 条，提问的 `kind` 为 `ask`、带 `ask`）；`questions` 是最近 24 小时还在等回答的 `question`（至多 100 条），同一会话之后有了任何新事件（`done`、新的 `permission`、`ask` 或 `question`）就不再列出，没有会话 id 的一直列到滑出 24 小时；已吊销机器的不列 |
 | `GET /api/requests?state=&limit=` | cookie | 按创建时间倒序；`state` 为空表示全部，`limit` 默认 50、最大 500 |
 | `GET /api/requests/{id}` | cookie | `{"request":…,"audit":[…]}`，审计倒序至多 200 条；没有 404 |
 | `POST /api/requests/{id}/propose` | cookie + 同源 | `{"action":"allow|deny","scope":"project|global"}` → `{"rule_id","scope","yaml","summary":{"action","payload","anchor"}}`：只计算“记住”会生成的规则，不入库、不审计、不改请求。`scope` 是草案实际的范围（缺省时按下文规则选定），`yaml` 是这条规则的 YAML（与入库后 `/api/rules` 里的相同，只有一处例外：`rule_id` 与已有规则撞了时，入库时 id 追加 `-2`、`-3`…，存下的 YAML 里的 id 与预览的不同，以 decide 返回的请求里的 `rule_id` 和 `/api/rules` 为准），`summary.payload` 取 `shell|file_write|network|mcp`，`anchor` 是起匹配作用的命令前缀、命令正则、路径、`服务/工具` 或主机名。错误码与 decide 相同：坏请求体、坏 action、坏 scope 400，没有 404，已处理、已过期或机器已吊销 409（文案同 decide，但 propose 不改请求状态），记不住 422 |
-| `POST /api/requests/{id}/decide` | cookie + 同源 | `{"action":"allow|deny","note":"…","remember":bool,"scope":"project|global"}` → 决定后的请求；`scope` 只在 `remember: true` 时起作用。坏 action、坏 scope（不论是否 remember）或备注超过 1000 字符 400，没有 404，已处理、已过期或机器已吊销 409，记不住 422 |
+| `POST /api/requests/{id}/decide` | cookie + 同源 | `{"action":"allow|deny","note":"…","remember":bool,"scope":"project|global","trust":{"scope":"session|project","minutes":120}}` → 决定后的请求；`scope` 只在 `remember: true` 时起作用。`trust` 可选：批准时顺带限时放行，`minutes` 缺省或 0 按 120，超过 1440 截到 24 小时；hub 先校验、入库这条放行，把快照排在 allow 之前推给守护进程（守护进程先有放行、再收到 allow），审计 `trust_set`。坏 action、坏 scope（不论是否 remember）、备注超过 1000 字符或放行不合规 400，没有 404，已处理、已过期或机器已吊销 409（这时不建放行），记不住 422。放行不合规的 400 文案：“只有批准审批时才能顺带放行”“放行范围只能是 session 或 project”“放行时长至少 5 分钟”“这台机器的守护进程太旧，不支持限时放行，请升级 railse”“这台机器不在线，不能限时放行”“这条请求没有会话编号，只能放行这个项目”“这条请求没有项目根，只能放行这个会话”“这台机器同时生效的放行已有 20 条，先撤掉一些”；400 时整个决定不落库，请求仍 pending |
 | `POST /api/requests/{id}/answer` | cookie + 同源 | `{"answers":{"<题面>":"<答案>"},"passthrough":false}`（至多 64 KiB）→ 作答后的请求（`state` 为 `answered` 或 `passthrough`），只对提问（`kind` 为 `ask`，Claude Code 的 `AskUserQuestion`）。键是请求里 `ask.questions[].question` 的原样（逐字节），每道题都要有答案，去掉首尾空白后非空、至多 1000 个字符，不能有多余的键；`passthrough: true` 时让 agent 在终端问，`answers` 不看。答案原样下发给守护进程（库里存原文，审计里脱敏），不学规则。坏请求体、答案不合规或不是提问 400，没有 404，已处理、已过期或机器已吊销 409（两次并发作答只有一次成功）；对提问调 decide、propose 回 400“这是提问，用答题接口” |
 | `GET /api/rules` | cookie | 每条 `id、source、enabled、elevated、hit_count、last_hit_at、created_at、created_from、yaml` |
 | `PATCH /api/rules/{id}` | cookie + 同源 | `{"enabled":bool}` → 204 并下发 |
@@ -107,6 +119,8 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 | `GET /api/rules/export` | cookie | 整套规则 YAML（附件 `railse-rules.yaml`） |
 | `GET /api/machines` | cookie | 每台 `id、name、online、last_seen、agent_version、enrolled_at、revoked` |
 | `DELETE /api/machines/{id}` | cookie + 同源 | 吊销 → 204；没有 404 |
+| `GET /api/trusts` | cookie | 生效中的限时放行，按到期先后，没有时空数组；已吊销机器的不列。每条 `id、machine_id、scope、tool、cli_session_id、project_root、until、created_at、created_by、note`（`tool`、`cli_session_id`、`project_root`、`note` 为空时省略；手机建的会话放行也带 `project_root`，只给显示用），加 `machine_name`、`project`（项目根的最后一段）与 `remaining_seconds` |
+| `DELETE /api/trusts/{id}` | cookie + 同源 | 撤销一条放行 → 204，并推新快照给那台机器（离线时重连的 welcome 带上）、审计 `trust_revoke`；没有或已撤 404 |
 | `GET /ws/client` | cookie + 同源 | 网页的推送通道，见下 |
 | `GET /api/push/vapid` | cookie | `{"enabled","public_key","reason"}`：启用时 `public_key` 是 VAPID 公钥（base64url，87 个字符，给 `applicationServerKey`）、`reason` 为空；没配 `--public-url` 时 `enabled: false`、`public_key` 为空、`reason` 说明原因。每次从库里读，换过钥就是新的 |
 | `POST /api/push/subscribe` | cookie + 同源 | 请求体是浏览器 `PushSubscription.toJSON()` 原样（`{"endpoint","keys":{"p256dh","auth"}}`，多余字段忽略）→ 204；同一端点再登记是更新（换密钥、失败归零、`lang` 改成新值）。请求体可多带 `lang`（网页的界面语言；缺省多半是旧网页或旧 Service Worker）：缺省、为空或以 `zh` 开头记为 `zh`，其余记为 `en`，此后这条订阅收到的推送文案、测试通知都用这种语言（库里存在 `push_subscriptions.lang`，库版本 4 新增，`TEXT NOT NULL DEFAULT 'zh'`，升级前的老订阅按 `zh`）。端点须是 https、至多 2048 字节，`p256dh` 须是 P-256 曲线上的点，`auth` 须 16 字节，否则 400；已有 20 条订阅时登记新端点回 409 `{"error":"推送订阅已达上限 20 个，请先在别的设备上关闭通知"}`（同一端点再登记不算新增）；推送停用 503 |
@@ -115,7 +129,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 | `POST /api/push/test` | cookie + 同源 | `{"endpoint"}` → 同步发一条测试通知（标题 Railse、正文随这条订阅的语言：`zh` 为“通知正常”、`en` 为 “Notifications are working”）：成功 204；hub 没有这条订阅 404；推送服务没收下 502（订阅已失效时 hub 已删掉它，文案提示重新开启）；推送停用 503 |
 | `GET /`（及 `/api/`、`/ws/` 以外的一切路径） | 无 | 网页：构建产物里的文件原样返回，其余路径回 `index.html`（单页回退）；只接受 GET、HEAD，其余 405；没构建时 503 提示。`/api/`、`/ws/` 下没有的接口不论方法都回 404 `{"error":"没有这个接口"}`，不回网页 |
 
-请求的 JSON 字段：`id、machine_id、session_id、kind（permission|question|done|webhook|ask）、tool_name、payload（已脱敏）、risk、project_root、engine_reason、state、decided_by、decision_note、rule_id、turn_id、cli_session_id、title、created_at、expires_at、decided_at、delivered_at`，以及可选的 `trigger`（引擎的触发点 `{segment, why}`：`segment` 是命令里起决定作用的那一段（或路径、网址），已脱敏、至多 80 字；`why` 是固定的中文短语，网页自带英文；`read`、`write_in_project`、提问与老守护进程送来的请求没有这个键，库 v5 起有）；载荷里 shell 请求可能多一个 `description`（Claude Code 自己写的一句话说明，已脱敏）；`/api/inbox` 的 `pending` 与 `questions`、`/api/requests`、`/api/requests/{id}` 的 `request`、decide 的返回与 `/ws/client` 推送的请求（统称“请求视图”）还带 `cli`（请求所属会话的 CLI：`claude`、`codex`、`gemini`，没有会话或查不到为空串）、`machine_name`（webhook 请求为空）、`project`（项目根的最后一段）与 `has_redacted`（载荷任一字段或 `title` 含脱敏占位符 `<redacted>` 时为 true；question 的 `title` 是事件消息、webhook 的是来源给的标题，入库前都已脱敏）。`state` 取 `pending、approved、denied、answered、cancelled、expired、auto_allowed、auto_denied、passthrough、recorded`（`answered` 只有提问会到）；`delivered_at` 非空表示决定已交到钩子（或 webhook 回调已成功）。
+请求的 JSON 字段：`id、machine_id、session_id、kind（permission|question|done|webhook|ask）、tool_name、payload（已脱敏）、risk、project_root、engine_reason、state、decided_by、decision_note、rule_id、turn_id、cli_session_id、title、created_at、expires_at、decided_at、delivered_at`，以及可选的 `trigger`（引擎的触发点 `{segment, why}`：`segment` 是命令里起决定作用的那一段（或路径、网址），已脱敏、至多 80 字；`why` 是固定的中文短语，网页自带英文；`read`、`write_in_project`、提问与老守护进程送来的请求没有这个键，库 v5 起有）；载荷里 shell 请求可能多一个 `description`（Claude Code 自己写的一句话说明，已脱敏）；`/api/inbox` 的 `pending` 与 `questions`、`/api/requests`、`/api/requests/{id}` 的 `request`、decide 的返回与 `/ws/client` 推送的请求（统称“请求视图”）还带 `cli`（请求所属会话的 CLI：`claude`、`codex`、`gemini`，没有会话或查不到为空串）、`machine_name`（webhook 请求为空）、`project`（项目根的最后一段）、`can_trust`（批准时能不能顺带限时放行：请求是审批、所属机器在线且守护进程声明了 `trust`）与 `has_redacted`（载荷任一字段或 `title` 含脱敏占位符 `<redacted>` 时为 true；question 的 `title` 是事件消息、webhook 的是来源给的标题，入库前都已脱敏）。`state` 取 `pending、approved、denied、answered、cancelled、expired、auto_allowed、auto_denied、passthrough、recorded`（`answered` 只有提问会到）；`delivered_at` 非空表示决定已交到钩子（或 webhook 回调已成功）。
 
 **提问的请求视图。** `kind` 为 `ask`，`tool_name` 固定 `AskUserQuestion`，`risk`、`engine_reason`、`title` 为空串，`payload` 别用；多出 `ask`（题目）和作答后的 `answers`，没有时这两个键省略。`ask.questions` 有 1～4 道题，各自：`question`（必有，题与题互不相同，至多 2000 字）、`header`（可省，至多 60 字）、`options`（总是数组，可为空，至多 8 个，每个 `label` 必有至多 200 字、`description` 可省）、`multiSelect`（只在为 true 时出现）。文字里可能有 `<redacted>`（守护进程脱敏的；hub 收到时会再脱敏一遍核对，题面有变化就整条拒收，不改写），这时 `has_redacted` 为 true。作答后 `state` 为 `answered`、`decided_by` 为 `user`，`answers` 是 `{题面: 答案}`（答案是用户打的原文）；守护进程交给钩子后 `delivered_at` 有值。手机上交回终端是 `passthrough`、`decided_by: user`，没有 `answers`，也不等送达。其余结束同审批：`expired`、`cancelled`，或守护进程侧的 `passthrough`（没接 hub、出错等）。对提问调 `decide`、`propose` 回 400“这是提问，用答题接口”。
 
@@ -127,7 +141,7 @@ hub 同源托管手机网页（PWA）：浏览器打开 `https://<hub 域名>/` 
 
 记不住时请求保持 pending，回 422，文案以“不能记住：”开头，例如：只读、项目内改动和联网操作之外的不能记成放行（`outward`、`destructive` 永远不行）；没有项目根的命令或文件写入不能记成放行（全局也不行：定级依赖项目根；项目根是家目录、它的上级或根目录时也算没有）；含凭据的命令（载荷里有 `<redacted>`）；命令、路径等超过 4 KiB；规则集已接近下发上限；拒绝匹配不上这条请求（例如 `a && b` 这样的复合命令，请手写规则）；webhook 请求；显式 `scope: project` 而没有项目根。
 
-**`/ws/client` 帧**：每帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`。`request_new`、`request_updated` 的 `data` 是请求视图（与 `/api/inbox` 里每条同形状，守护进程、webhook、question/done、提问的请求都一样），`rules_updated` 是 `{"version"}`，`status` 是 `{"paused"}`。请求的状态变化、决定未送达（undeliverable），以及 `delivered_at` 从空变成有值（守护进程的送达回执、送达对账、webhook 回调成功）都推 `request_updated`。question 不再等（同一会话来了新事件）时不单独推 `request_updated`：之后的 question、done、待审批与提问本身以 `request_new` 推出，网页收到 `request_new` 时应重新拉 `/api/inbox`，`questions` 随之更新；由守护进程审计补进的历史行（本机自动放行、自动拒绝等）不推送，它们让 question 不再等的变化要到下一次全量拉取才看得到。推送只是“有变化”的提示：慢的订阅者（积压 64 帧）会被丢帧，网页每次连上或怀疑漏帧时必须全量重新拉取（`/api/inbox`、`/api/status`、`/api/rules` 等）。hub 每 30 秒复核一次登录并 ping，登录失效（登出、换密码、过期）时以 1008 关闭；网页不该发数据帧，发了就断开。
+**`/ws/client` 帧**：每帧 `{"type":"request_new|request_updated|rules_updated|status","data":…}`。`request_new`、`request_updated` 的 `data` 是请求视图（与 `/api/inbox` 里每条同形状，守护进程、webhook、question/done、提问的请求都一样），`rules_updated` 是 `{"version"}`，`status` 是 `{"paused"}` 或 `{"trusts"}`（生效中的限时放行条数变了：建、撤、到期，网页据此重拉 `/api/trusts`）。请求的状态变化、决定未送达（undeliverable），以及 `delivered_at` 从空变成有值（守护进程的送达回执、送达对账、webhook 回调成功）都推 `request_updated`。question 不再等（同一会话来了新事件）时不单独推 `request_updated`：之后的 question、done、待审批与提问本身以 `request_new` 推出，网页收到 `request_new` 时应重新拉 `/api/inbox`，`questions` 随之更新；由守护进程审计补进的历史行（本机自动放行、自动拒绝等）不推送，它们让 question 不再等的变化要到下一次全量拉取才看得到。推送只是“有变化”的提示：慢的订阅者（积压 64 帧）会被丢帧，网页每次连上或怀疑漏帧时必须全量重新拉取（`/api/inbox`、`/api/status`、`/api/rules` 等）。hub 每 30 秒复核一次登录并 ping，登录失效（登出、换密码、过期）时以 1008 关闭；网页不该发数据帧，发了就断开。
 
 **webhook。** `POST /api/webhook/approvals`，`Authorization: Bearer <来源令牌>`，请求体至多 64 KiB：
 
@@ -257,6 +271,7 @@ fly ssh console -a <应用名> -C "railse hub token"             # 接入码，�
 | 守护进程日志“拒绝了握手…协议版本不一致” | 升级守护进程与 hub 中较旧的一方 |
 | 请求不进收件箱、立即交回终端 | 看 `railse agent status` 是否暂停；看 `agent.log` 是否连着 hub；Gemini 的请求本来就不进 |
 | 审批照常进手机，Claude Code 的选择题却立即交回终端 | hub 是 0.1.4 及更早的（welcome 里没声明认得提问），`agent.log` 有“hub … 没有声明认得提问（版本太旧）”：升级 hub；本机 hub 升级后要重启（`railse setup` 不会重启已在跑的本机 hub），见 [setup.md](setup.md) 的“升级” |
+| 手机批准时没有“接下来一段时间都放行”开关 | 请求视图 `can_trust` 为 false：机器不在线，或守护进程是 0.2.2 及更早（hello 没声明 `trust`，升级并重启守护进程）；hub 是 0.2.2 及更早时也没有（升级并重启 hub）。请求既没有会话编号也没有项目根时同样不显示 |
 | `railse hub password` 回显密码 | 用 `read -s PW; printf '%s\n' "$PW" \| railse hub password` |
 | hub 退出码 1、日志“不关数据库” | 关停时有在途请求、长连接处理或回调没在时限内退出，或服务出错结束；直接重启即可 |
 | `railse hub run` 启动即退出 1、日志“监听失败” | 端口被占或 `--listen` 地址无效，换个地址。用 `--acme-domain` 时还可能是 80 端口被占（`--acme-http` 换地址或 `none`）、证书目录建不了，或 Linux 上没有 `CAP_NET_BIND_SERVICE`（`permission denied`，见“部署与反向代理”的 A） |

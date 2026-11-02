@@ -9,12 +9,12 @@
 ```sh
 go build -o ~/bin/railse ./cmd/railse
 railse agent run --foreground    # 前台运行，--foreground 让日志同时打到 stderr；Ctrl-C 退出
-railse agent status              # 另开终端查看：paused、规则条数、待决请求数、hub 连接
+railse agent status              # 另开终端查看：paused、规则条数、待决请求数、生效中的限时放行条数（trusts: N）、hub 连接
 ```
 
 `railse agent status` 的 `hub:` 行：没接入 hub（没有 `machine.json`，或接入后还没重启守护进程）时是 `hub: none`；升级前起的旧守护进程不报这一项，显示 `hub: 未知（守护进程版本较旧？重启它）`；接入后是 `hub: connecting <地址>`（还没连上或等着重连）、`hub: connected <地址>`，或 `hub: disabled <地址>`（连续 3 次被 hub 以 401 拒绝，已停止连接，要 `railse agent enroll --force` 后重启守护进程，见 `docs/hub.md`）。
 
-配置目录取 `$RAILSE_HOME`，没设就是 `~/.railse`（权限 0700），里面有 `agent.sock`、`rules.yaml`、`audit.jsonl`、`state.json`、`agent.log`，socket 与审计为 0600。`agent` 子命令也接受 `--dir 目录`。钩子不带 `--socket` 时连 `$RAILSE_HOME` 或 `~/.railse` 里的 `agent.sock`，看的是 CLI 起钩子时的环境，那里不一定有 `RAILSE_HOME`。所以守护进程的数据目录（`--dir`，没给时取 `$RAILSE_HOME`）不是 `~/.railse` 时，`railse setup hooks` 在钩子命令里写上 `--socket <目录>/agent.sock`（是 `~/.railse` 时不写，命令不变）；只设了 `RAILSE_HOME` 的也一样。以前手工换过目录、钩子是按 `~/.railse` 装的，重跑一次 `setup hooks --dir <目录>`；`railse doctor --dir <目录>` 会在 `hooks.*` 报出对不上的 socket（它把不带 `--socket` 的钩子当作连 `~/.railse/agent.sock`）。开机自启与退出后自动拉起用 `railse setup autostart`（macOS launchd、Linux systemd 用户单元，见 [setup.md](setup.md)）；`railse doctor` 只读地检查目录与文件权限、守护进程在不在跑、钩子装没装好。
+配置目录取 `$RAILSE_HOME`，没设就是 `~/.railse`（权限 0700），里面有 `agent.sock`、`rules.yaml`、`audit.jsonl`、`state.json`、`agent.log`，以及建过限时放行后的 `trusts.json`，socket、审计与 `trusts.json` 为 0600。`agent` 子命令也接受 `--dir 目录`。钩子不带 `--socket` 时连 `$RAILSE_HOME` 或 `~/.railse` 里的 `agent.sock`，看的是 CLI 起钩子时的环境，那里不一定有 `RAILSE_HOME`。所以守护进程的数据目录（`--dir`，没给时取 `$RAILSE_HOME`）不是 `~/.railse` 时，`railse setup hooks` 在钩子命令里写上 `--socket <目录>/agent.sock`（是 `~/.railse` 时不写，命令不变）；只设了 `RAILSE_HOME` 的也一样。以前手工换过目录、钩子是按 `~/.railse` 装的，重跑一次 `setup hooks --dir <目录>`；`railse doctor --dir <目录>` 会在 `hooks.*` 报出对不上的 socket（它把不带 `--socket` 的钩子当作连 `~/.railse/agent.sock`）。开机自启与退出后自动拉起用 `railse setup autostart`（macOS launchd、Linux systemd 用户单元，见 [setup.md](setup.md)）；`railse doctor` 只读地检查目录与文件权限、守护进程在不在跑、钩子装没装好。
 
 ## 装钩子
 
@@ -54,7 +54,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | `ask`、`answers` | 仅 `ask`：脱敏后的题目；`answers` 仅手机上答了的，脱敏后的题面 → 脱敏后的答案 |
 | `action` | `allow`、`deny`、`passthrough`、`answer`（`ask` 在手机上答了） |
 | `state` | 见下表 |
-| `rule_id`、`reason`、`decided_by` | 命中的规则与理由；谁定的：`rule:<id>`、`no_hub`、`paused`、`timeout`、`terminal`、`shutdown`、`error` |
+| `rule_id`、`reason`、`decided_by` | 命中的规则与理由；谁定的：`rule:<id>`、`trust:<放行 id>`（限时放行命中）、`no_hub`、`paused`、`timeout`、`terminal`、`shutdown`、`error`；管理命令里限时放行的建、撤、到期记建的人 `cli`、`env`、`phone`，被手机撤掉的记 `hub` |
 | `message` | 事件文本，如最后一条回复 |
 
 | `state` | 含义 |
@@ -102,6 +102,50 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 
 `railse agent pause` 后，除命中用户 deny 规则的请求外一律交回终端（Claude Code 的选择题不受暂停影响）；`railse agent resume` 恢复。暂停状态存在 `state.json`，重启守护进程后保持。
 
+## 限时放行（0.2.3 起）
+
+把一个 CLI 会话或这台机器上的一个项目在一段时间内整体放行。**放行期间 Railse 对该范围完全不把关，等同于 Claude Code 的 bypassPermissions 加上审计，到期自动失效，最长 24 小时。** 守护进程是执行者：放行表在它内存里，同时落 `trusts.json`，重启不丢；接了 hub 时与 hub 双向同步（见下），hub 断线期间照常生效到期。
+
+### 判定
+
+`handlePermission` 跑完引擎、在送手机之前看放行表：
+
+| 引擎结论 | 命中放行 | 结果 |
+| --- | --- | --- |
+| 规则 allow / deny（含你手写的 deny） | 任意 | 照旧：放行不压拒绝规则，也不需要出手 |
+| 定不了，总开关暂停 | 任意 | 照旧交回终端（暂停压过放行） |
+| 定不了 | 有，且未过期 | `allow`，审计 `state: auto_allowed`、`decided_by: trust:<id>`、`reason` 形如“限时放行（会话 claude，剩 1 小时 5 分）”；钩子看到的理由是固定的“限时放行中” |
+| 定不了 | 无 | 照旧（硬底线回 ask，中间三级交 Claude，`PermissionRequest` 送手机） |
+
+- **怎么算命中。** 会话范围要请求的 CLI（`tool`）与会话 id（`cli_session_id`）都相同，请求没有会话 id 不命中；项目范围要请求算出的项目根（见“项目根”）与放行的项目根字符串相等，没有项目根不命中。同时命中几条记最晚到期的那条。`PreToolUse`、`PermissionRequest` 与 Codex 的请求都看；Gemini 的钩子不能放行，命中了也只是渲染成不作决定，照旧交回终端。
+- **后果。** `PreToolUse` 回 allow 时 Claude Code 跳过它自己的权限检查（含 auto 的分类器）；`settings.json` 里你写的 deny 仍先生效。选择题（`AskUserQuestion`）不看放行，照样进手机。
+- **上限。** 时长 5 分钟～24 小时，超界截到边上（`railse trust 1m` 建成 5 分钟，`48h` 建成 24 小时）；每台机器同时生效至多 20 条，超出拒建。
+
+### 三个入口
+
+```sh
+railse trust [时长] [--session <会话 id>] [--note 文字] [--dir 目录]   # 时长如 30m、2h、8h，默认 2h
+railse trust list [--dir 目录]                                    # 每条一行：id、范围、剩余时长、谁建的、备注
+railse trust revoke <id> | --all [--dir 目录]
+```
+
+- **终端。** 不带 `--session` 放行当前目录所在的项目，项目根与守护进程同一套算法（git 仓库根，或家目录下的普通目录）；定不出项目根（家目录及其上级、系统目录、点开头的目录等）时报错、不放行。这台机器上各个 CLI 在这个项目里的请求都算，含之后新开的窗口。`--session` 放行一个 Claude Code 会话（钩子输入里的 `session_id`），只对 Claude 会话有意义。命令经本机 socket 发给守护进程（管理命令 `trust_set`、`trust_list`、`trust_revoke`，与 pause、resume 同一通道）；升级后没重启的旧守护进程不认，提示重启它。
+- **启动命令。** `RAILSE_TRUST=2h claude`：Claude 的 `PreToolUse` 钩子把这个环境变量原样带给守护进程（钩子不判断格式、不在 stderr 说话），守护进程第一次在这个会话里碰上定不了的请求时建一条会话放行（`created_by: env`，从那一刻起算）。只认 Claude `PreToolUse` 带来的、且要有会话 id；格式不对（不是 `30m`、`2h` 这类 Go 时长写法，或不是正数）只记 `agent.log`，按没有处理。**每个会话只建一次**：过期或被撤之后不再重建，要继续放行用 `railse trust --session` 或重开窗口；守护进程重启会忘掉见过哪些会话，那时还带着这个变量的会话会再建一条。
+- **手机。** 批准时打开“接下来一段时间都放行”，选这个会话或这个项目、30 分钟 / 2 小时 / 8 小时。hub 建好放行，先把快照推给守护进程、再下发 allow。要守护进程与 hub 都是 0.2.3 以上，见 [hub.md](hub.md) 的“限时放行”。
+
+看得见、撤得掉：`railse trust list`、`railse agent status` 的 `trusts: N`、`railse doctor` 的 `agent.trusts`（有生效中的报 ok、列条数，没有或守护进程没在跑 skip）；手机收件箱横幅与设置页“限时放行”一节。建、撤、到期各记一条审计 `kind: control`，`message` 为 `trust_set`、`trust_revoke`、`trust_expired`，`reason` 形如“项目 blog，到 11-02 15:30，cli 建”，随审计上报 hub。守护进程每分钟清一次到期的。
+
+### `trusts.json`
+
+数据目录里的 JSON 数组，每项一条放行：`id、scope、tool、cli_session_id、project_root、until、created_at、created_by、note`，外加 `synced`（hub 已收下）与 `revoked`（墓碑：本机撤掉、hub 可能还没收下的，只有 `id` 与原到期时间，不生效，过了原到期时间清掉）。原子写入、0600；读不了或损坏时记日志、按空表跑。不要手改：守护进程只在启动时读。
+
+### 与 hub 同步
+
+hello 里声明 `trust` 能力；连着同样声明了 `trust` 的 hub 时才同步，否则只用本机条目，不发、不标同步、hub 的快照也不看。
+
+- **本机 → hub。** 本机建、撤、到期都经 `trust` 帧（`op` 为 `set`、`revoke`、`expired`）报给 hub，走单独的发送队列，不拖慢审批。
+- **hub → 本机。** welcome 与之后的 `trusts` 帧带这台机器的全部放行。合并：快照里有的写入并标已同步；已同步却不在快照里的删掉（被手机撤了，审计 `trust_revoke`、`decided_by: hub`）；未同步的（断线期间或老 hub 时建的）保留并补发 `set`；本机撤掉的有墓碑，快照里还带着时不复活、重发 `revoke`。本机建的条目等 hub 的快照回来才算同步。welcome 不带 `trusts` 键时：welcome 远小于单帧上限就当空快照；否则可能是 hub 带不下、紧跟着单发，按不完整处理，不删任何条目。
+
 ## 三家 CLI 的差异
 
 | | Claude Code | Codex | Gemini CLI |
@@ -122,6 +166,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | --- | --- |
 | 规则放行（内置只读、项目内改动；你记住的放行） | allow |
 | 规则拒绝 | deny |
+| 定不了，命中限时放行（0.2.3 起） | allow，理由“Railse：限时放行中”（见“限时放行”） |
 | 定不了，对外或不可逆 | 立刻回 `ask`（0.2.2 起不在这里等手机）：终端弹确认框，随后的 `PermissionRequest` 送手机，谁先答谁算 |
 | 定不了，联网、项目外改动、无法判断 | 不表态（审计 `passthrough`、`decided_by: classifier`），先让 Claude 自己的 allow 列表、auto 的分类器处理；Claude 要问人时 `PermissionRequest` 再送手机。`~/.railse/settings.yaml` 写 `claude_undecided: phone` 则与上一行一样回 `ask` |
 
