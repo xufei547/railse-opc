@@ -19,13 +19,22 @@ import (
 // trusts 是本机的限时放行表：守护进程是执行者，hub 只是展示与远程控制。内存里一份，改动即原子落盘到 trusts.json。
 // 过期的条目只在 sweep 时删掉（调用方据此写 trust_expired 审计），其余读路径（list、match、add 的计数）只是跳过它们；
 // 启动时读回的过期条目也留到第一次 sweep，停机期间到期的同样有审计。
-// synced 记哪些条目 hub 已经收下（见 hubclient：已同步的条目不在 hub 快照里，就是被手机撤了）。
+// synced 记哪些条目 hub 已经收下（见 applySnapshot：已同步的条目不在 hub 快照里，就是被手机撤了）；tomb 是墓碑：本机撤掉、
+// hub 可能还没收下的 id → 原到期时间，hub 快照里还带着它们时不复活、要重发撤销。两者都随表落盘，守护进程重启后照样认。
 type trusts struct {
 	mu     sync.Mutex
 	path   string
 	now    func() time.Time
 	items  map[string]proto.Trust
 	synced map[string]bool
+	tomb   map[string]time.Time
+}
+
+// trustRecord 是 trusts.json 的一项：放行本身，加 hub 是否已收下（synced）。revoked 为真的是墓碑，只有 id 与到期时间，不生效。
+type trustRecord struct {
+	proto.Trust
+	Synced  bool `json:"synced,omitempty"`
+	Revoked bool `json:"revoked,omitempty"`
 }
 
 // 管理命令回给 railse trust 的错误。都是固定句子：命令行按终端语言用 i18n.Lookup 翻（英文在 internal/i18n/en.go），改了那边要一起改。
@@ -39,7 +48,7 @@ var (
 
 // newTrusts 读回 path 里的放行表（不存在按空表）。读不了或损坏时返回空表与错误，调用方记日志后照常用这张空表。
 func newTrusts(path string, now func() time.Time) (*trusts, error) {
-	t := &trusts{path: path, now: now, items: map[string]proto.Trust{}, synced: map[string]bool{}}
+	t := &trusts{path: path, now: now, items: map[string]proto.Trust{}, synced: map[string]bool{}, tomb: map[string]time.Time{}}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return t, nil
@@ -47,13 +56,20 @@ func newTrusts(path string, now func() time.Time) (*trusts, error) {
 	if err != nil {
 		return t, fmt.Errorf("读放行表 %s: %w", path, err)
 	}
-	var list []proto.Trust
+	var list []trustRecord
 	if err := json.Unmarshal(b, &list); err != nil {
 		return t, fmt.Errorf("放行表 %s 损坏，按空表处理: %w", path, err)
 	}
-	for _, tr := range list {
-		if tr.ID != "" {
-			t.items[tr.ID] = tr
+	for _, r := range list {
+		switch {
+		case r.ID == "":
+		case r.Revoked:
+			t.tomb[r.ID] = r.Until
+		default:
+			t.items[r.ID] = r.Trust
+			if r.Synced {
+				t.synced[r.ID] = true
+			}
 		}
 	}
 	return t, nil
@@ -87,17 +103,8 @@ func (t *trusts) add(tr proto.Trust) (proto.Trust, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
-	switch tr.Scope {
-	case proto.TrustScopeSession:
-		if tr.Tool == "" || tr.CLISession == "" {
-			return proto.Trust{}, errTrustTarget
-		}
-	case proto.TrustScopeProject:
-		if tr.Project == "" {
-			return proto.Trust{}, errTrustTarget
-		}
-	default:
-		return proto.Trust{}, errTrustScope
+	if err := checkTrustTarget(tr); err != nil {
+		return proto.Trust{}, err
 	}
 	// 下限留 trustMinGrace 的余量：调用方（命令行、手机经 hub、RAILSE_TRUST）按“此刻 + 时长”算 Until，送到这里已过去一点时间
 	if tr.Until.Before(now.Add(proto.TrustMin - trustMinGrace)) {
@@ -119,6 +126,23 @@ func (t *trusts) add(tr proto.Trust) (proto.Trust, error) {
 	return tr, t.saveLocked()
 }
 
+// checkTrustTarget 校验范围与目标：session 要有 tool 与 cli_session_id，project 要有项目根。
+func checkTrustTarget(tr proto.Trust) error {
+	switch tr.Scope {
+	case proto.TrustScopeSession:
+		if tr.Tool == "" || tr.CLISession == "" {
+			return errTrustTarget
+		}
+	case proto.TrustScopeProject:
+		if tr.Project == "" {
+			return errTrustTarget
+		}
+	default:
+		return errTrustScope
+	}
+	return nil
+}
+
 // newTrustID 是随机 8 字节的十六进制。
 func newTrustID() string {
 	var b [8]byte
@@ -137,7 +161,8 @@ func (t *trusts) liveLocked(now time.Time) int {
 	return n
 }
 
-// revoke 撤掉一条，"all" 撤全部；返回撤掉的（生效中的与已过期未清的都算）。落盘失败只能等下次改动再写，不影响内存里已撤。
+// revoke 撤掉一条，"all" 撤全部；返回撤掉的（生效中的与已过期未清的都算）。撤掉的留墓碑到原到期时间（见 applySnapshot）。
+// 落盘失败只能等下次改动再写，不影响内存里已撤。
 func (t *trusts) revoke(id string) []proto.Trust {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -147,6 +172,7 @@ func (t *trusts) revoke(id string) []proto.Trust {
 			gone = append(gone, tr)
 			delete(t.items, k)
 			delete(t.synced, k)
+			t.tomb[k] = tr.Until
 		}
 	}
 	if len(gone) > 0 {
@@ -211,7 +237,7 @@ func (t *trusts) clock() time.Time {
 	return t.now()
 }
 
-// sweep 清掉过期的并返回它们（按到期先后），调用方写审计。
+// sweep 清掉过期的并返回它们（按到期先后），调用方写审计；过了原到期时间的墓碑一并清掉（hub 那边也已到期）。
 func (t *trusts) sweep() []proto.Trust {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -224,24 +250,114 @@ func (t *trusts) sweep() []proto.Trust {
 			delete(t.synced, id)
 		}
 	}
-	if len(gone) > 0 {
+	pruned := false
+	for id, until := range t.tomb {
+		if !until.After(now) {
+			delete(t.tomb, id)
+			pruned = true
+		}
+	}
+	if len(gone) > 0 || pruned {
 		_ = t.saveLocked()
 	}
 	sortByUntil(gone)
 	return gone
 }
 
+// unsynced 返回生效中、hub 还没收下的（本机建的，或 hub 不认得放行时建的），按到期先后。
+func (t *trusts) unsynced() []proto.Trust {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now()
+	var out []proto.Trust
+	for id, tr := range t.items {
+		if !t.synced[id] && tr.Until.After(now) {
+			out = append(out, tr)
+		}
+	}
+	sortByUntil(out)
+	return out
+}
+
+// applySnapshot 按 hub 的放行快照合并（设计 §2.5 的精确化）：
+//   - 快照里有的写入/覆盖本机表并标已同步；已过期的、范围或目标不合规的不收，生效中的已满 20 条时不收新的；
+//   - 快照里有、本机留着墓碑的（本机撤了、hub 还没收下）不复活，放进 resend，调用方重发撤销；
+//   - complete 为真时，本机已同步、还没过期却不在快照里的删掉（被手机撤了），放进 revoked，调用方写审计；
+//     不在快照里的墓碑清掉（hub 已收下撤销）。complete 为假（快照可能不完整）时这两步都不做。
+//
+// 本机未同步的条目一律保留，由调用方补发；已过期的留给 sweep（审计记到期，不记被撤）。
+func (t *trusts) applySnapshot(snap []proto.Trust, complete bool) (revoked []proto.Trust, resend []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now()
+	in := make(map[string]bool, len(snap))
+	changed := false
+	for _, tr := range snap {
+		if tr.ID == "" {
+			continue
+		}
+		in[tr.ID] = true
+		if _, dead := t.tomb[tr.ID]; dead {
+			resend = append(resend, tr.ID)
+			continue
+		}
+		if !tr.Until.After(now) || checkTrustTarget(tr) != nil {
+			continue
+		}
+		if limit := now.Add(proto.TrustMax); tr.Until.After(limit) {
+			tr.Until = limit
+		}
+		if _, exists := t.items[tr.ID]; !exists && t.liveLocked(now) >= proto.TrustPerMachine {
+			continue
+		}
+		tr.MachineID = "" // 机器不言自明，与本机建的一样不存
+		t.items[tr.ID] = tr
+		t.synced[tr.ID] = true
+		changed = true
+	}
+	if complete {
+		for id, tr := range t.items {
+			if t.synced[id] && !in[id] && tr.Until.After(now) {
+				revoked = append(revoked, tr)
+				delete(t.items, id)
+				delete(t.synced, id)
+				changed = true
+			}
+		}
+		for id := range t.tomb {
+			if !in[id] {
+				delete(t.tomb, id)
+				changed = true
+			}
+		}
+	}
+	if changed {
+		_ = t.saveLocked() // 落盘失败只能等下次改动再写，内存里已生效
+	}
+	sortByUntil(revoked)
+	sort.Strings(resend)
+	return revoked, resend
+}
+
 func sortByUntil(l []proto.Trust) {
 	sort.Slice(l, func(i, j int) bool { return l[i].Until.Before(l[j].Until) })
 }
 
-// saveLocked 把全表按建立先后原子写进 trusts.json（0600）。
+// saveLocked 把全表（连同已同步标记与墓碑）按建立先后原子写进 trusts.json（0600）；墓碑没有建立时间，排在最前。
 func (t *trusts) saveLocked() error {
-	list := make([]proto.Trust, 0, len(t.items))
-	for _, tr := range t.items {
-		list = append(list, tr)
+	list := make([]trustRecord, 0, len(t.items)+len(t.tomb))
+	for id, tr := range t.items {
+		list = append(list, trustRecord{Trust: tr, Synced: t.synced[id]})
 	}
-	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.Before(list[j].CreatedAt) })
+	for id, until := range t.tomb {
+		list = append(list, trustRecord{Trust: proto.Trust{ID: id, Until: until}, Revoked: true})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if !list[i].CreatedAt.Equal(list[j].CreatedAt) {
+			return list[i].CreatedAt.Before(list[j].CreatedAt)
+		}
+		return list[i].ID < list[j].ID
+	})
 	b, err := json.Marshal(list)
 	if err != nil {
 		return err
@@ -349,6 +465,17 @@ func (s *Server) trustEvent(msg string, tr proto.Trust) {
 		op := map[string]string{"trust_set": "set", "trust_revoke": "revoke", "trust_expired": "expired"}[msg]
 		(*fn)(tr, op)
 	}
+}
+
+// applyHubTrusts 合并 hub 的放行快照（见 trusts.applySnapshot）：被手机撤掉的逐条写 trust_revoke 审计（decided_by hub），
+// 不通知 trustChanged（hub 那边已经撤了）。返回仍要报给 hub 的：本机撤了、hub 还带着的 id，与本机未同步的条目。
+// 写审计会同步调 AuditSink.Forward，调用方不得持着它用到的锁。
+func (s *Server) applyHubTrusts(snap []proto.Trust, complete bool) (revokes []string, unsynced []proto.Trust) {
+	gone, revokes := s.trusts.applySnapshot(snap, complete)
+	for _, tr := range gone {
+		s.writeAudit(AuditEntry{TS: time.Now(), Kind: "control", State: "recorded", Message: "trust_revoke", Reason: trustAuditReason(tr), DecidedBy: "hub"})
+	}
+	return revokes, s.trusts.unsynced()
 }
 
 // SetTrustChanged 装上放行变更的回调（hub 客户端用来发 trust 帧）：op 为 set、revoke、expired。nil 表示不通知。可随时调用；

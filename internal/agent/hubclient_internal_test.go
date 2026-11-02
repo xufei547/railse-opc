@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1095,4 +1096,271 @@ func TestAuditFlushFallsBackOnEncodeError(t *testing.T) {
 	if !tc.c.Connected() || f.dials.Load() != 1 {
 		t.Fatal("编码失败不应断开连接")
 	}
+}
+
+// trustSyncEnv 是放行同步的测试环境：真实的守护进程（监听 socket，管理命令走 roundTrip）接一个假 hub。
+// 假 hub 每次连接都先等 admit 里的一个令牌再发 welcome（测试借此让客户端停在“拨上了、没握手完”的断线状态），
+// welcome 带 features 与 snap 里的放行（snap 为 nil 时不带 trusts 键），然后把连接交给测试、自己记帧。
+type trustSyncEnv struct {
+	env   *testEnv
+	hub   *fakeHub
+	c     *HubClient
+	logs  *logBuf
+	admit chan struct{}
+	snap  atomic.Pointer[[]proto.Trust]
+}
+
+func newTrustSyncEnv(t *testing.T, features []string) *trustSyncEnv {
+	t.Helper()
+	setHubTimings(t, []time.Duration{20 * time.Millisecond}, 0, 0, 0)
+	e := &trustSyncEnv{logs: &logBuf{}, admit: make(chan struct{}, 8)}
+	e.hub = newFakeHub(t, 0, func(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
+		select {
+		case <-e.admit:
+		case <-time.After(10 * time.Second):
+			return
+		}
+		w := wire.Welcome{T: wire.TWelcome, RulesVersion: 1, RulesYAML: defaultRulesYAML(), ServerTime: time.Now().UTC(), Features: features}
+		if p := e.snap.Load(); p != nil {
+			w.Trusts = *p
+		}
+		f.send(conn, w)
+		f.conns <- conn
+		f.record(conn)
+	})
+	e.env = startServerLog(t, LocalDecider{}, nil, e.logs)
+	rules, err := LoadRules(e.env.cfg.RulesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.c = NewHubClient(e.env.cfg, MachineConfig{HubURL: e.hub.http.URL, MachineID: "m1", Secret: fakeSecret, Name: "mac"}, rules,
+		e.env.srv.Pending(), e.env.srv.SetHubPaused, log.New(e.logs, "", 0))
+	e.c.SyncTrusts(e.env.srv)
+	e.env.srv.SetAuditSink(e.c) // 与 cmd 的接线一致：被快照撤掉的写审计时同步调 Forward，验证这时没持着客户端的锁
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.c.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("取消后 Run 没有返回")
+		}
+		if t.Failed() {
+			t.Logf("日志:\n%s", e.logs.String())
+		}
+	})
+	return e
+}
+
+// connect 放行一次握手，等到连上，返回假 hub 这一侧的连接。
+func (e *trustSyncEnv) connect(t *testing.T) *websocket.Conn {
+	t.Helper()
+	e.admit <- struct{}{}
+	select {
+	case conn := <-e.hub.conns:
+		waitFor(t, e.c.Connected)
+		return conn
+	case <-time.After(5 * time.Second):
+		t.Fatal("假 hub 没等到连接")
+		return nil
+	}
+}
+
+// changes 是假 hub 收到的全部 trust 帧。
+func (e *trustSyncEnv) changes() []wire.TrustChange {
+	var out []wire.TrustChange
+	for _, raw := range e.hub.framesOf(wire.TTrust) {
+		var ch wire.TrustChange
+		if err := json.Unmarshal(raw, &ch); err != nil {
+			panic(err)
+		}
+		out = append(out, ch)
+	}
+	return out
+}
+
+// expectChanges 等到收齐 n 条 trust 帧并返回；多收了也报错（稍等一会儿再看）。
+func (e *trustSyncEnv) expectChanges(t *testing.T, n int) []wire.TrustChange {
+	t.Helper()
+	waitFor(t, func() bool { return len(e.changes()) >= n })
+	time.Sleep(100 * time.Millisecond)
+	got := e.changes()
+	if len(got) != n {
+		t.Fatalf("应收到 %d 条 trust 帧，实际 %d：%+v", n, len(got), got)
+	}
+	return got
+}
+
+func (e *trustSyncEnv) trustSet(t *testing.T, tr proto.Trust) proto.Trust {
+	t.Helper()
+	var reply proto.ControlReply
+	json.Unmarshal(roundTrip(t, e.env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set", Trust: &tr}), &reply)
+	if !reply.OK || len(reply.Trusts) == 0 {
+		t.Fatalf("建放行：%+v", reply)
+	}
+	// 回执是全部生效中的；新建的那条建立时间最晚（项目根会被规范化，不按字段比）
+	last := reply.Trusts[0]
+	for _, x := range reply.Trusts[1:] {
+		if x.CreatedAt.After(last.CreatedAt) {
+			last = x
+		}
+	}
+	return last
+}
+
+func (e *trustSyncEnv) trustRevoke(t *testing.T, id string) {
+	t.Helper()
+	var reply proto.ControlReply
+	json.Unmarshal(roundTrip(t, e.env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_revoke", TrustID: id}), &reply)
+	if !reply.OK {
+		t.Fatalf("撤放行：%+v", reply)
+	}
+}
+
+func (e *trustSyncEnv) trustIDs() []string {
+	var out []string
+	for _, tr := range e.env.srv.trusts.list() {
+		out = append(out, tr.ID)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func sortedIDs(ids ...string) []string {
+	out := slices.Clone(ids)
+	slices.Sort(out)
+	return out
+}
+
+// hubRevokeAudits 是本机审计里由 hub 快照撤掉的放行（trust_revoke，decided_by hub）条数。
+func (e *trustSyncEnv) hubRevokeAudits(t *testing.T) int {
+	t.Helper()
+	n := 0
+	for _, a := range readAudit(t, e.env.cfg.AuditPath) {
+		if a.Kind == "control" && a.Message == "trust_revoke" && a.DecidedBy == "hub" {
+			n++
+		}
+	}
+	return n
+}
+
+// 放行双向同步：本机建的发 set 帧、等快照回来才算同步；快照里手机建的写进本机表，已同步却不在快照里的删掉并审计；
+// 断线期间本机建的、撤的，重连后按 welcome 的快照补发（撤过的不被快照复活）；本机撤销发 revoke 帧。
+func TestHubTrustSync(t *testing.T) {
+	e := newTrustSyncEnv(t, []string{wire.FeatureAsk, wire.FeatureTrust})
+	conn := e.connect(t)
+	if h := e.hub.hellos[0]; !h.Has(wire.FeatureTrust) {
+		t.Fatalf("hello 应声明 trust：%+v", h.Features)
+	}
+	// 1) 本机建一条 → hub 收到 set 帧
+	local := e.trustSet(t, proto.Trust{Scope: proto.TrustScopeProject, Project: e.env.repo, Until: time.Now().Add(time.Hour)})
+	if ch := e.expectChanges(t, 1)[0]; ch.T != wire.TTrust || ch.Op != wire.TrustOpSet || ch.Trust.ID != local.ID || ch.Trust.CreatedBy != "cli" {
+		t.Fatalf("set 帧：%+v", ch)
+	}
+	// 2) hub 回快照：本机那条 + 手机建的一条
+	phone := proto.Trust{ID: "p1", MachineID: "m1", Scope: proto.TrustScopeSession, Tool: "claude", CLISession: "s1", Until: time.Now().Add(time.Hour), CreatedAt: time.Now(), CreatedBy: "phone"}
+	e.hub.send(conn, wire.Trusts{T: wire.TTrusts, Trusts: []proto.Trust{local, phone}})
+	waitFor(t, func() bool { return slices.Equal(e.trustIDs(), sortedIDs(local.ID, "p1")) })
+	// 3) 不含 p1 的快照 → p1 被撤（审计 decided_by hub，不回发 revoke 帧），本机那条已同步、不补发
+	e.hub.send(conn, wire.Trusts{T: wire.TTrusts, Trusts: []proto.Trust{local}})
+	waitFor(t, func() bool { return slices.Equal(e.trustIDs(), []string{local.ID}) })
+	waitFor(t, func() bool { return e.hubRevokeAudits(t) == 1 })
+	e.expectChanges(t, 1)
+	// 4) 断线期间本机建一条、撤掉已同步的 local；重连的 welcome 快照仍带着 local → local 不复活、重发撤销，新建的补发 set
+	conn.CloseNow()
+	waitFor(t, func() bool { return !e.c.Connected() })
+	offline := e.trustSet(t, proto.Trust{Scope: proto.TrustScopeSession, Tool: "claude", CLISession: "s2", Until: time.Now().Add(time.Hour)})
+	e.trustRevoke(t, local.ID)
+	e.snap.Store(&[]proto.Trust{local})
+	conn = e.connect(t)
+	got := e.expectChanges(t, 3)[1:]
+	if got[0].Op != wire.TrustOpRevoke || got[0].Trust.ID != local.ID || got[1].Op != wire.TrustOpSet || got[1].Trust.ID != offline.ID {
+		t.Fatalf("重连后应重发撤销、补发未同步的：%+v", got)
+	}
+	if !slices.Equal(e.trustIDs(), []string{offline.ID}) {
+		t.Fatalf("未同步的应保留、撤过的不复活：%v", e.trustIDs())
+	}
+	// 5) hub 收下两条后的快照：只有 offline。再撤 offline → revoke 帧
+	e.hub.send(conn, wire.Trusts{T: wire.TTrusts, Trusts: []proto.Trust{offline}})
+	e.hub.pingAndWaitPong(t, conn)
+	e.expectChanges(t, 3)
+	e.trustRevoke(t, offline.ID)
+	if ch := e.expectChanges(t, 4)[3]; ch.Op != wire.TrustOpRevoke || ch.Trust.ID != offline.ID {
+		t.Fatalf("revoke 帧：%+v", ch)
+	}
+	if e.hubRevokeAudits(t) != 1 {
+		t.Fatal("本机撤的不该记成 hub 撤的")
+	}
+}
+
+// 声明了 trust 的 hub 发来不带 trusts 键的 welcome（hub 那边没有生效中的放行时省略）：按空快照合并，已同步的被撤；
+// 断线期间手机建的副本照常生效。
+func TestHubTrustWelcomeWithoutTrusts(t *testing.T) {
+	e := newTrustSyncEnv(t, []string{wire.FeatureAsk, wire.FeatureTrust})
+	conn := e.connect(t)
+	phone := proto.Trust{ID: "p1", Scope: proto.TrustScopeSession, Tool: "claude", CLISession: "s1", Until: time.Now().Add(time.Hour), CreatedAt: time.Now(), CreatedBy: "phone"}
+	e.hub.send(conn, wire.Trusts{T: wire.TTrusts, Trusts: []proto.Trust{phone}})
+	waitFor(t, func() bool { return slices.Equal(e.trustIDs(), []string{"p1"}) })
+	conn.CloseNow()
+	waitFor(t, func() bool { return !e.c.Connected() })
+	if _, ok := e.env.srv.trusts.match(proto.Session{Tool: "claude", CLISessionID: "s1"}, ""); !ok {
+		t.Fatal("断线期间手机建的副本应照常生效")
+	}
+	e.connect(t) // snap 为 nil：welcome 不带 trusts 键
+	waitFor(t, func() bool { return len(e.trustIDs()) == 0 })
+	waitFor(t, func() bool { return e.hubRevokeAudits(t) == 1 })
+	e.expectChanges(t, 0)
+}
+
+// hub 没声明 trust：本机建放行不发帧、不标同步；hub 发来的快照（不该有）忽略，本机表不变。
+func TestHubWithoutTrustFeatureIgnored(t *testing.T) {
+	e := newTrustSyncEnv(t, []string{wire.FeatureAsk})
+	conn := e.connect(t)
+	local := e.trustSet(t, proto.Trust{Scope: proto.TrustScopeProject, Project: e.env.repo, Until: time.Now().Add(time.Hour)})
+	phone := proto.Trust{ID: "p1", Scope: proto.TrustScopeSession, Tool: "claude", CLISession: "s1", Until: time.Now().Add(time.Hour), CreatedBy: "phone"}
+	e.hub.send(conn, wire.Trusts{T: wire.TTrusts, Trusts: []proto.Trust{local, phone}})
+	e.hub.pingAndWaitPong(t, conn)
+	time.Sleep(300 * time.Millisecond)
+	e.expectChanges(t, 0)
+	if !slices.Equal(e.trustIDs(), []string{local.ID}) || len(e.env.srv.trusts.unsynced()) != 1 {
+		t.Fatalf("快照应被忽略、本机的不标同步：%v %v", e.trustIDs(), e.env.srv.trusts.unsynced())
+	}
+}
+
+// 没接放行表的客户端（SyncTrusts 没调）不在 hello 里声明 trust：hub 不会让手机给这台机器建放行。
+func TestHubHelloWithoutTrustTable(t *testing.T) {
+	f := newFakeHub(t, 0, welcomeThenRecord)
+	tc := startTestClient(t, f)
+	tc.waitConnected(t)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.hellos[0].Has(wire.FeatureTrust) {
+		t.Fatalf("没接放行表不该声明 trust：%+v", f.hellos[0].Features)
+	}
+}
+
+// welcome 太大、分不清不带 trusts 是“一条没有”还是“带不下、紧跟着单发”时，按不完整处理：已同步的先不删，等单发的 trusts 帧。
+func TestHubTrustWelcomeMaybeIncomplete(t *testing.T) {
+	old := welcomeTrustsRoom
+	welcomeTrustsRoom = wire.MaxFrame // 任何 welcome 都算“可能带不下”
+	t.Cleanup(func() { welcomeTrustsRoom = old })
+	e := newTrustSyncEnv(t, []string{wire.FeatureAsk, wire.FeatureTrust})
+	conn := e.connect(t)
+	phone := proto.Trust{ID: "p1", Scope: proto.TrustScopeSession, Tool: "claude", CLISession: "s1", Until: time.Now().Add(time.Hour), CreatedAt: time.Now(), CreatedBy: "phone"}
+	e.hub.send(conn, wire.Trusts{T: wire.TTrusts, Trusts: []proto.Trust{phone}})
+	waitFor(t, func() bool { return slices.Equal(e.trustIDs(), []string{"p1"}) })
+	conn.CloseNow()
+	waitFor(t, func() bool { return !e.c.Connected() })
+	conn = e.connect(t) // welcome 不带 trusts 键
+	e.hub.pingAndWaitPong(t, conn)
+	if !slices.Equal(e.trustIDs(), []string{"p1"}) || e.hubRevokeAudits(t) != 0 {
+		t.Fatalf("快照可能不完整时不该删：%v", e.trustIDs())
+	}
+	e.hub.send(conn, wire.Trusts{T: wire.TTrusts, Trusts: []proto.Trust{}})
+	waitFor(t, func() bool { return len(e.trustIDs()) == 0 })
 }

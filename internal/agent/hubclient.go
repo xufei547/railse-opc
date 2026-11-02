@@ -110,7 +110,21 @@ type HubClient struct {
 	auditSeq      uint64
 	auditDropping bool          // 本轮积压已记过“丢弃最旧”的日志
 	auditKick     chan struct{} // 攒够一批时叫醒上报循环，容量 1
+
+	// trustSrv 是本机的放行表（SyncTrusts 接上，Run 之前设好、之后只读）；nil 时 hello 不声明 trust、不同步放行。
+	trustSrv *Server
+	// trustQ 是待发的放行变更（由 mu 保护），只在连着声明了 trust 的 hub 时进队；换连接时清空：没发出去的
+	// 由重连的 welcome 快照对齐补上（未同步的补发 set，墓碑重发撤销，到期的 hub 自己清）。
+	trustQ    []wire.TrustChange
+	trustKick chan struct{} // 有新变更时叫醒发送循环，容量 1
 }
+
+// welcomeTrustsRoom 是一台机器的放行快照编码后的上界：至多 20 条，每条的项目根（4096 字节）、短字段（256 字节）与备注（200 字符）
+// 都按 JSON 最坏的转义膨胀算（约 32 KiB 一条），取整留余量。hub 只在 welcome 带上快照会超过单帧上限时才省掉 trusts、紧跟着单发一帧
+// （见 hub 的 welcomeFrame），没有生效中的放行时也省掉（omitempty）。所以 welcome 比单帧上限小出这么多还不带 trusts，只可能是
+// hub 那边一条都没有；否则分不清，按快照不完整处理，等那一帧。
+// 是变量只为测试能调（测试在 Run 之前改、Run 结束后还原）。
+var welcomeTrustsRoom = 768 << 10
 
 // NewHubClient 组装客户端，不发起连接。setHubPaused 是设置 hub 总开关的入口（守护进程里传 Server.SetHubPaused）：
 // welcome 与 paused 帧只经它改 hub 那一侧，不直接改规则引擎或 state.json；不能为 nil。
@@ -122,7 +136,78 @@ func NewHubClient(cfg Config, m MachineConfig, rules *Rules, pending *Pending, s
 	return &HubClient{cfg: cfg, machine: m, rules: rules, pending: pending, setHubPaused: setHubPaused, log: logger, addr: hubOrigin(m.HubURL),
 		backoff: append([]time.Duration(nil), hubBackoff...), stableAfter: hubStableAfter, idleTimeout: hubIdleTimeout, protoBackoff: hubProtoBackoff,
 		auditInterval: hubAuditInterval, auditMaxBytes: hubAuditMaxBytes,
-		changed: make(chan struct{}), waiters: map[string]chan wire.Decision{}, auditKick: make(chan struct{}, 1)}
+		changed: make(chan struct{}), waiters: map[string]chan wire.Decision{}, auditKick: make(chan struct{}, 1), trustKick: make(chan struct{}, 1)}
+}
+
+// SyncTrusts 接上本机的放行表：hello 声明 trust 能力；连着声明了 trust 的 hub 时，收 welcome 与 trusts 帧里的快照合并进本机表，
+// 本机的建、撤、到期经 trust 帧报给 hub。只能在 Run 之前调用。
+func (h *HubClient) SyncTrusts(s *Server) {
+	h.trustSrv = s
+	s.SetTrustChanged(h.queueTrust)
+}
+
+// queueTrust 把一条放行变更排进发送队列并叫醒发送循环，不阻塞（它是 Server 的 trustChanged 回调，在处理连接或到期清理的
+// goroutine 里同步调用）。没连着，或连着的 hub 没声明 trust 时丢掉：前者重连后按快照对齐补上，后者 hub 根本不收。
+func (h *HubClient) queueTrust(tr proto.Trust, op string) {
+	h.mu.Lock()
+	if h.conn == nil || !slices.Contains(h.features, wire.FeatureTrust) {
+		h.mu.Unlock()
+		return
+	}
+	h.trustQ = append(h.trustQ, wire.TrustChange{T: wire.TTrust, Op: op, Trust: tr})
+	h.mu.Unlock()
+	select {
+	case h.trustKick <- struct{}{}:
+	default:
+	}
+}
+
+// applyTrusts 把 hub 的放行快照合并进本机表（被手机撤掉的由 Server 审计），再把本机撤了、hub 还带着的重发撤销，
+// 未同步的逐条补发 set。本机建的条目发出 set 后不算同步，等 hub 收下后回推的快照里有它才算。
+// 合并时会写审计、同步调 Forward（要拿 h.mu），所以这里不能持着 h.mu。
+func (h *HubClient) applyTrusts(snap []proto.Trust, complete bool) {
+	revokes, unsynced := h.trustSrv.applyHubTrusts(snap, complete)
+	for _, id := range revokes {
+		h.queueTrust(proto.Trust{ID: id}, wire.TrustOpRevoke)
+	}
+	for _, tr := range unsynced {
+		h.queueTrust(tr, wire.TrustOpSet)
+	}
+}
+
+// trustLoop 把放行变更按进队顺序发出去，ctx 结束时返回。写连接失败时关掉连接并结束（同审计上报循环：没发出去的由重连对齐补上）；
+// 编码失败（不该发生：字段都已限长）只丢掉那一条并记日志。
+func (h *HubClient) trustLoop(ctx context.Context, conn *websocket.Conn) {
+	for {
+		select {
+		case <-h.trustKick:
+		case <-ctx.Done():
+			return
+		}
+		for {
+			h.mu.Lock()
+			q := h.trustQ
+			h.trustQ = nil
+			h.mu.Unlock()
+			if len(q) == 0 {
+				break
+			}
+			for _, ch := range q {
+				b, err := wire.Marshal(ch)
+				if err != nil {
+					h.log.Printf("放行 %q 的变更（%s）无法报给 hub，丢弃: %v", clipText(ch.Trust.ID, hubLogFieldMax), ch.Op, err)
+					continue
+				}
+				if err := writeRaw(ctx, conn, b); err != nil {
+					if ctx.Err() == nil {
+						h.log.Printf("报放行变更失败，断开重连后对齐: %q", clipText(err.Error(), hubLogFieldMax))
+						_ = conn.CloseNow() // 只为断开重连，已关过时报错无害
+					}
+					return
+				}
+			}
+		}
+	}
 }
 
 // hubOrigin 给出日志里显示的 hub 地址：只有 scheme://host，不带 userinfo、路径与 query。
@@ -233,6 +318,7 @@ func (h *HubClient) setConn(c *websocket.Conn, features []string) {
 	h.conn = c
 	if c != nil {
 		h.features = slices.Clone(features)
+		h.trustQ = nil // 上一条连接没发出去的放行变更由这条连接的快照对齐补上，见 trustQ
 	}
 	close(h.changed)
 	h.changed = make(chan struct{})
@@ -341,10 +427,13 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 		summaries = append(summaries, wire.PendingSummary{RequestID: pr.ID, CreatedAt: pr.Created.UTC()})
 	}
 	hello := wire.Hello{T: wire.THello, Proto: wire.Proto, MachineID: h.machine.MachineID, AgentVersion: h.cfg.AgentVersion, HomeDir: h.cfg.HomeDir, Pending: summaries}
+	if h.trustSrv != nil {
+		hello.Features = []string{wire.FeatureTrust}
+	}
 	if err := writeFrame(ctx, conn, hello); err != nil {
 		return sessionEnd{err: err}
 	}
-	welcome, end := h.readWelcome(ctx, conn)
+	welcome, welcomeLen, end := h.readWelcome(ctx, conn)
 	if end != nil {
 		return *end
 	}
@@ -353,6 +442,12 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 	h.setConn(conn, welcome.Features)
 	defer h.setConn(nil, nil)
 	h.log.Printf("已连接 hub %s，规则版本 %d", h.addr, welcome.RulesVersion)
+	trustOK := h.trustSrv != nil && welcome.Has(wire.FeatureTrust)
+	if trustOK {
+		// 连上之后才合并：此后本机的变更都会进这条连接的队列，合并时算出的补发与它们不会漏掉。
+		// 不带 trusts 键的 welcome 是否算完整快照，见 welcomeTrustsRoom。
+		h.applyTrusts(welcome.Trusts, welcome.Trusts != nil || welcomeLen+welcomeTrustsRoom <= wire.MaxFrame)
+	}
 	askOK := welcome.Has(wire.FeatureAsk)
 	if !askOK {
 		h.log.Printf("hub %s 没有声明认得提问（版本太旧）：Claude Code 的选择题都交回终端；升级并重启 hub 后才会送到手机", h.addr)
@@ -383,33 +478,40 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 	}
 
 	sctx, stop := context.WithCancel(ctx)
-	auditDone := make(chan struct{})
+	auditDone, trustDone := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(auditDone)
 		h.auditLoop(sctx, conn)
 	}()
+	go func() {
+		defer close(trustDone)
+		if trustOK {
+			h.trustLoop(sctx, conn)
+		}
+	}()
 	defer func() {
 		stop()
 		<-auditDone
+		<-trustDone
 	}()
-	return ended(h.readLoop(sctx, conn, &pinged))
+	return ended(h.readLoop(sctx, conn, &pinged, trustOK))
 }
 
-// readWelcome 读 hub 的第一帧。是 welcome 时返回它；hub 回 Error 帧并以 PolicyViolation 关闭时记下 hub 的文案、
+// readWelcome 读 hub 的第一帧。是 welcome 时返回它与它编码的字节数；hub 回 Error 帧并以 PolicyViolation 关闭时记下 hub 的文案、
 // 标为协议版本不一致；其余情况返回错误。
-func (h *HubClient) readWelcome(ctx context.Context, conn *websocket.Conn) (wire.Welcome, *sessionEnd) {
+func (h *HubClient) readWelcome(ctx context.Context, conn *websocket.Conn) (wire.Welcome, int, *sessionEnd) {
 	first, err := readFrame(ctx, conn, hubHandshakeTimeout)
 	if err != nil {
-		return wire.Welcome{}, &sessionEnd{err: err}
+		return wire.Welcome{}, 0, &sessionEnd{err: err}
 	}
 	kind, _ := wire.Kind(first)
 	switch kind {
 	case wire.TWelcome:
 		var w wire.Welcome
 		if err := wire.Unmarshal(first, &w); err != nil {
-			return wire.Welcome{}, &sessionEnd{err: fmt.Errorf("解析 welcome: %w", err)}
+			return wire.Welcome{}, 0, &sessionEnd{err: fmt.Errorf("解析 welcome: %w", err)}
 		}
-		return w, nil
+		return w, len(first), nil
 	case wire.TError:
 		var e wire.Error
 		_ = wire.Unmarshal(first, &e) // 解析不了时 Message 为空，照样按 hub 报错处理
@@ -418,11 +520,11 @@ func (h *HubClient) readWelcome(ctx context.Context, conn *websocket.Conn) (wire
 		if websocket.CloseStatus(err) == websocket.StatusPolicyViolation {
 			h.log.Printf("hub %s 拒绝了握手: %q。多半是守护进程与 hub 的协议版本不一致，请升级较旧的一方；%s 后再试",
 				h.addr, msg, h.protoBackoff)
-			return wire.Welcome{}, &sessionEnd{protoMismatch: true}
+			return wire.Welcome{}, 0, &sessionEnd{protoMismatch: true}
 		}
-		return wire.Welcome{}, &sessionEnd{err: fmt.Errorf("hub 在握手时报错: %q", msg)}
+		return wire.Welcome{}, 0, &sessionEnd{err: fmt.Errorf("hub 在握手时报错: %q", msg)}
 	}
-	return wire.Welcome{}, &sessionEnd{err: errors.New("hub 的第一帧不是 welcome")}
+	return wire.Welcome{}, 0, &sessionEnd{err: errors.New("hub 的第一帧不是 welcome")}
 }
 
 // applyWelcome 以 hub 为准：规则无论版本都替换（hub 重建库后版本可能变小或巧合相等），总开关交给 setHubPaused。
@@ -432,8 +534,9 @@ func (h *HubClient) applyWelcome(w wire.Welcome) {
 }
 
 // readLoop 读 hub 的帧并逐帧分发，连接出错、ctx 结束或超过 idleTimeout 没收到任何帧时返回。
-// 收到 ping 时把 *pinged 置真（连接稳定的标志）。只有这里读连接（库不允许并发读）。
-func (h *HubClient) readLoop(ctx context.Context, conn *websocket.Conn, pinged *bool) error {
+// 收到 ping 时把 *pinged 置真（连接稳定的标志）。trustOK 为假（没接放行表，或 hub 没声明 trust）时 trusts 帧忽略。
+// 只有这里读连接（库不允许并发读）。
+func (h *HubClient) readLoop(ctx context.Context, conn *websocket.Conn, pinged *bool, trustOK bool) error {
 	for {
 		b, err := readFrame(ctx, conn, h.idleTimeout)
 		if err != nil {
@@ -472,6 +575,11 @@ func (h *HubClient) readLoop(ctx context.Context, conn *websocket.Conn, pinged *
 			var p wire.Paused
 			if wire.Unmarshal(b, &p) == nil {
 				h.applyHubPaused(p.Paused)
+			}
+		case wire.TTrusts:
+			var s wire.Trusts
+			if trustOK && wire.Unmarshal(b, &s) == nil {
+				h.applyTrusts(s.Trusts, true)
 			}
 		case wire.TError:
 			var e wire.Error

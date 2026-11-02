@@ -3,6 +3,8 @@ package agent
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -176,5 +178,87 @@ func TestTrustSweepAuditsExpired(t *testing.T) {
 	json.Unmarshal(roundTrip(t, sock, r), &resp)
 	if resp.Decision != "ask" {
 		t.Fatalf("到期后同会话不该重建：%+v", resp)
+	}
+}
+
+// hub 快照的合并规则：快照里有的写入并标已同步；已同步却不在快照里的删掉（被手机撤了）；未同步的保留待补发；
+// 本机撤了、hub 还没收下的（墓碑）不被快照复活，要重发撤销；快照里已过期的不收；不完整的快照（complete 为假）不删任何东西。
+// 已同步标记与墓碑都落盘，守护进程重启后照样认。
+func TestTrustsApplySnapshot(t *testing.T) {
+	t0 := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	now := t0
+	clock := func() time.Time { return now }
+	path := filepath.Join(t.TempDir(), "trusts.json")
+	tr, _ := newTrusts(path, clock)
+	ids := func(l []proto.Trust) []string {
+		var out []string
+		for _, x := range l {
+			out = append(out, x.ID)
+		}
+		sort.Strings(out)
+		return out
+	}
+	local, _ := tr.add(proto.Trust{Scope: proto.TrustScopeProject, Project: "/home/u/proj", Until: t0.Add(time.Hour), CreatedBy: "cli"})
+	if got := ids(tr.unsynced()); !slices.Equal(got, []string{local.ID}) {
+		t.Fatalf("本机建的应是未同步：%v", got)
+	}
+	phone := proto.Trust{ID: "p1", MachineID: "m1", Scope: proto.TrustScopeSession, Tool: "claude", CLISession: "s1", Until: t0.Add(2 * time.Hour), CreatedAt: t0, CreatedBy: "phone"}
+	if gone, resend := tr.applySnapshot([]proto.Trust{local, phone}, true); len(gone) != 0 || len(resend) != 0 {
+		t.Fatalf("第一份快照不该撤什么：%v %v", gone, resend)
+	}
+	if len(tr.unsynced()) != 0 || len(tr.list()) != 2 {
+		t.Fatalf("快照里的都应已同步：%v %v", tr.unsynced(), tr.list())
+	}
+	if m, ok := tr.match(proto.Session{Tool: "claude", CLISessionID: "s1"}, ""); !ok || m.ID != "p1" {
+		t.Fatal("手机建的应生效")
+	}
+	if gone, _ := tr.applySnapshot([]proto.Trust{local}, true); len(gone) != 1 || gone[0].ID != "p1" {
+		t.Fatalf("已同步却不在快照里的应被撤：%v", gone)
+	}
+	// 断线期间本机建一条：快照里没有它，保留、待补发
+	offline, _ := tr.add(proto.Trust{Scope: proto.TrustScopeSession, Tool: "claude", CLISession: "s2", Until: t0.Add(time.Hour), CreatedBy: "cli"})
+	if gone, _ := tr.applySnapshot([]proto.Trust{local}, true); len(gone) != 0 || !slices.Equal(ids(tr.unsynced()), []string{offline.ID}) {
+		t.Fatalf("未同步的应保留：%v %v", gone, tr.unsynced())
+	}
+	// 本机撤掉已同步的 local：hub 的快照还带着它时不复活，要重发撤销；hub 收下后（快照里没了）墓碑清掉
+	tr.revoke(local.ID)
+	gone, resend := tr.applySnapshot([]proto.Trust{local, offline}, true)
+	if len(gone) != 0 || !slices.Equal(resend, []string{local.ID}) || !slices.Equal(ids(tr.list()), []string{offline.ID}) {
+		t.Fatalf("撤过的不该被快照复活：%v %v %v", gone, resend, tr.list())
+	}
+	if len(tr.unsynced()) != 0 {
+		t.Fatal("快照里有 offline，应已同步")
+	}
+	// 重新打开：已同步标记与墓碑都还在
+	tr2, err := newTrusts(path, clock)
+	if err != nil || len(tr2.unsynced()) != 0 {
+		t.Fatalf("已同步标记应落盘：%v %v", err, tr2.unsynced())
+	}
+	if _, resend := tr2.applySnapshot([]proto.Trust{local, offline}, true); !slices.Equal(resend, []string{local.ID}) || len(tr2.list()) != 1 {
+		t.Fatalf("墓碑应落盘：%v %v", resend, tr2.list())
+	}
+	if _, resend := tr2.applySnapshot([]proto.Trust{offline}, true); len(resend) != 0 {
+		t.Fatal("hub 收下撤销后不再重发")
+	}
+	if _, resend := tr2.applySnapshot([]proto.Trust{offline}, true); len(resend) != 0 || len(tr2.tomb) != 0 {
+		t.Fatalf("墓碑应清掉：%v", tr2.tomb)
+	}
+	// 不完整的快照不删已同步的
+	if gone, _ := tr2.applySnapshot(nil, false); len(gone) != 0 || len(tr2.list()) != 1 {
+		t.Fatal("不完整的快照不该删东西")
+	}
+	// 快照里已过期的不收；不合规的（缺目标）不收
+	stale := proto.Trust{ID: "old", Scope: proto.TrustScopeProject, Project: "/x", Until: t0.Add(-time.Minute), CreatedBy: "phone"}
+	bad := proto.Trust{ID: "bad", Scope: proto.TrustScopeSession, Until: t0.Add(time.Hour), CreatedBy: "phone"}
+	tr2.applySnapshot([]proto.Trust{offline, stale, bad}, true)
+	if !slices.Equal(ids(tr2.list()), []string{offline.ID}) {
+		t.Fatalf("过期的、不合规的不该收：%v", tr2.list())
+	}
+	// 墓碑在原到期时间之后由 sweep 清掉
+	tr2.revoke(offline.ID)
+	now = t0.Add(2 * time.Hour)
+	tr2.sweep()
+	if len(tr2.tomb) != 0 {
+		t.Fatalf("过期的墓碑应清掉：%v", tr2.tomb)
 	}
 }

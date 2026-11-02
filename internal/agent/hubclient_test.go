@@ -138,6 +138,7 @@ func newClient(t *testing.T, h *hubEnv, m agent.MachineConfig, before func(env c
 	// 与 cmd 的接线一致：hub 客户端也是审计转发目标。SetHubPaused 写审计时会同步调 c.Forward，
 	// 这里顺带验证客户端调 SetHubPaused 时没有持着自己的锁（否则自锁挂死）。
 	srv.SetAuditSink(c)
+	c.SyncTrusts(srv)
 	ctx, cancel := context.WithCancel(context.Background())
 	env := clientEnv{c: c, srv: srv, cfg: cfg, rules: rules, pending: srv.Pending(), logs: logs, cancel: cancel, done: make(chan struct{})}
 	if before != nil {
