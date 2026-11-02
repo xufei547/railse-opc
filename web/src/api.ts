@@ -1,5 +1,5 @@
 import { t, type Lang } from './i18n'
-import type { AnswerBody, AuditEvent, DecideBody, Draft, Inbox, Machine, RequestView, Rule, Status, VapidInfo } from './types'
+import type { AnswerBody, AuditEvent, DecideBody, Draft, Inbox, Machine, RequestView, Rule, Status, TrustView, VapidInfo } from './types'
 
 /** hub 回了非 2xx（status 为 HTTP 状态码），或根本连不上（status 为 0）。message 是给人看的文案：hub 给的原文照带，网页自己写的按当前语言。 */
 export class ApiError extends Error {
@@ -114,4 +114,7 @@ export const hub = {
   pushUnsubscribe: (endpoint: string) => del<void>('/api/push/subscribe', { endpoint }),
   pushCheck: (endpoint: string) => post<{ active: boolean }>('/api/push/check', { endpoint }),
   pushTest: (endpoint: string) => post<void>('/api/push/test', { endpoint }),
+  /** 生效中的限时放行，按到期先后排。 */
+  trusts: () => get<TrustView[]>('/api/trusts'),
+  revokeTrust: (id: string) => del<void>(`/api/trusts/${enc(id)}`),
 }

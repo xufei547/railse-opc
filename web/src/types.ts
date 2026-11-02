@@ -78,6 +78,8 @@ export interface RequestView {
   ask?: { questions: Question[] }
   /** 提问作答后的答案：题面 → 用户答的原文；没答时没有这个键。 */
   answers?: Record<string, string>
+  /** 批准时能不能顺带限时放行：审批（kind permission）、机器在线且守护进程支持。老 hub 没有这个键（不显示开关）。 */
+  can_trust?: boolean
 }
 
 export interface AuditEvent {
@@ -122,6 +124,34 @@ export interface Status {
   /** hub 是否配了 --public-url（推送启用）。 */
   push_enabled: boolean
   push_subscriptions: number
+  /** 生效中的限时放行条数；老 hub 没有这个键（设置页不显示放行一节）。 */
+  trusts?: number
+}
+
+export type TrustScope = 'session' | 'project'
+
+/**
+ * GET /api/trusts 的一条：生效中的限时放行，按到期先后排。hub 对空的 tool、cli_session_id、project_root、note 省略键；
+ * 时间是 RFC 3339（小数位不定宽，比较先后要先解析）。
+ */
+export interface TrustView {
+  id: string
+  machine_id?: string
+  scope: TrustScope | string
+  /** session 范围的 CLI（claude）。 */
+  tool?: string
+  cli_session_id?: string
+  project_root?: string
+  until: string
+  created_at: string
+  /** 谁建的：phone（手机批准时）、cli（railse trust）、env（RAILSE_TRUST 启动命令）。 */
+  created_by: string
+  note?: string
+  machine_name: string
+  /** 项目根的末段；没有项目根为空串。 */
+  project: string
+  /** hub 算的剩余秒数（拉取那一刻）。 */
+  remaining_seconds: number
 }
 
 export interface Inbox {
@@ -145,6 +175,8 @@ export interface DecideBody {
   note?: string
   remember?: boolean
   scope?: 'project' | 'global'
+  /** 批准时顺带的限时放行；拒绝不带。 */
+  trust?: { scope: TrustScope; minutes: number }
 }
 
 /** POST /api/requests/{id}/answer 的请求体：answers 的键是题面原样；交回终端只带 passthrough。 */

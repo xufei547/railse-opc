@@ -7,6 +7,8 @@ import { failure, formatUptime, onlineCount, pauseCopy } from '../manage'
 import { lang, readChoice, resolveLang, saveChoice, setLang, t, type LangChoice } from '../i18n'
 import { browserEnv, logoutDevice, resubscribeForLang, usePush, type PushApi, type PushControl, type PushEnv } from '../push'
 import { useStore } from '../StoreProvider'
+import { trustMeta, trustWhere } from '../trust'
+import type { TrustView } from '../types'
 
 export function Settings() {
   const { state, reload } = useStore()
@@ -45,6 +47,15 @@ export function Settings() {
         return { tone: 'ok', title: t('已暂停自动审批'), text: pauseCopy().done }
       },
     })
+  }
+
+  // 撤销一条放行：不用确认（撤了只是恢复照常审批），经 act 与别的操作互斥；之后重拉，条数与列表跟着换
+  function revokeTrust(v: TrustView) {
+    void actions.act(async () => {
+      await hub.revokeTrust(v.id)
+      await reload()
+      return { tone: 'ok', title: t('已撤销放行'), text: t('这个范围里的请求恢复照常审批') }
+    }, t('撤销失败'))
   }
 
   // 先尽力关掉这台设备的推送（不然退出后锁屏上照样收到审批摘要；最多等几秒，失败不挡退出），再退出登录
@@ -110,12 +121,37 @@ export function Settings() {
           <dt>{t('已运行')}</dt>
           <dd>{status ? formatUptime(status.uptime) : '-'}</dd>
         </dl>
+        {typeof status?.trusts === 'number' && <TrustsView trusts={state.trusts ?? []} busy={actions.busy || leaving} onRevoke={revokeTrust} />}
         <button type="button" className="btn block page-end" disabled={leaving || actions.busy || push.busy} onClick={() => void logout()}>
           {leaving ? t('正在退出…') : t('退出登录')}
         </button>
       </div>
       {actions.overlays}
     </>
+  )
+}
+
+/** 限时放行一节：每条一行范围、一行剩余 · 谁建的 · 备注，右侧撤销。只在 hub 支持放行（status 带 trusts）时显示。 */
+export function TrustsView({ trusts, busy, onRevoke }: { trusts: readonly TrustView[]; busy: boolean; onRevoke: (v: TrustView) => void }) {
+  return (
+    <section>
+      <h2 className="section-title">{t('限时放行')}</h2>
+      {trusts.length === 0 && <p className="sub line">{t('没有生效中的放行')}</p>}
+      {trusts.map((v) => {
+        const where = trustWhere(v)
+        return (
+          <div key={v.id} className="list-item">
+            <div className="grow">
+              <div className="name">{where}</div>
+              <div className="sub">{trustMeta(v)}</div>
+            </div>
+            <button type="button" className="btn danger-text" disabled={busy} aria-label={t('撤销放行 {what}', { what: where })} onClick={() => onRevoke(v)}>
+              {t('撤销')}
+            </button>
+          </div>
+        )
+      })}
+    </section>
   )
 }
 
