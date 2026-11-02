@@ -20,6 +20,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/hub/store"
 	"github.com/xufei547/railse-opc/internal/hub/wire"
 	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 type agentClient struct {
@@ -194,9 +195,11 @@ func TestAgentWSHelloWelcome(t *testing.T) {
 	if w.RulesVersion != 1 || !strings.Contains(w.RulesYAML, "builtin-readonly") || w.Paused {
 		t.Fatalf("welcome = %+v", w)
 	}
-	// 声明认得提问：守护进程据此才把 AskUserQuestion 送来（旧 hub 不发 features，提问交回终端）
-	if !reflect.DeepEqual(w.Features, []string{wire.FeatureAsk}) || !strings.Contains(string(b), `"features":["ask"]`) {
-		t.Fatalf("welcome 应声明 features [ask]: %s", b)
+	// 声明认得提问与限时放行：守护进程据此才把 AskUserQuestion 送来、才发 trust 帧（旧 hub 不发 features，提问交回终端）；
+	// 没有放行时不带 trusts 键
+	if !reflect.DeepEqual(w.Features, []string{wire.FeatureAsk, wire.FeatureTrust}) || !strings.Contains(string(b), `"features":["ask","trust"]`) ||
+		strings.Contains(string(b), `"trusts"`) {
+		t.Fatalf("welcome 应声明 features [ask trust]: %s", b)
 	}
 	if !h.srv.agents.connected(id) {
 		t.Fatal("应登记为已连接")
@@ -685,11 +688,14 @@ type fakeWelcomeSource struct {
 	hasPaused  bool
 	settingErr error
 	rulesErr   error
+	trustsErr  error
 }
 
 func (f fakeWelcomeSource) RuleSet() (policy.RuleSet, int, error) {
 	return policy.RuleSet{Version: policy.RuleSetVersion}, 3, f.rulesErr
 }
+
+func (f fakeWelcomeSource) ListTrusts(string) ([]proto.Trust, error) { return nil, f.trustsErr }
 
 func (f fakeWelcomeSource) GetSetting(key string) (string, bool, error) {
 	if key != "paused" {
@@ -711,8 +717,9 @@ func TestWelcomeFramePaused(t *testing.T) {
 		"值损坏":   {fakeWelcomeSource{paused: "yes", hasPaused: true}, false, true},
 		"读设置失败": {fakeWelcomeSource{settingErr: errors.New("磁盘坏了")}, false, true},
 		"读规则失败": {fakeWelcomeSource{rulesErr: errors.New("磁盘坏了")}, false, true},
+		"读放行失败": {fakeWelcomeSource{trustsErr: errors.New("磁盘坏了")}, false, true},
 	} {
-		b, err := welcomeFrame(c.src)
+		b, _, err := welcomeFrame(c.src, "m1")
 		if c.err {
 			if err == nil {
 				t.Fatalf("%s: 应报错", name)

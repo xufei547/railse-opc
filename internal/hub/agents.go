@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/hub/store"
 	"github.com/xufei547/railse-opc/internal/hub/wire"
 	"github.com/xufei547/railse-opc/internal/policy"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 const (
@@ -23,6 +25,8 @@ const (
 	agentWriteTimeout   = 10 * time.Second // 写出一帧的上限
 	agentQueueLen       = 256              // 每条连接的发送队列长度
 	maxAgentVersionLen  = 64               // hello 里 agent_version 的字节上限；home_dir 沿用 maxHomeDirLen
+	maxHelloFeatures    = 16               // hello 里 features 的条数上限，每条至多 maxFeatureLen 字节
+	maxFeatureLen       = 32               // features 每条的字节上限
 	protoAuditEvery     = time.Hour        // 同一机器、同一对协议版本的不一致审计至多这么久记一次
 	badFrameLogMax      = 5                // 每条连接逐条记日志的坏帧数，之后只计数，断开时汇总
 	logFieldMax         = 200              // 日志里来自对端的字段（帧种类、解码错误）的字节上限
@@ -32,10 +36,12 @@ const (
 // 别处只经 out 排队发帧（agentHub.send）、经 close 要求断开。
 type agentConn struct {
 	machine store.Machine
-	conn    *websocket.Conn
-	out     chan []byte
-	closed  chan struct{}
-	once    sync.Once
+	// features 是这条连接的守护进程在 hello 里声明的能力（wire.Feature*），连接期间不变。
+	features []string
+	conn     *websocket.Conn
+	out      chan []byte
+	closed   chan struct{}
+	once     sync.Once
 	// resent 是重连对齐时在这条连接上已补发决定的请求 id：守护进程随后重发这些请求的 pending 时不再重复补发。
 	resentMu sync.Mutex
 	resent   map[string]bool
@@ -112,7 +118,7 @@ func (h *agentHub) unregister(c *agentConn) {
 	c.close()
 }
 
-// outboundKind 给出 hub 允许下发的帧的种类：只有 welcome、decision、rules、paused、ping、pong、error 这几种值类型，
+// outboundKind 给出 hub 允许下发的帧的种类：只有 welcome、decision、rules、paused、trusts、ping、pong、error 这几种值类型，
 // 且 t 字段与类型相符。纵深防御：hub 没有让机器执行任何东西的帧，别的一律不发。
 func outboundKind(frame any) (string, bool) {
 	var want, got string
@@ -125,6 +131,8 @@ func outboundKind(frame any) (string, bool) {
 		want, got = wire.TRules, f.T
 	case wire.Paused:
 		want, got = wire.TPaused, f.T
+	case wire.Trusts:
+		want, got = wire.TTrusts, f.T
 	case wire.Ping:
 		want, got = wire.TPing, f.T
 	case wire.Pong:
@@ -219,6 +227,14 @@ func (h *agentHub) current(c *agentConn) bool {
 	return h.conns[c.machine.ID] == c && !c.isClosed()
 }
 
+// supports 报告机器当前连接的守护进程声明了能力 f；不在线或连接已被要求断开为否。
+func (h *agentHub) supports(machineID, f string) bool {
+	h.mu.Lock()
+	c := h.conns[machineID]
+	h.mu.Unlock()
+	return c != nil && !c.isClosed() && slices.Contains(c.features, f)
+}
+
 func (h *agentHub) connected(machineID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -307,7 +323,7 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	}
 	machine.HomeDir, machine.AgentVersion = home, hello.AgentVersion
 
-	c := &agentConn{machine: machine, conn: conn, out: make(chan []byte, agentQueueLen), closed: make(chan struct{})}
+	c := &agentConn{machine: machine, features: hello.Features, conn: conn, out: make(chan []byte, agentQueueLen), closed: make(chan struct{})}
 	// 先登记再读快照、写 welcome：登记之后的规则或暂停变更，广播一定排进 out、在 welcome 之后写出；
 	// 登记之前的变更已在快照里。welcome 永远是第一帧，也不会漏掉变更。
 	s.agents.register(c)
@@ -322,7 +338,11 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		conn.Close(websocket.StatusPolicyViolation, "机器已吊销")
 		return
 	}
-	welcome, err := welcomeFrame(s.store)
+	trustOf := "" // 守护进程声明了 trust 才在 welcome 里带放行快照
+	if hello.Has(wire.FeatureTrust) {
+		trustOf = machine.ID
+	}
+	welcome, trustsDropped, err := welcomeFrame(s.store, trustOf)
 	if err != nil {
 		s.log.Printf("组装 welcome: %v", err)
 		conn.Close(websocket.StatusInternalError, "hub 内部错误")
@@ -330,6 +350,11 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	}
 	if writeAgentFrame(r.Context(), conn, welcome) != nil {
 		return
+	}
+	if trustsDropped { // 规则快照太大、带不下放行快照：紧跟着单发一帧
+		if snap, ok := s.trustsSnapshot(machine.ID); ok {
+			s.agents.sendTo(c, snap)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(r.Context())
@@ -377,6 +402,8 @@ func (s *Server) readHello(ctx context.Context, conn *websocket.Conn, m store.Ma
 		reason = "agent_version 超长"
 	case len(hello.HomeDir) > maxHomeDirLen:
 		reason = "home_dir 超长"
+	case len(hello.Features) > maxHelloFeatures || slices.ContainsFunc(hello.Features, func(f string) bool { return len(f) > maxFeatureLen }):
+		reason = "features 超长"
 	}
 	if reason != "" {
 		conn.Close(websocket.StatusPolicyViolation, reason)
@@ -404,27 +431,42 @@ func (s *Server) rejectProto(ctx context.Context, conn *websocket.Conn, m store.
 type welcomeSource interface {
 	RuleSet() (policy.RuleSet, int, error)
 	GetSetting(key string) (string, bool, error)
+	ListTrusts(machineID string) ([]proto.Trust, error)
 }
 
-// hubFeatures 是本 hub 在 welcome 里声明的能力（wire.Welcome.Features）：认得提问。守护进程只把提问送给声明了它的 hub。
-func hubFeatures() []string { return []string{wire.FeatureAsk} }
+// hubFeatures 是本 hub 在 welcome 里声明的能力（wire.Welcome.Features），GET /api/version 也回它：认得提问、限时放行。
+// 守护进程只把提问送给声明了 ask 的 hub，只给声明了 trust 的 hub 发放行变更。
+func hubFeatures() []string { return []string{wire.FeatureAsk, wire.FeatureTrust} }
 
-// welcomeFrame 组装 welcome：规则快照（规则与版本号同一事务读出）、全局暂停状态与本 hub 的能力（hubFeatures）。任一读失败都返回错误，
-// 握手随之以 InternalError 关闭：宁可不连，也不把读不出的暂停当成未暂停。
-func welcomeFrame(src welcomeSource) ([]byte, error) {
+// welcomeFrame 组装 welcome：规则快照（规则与版本号同一事务读出）、全局暂停状态、本 hub 的能力（hubFeatures），以及 trustOf 非空时
+// 那台机器的放行快照。任一读失败都返回错误，握手随之以 InternalError 关闭：宁可不连，也不把读不出的暂停当成未暂停、把读不出的放行当成没有。
+// 规则快照已接近单帧上限、带上放行就超限时不带放行，trustsDropped 为真，调用方紧跟着单发一帧放行快照。
+func welcomeFrame(src welcomeSource, trustOf string) (frame []byte, trustsDropped bool, err error) {
 	rs, version, err := src.RuleSet()
 	if err != nil {
-		return nil, fmt.Errorf("读规则: %w", err)
+		return nil, false, fmt.Errorf("读规则: %w", err)
 	}
 	y, err := rs.Marshal()
 	if err != nil {
-		return nil, fmt.Errorf("编码规则: %w", err)
+		return nil, false, fmt.Errorf("编码规则: %w", err)
 	}
 	paused, err := pausedSetting(src)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return wire.Marshal(wire.Welcome{T: wire.TWelcome, RulesVersion: version, RulesYAML: string(y), Paused: paused, ServerTime: time.Now().UTC(), Features: hubFeatures()})
+	w := wire.Welcome{T: wire.TWelcome, RulesVersion: version, RulesYAML: string(y), Paused: paused, ServerTime: time.Now().UTC(), Features: hubFeatures()}
+	if trustOf != "" {
+		if w.Trusts, err = src.ListTrusts(trustOf); err != nil {
+			return nil, false, fmt.Errorf("读放行: %w", err)
+		}
+	}
+	b, err := wire.Marshal(w)
+	if errors.Is(err, wire.ErrFrameTooLarge) && len(w.Trusts) > 0 {
+		w.Trusts = nil
+		b, err = wire.Marshal(w)
+		return b, err == nil, err
+	}
+	return b, false, err
 }
 
 // pausedSetting 读全局总开关：settings 的 paused 为 "1" 是暂停，"0" 或没有是未暂停；读失败或别的值返回错误。
@@ -539,6 +581,8 @@ func (s *Server) handleAgentFrame(c *agentConn, b []byte, pongs *pongClock, bad 
 		dispatchFrame(bad, kind, b, func(f wire.Delivered) { s.onDelivered(m, f) })
 	case wire.TAudit:
 		dispatchFrame(bad, kind, b, func(f wire.Audit) { s.onAudit(m, f) })
+	case wire.TTrust:
+		dispatchFrame(bad, kind, b, func(f wire.TrustChange) { s.onTrustChange(c, f) })
 	default:
 		bad.record(kind, errUnknownKind)
 	}

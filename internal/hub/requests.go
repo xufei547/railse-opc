@@ -74,6 +74,8 @@ type DecideInput struct {
 	// Scope 是“记住”的范围：project、global，或空（有项目根记成项目，没有记成全局）。只在 Remember 时起作用，
 	// 但不认识的取值无论记不记住都回 errBadScope。
 	Scope string
+	// Trust 非空时批准顺带限时放行（见 Decide）。
+	Trust *TrustInput
 }
 
 // machineLocks 给每台机器一把锁，让同一机器的重连对齐串行执行。零值可用。
@@ -571,7 +573,10 @@ func (s *Server) sendDecision(r store.Request) bool {
 // 所属机器未吊销且未过期。
 // Remember 时先学规则（学不了时请求保持 pending，错误包 errLearn），再改状态；成功后审计学到的规则并下发规则快照，
 // 再审计决定、下发决定（未连接时留给重连对齐补发；webhook 请求改为回调来源）、广播。快照先于决定排进同一连接的队列，守护进程先拿到规则。
-// 错误：errBadAction（对提问为 errIsAsk）、errBadScope、store.ErrNotFound、store.ErrNotPending（机器已吊销时为 errRevoked、
+// Trust 非空时在改状态之前就校验并入库这条放行（reserveTrustLocked），不合规时整个决定不落库、回 errBadTrust；
+// 批准落库失败时收回它；成功后审计 trust_set，并在下发决定之前把放行快照排进同一连接的队列：守护进程先有放行、再收到 allow。
+// 请求已决定不了（不是 pending、机器已吊销、已过期）时不建放行，错误照旧由改状态那一步给出。
+// 错误：errBadAction（对提问为 errIsAsk）、errBadScope、errBadTrust、store.ErrNotFound、store.ErrNotPending（机器已吊销时为 errRevoked、
 // 已过期时为 errExpired，都满足 errors.Is(err, store.ErrNotPending)）、errLearn；其余是存储错误。
 func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	if in.Action != "allow" && in.Action != "deny" {
@@ -580,6 +585,16 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	if !validScope(in.Scope) {
 		return store.Request{}, errBadScope
 	}
+	var trust *proto.Trust
+	if in.Trust != nil {
+		s.trustMu.Lock()
+		defer s.trustMu.Unlock()
+		t, err := s.reserveTrust(in)
+		if err != nil {
+			return store.Request{}, err
+		}
+		trust = t
+	}
 	note := truncate(in.Note, maxTextLen)
 	state := "denied"
 	if in.Action == "allow" {
@@ -587,6 +602,9 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	}
 	r, ruleID, err := s.commitDecision(in, state, note)
 	if err != nil {
+		if trust != nil {
+			s.unreserveTrust(*trust)
+		}
 		return store.Request{}, s.settleRefused(r, err)
 	}
 	if fresh, err := s.store.GetRequest(r.ID); err == nil {
@@ -601,6 +619,10 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 		s.audit(r.MachineID, "user", r.ID, "rule_learned", map[string]string{"rule_id": ruleID, "action": in.Action})
 		s.pushRules()
 	}
+	if trust != nil {
+		s.audit(r.MachineID, "user", r.ID, "trust_set", trustDetail(*trust))
+		s.pushTrustsLocked(r.MachineID)
+	}
 	// 审计动作是 allow 或 deny，与 wire.Decision 的 action 一致（简报接口文字里的 approve 不用）
 	s.audit(r.MachineID, "user", r.ID, in.Action, map[string]any{"note": note, "remember": in.Remember, "rule_id": ruleID})
 	if r.Kind == "webhook" {
@@ -609,7 +631,30 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 		s.sendDecision(r) // 未连接时留给重连对齐补发
 	}
 	s.clients.broadcast("request_updated", s.view(r))
+	if trust != nil {
+		s.broadcastTrusts()
+	}
 	return r, nil
+}
+
+// reserveTrust 是 Decide 带放行时的前置（调用方持 trustMu）：取请求，提问回 errIsAsk；请求已决定不了（decidable 不过）时
+// 返回 nil、不建放行，交给改状态那一步给出该给的错误；否则校验并入库（reserveTrustLocked）。
+func (s *Server) reserveTrust(in DecideInput) (*proto.Trust, error) {
+	r, err := s.store.GetRequest(in.RequestID)
+	if err != nil {
+		return nil, err
+	}
+	if err := refuseAsk(r); err != nil {
+		return nil, err
+	}
+	if s.decidable(r) != nil {
+		return nil, nil
+	}
+	t, err := s.reserveTrustLocked(r, in.Action, *in.Trust)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
 }
 
 // commitDecision 在 decideMu 下完成“取请求 → 校验（takePending：不是提问、仍 pending、机器未吊销、未过期）→ 学规则 → 改状态”，
