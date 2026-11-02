@@ -50,6 +50,32 @@
 5. Paperclip 的 ACP 通道下 Claude Code 用户级 hooks 是否照常触发（CLI 通道基本确定）。
 6. 一个外部插件能否同时作为 Gateway API client 调 `approval.resolve`（同屏方案）。
 
+## 5 源码层补充（2026-11-03，openclaw 主干 8051834，版本 2026.10.9）
+
+浅克隆源码后核对，第 4 节里的 1、3、4 三项已经有答案，不必等实机：
+
+**事件与上下文字段（`src/plugins/hook-types.ts`、`hook-tool-context.types.ts`）。**
+- `event`: `toolName`, `params: Record<string, unknown>`, `toolKind?` (`code_mode_exec`), `toolInputKind?` (`javascript|typescript`), `runId?`, `toolCallId?`, `derivedPaths?`（宿主从 `apply_patch` 等信封里尽力推出的路径，只能当快路径，策略判断要自己解析 `params`）。
+- `ctx`: `agentId?`, `sessionKey?`, `sessionId?`, `runId?`, `abortSignal?`, `channelId?`, `trigger?`（`user|cron|memory`…，仅元数据）, `requester?{channel, accountId, senderId, senderIsOwner, roleIds}`（消息触发时才有；文档明说授权类钩子在字段缺失时应 fail-closed）。
+- 对 Railse 的映射：`agentId` → 角色绑定键；`sessionKey` → 会话放行作用域；`trigger=cron` → 可单独收紧；`requester.senderIsOwner=false` → 来自外人消息触发的工具调用，风险应上调（这正是邮件注入场景）。
+
+**返回值（`src/plugins/hook-before-tool-call-result.ts`）。** `{ params?, block?, blockReason?, requireApproval?{title, description, scope?, severity?, timeoutMs?, timeoutReason?, allowedDecisions?, pluginId?, onResolution?} }`。`blockReason` 会原样成为模型看到的工具结果文本（`buildBlockedToolResult` 把它放进 `content[0].text` 和 `details.reason`，宿主默认文案是 "Tool call blocked by plugin hook"）。所以"手机上拒绝了"这句话可以直接告诉模型，第 4 节第 3 项成立。`timeoutReason` 可以把审批超时也变成带自定义文案的拦截。
+
+**核心工具清单（`src/agents/tool-catalog.ts`，分组 fs / runtime / web / memory / sessions / ui / messaging / automation / nodes / agents / media）。** 对策略引擎最要紧的：
+- 外发类（应落 `outward`）：`message`、`conversations_send`、`conversations_turn`、`github_publish`、`sessions_send`。
+- 执行类：`exec`、`process`、`code_execution`、`computer`、`browser`、`terminal`、`nodes`、`mobile_ui`。
+- 写文件：`write`、`edit`、`apply_patch`；读：`read`、`ls`、`memory_get`、`web_fetch`、`web_search`。
+- 控制面（应视为高风险）：`gateway`（改配置、升级）、`plugins`、`cron`（automations）、`sessions_spawn`、`secrets`、`personal_instructions`。
+OpenClaw 自带的 ACP 审批分类器（`src/acp/approval-classifier.ts`）把工具分为 readonly_scoped / readonly_search / mutating / exec_capable / control_plane / interactive，可作为我们风险映射的起点。
+
+**插件注册方式。** `api.on("before_tool_call", handler, { matcher?, priority?, timeoutMs? })`；操作者可在 `plugins.entries.<id>.hooks.timeouts.before_tool_call` 覆盖到 600000 ms。注意：超时后 handler 不会被取消，插件要自己处理 `abortSignal`。
+
+**同类先例。** 内置扩展里已经有用 `before_tool_call` + `requireApproval` 做授权的：`onepassword`（凭据放行，`pending-authorization.ts`）、`facetime`、`codex`（`approval-bridge.ts` 把 Codex 原生审批桥到 OpenClaw）；`imessage` 用表情回应解决审批。没有一个内置扩展注册 trusted tool policy，说明普通钩子是正道。`extensions/` 下共 191 个扩展，Railse 做成其中一个在形态上完全常规。
+
+**实机前提。** OpenClaw 要求 Node ≥24.16（`engines`），这台 Mac 是 v20.20，实机 spike 前要先升 Node（由作者在自己终端做）。
+
+**第 4 节剩余待实机验证：** 2（10 分钟挂起时 Control UI 的提示）、5（Paperclip ACP 通道下 Claude Code hooks）、6（插件同时作为 Gateway client 调 `exec.approval.resolve`，需要 `operator.approvals` scope）。
+
 ## 来源
 - https://docs.openclaw.ai/plugins/hooks 、https://docs.openclaw.ai/plugins/hooks/tool-policy 、https://docs.openclaw.ai/plugins/hooks/reference
 - https://docs.openclaw.ai/plugins/building-plugins 、https://docs.openclaw.ai/tools/exec-approvals 、https://docs.openclaw.ai/gateway/protocol
