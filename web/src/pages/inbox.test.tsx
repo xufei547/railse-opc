@@ -195,12 +195,12 @@ describe('收件箱的限时放行横幅', () => {
 
   it('有生效中的放行：横幅写条数与最近的到期时间，链接去设置', () => {
     store.over = { loaded: true, connected: true, status: { ...status, trusts: 2 }, trusts: [tv('a', today(14, 0)), tv('b', today(12, 30))] }
-    expect(render()).toMatch(/<div class="banner info" role="status">2 个放行生效中，最近的 12:30 到期<a href="\/settings"[^>]*>去设置<\/a><\/div>/)
+    expect(render()).toMatch(/<div class="banner info" role="status">2 个放行生效中，最近的 12:30 到期。<a href="\/settings"[^>]*>去设置<\/a><\/div>/)
   })
 
   it('列表还没拉到时只说条数；没有放行或老 hub 不显示', () => {
     store.over = { loaded: true, connected: true, status: { ...status, trusts: 1 }, trusts: null }
-    expect(render()).toContain('1 个放行生效中<a href="/settings"')
+    expect(render()).toContain('1 个放行生效中。<a href="/settings"')
     for (const s of [{ ...status, trusts: 0 }, status]) {
       store.over = { loaded: true, connected: true, status: s }
       expect(render()).not.toContain('放行生效中')

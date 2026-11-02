@@ -105,7 +105,7 @@ func (s *Server) reserveTrustLocked(r store.Request, action string, in TrustInpu
 	}
 	d = min(d, proto.TrustMax)
 	now := time.Now()
-	t := proto.Trust{ID: store.NewID(), MachineID: r.MachineID, Scope: in.Scope, Until: now.Add(d), CreatedAt: now, CreatedBy: "phone",
+	t := proto.Trust{ID: proto.NewTrustID(), MachineID: r.MachineID, Scope: in.Scope, Until: now.Add(d), CreatedAt: now, CreatedBy: "phone",
 		Project: r.ProjectRoot}
 	switch in.Scope {
 	case proto.TrustScopeSession:

@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -143,12 +141,8 @@ func checkTrustTarget(tr proto.Trust) error {
 	return nil
 }
 
-// newTrustID 是随机 8 字节的十六进制。
-func newTrustID() string {
-	var b [8]byte
-	_, _ = rand.Read(b[:]) // crypto/rand 不会失败（失败时它自己终止进程）
-	return hex.EncodeToString(b[:])
-}
+// newTrustID 与 hub 用同一个生成器（proto.NewTrustID），两边建的 id 一样长。
+func newTrustID() string { return proto.NewTrustID() }
 
 // liveLocked 是生效中（未过期）的条数。
 func (t *trusts) liveLocked(now time.Time) int {

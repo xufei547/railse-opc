@@ -74,5 +74,6 @@ export function trustBanner(n: number, list: readonly TrustView[] | null, now: D
     if (!time) return head
     return n === 1 ? `${head}, ends at ${time}` : `${head}, the soonest ends at ${time}`
   }
-  return time ? `${n} 个放行生效中，最近的 ${time} 到期` : `${n} 个放行生效中`
+  // 中文句末带句号，和后面紧跟的“去设置”链接分开（英文那边靠空格）
+  return time ? `${n} 个放行生效中，最近的 ${time} 到期。` : `${n} 个放行生效中。`
 }

@@ -81,8 +81,8 @@ describe('收件箱横幅', () => {
   })
 
   it('有列表时带最近的到期时间，没有列表时只说条数', () => {
-    expect(trustBanner(2, [tv({ until: at(14, 0) }), tv({ until: at(12, 30) })], now)).toBe('2 个放行生效中，最近的 12:30 到期')
-    expect(trustBanner(2, null, now)).toBe('2 个放行生效中')
+    expect(trustBanner(2, [tv({ until: at(14, 0) }), tv({ until: at(12, 30) })], now)).toBe('2 个放行生效中，最近的 12:30 到期。')
+    expect(trustBanner(2, null, now)).toBe('2 个放行生效中。')
     setLang('en')
     expect(trustBanner(1, [tv({ until: at(12, 30) })], now)).toBe('1 trust active, ends at 12:30')
     expect(trustBanner(2, [tv({ until: at(12, 30) })], now)).toBe('2 trusts active, the soonest ends at 12:30')

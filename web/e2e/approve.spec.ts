@@ -130,7 +130,7 @@ test('登录、看到请求、批准并记住、规则多一条；再拒绝一�
   // 收件箱顶部横幅：1 个放行生效中，最近的 HH:MM 到期；点进设置页
   await nav.getByRole('link', { name: /收件箱/ }).click()
   const banner = page.locator('.banner', { hasText: '放行生效中' })
-  await expect(banner).toHaveText(/^1 个放行生效中，最近的 (\d\d-\d\d )?\d\d:\d\d 到期去设置$/)
+  await expect(banner).toHaveText(/^1 个放行生效中，最近的 (\d\d-\d\d )?\d\d:\d\d 到期。去设置$/)
   await expect(page.locator('.card', { hasText: 'curl https://trust.example.com/b' })).toHaveCount(0)
   await banner.getByRole('link', { name: '去设置' }).click()
 

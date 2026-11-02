@@ -4,6 +4,8 @@ package proto
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -255,4 +257,11 @@ func Decode(line []byte, v any) error {
 		return fmt.Errorf("协议版本不匹配：想要 %d，得到 %d", Version, head.V)
 	}
 	return json.Unmarshal(line, v)
+}
+
+// NewTrustID 是放行记录的 id：随机 8 字节的十六进制。守护进程与 hub 都用它，两边建的 id 长短一致。
+func NewTrustID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:]) // crypto/rand 不会失败（失败时它自己终止进程）
+	return hex.EncodeToString(b[:])
 }
