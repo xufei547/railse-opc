@@ -18,7 +18,7 @@ import (
 var schemaSQL string
 
 // SchemaVersion 是本程序的数据库版本（schema_version 表的 v）。railse doctor 只读地拿库里的版本和它比。
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // migrations 是逐版本升级的 SQL，键是升级后的版本号。改 schema.sql 时必须同时加一条迁移并提高 SchemaVersion：
 // 已有库只跑迁移，不再执行 schema.sql。
@@ -47,6 +47,24 @@ ALTER TABLE push_subscriptions ADD COLUMN lang TEXT NOT NULL DEFAULT 'zh';
 	// 5：requests 加 trigger（引擎的触发点，JSON），旧行为空串。列加在表尾，与 schema.sql 的列序一致。
 	5: `
 ALTER TABLE requests ADD COLUMN trigger TEXT NOT NULL DEFAULT '';
+`,
+	// 6：新表 trusts（限时放行）与它的索引，与 schema.sql 的一致（TestMigratedTrustsSchemaMatchesFresh 核对）。
+	6: `
+CREATE TABLE trusts (
+  id             TEXT PRIMARY KEY,
+  machine_id     TEXT NOT NULL REFERENCES machines(id),
+  scope          TEXT NOT NULL,
+  tool           TEXT NOT NULL DEFAULT '',
+  cli_session_id TEXT NOT NULL DEFAULT '',
+  project_root   TEXT NOT NULL DEFAULT '',
+  until_at       TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  created_by     TEXT NOT NULL,
+  note           TEXT NOT NULL DEFAULT '',
+  revoked_at     TEXT,
+  revoke_reason  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX trusts_machine_until ON trusts (machine_id, until_at);
 `,
 }
 

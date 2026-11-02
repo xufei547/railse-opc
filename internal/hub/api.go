@@ -55,6 +55,8 @@ func (s *Server) apiRoutes() {
 	s.mux.HandleFunc("GET /api/rules/export", read(s.handleRulesExport))
 	s.mux.HandleFunc("GET /api/machines", read(s.handleMachines))
 	s.mux.HandleFunc("DELETE /api/machines/{id}", write(s.handleMachineRevoke))
+	s.mux.HandleFunc("GET /api/trusts", read(s.handleTrusts))
+	s.mux.HandleFunc("DELETE /api/trusts/{id}", write(s.handleTrustRevoke))
 	// WebSocket 握手是 GET，但浏览器跨站也能发起（带 cookie），同样查 Origin
 	s.mux.HandleFunc("GET /ws/client", sameOrigin(s.requireClient(s.handleClientWS)))
 }
@@ -80,6 +82,7 @@ func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 // request_updated 都用它。提问（kind ask）带 ask（题目），作答后带 answers（题面 → 答案原文）。
 // HasRedacted 为 true 表示载荷（或提问的题目）里有被脱敏抹掉的部分：网页展示的不是原文（命令行语境的脱敏可能连带吞掉紧贴的后半截命令），
 // 必须醒目告警，建议去终端核对。
+// CanTrust 为 true 表示批准时可以顺带限时放行：请求是审批（kind permission），所属机器在线且其守护进程声明了 trust 能力。
 type requestView struct {
 	store.Request
 	// CLI 是请求所属会话的 sessions.tool 原值（claude、codex、gemini）；没有会话、查不到为空，读库出错记日志也为空；显示名由网页按它算。
@@ -87,6 +90,7 @@ type requestView struct {
 	MachineName string `json:"machine_name"`
 	Project     string `json:"project"`
 	HasRedacted bool   `json:"has_redacted"`
+	CanTrust    bool   `json:"can_trust"`
 }
 
 // payloadHasRedacted 报告库里的载荷有没有脱敏占位符。库里的载荷入库前都经 redact.Payload，字符串字段里的占位符是字面；
@@ -144,7 +148,8 @@ func (s *Server) views(rs []store.Request) []requestView {
 			}
 			tools[r.SessionID] = tool
 		}
-		out = append(out, requestView{Request: r, CLI: tool, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: requestHasRedacted(r)})
+		out = append(out, requestView{Request: r, CLI: tool, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: requestHasRedacted(r),
+			CanTrust: r.Kind == "permission" && s.trustSupported(r.MachineID)})
 	}
 	return out
 }
@@ -181,8 +186,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		s.log.Printf("统计推送订阅: %v", err) // 不影响其余状态，按 0 回
 		subs = 0
 	}
+	trusts, err := s.store.ListTrusts("")
+	if err != nil {
+		s.log.Printf("统计放行: %v", err) // 不影响其余状态，按 0 回
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"paused": paused, "pending": pending, "rules_version": version, "machines": ms,
-		"uptime": time.Since(s.start).Round(time.Second).String(), "push_enabled": s.push.enabled, "push_subscriptions": subs})
+		"uptime": time.Since(s.start).Round(time.Second).String(), "push_enabled": s.push.enabled, "push_subscriptions": subs, "trusts": len(trusts)})
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, paused bool) {
@@ -246,15 +255,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"request": s.view(req), "audit": events})
 }
 
-// handleDecide 是网页的决定入口：{"action":"allow|deny","note":"…","remember":true,"scope":"project|global"}。
-// scope 只在 remember 时起作用，缺省时有项目根记成项目、没有记成全局。
-// 200 返回决定后的请求；坏请求体、坏 action、坏 scope、备注超过 1000 字符 400；其余错误见 writeDecideErr。
+// handleDecide 是网页的决定入口：{"action":"allow|deny","note":"…","remember":true,"scope":"project|global","trust":{"scope":"session|project","minutes":120}}。
+// scope 只在 remember 时起作用，缺省时有项目根记成项目、没有记成全局。trust 可选：批准时顺带限时放行（见 Decide）。
+// 200 返回决定后的请求；坏请求体、坏 action、坏 scope、备注超过 1000 字符、放行不合规 400；其余错误见 writeDecideErr。
 func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Action   string `json:"action"`
-		Note     string `json:"note"`
-		Remember bool   `json:"remember"`
-		Scope    string `json:"scope"`
+		Action   string      `json:"action"`
+		Note     string      `json:"note"`
+		Remember bool        `json:"remember"`
+		Scope    string      `json:"scope"`
+		Trust    *TrustInput `json:"trust"`
 	}
 	if err := decodeJSON(w, r, decideBodyMax, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体不是 JSON")
@@ -264,7 +274,7 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "备注至多 1000 个字符")
 		return
 	}
-	req, err := s.Decide(DecideInput{RequestID: r.PathValue("id"), Action: body.Action, Note: body.Note, Remember: body.Remember, Scope: body.Scope})
+	req, err := s.Decide(DecideInput{RequestID: r.PathValue("id"), Action: body.Action, Note: body.Note, Remember: body.Remember, Scope: body.Scope, Trust: body.Trust})
 	if err != nil {
 		s.writeDecideErr(w, "决定请求", err)
 		return
@@ -330,12 +340,12 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 		"summary": map[string]string{"action": string(rule.Action), "payload": string(rule.Match.Payload), "anchor": ruleAnchor(rule)}})
 }
 
-// writeDecideErr 把 Decide、propose 与 Answer 的错误写成 HTTP 回应：坏 action、坏 scope、答案不合规、接口与种类不符
+// writeDecideErr 把 Decide、propose 与 Answer 的错误写成 HTTP 回应：坏 action、坏 scope、答案不合规、放行不合规、接口与种类不符
 // （对提问 decide 或 propose、对不是提问的作答，文案说明该怎么办）400；没有这条请求 404；机器已吊销、已过期、已处理 409；
 // 记不住 422（文案以“不能记住：”开头）；其余记日志回 500（what 说明在做什么）。
 func (s *Server) writeDecideErr(w http.ResponseWriter, what string, err error) {
 	switch {
-	case errors.Is(err, errBadAction), errors.Is(err, errBadScope), errors.Is(err, errBadAnswer):
+	case errors.Is(err, errBadAction), errors.Is(err, errBadScope), errors.Is(err, errBadAnswer), errors.Is(err, errBadTrust):
 		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, store.ErrNotAsk):
 		writeErr(w, http.StatusBadRequest, errNotAsk.Error()) // 与 onlyAsk 的“不是提问”同口径
@@ -536,7 +546,7 @@ func (s *Server) handleMachines(w http.ResponseWriter, r *http.Request) {
 // decidedByRevoked 是吊销机器时取消其待决请求记的 decided_by。
 const decidedByRevoked = "machine_revoked"
 
-// handleMachineRevoke 吊销机器（密钥立即失效）、断开它的在线连接，再取消它仍 pending 的请求。
+// handleMachineRevoke 吊销机器（密钥立即失效）、断开它的在线连接，再取消它仍 pending 的请求、撤掉它的放行。
 // 握手进行中的连接由 handleAgentWS 登记后再核对一次吊销。
 func (s *Server) handleMachineRevoke(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -555,6 +565,7 @@ func (s *Server) handleMachineRevoke(w http.ResponseWriter, r *http.Request) {
 	s.agents.disconnect(id)
 	s.audit(id, "user", "", "machine_revoked", nil)
 	s.cancelRevokedPending(id)
+	s.revokeMachineTrusts(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 

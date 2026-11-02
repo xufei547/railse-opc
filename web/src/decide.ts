@@ -3,7 +3,7 @@
 import { ApiError } from './api'
 import { isRedacted, outcomeText, stateLabel } from './format'
 import { lang, t } from './i18n'
-import type { AuditEvent, DecideBody, Draft, RequestView } from './types'
+import type { AuditEvent, DecideBody, Draft, RequestView, TrustScope } from './types'
 
 export type Verdict = 'allow' | 'deny'
 export type Scope = 'project' | 'global'
@@ -29,6 +29,13 @@ export interface SheetState {
   draftError: string | null
   /** draftError 能不能重试：记不住（422）等 4xx 是确定的结果，重试没用。 */
   draftRetryable: boolean
+  /** 请求有没有 CLI 会话：没有时不能放行“这个会话”。 */
+  hasSession: boolean
+  /** 批准时能不能顺带限时放行（见 canTrust）。 */
+  trustable: boolean
+  trust: boolean
+  trustScope: TrustScope
+  trustMinutes: number
   busy: boolean
   error: string | null
 }
@@ -40,6 +47,9 @@ export type SheetAction =
   | { type: 'retry' }
   | { type: 'draft'; seq: number; draft: Draft }
   | { type: 'draft_error'; seq: number; message: string; retryable: boolean }
+  | { type: 'trust'; on: boolean }
+  | { type: 'trust_scope'; scope: TrustScope }
+  | { type: 'trust_minutes'; minutes: number }
   | { type: 'submit' }
   | { type: 'failed'; message: string }
 
@@ -56,6 +66,45 @@ export function rememberBlock(r: RequestView): string | null {
   return null
 }
 
+/** 放行的时长按钮（分钟）：30 分钟、2 小时（默认，同 hub 与守护进程）、8 小时。 */
+export const trustMinutesOptions = [30, 120, 480] as const
+const trustDefaultMinutes = 120
+
+/**
+ * 批准时能不能顺带限时放行：hub 说可以（can_trust：审批、机器在线、守护进程支持；老 hub 没有这个键）、是批准，
+ * 且至少有会话或项目根之一可放行。拒绝不放行。
+ */
+export function canTrust(r: RequestView, action: Verdict): boolean {
+  return action === 'allow' && r.kind === 'permission' && r.can_trust === true && (r.cli_session_id !== '' || r.project_root !== '')
+}
+
+export interface TrustScopeOption {
+  scope: TrustScope
+  label: string
+  disabled: boolean
+}
+
+/** 放行的范围按钮：没有会话时“这个会话”不可选，没有项目根时“这个项目”不可选（hub 会回 400）。 */
+export function trustScopeOptions(r: Pick<RequestView, 'cli_session_id' | 'project_root'>): TrustScopeOption[] {
+  return [
+    { scope: 'session', label: t('这个会话'), disabled: r.cli_session_id === '' },
+    { scope: 'project', label: t('这个项目'), disabled: r.project_root === '' },
+  ]
+}
+
+/** 时长按钮的文字。整句取（英文的单复数不同），不认识的按分钟说。 */
+export function minutesLabel(m: number): string {
+  switch (m) {
+    case 30:
+      return t('30 分钟')
+    case 120:
+      return t('2 小时')
+    case 480:
+      return t('8 小时')
+  }
+  return t('{n} 分钟', { n: m })
+}
+
 export function initSheet(r: RequestView, action: Verdict): SheetState {
   const hasProject = r.project_root !== ''
   return {
@@ -70,6 +119,12 @@ export function initSheet(r: RequestView, action: Verdict): SheetState {
     draftSeq: -1,
     draftError: null,
     draftRetryable: false,
+    hasSession: r.cli_session_id !== '',
+    trustable: canTrust(r, action),
+    trust: false,
+    // 有会话默认只放行这个会话（范围最小），没有才放行项目
+    trustScope: r.cli_session_id !== '' ? 'session' : 'project',
+    trustMinutes: trustDefaultMinutes,
     busy: false,
     error: null,
   }
@@ -97,6 +152,15 @@ export function sheetReducer(s: SheetState, a: SheetAction): SheetState {
     case 'draft_error':
       if (a.seq !== s.seq || !s.remember) return s
       return { ...s, draft: null, draftSeq: -1, draftError: a.message, draftRetryable: a.retryable }
+    case 'trust':
+      if (s.busy || a.on === s.trust || (a.on && !s.trustable)) return s
+      return { ...s, trust: a.on, error: null }
+    case 'trust_scope':
+      if (s.busy || a.scope === s.trustScope || !(a.scope === 'session' ? s.hasSession : s.hasProject)) return s
+      return { ...s, trustScope: a.scope, error: null }
+    case 'trust_minutes':
+      if (s.busy || a.minutes === s.trustMinutes || !(trustMinutesOptions as readonly number[]).includes(a.minutes)) return s
+      return { ...s, trustMinutes: a.minutes, error: null }
     case 'submit':
       if (!canConfirm(s)) return s
       return { ...s, busy: true, error: null }
@@ -123,7 +187,7 @@ export function canConfirm(s: SheetState): boolean {
 }
 
 /**
- * decide 的请求体；不能确认时回 null。“记住”时 scope 取屏上草案的范围（hub 在 decide 时按它重新生成规则），
+ * decide 的请求体；不能确认时回 null。开着限时放行时带 trust（hub 先建放行再下发这条的 allow）。“记住”时 scope 取屏上草案的范围（hub 在 decide 时按它重新生成规则），
  * 不取组件里的选择，保证存下的就是用户看到的那条。备注去掉首尾空白，空的不带。
  */
 export function decideBody(s: SheetState, note: string): DecideBody | null {
@@ -136,6 +200,7 @@ export function decideBody(s: SheetState, note: string): DecideBody | null {
     body.remember = true
     body.scope = d.scope
   }
+  if (s.trust && s.trustable) body.trust = { scope: s.trustScope, minutes: s.trustMinutes }
   return body
 }
 

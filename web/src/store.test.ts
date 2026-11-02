@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { setLang } from './i18n'
 import { groupByProject, initialState, reduce, waitingIDs, type State } from './store'
 import type { Frame } from './ws'
-import type { RequestView, Status } from './types'
+import type { RequestView, Status, TrustView } from './types'
 
 function req(over: Partial<RequestView>): RequestView {
   return {
@@ -256,5 +256,30 @@ describe('groupByProject 的英文', () => {
     setLang('en')
     const g = groupByProject([req({ id: '1', project: '' }), req({ id: '2', kind: 'webhook', project: '' })])
     expect(g.map((x) => x.project)).toEqual(['Other', 'webhook'])
+  })
+})
+
+describe('限时放行的条数与列表', () => {
+  const tv = (id: string, until: string): TrustView => ({
+    id, machine_id: 'm', scope: 'project', tool: '', cli_session_id: '', project_root: '/p/blog', until, created_at: until,
+    created_by: 'phone', note: '', machine_name: 'mac', project: 'blog', remaining_seconds: 3600,
+  })
+
+  it('status 帧只带 trusts 时改条数、不动暂停；只带 paused 时不动条数', () => {
+    let s = reduce(initialState, { type: 'loaded', inbox: { pending: [], questions: [] }, status: { ...status, paused: true, trusts: 0 } })
+    s = reduce(s, frame({ type: 'status', data: { trusts: 2 } }))
+    expect(s.status).toMatchObject({ paused: true, trusts: 2 })
+    s = reduce(s, frame({ type: 'status', data: { paused: false } }))
+    expect(s.status).toMatchObject({ paused: false, trusts: 2 })
+    expect(reduce(s, frame({ type: 'status', data: { trusts: 'x' } }))).toBe(s)
+  })
+
+  it('trusts 动作存列表；条数降到 0 时列表清空', () => {
+    let s = reduce(initialState, { type: 'loaded', inbox: { pending: [], questions: [] }, status: { ...status, trusts: 1 } })
+    expect(s.trusts).toBeNull()
+    s = reduce(s, { type: 'trusts', trusts: [tv('t1', '2026-11-02T12:30:00.000000000Z')] })
+    expect(s.trusts?.map((x) => x.id)).toEqual(['t1'])
+    s = reduce(s, frame({ type: 'status', data: { trusts: 0 } }))
+    expect(s.trusts).toEqual([])
   })
 })

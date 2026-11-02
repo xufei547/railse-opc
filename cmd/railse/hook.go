@@ -46,7 +46,7 @@ type parentGoneError struct{}
 func (parentGoneError) Error() string { return i18n.T("父进程（CLI）已退出") }
 
 // runHook 永远以“不作决定”收场（stdout 为空、退出 0），除非守护进程明确给了 allow、deny 或答题的答案。
-// 这里绝不打印任何环境变量，只读：找守护进程 socket 与 lang 文件用的 RAILSE_HOME、HOME，以及界面语言用的 RAILSE_LANG、LC_ALL、LC_MESSAGES、LANG（见 internal/i18n）：CLI 会往钩子环境里注入令牌。
+// 这里绝不打印任何环境变量，只读：找守护进程 socket 与 lang 文件用的 RAILSE_HOME、HOME，以及界面语言用的 RAILSE_LANG、LC_ALL、LC_MESSAGES、LANG（见 internal/i18n），以及 Claude 的 PreToolUse 请求原样带给守护进程的 RAILSE_TRUST（见 hookPermission）：CLI 会往钩子环境里注入令牌。
 // 从入口起就接管 SIGTERM、SIGINT、SIGHUP：任何阶段收到信号都不作决定并退出 0，进程不会被信号杀掉。
 func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 	defer func() {
@@ -174,6 +174,10 @@ func readStdin(ctx context.Context, stdin io.Reader) ([]byte, error) {
 func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.Client, in adapter.Input, stdout, stderr io.Writer) int {
 	req := proto.Request{Kind: "permission", Session: in.Session, ToolName: in.ToolName, Payload: in.Payload,
 		Source: in.Source, PermissionMode: in.PermissionMode, ToolUseID: in.ToolUseID}
+	if in.Source == proto.SourcePreToolUse {
+		// RAILSE_TRUST=2h claude：原文照带，格式由守护进程判断（不对只记它的日志）；Claude 每次调用先经 PreToolUse，只带这一路
+		req.TrustFor = os.Getenv("RAILSE_TRUST")
+	}
 	resp, err := awaitReply(ctx, ad, client, req)
 	if err != nil {
 		return passthrough(stderr, err.Error())

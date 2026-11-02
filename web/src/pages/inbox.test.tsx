@@ -179,3 +179,39 @@ describe('外壳：连接中、导航、没有这个页面', () => {
     expect(c).not.toMatch(cjk)
   })
 })
+
+describe('收件箱的限时放行横幅', () => {
+  const status = { paused: false, pending: 0, rules_version: 1, machines: [], uptime: '1s', push_enabled: true, push_subscriptions: 1 }
+  // 今天本地 12:30 与 14:00 到期：横幅只写时分
+  const today = (h: number, m: number) => {
+    const d = new Date()
+    d.setHours(h, m, 0, 0)
+    return d.toISOString()
+  }
+  const tv = (id: string, until: string) => ({
+    id, machine_id: 'm', scope: 'project', tool: '', cli_session_id: '', project_root: '/p/blog', until, created_at: until,
+    created_by: 'phone', note: '', machine_name: 'mac', project: 'blog', remaining_seconds: 600,
+  })
+
+  it('有生效中的放行：横幅写条数与最近的到期时间，链接去设置', () => {
+    store.over = { loaded: true, connected: true, status: { ...status, trusts: 2 }, trusts: [tv('a', today(14, 0)), tv('b', today(12, 30))] }
+    expect(render()).toMatch(/<div class="banner info" role="status">2 个放行生效中，最近的 12:30 到期。<a href="\/settings"[^>]*>去设置<\/a><\/div>/)
+  })
+
+  it('列表还没拉到时只说条数；没有放行或老 hub 不显示', () => {
+    store.over = { loaded: true, connected: true, status: { ...status, trusts: 1 }, trusts: null }
+    expect(render()).toContain('1 个放行生效中。<a href="/settings"')
+    for (const s of [{ ...status, trusts: 0 }, status]) {
+      store.over = { loaded: true, connected: true, status: s }
+      expect(render()).not.toContain('放行生效中')
+    }
+  })
+
+  it('英文：句子与链接之间有空格', () => {
+    setLang('en')
+    store.over = { loaded: true, connected: true, status: { ...status, trusts: 2 }, trusts: [tv('b', today(12, 30))] }
+    const html = render()
+    expect(html).toMatch(/2 trusts active, the soonest ends at 12:30 <a href="\/settings"[^>]*>Go to Settings<\/a>/)
+    expect(html).not.toMatch(cjk)
+  })
+})

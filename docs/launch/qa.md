@@ -18,6 +18,8 @@
 
 **How is this different from `--dangerously-skip-permissions`?** YOLO mode allows everything. Railse allows the boring 80% and makes you tap for the rest, and it's the same tap whether you're at the desk or not.
 
+**Too noisy? Can I just let one window run for a while?** Yes, with a time-limited trust (0.2.3). Tick "Trust this for a while" when you approve on the phone, run `railse trust 2h` in a project directory, or start with `RAILSE_TRUST=2h claude` for just that session. Inside the scope Railse stops gating: it's bypassPermissions plus an audit log. It expires on its own, after 24 hours at most, and you can revoke it from the phone or the terminal.
+
 **Teams?** Several machines per hub work today, but it's designed around one person. No per-user roles yet.
 
 **Uninstall?** `railse setup autostart --uninstall` stops the daemon (and `--hub --uninstall` the local hub), then remove the `railse hook …` entries from each CLI's settings and delete the binary and `~/.railse`. There's no hook-removal command yet; it's on the list.

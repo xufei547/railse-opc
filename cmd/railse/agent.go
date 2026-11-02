@@ -99,7 +99,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		}
 		if args[0] == "status" && reply.Status != nil {
 			st := reply.Status
-			fmt.Fprintf(stdout, "%s\nrules: %d\npending: %d\nmachine: %s\n%s\nrules_path: %s\nuptime: %s\n", pausedLine(st), st.Rules, st.Pending, st.MachineID, hubLine(st), st.RulesPath, st.Uptime)
+			fmt.Fprintf(stdout, "%s\nrules: %d\npending: %d\ntrusts: %d\nmachine: %s\n%s\nrules_path: %s\nuptime: %s\n", pausedLine(st), st.Rules, st.Pending, st.Trusts, st.MachineID, hubLine(st), st.RulesPath, st.Uptime)
 			return 0
 		}
 		fmt.Fprintln(stdout, "ok")
@@ -378,6 +378,7 @@ func runAgentServe(ctx context.Context, cfg agent.Config, foreground bool, stder
 		decider := &agent.HubDecider{Client: client, Grace: cfg.HubGrace, Log: logger}
 		srv.SetDecider(decider)
 		srv.SetAuditSink(client)
+		client.SyncTrusts(srv) // 放行表与 hub 双向同步：hello 声明 trust，本机的建、撤、到期报给 hub
 		srv.SetHubStatus(func() (string, string) { return client.State(), machine.HubURL })
 		// 送达回执在后台发：在审批服务停下（下面登记的 srv.Close，后登记先执行）之后、关审计与日志之前等它们发完
 		defer decider.Wait()

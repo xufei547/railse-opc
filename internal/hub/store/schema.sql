@@ -1,5 +1,5 @@
 -- 改动 schema 必须提高 store.go 的 SchemaVersion 并写迁移（版本一致时不会重新执行建表）。
--- Railse OPC hub 数据库，版本 4。时间列一律定宽 UTC 文本（纳秒 9 位、以 Z 结尾，见 store.go 的 timeLayout），按字典序比较即按时间先后。
+-- Railse OPC hub 数据库，版本 6。时间列一律定宽 UTC 文本（纳秒 9 位、以 Z 结尾，见 store.go 的 timeLayout），按字典序比较即按时间先后。
 CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -106,3 +106,20 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   first_failed_at TEXT,                  -- 这一轮连续失败的第一次失败时刻，成功与重新订阅时清空
   lang       TEXT NOT NULL DEFAULT 'zh'  -- 推送文案语言：zh、en（v4）
 );
+
+-- 限时放行（v6）：守护进程是执行者，hub 存副本给手机看、建、撤。撤销与到期只标 revoked_at，不删行。
+CREATE TABLE IF NOT EXISTS trusts (
+  id             TEXT PRIMARY KEY,
+  machine_id     TEXT NOT NULL REFERENCES machines(id),
+  scope          TEXT NOT NULL,             -- session、project
+  tool           TEXT NOT NULL DEFAULT '',
+  cli_session_id TEXT NOT NULL DEFAULT '',
+  project_root   TEXT NOT NULL DEFAULT '',
+  until_at       TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  created_by     TEXT NOT NULL,             -- phone、cli、env
+  note           TEXT NOT NULL DEFAULT '',
+  revoked_at     TEXT,
+  revoke_reason  TEXT NOT NULL DEFAULT ''   -- user、expired、agent
+);
+CREATE INDEX IF NOT EXISTS trusts_machine_until ON trusts (machine_id, until_at);

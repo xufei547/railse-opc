@@ -4,10 +4,13 @@ package proto
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/xufei547/railse-opc/internal/policy"
 )
@@ -89,6 +92,8 @@ type Request struct {
 	PermissionMode string `json:"permission_mode,omitempty"`
 	// ToolUseID 是 Claude Code 给这次工具调用的编号，只有 PreToolUse 带，用来认出同一调用。
 	ToolUseID string `json:"tool_use_id,omitempty"`
+	// TrustFor 是钩子从环境变量 RAILSE_TRUST 带来的时长原文（如 "2h"）：守护进程第一次见到带它的会话时建一条会话放行，之后不再看它。
+	TrustFor string `json:"trust_for,omitempty"`
 }
 
 // 审批请求的来源钩子事件。
@@ -138,8 +143,37 @@ type EventAck struct {
 type Control struct {
 	V    int    `json:"v"`
 	Kind string `json:"kind"`
-	Op   string `json:"op"` // status、pause、resume、reload
+	Op   string `json:"op"` // status、pause、resume、reload、trust_set、trust_list、trust_revoke
+	// Trust 是 trust_set 要建的放行（ID、CreatedAt 由守护进程补，CreatedBy 空按 cli）。
+	Trust *Trust `json:"trust,omitempty"`
+	// TrustID 是 trust_revoke 要撤的放行；"all" 撤全部。
+	TrustID string `json:"trust_id,omitempty"`
 }
+
+// Trust 是一条限时放行：范围内引擎定不了（ask）的审批在 Until 之前一律放行。守护进程是执行者，hub 存副本给手机看、建、撤。
+// session 范围按 Tool + CLISession 认会话，project 范围按项目根（与守护进程算出的项目根字符串相等）。
+type Trust struct {
+	ID         string    `json:"id"`
+	MachineID  string    `json:"machine_id,omitempty"`
+	Scope      string    `json:"scope"`                    // session | project
+	Tool       string    `json:"tool,omitempty"`           // session
+	CLISession string    `json:"cli_session_id,omitempty"` // session
+	Project    string    `json:"project_root,omitempty"`   // project
+	Until      time.Time `json:"until"`
+	CreatedAt  time.Time `json:"created_at"`
+	CreatedBy  string    `json:"created_by"` // phone | cli | env
+	Note       string    `json:"note,omitempty"`
+}
+
+// 放行的范围与上下限：时长 5 分钟～24 小时（超上限截断、短于下限拒建），默认 2 小时；每台机器同时生效至多 20 条。
+const (
+	TrustScopeSession = "session"
+	TrustScopeProject = "project"
+	TrustMin          = 5 * time.Minute
+	TrustMax          = 24 * time.Hour
+	TrustDefault      = 2 * time.Hour
+	TrustPerMachine   = 20
+)
 
 // Status 是守护进程状态。Paused 是生效值（本机暂停或 hub 暂停），LocalPaused、HubPaused 说明来源。
 type Status struct {
@@ -153,6 +187,7 @@ type Status struct {
 	Uptime      string `json:"uptime"`
 	Hub         string `json:"hub"`               // none（未接入）、connecting、connected、disabled（被 hub 以 401 停用）
 	HubURL      string `json:"hub_url,omitempty"` // machine.json 里的 hub 地址；未接入时为空
+	Trusts      int    `json:"trusts"`            // 生效中的限时放行条数
 }
 
 // ControlReply 是管理命令的答复。
@@ -161,6 +196,8 @@ type ControlReply struct {
 	OK     bool    `json:"ok"`
 	Error  string  `json:"error,omitempty"`
 	Status *Status `json:"status,omitempty"`
+	// Trusts 是 trust_set 建好的那条，或 trust_list、trust_revoke 之后生效中的全部（按到期先后）。
+	Trusts []Trust `json:"trusts,omitempty"`
 }
 
 // WriteLine 把 v 编成一行 JSON 并写出，末尾带换行。
@@ -220,4 +257,11 @@ func Decode(line []byte, v any) error {
 		return fmt.Errorf("协议版本不匹配：想要 %d，得到 %d", Version, head.V)
 	}
 	return json.Unmarshal(line, v)
+}
+
+// NewTrustID 是放行记录的 id：随机 8 字节的十六进制。守护进程与 hub 都用它，两边建的 id 长短一致。
+func NewTrustID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:]) // crypto/rand 不会失败（失败时它自己终止进程）
+	return hex.EncodeToString(b[:])
 }

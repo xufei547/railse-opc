@@ -34,7 +34,7 @@ type Trust struct {
 }
 ```
 
-时长：默认 2 小时，最长 24 小时，最短 5 分钟。**守护进程是执行者**，放行表在它内存里，同时落 `~/.railse/state.json`（重启不丢，过期的启动时清掉）。hub 是**展示与远程控制**：存一份副本，手机上看、撤、建。两边同步见 2.5。
+时长：默认 2 小时，最长 24 小时，最短 5 分钟。**守护进程是执行者**，放行表在它内存里，同时落 `~/.railse/trusts.json`（独立于 state.json；重启不丢，过期的启动时清掉）。（计划写作时改定：原稿写进 state.json。）hub 是**展示与远程控制**：存一份副本，手机上看、撤、建。两边同步见 2.5。
 
 ### 2.2 判定
 
@@ -81,7 +81,7 @@ railse trust revoke <id> | --all
 照"总开关"的样子做，不照"规则"的样子（规则是 hub 单向下发，放行要双向）：
 
 - wire 新增 `trusts` 帧（hub → 守护进程，整台机器的放行快照）和 `trust` 帧（守护进程 → hub，一条变更：set / revoke / expired）。`welcome` 带快照。
-- 守护进程收到快照：hub 来的（`created_by: phone`）以 hub 为准替换；本机来的（cli / env）本机为准，并立刻把 hub 没有的本机条目补发给 hub。
+- 守护进程收到快照（计划写作时精确化）：快照里有的条目写入/覆盖并标"已同步"；本机**已同步**却不在快照里的，删掉（被手机撤了）；本机**未同步**的（断线期间 cli / env 建的）保留，并逐条补发给 hub。本机建的条目只有等 hub 的快照回来才算同步。
 - 没接 hub / hub 不可达：本机条目照常生效；手机建的条目在断线期间仍按守护进程手里的副本生效直到过期（不因断线失效，也不因断线延长）。
 - hub 存 `trusts` 表（schema v6：`id, machine_id, scope, tool, cli_session_id, project_root, until, created_at, created_by, note, revoked_at`），每分钟清过期的；`GET /api/trusts`、`DELETE /api/trusts/{id}` 给网页用；hub 收到 `DELETE` 就推新快照给那台机器。
 - 旧 hub 配新守护进程：welcome 里没有 `trusts` 能力声明，守护进程不发 `trust` 帧，只用本机条目，手机上看不到也建不了（面板不显示开关：网页看 `/api/version` 的能力）。新 hub 配旧守护进程：hub 不下发快照，手机上的开关不显示（按机器的 `agent_version` 判断）。
@@ -104,6 +104,28 @@ railse trust revoke <id> | --all
 5. 停掉本机 hub：手机建的放行仍生效到过期；本机 `railse trust` 照常。
 6. 放行期间 `AskUserQuestion` 仍进手机；用户 deny 规则仍拒绝。
 7. 老 hub（0.2.2）配新守护进程：本机 `railse trust` 生效，手机上没有开关、不报错。
+
+### 真机验收记录（2026-11-02，rc1，Mac 本机 hub v6）
+
+安装：`railse 0.2.3-rc1` 换到 `/opt/homebrew/bin`，hub 库 v5 → v6，doctor 20 通过 1 警告。终端侧用真实守护进程、把 PreToolUse 样本直接喂 `railse hook claude` 模拟各个"窗口"（不同 `session_id`、`cwd`），另起一个真的 `claude --permission-mode auto` 窗口做对照；手机侧由作者操作 iPhone PWA。
+
+| # | 验收项 | 结果 |
+|---|---|---|
+| 1 | 手机批准带"这个会话 2 小时" | 通过。同窗口 `rm -rf` 当即 allow（"限时放行中"），放行表多一条 `created_by: phone`；2 小时后被到期清理，hub 库标 `expired` |
+| 2 | 手机设置页撤销 | 通过（第二次）。撤后守护进程表为空、同窗口回 ask、hub 库 `revoked_at` + `revoke_reason: user`、审计 `trust_revoke`。第一次点撤销没有任何请求到 hub，原因未查明（当时页面可能是旧状态）；电脑浏览器上同一页撤销一次成功 |
+| 3 | 项目目录 `railse trust 30m` | 通过。同项目两个窗口 `git push`、`rm -rf` 都 allow，别的目录仍 ask；真窗口 `git push --dry-run` 不弹框直接跑，审计 `decided_by: trust:<id>`；`railse trust list` 与手机横幅、设置页都看得到 |
+| 4 | `RAILSE_TRUST=5m` | 通过。当条放行并建一条 `env` 来源的会话放行，同窗口后续不带变量也放行，别的窗口不受影响；5 分钟后两条被清（审计 2 条 `trust_expired`），同窗口回 ask，hub 库标 `expired` |
+| 5 | 停 hub | 通过。`launchctl bootout` 后放行仍 allow，`railse trust` 照常建；`bootstrap` 回来后停机期间建的条目补发进 hub 库 |
+| 6 | 提问与 deny 规则 | 通过。放行中的项目里 `AskUserQuestion` 仍进手机并带回答案；临时守护进程加一条用户 deny（`command_prefix: rm -rf`）后放行期间仍 deny、`git push` allow |
+| 7 | 老 hub 配新守护进程 | 未在真机做（Fly 上的 0.2.2 hub 停着），靠单元测试与 hello 能力声明兜底 |
+
+顺带发现，均不阻塞发布：
+
+- 手机建的放行 id 是 32 位十六进制（hub `store.NewID`），本机建的是 16 位（设计 §2.1 写 8 字节），列表里长短不一。
+- 收件箱横幅"到期"与"去设置"之间少一个空格。
+- 收件箱挂着多张"在终端等你回答"（Claude Code 空闲提示）的旧卡，最早 22 小时前；v0.2.2 的收尾取消只覆盖审批与提问。
+- `railse trust --dir` 是守护进程数据目录（与 `agent --dir` 一致），不是项目目录；用法说明写得对，但容易看错。
+- 没接 hub 时 PreToolUse 的 ask 理由仍写"已发到手机"（v0.2.2 起就有）。
 
 ## 4 文档
 

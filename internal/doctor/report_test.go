@@ -112,6 +112,7 @@ func TestRunEnglishUnconfigured(t *testing.T) {
 		"[fail]  Daemon data directory: " + filepath.Join(home, ".railse") + " doesn't exist\n",
 		"[fail]  Daemon status: can't connect to the daemon: dial unix ",
 		"[skip]  Hub connection: the daemon isn't running\n",
+		"[skip]  Time-limited trusts: the daemon isn't running\n",
 		"[skip]  Hub reachability: no machine.json (not enrolled with a hub)\n",
 		"[fail]  Claude Code hooks: no hooks installed (looked in ",
 		"        Fix: railse setup hooks --claude\n",
@@ -119,7 +120,7 @@ func TestRunEnglishUnconfigured(t *testing.T) {
 		"[skip]  Project root: ",
 		"[skip]  Gemini CLI version: gemini isn't in PATH\n",
 		"[skip]  Hub data directory: no hub data directory at ",
-		"\n0 passed, 2 warned, 6 failed, 14 skipped (railse 0.2.0)\n",
+		"\n0 passed, 2 warned, 6 failed, 15 skipped (railse 0.2.0)\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("缺 %q:\n%s", want, text)

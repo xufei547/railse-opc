@@ -54,17 +54,27 @@ Railse turns all of that into one rule: **every approval goes through the rules 
 
 What each CLI supports:
 
-| | Can approve | Deny only | Reminders only | Answer questions on the phone | Works in auto / yolo mode |
-|---|---|---|---|---|---|
-| Claude Code | yes | — | waiting for you, finished | yes (`AskUserQuestion`) | yes: outward and destructive go to your phone in any mode; the terminal shows the same prompt, first answer wins; network, writes outside the project and unknown commands go to Claude first and reach the phone only when Claude asks |
-| Codex | yes (interactive sessions) | — | finished | no | depends on Codex's own `approval_policy` |
-| Gemini CLI | no | yes | questions, finished | no | no (yolo skips hooks) |
+| | Can approve | Deny only | Reminders only | Answer questions on the phone | Works in auto / yolo mode | Time-limited trust |
+|---|---|---|---|---|---|---|
+| Claude Code | yes | — | waiting for you, finished | yes (`AskUserQuestion`) | yes: outward and destructive go to your phone in any mode; the terminal shows the same prompt, first answer wins; network, writes outside the project and unknown commands go to Claude first and reach the phone only when Claude asks | session or project; from the phone, the terminal or `RAILSE_TRUST` |
+| Codex | yes (interactive sessions) | — | finished | no | depends on Codex's own `approval_policy` | project (phone, terminal); session from the phone only |
+| Gemini CLI | no | yes | questions, finished | no | no (yolo skips hooks) | not applicable (hooks can't approve) |
 
 Besides approvals and these questions, the inbox also shows when an agent stops to wait for your next message and when it finishes, telling you which machine and directory to go to in the terminal. Human-approval steps from workflows like n8n can be posted to the hub's webhook and show up in the same inbox as agent approvals. See [docs/integrations/n8n.en.md](docs/integrations/n8n.en.md).
 
 <p align="center"><img src="assets/demo.en.gif" width="390" alt="Demo: log in to the phone web app; Claude Code wants to run curl, no rule decides it, and the request shows up in the inbox; approve it with Remember on; a multiple-choice question is answered on the phone; the rules page now has a learned rule"></p>
 
 In the demo, Claude Code wants to run `curl`; no rule decides it, so it goes to the phone. Approving with Remember on adds a learned rule, then a multiple-choice question from Claude Code is answered on the phone.
+
+## Time-limited trust
+
+When you're watching one window and don't want to approve every step, you can hand over a session or a project for a while (new in 0.2.3). Three ways in:
+
+- **Phone.** When you approve a request, turn on "Trust this for a while", pick this session or this project, and 30 minutes, 2 hours or 8 hours.
+- **Terminal.** `railse trust 2h` inside a project directory (2 hours by default) trusts that project: requests from every CLI on this machine working in it. `railse trust list` shows what's active; `railse trust revoke <id>` or `--all` ends it. `--session <session id>` trusts one Claude Code session instead.
+- **Launch command.** `RAILSE_TRUST=2h claude` trusts just that window, counted from the first action the rules can't decide.
+
+**While a trust is active, Railse doesn't gate anything in that scope: it's Claude Code's bypassPermissions plus an audit log. It expires on its own, after at most 24 hours.** Durations are clamped to 5 minutes – 24 hours, with at most 20 active per machine. Not affected: deny rules still deny, the global pause still hands everything back to the terminal, and multiple-choice questions still go to your phone. The phone inbox shows a banner while trusts are active, and the "Time-limited trusts" section in Settings lists them with a Revoke button. Creating, revoking and expiring are all audited. Details: "限时放行" in [docs/agent-local-loop.md](docs/agent-local-loop.md).
 
 ## Why not Claude Code's Remote Control?
 
@@ -149,17 +159,19 @@ The docs under `docs/` are in Chinese.
 - [docs/setup.md](docs/setup.md): install, the local hub (one machine is enough), hub deployment (Linux service, reverse proxy), enrolling machines, autostart, `railse doctor` checks, upgrades
 - [docs/hub.md](docs/hub.md): hub API, push notifications, security, Fly.io, troubleshooting
 - [docs/web.md](docs/web.md): the phone web app
-- [docs/agent-local-loop.md](docs/agent-local-loop.md): daemon, hooks, rules, audit log
+- [docs/agent-local-loop.md](docs/agent-local-loop.md): daemon, hooks, rules, time-limited trusts, audit log
 - [Design doc](docs/superpowers/specs/2026-10-21-railse-opc-design.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md)
 
 ## Status and limitations
 
-- This is v0.2.2, and the author is dogfooding it.
+- This is v0.2.3, and the author is dogfooding it.
 - For Claude Code, network calls, writes outside the project and commands Railse hasn't seen are left to Claude first, in every permission mode: whatever your Claude allow list or auto mode's classifier lets through just runs, and only when Claude decides to ask does it reach the phone. Outward and destructive actions always reach the phone, and the terminal shows Claude's own prompt at the same time (the reason starts with "Railse:" and names the part of the command that triggered it); answer on either side. If the hub can't be reached, only the terminal prompt is left. To send all of them to the phone, put `claude_undecided: phone` in `~/.railse/settings.yaml` and run `railse agent reload`.
 - When Railse allows a call at `PreToolUse` (the built-in read-only and in-project rules, or an allow rule you remembered), Claude Code skips its own permission checks; deny rules in Claude's `settings.json` still apply first.
 - Upgrading from 0.2.0: rerun `railse setup hooks --claude` once so Claude's `PreToolUse` hook also matches Bash and the other tools (`railse doctor` reports it under `hooks.claude`); until then approvals in auto mode still bypass Railse.
 - Upgrading from 0.2.1: the hub database moves to v5 (requests get a trigger column), so upgrade both the daemon and the hub. Afterwards actions like `git push` and `rm -rf` pop up Claude's own prompt in the terminal with a reason starting "Railse:", and the same request is on your phone; answer on either side. Rerun `railse setup hooks --claude` once to add the `PostToolUse` hook (`railse doctor` flags it under `hooks.claude`): in the Claude Code desktop app it clears phone cards for requests already handled on this machine; without it they stay until they expire.
+- Upgrading from 0.2.2: the hub database moves to v6 (a new `trusts` table for time-limited trusts) the first time it's opened and can't be downgraded, so back up the hub data directory first. Upgrade and restart both the daemon and the hub to get the trust switch on the phone; with only the daemon upgraded, `railse trust` and `RAILSE_TRUST` still work on that machine but the phone doesn't see them. No need to reinstall hooks.
+- `RAILSE_TRUST` only works with Claude Code and creates one trust per session: once it expires or is revoked it isn't created again. To keep going, open a new window or use `railse trust`.
 - Most docs under `docs/` are in Chinese for now; the CLI and the phone web app are in both languages.
 - Gemini CLI hooks can deny but can't approve: rule denials still apply, and everything else goes back to Gemini's own prompt and never reaches the phone. Needs Gemini CLI 0.65.0 or later.
 - On the phone you can only answer Claude Code's multiple-choice questions (`AskUserQuestion`). Questions from Codex and Gemini, and an agent stopping to wait for your next message, are still reminders only: you go back to the terminal.

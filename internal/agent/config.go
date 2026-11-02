@@ -22,9 +22,11 @@ type Config struct {
 	LogPath    string
 	// SettingsPath 是本机设置 settings.yaml（见 Settings），不随 hub 下发
 	SettingsPath string
-	MachineID    string
-	HomeDir      string
-	Deadline     time.Duration // 单条请求的等待上限
+	// TrustsPath 是限时放行表 trusts.json（见 trusts），独立于 state.json
+	TrustsPath string
+	MachineID  string
+	HomeDir    string
+	Deadline   time.Duration // 单条请求的等待上限
 
 	MachinePath  string        // machine.json：本机在 hub 的身份，不存在表示未接入 hub
 	HubGrace     time.Duration // 请求送到 hub 后断线，最多等这么久重连，超时交回终端
@@ -61,6 +63,7 @@ func ConfigIn(dir string) Config {
 		StatePath:    filepath.Join(dir, "state.json"),
 		LogPath:      filepath.Join(dir, "agent.log"),
 		SettingsPath: filepath.Join(dir, "settings.yaml"),
+		TrustsPath:   filepath.Join(dir, "trusts.json"),
 		MachineID:    host,
 		HomeDir:      home,
 		Deadline:     deadline,

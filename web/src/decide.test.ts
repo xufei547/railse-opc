@@ -20,6 +20,9 @@ import {
   scopeOptions,
   sheetReducer,
   sheetTitle,
+  minutesLabel,
+  trustMinutesOptions,
+  trustScopeOptions,
   type SheetAction,
   type SheetState,
 } from './decide'
@@ -575,5 +578,69 @@ describe('面板标题与草案摘要（整句按语言取）', () => {
     expect(draftLead('allow', 'something')).toBe('Will allow')
     expect(draftScope('project', 'blog')).toBe(' (project blog only)')
     expect(draftScope('global', 'blog')).toBe(' (all projects)')
+  })
+})
+
+describe('限时放行（批准时顺带）', () => {
+  afterEach(() => setLang('zh'))
+  const trustable = (over: Partial<RequestView> = {}) => req({ can_trust: true, ...over })
+
+  it('can_trust 为真的待批审批可以放行；有会话默认“这个会话”，没有默认“这个项目”；默认 2 小时、不开', () => {
+    expect(initSheet(trustable(), 'allow')).toMatchObject({ trustable: true, trust: false, trustScope: 'session', trustMinutes: 120 })
+    expect(initSheet(trustable({ cli_session_id: '' }), 'allow')).toMatchObject({ trustable: true, trustScope: 'project' })
+    expect(initSheet(trustable({ project_root: '', project: '' }), 'allow')).toMatchObject({ trustable: true, trustScope: 'session' })
+  })
+
+  it('不能放行：没有 can_trust（老 hub、老守护进程、机器离线）、不是审批、拒绝、既没有会话也没有项目根', () => {
+    expect(initSheet(req(), 'allow').trustable).toBe(false)
+    expect(initSheet(req({ can_trust: false }), 'allow').trustable).toBe(false)
+    expect(initSheet(trustable({ kind: 'webhook' }), 'allow').trustable).toBe(false)
+    expect(initSheet(trustable(), 'deny').trustable).toBe(false)
+    expect(initSheet(trustable({ cli_session_id: '', project_root: '', project: '' }), 'allow').trustable).toBe(false)
+  })
+
+  it('开关、范围、时长；不可选的范围、不能放行时与提交中不变', () => {
+    let s = run(initSheet(trustable(), 'allow'), { type: 'trust', on: true })
+    expect(s.trust).toBe(true)
+    s = run(s, { type: 'trust_scope', scope: 'project' }, { type: 'trust_minutes', minutes: 480 })
+    expect(s).toMatchObject({ trustScope: 'project', trustMinutes: 480 })
+    const noSession = initSheet(trustable({ cli_session_id: '' }), 'allow')
+    expect(run(noSession, { type: 'trust_scope', scope: 'session' }).trustScope).toBe('project')
+    const noProject = initSheet(trustable({ project_root: '', project: '' }), 'allow')
+    expect(run(noProject, { type: 'trust_scope', scope: 'project' }).trustScope).toBe('session')
+    expect(run(initSheet(req(), 'allow'), { type: 'trust', on: true }).trust).toBe(false)
+    const busy = run(s, { type: 'submit' })
+    expect(run(busy, { type: 'trust', on: false }).trust).toBe(true)
+    expect(run(busy, { type: 'trust_minutes', minutes: 30 }).trustMinutes).toBe(480)
+  })
+
+  it('decideBody：开着时带 trust {scope, minutes}，关着不带；可与记住同时带', () => {
+    let s = initSheet(trustable(), 'allow')
+    expect(decideBody(s, '')).toEqual({ action: 'allow' })
+    s = run(s, { type: 'trust', on: true }, { type: 'trust_scope', scope: 'project' })
+    expect(decideBody(s, '')).toEqual({ action: 'allow', trust: { scope: 'project', minutes: 120 } })
+    s = run(s, { type: 'remember', on: true })
+    s = run(s, { type: 'draft', seq: s.seq, draft: draft('project') })
+    expect(decideBody(s, '')).toEqual({ action: 'allow', remember: true, scope: 'project', trust: { scope: 'project', minutes: 120 } })
+    expect(decideBody(run(s, { type: 'trust', on: false }), '')).toEqual({ action: 'allow', remember: true, scope: 'project' })
+  })
+
+  it('拒绝不带 trust', () => {
+    const s = run(initSheet(trustable(), 'deny'), { type: 'trust', on: true })
+    expect(decideBody(s, '')).toEqual({ action: 'deny' })
+  })
+
+  it('范围与时长按钮', () => {
+    expect(trustScopeOptions(trustable())).toEqual([
+      { scope: 'session', label: '这个会话', disabled: false },
+      { scope: 'project', label: '这个项目', disabled: false },
+    ])
+    expect(trustScopeOptions(trustable({ cli_session_id: '' })).map((o) => o.disabled)).toEqual([true, false])
+    expect(trustScopeOptions(trustable({ project_root: '' })).map((o) => o.disabled)).toEqual([false, true])
+    expect(trustMinutesOptions).toEqual([30, 120, 480])
+    expect(trustMinutesOptions.map(minutesLabel)).toEqual(['30 分钟', '2 小时', '8 小时'])
+    setLang('en')
+    expect(trustScopeOptions(trustable()).map((o) => o.label)).toEqual(['This session', 'This project'])
+    expect(trustMinutesOptions.map(minutesLabel)).toEqual(['30 min', '2 hours', '8 hours'])
   })
 })

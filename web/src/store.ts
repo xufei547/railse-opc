@@ -1,6 +1,6 @@
 import { t } from './i18n'
 import type { Frame } from './ws'
-import type { Inbox, Machine, RequestView, Rule, Status } from './types'
+import type { Inbox, Machine, RequestView, Rule, Status, TrustView } from './types'
 
 export interface State {
   loaded: boolean
@@ -13,6 +13,8 @@ export interface State {
   rules: Rule[] | null
   rulesStale: boolean
   machines: Machine[] | null
+  /** 生效中的限时放行（GET /api/trusts）；还没拉过、老 hub 时为 null。收件箱横幅取最近的到期时间，设置页列出。 */
+  trusts: TrustView[] | null
   error: string | null
   /** 每处理一帧有效的请求变化就加一；历史页、详情页据此重新拉取。 */
   tick: number
@@ -37,6 +39,7 @@ export const initialState: State = {
   rules: null,
   rulesStale: false,
   machines: null,
+  trusts: null,
   error: null,
   tick: 0,
   loads: 0,
@@ -49,6 +52,7 @@ export type Action =
   /** 规则可能变了（实时通道断开期间漏掉的 rules_updated）：规则页据此重新拉取。 */
   | { type: 'rules_stale' }
   | { type: 'machines'; machines: Machine[] }
+  | { type: 'trusts'; trusts: TrustView[] }
   | { type: 'status'; status: Status }
   | { type: 'connected'; connected: boolean }
   | { type: 'error'; error: string | null }
@@ -116,9 +120,15 @@ function applyFrame(state: State, frame: Frame): State {
     case 'rules_updated':
       return { ...state, rulesStale: true }
     case 'status': {
-      const d = frame.data as { paused?: unknown } | null
-      if (!state.status || typeof d?.paused !== 'boolean') return state
-      return { ...state, status: { ...state.status, paused: d.paused } }
+      // hub 的 status 帧只带变了的字段：总开关带 paused，放行条数变了带 trusts。缺的字段保持原样
+      const d = frame.data as { paused?: unknown; trusts?: unknown } | null
+      if (!state.status) return state
+      const paused = typeof d?.paused === 'boolean' ? d.paused : undefined
+      const trusts = typeof d?.trusts === 'number' ? d.trusts : undefined
+      if (paused === undefined && trusts === undefined) return state
+      const status = { ...state.status, ...(paused === undefined ? {} : { paused }), ...(trusts === undefined ? {} : { trusts }) }
+      // 条数降到 0：列表不用等重拉就清空（横幅、设置页立即反映）
+      return { ...state, status, trusts: trusts === 0 ? [] : state.trusts }
     }
     default:
       return state // 不认识的帧（ws.ts 已滤掉，这里再兜一层）
@@ -143,6 +153,8 @@ export function reduce(state: State, action: Action): State {
       return { ...state, rulesStale: true }
     case 'machines':
       return { ...state, machines: action.machines }
+    case 'trusts':
+      return { ...state, trusts: action.trusts }
     case 'status':
       return { ...state, status: action.status }
     case 'connected':

@@ -10,12 +10,15 @@ import {
   goneMessage,
   initSheet,
   isEscape,
+  minutesLabel,
   noteHint,
   rememberBlock,
   retryable,
   scopeOptions,
   sheetReducer,
   sheetTitle,
+  trustMinutesOptions,
+  trustScopeOptions,
   type Verdict,
 } from '../decide'
 import { t } from '../i18n'
@@ -185,6 +188,53 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
               </>
             )}
             {!shown && !s.draftError && <div className="sub">{t('正在生成草案…')}</div>}
+          </div>
+        )}
+        {s.trustable && (
+          <label className="switch">
+            <span>
+              {t('接下来一段时间都放行')}
+              <span className="sub line">{t('这段时间里这个范围内的请求一律放行，不再问你；到期自动失效，设置页可随时撤销。')}</span>
+            </span>
+            <input type="checkbox" checked={s.trust} disabled={s.busy} onChange={(e) => dispatch({ type: 'trust', on: e.target.checked })} />
+          </label>
+        )}
+        {s.trust && (
+          <div className="draft">
+            <div className="row">
+              <span>{t('范围')}</span>
+              <span className="seg" role="group" aria-label={t('放行的范围')}>
+                {trustScopeOptions(request).map((o) => (
+                  <button
+                    key={o.scope}
+                    type="button"
+                    className={s.trustScope === o.scope ? 'on' : ''}
+                    aria-pressed={s.trustScope === o.scope}
+                    disabled={o.disabled || s.busy}
+                    onClick={() => dispatch({ type: 'trust_scope', scope: o.scope })}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </span>
+            </div>
+            <div className="row">
+              <span>{t('时长')}</span>
+              <span className="seg" role="group" aria-label={t('放行的时长')}>
+                {trustMinutesOptions.map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    className={s.trustMinutes === m ? 'on' : ''}
+                    aria-pressed={s.trustMinutes === m}
+                    disabled={s.busy}
+                    onClick={() => dispatch({ type: 'trust_minutes', minutes: m })}
+                  >
+                    {minutesLabel(m)}
+                  </button>
+                ))}
+              </span>
+            </div>
           </div>
         )}
         {s.error && (

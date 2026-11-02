@@ -143,6 +143,7 @@ dl.kv dd { margin: 0; word-break: break-all; }
 .sheet .draft { margin: 10px 0; padding: 12px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); }
 .sheet .draft .row { display: flex; align-items: center; gap: 8px; }
 .sheet .draft .seg { margin-left: auto; }
+.sheet .draft .row + .row { margin-top: 8px; }
 .sheet .draft-summary { margin: 10px 0 6px; overflow-wrap: anywhere; }
 .sheet details summary { cursor: pointer; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 body.sheet-open { overflow: hidden; }

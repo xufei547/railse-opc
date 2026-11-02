@@ -40,17 +40,27 @@ Railse 把这些归成一件事：**每条审批先过一遍规则，规则定�
 
 各家 CLI 能做到哪一步：
 
-| | 能批 | 只能拒 | 只能提醒 | 能在手机上答题 | auto / yolo 模式下生效 |
-|---|---|---|---|---|---|
-| Claude Code | 是 | — | 等你说话、完成 | 是（`AskUserQuestion`） | 是：对外与不可逆任何模式都先到手机，终端同时弹确认框，谁先答谁算；联网、项目外改动、无法判断先交给 Claude 自己，它要问时再到手机 |
-| Codex | 是（交互会话） | — | 完成 | 否 | 看 Codex 自己的 `approval_policy` |
-| Gemini CLI | 否 | 是 | 问题、完成 | 否 | 否（yolo 跳过钩子） |
+| | 能批 | 只能拒 | 只能提醒 | 能在手机上答题 | auto / yolo 模式下生效 | 限时放行 |
+|---|---|---|---|---|---|---|
+| Claude Code | 是 | — | 等你说话、完成 | 是（`AskUserQuestion`） | 是：对外与不可逆任何模式都先到手机，终端同时弹确认框，谁先答谁算；联网、项目外改动、无法判断先交给 Claude 自己，它要问时再到手机 | 会话或项目；手机、终端、`RAILSE_TRUST` 三个入口 |
+| Codex | 是（交互会话） | — | 完成 | 否 | 看 Codex 自己的 `approval_policy` | 项目（手机、终端）；会话只能从手机建 |
+| Gemini CLI | 否 | 是 | 问题、完成 | 否 | 否（yolo 跳过钩子） | 不适用（钩子不能放行） |
 
 7. **Claude Code 的选择题可以在手机上答。** 它用 `AskUserQuestion` 问你时，题目不过规则，直接推到手机，选一个选项或自己填一句，agent 立刻继续，终端不再弹选项；也可以点「让它在终端问我」，交回终端。没接 hub、hub 连不上、等过期，终端照常问。
 
 除了审批和选择题，agent 停下来等你说下一句话、以及完成，也会进收件箱，告诉你去哪台机器哪个目录的终端处理；n8n 这类工作流的人工审批节点可以通过 hub 的 webhook 接进来，和 agent 的审批排在同一个收件箱里。做法见 [docs/integrations/n8n.md](docs/integrations/n8n.md)。
 
 <p align="center"><img src="assets/demo.gif" width="390" alt="演示：手机网页上登录；Claude Code 要跑 curl，规则定不了，请求出现在收件箱；批准时勾上「记住」；规则页多了一条「学来的」规则"></p>
+
+## 限时放行
+
+盯着某个窗口干活、不想一条条批的时候，可以把一个会话或一个项目在一段时间内整体交出去（0.2.3 起）。三个入口：
+
+- **手机**：批准一条审批时打开「接下来一段时间都放行」，范围选这个会话或这个项目，时长选 30 分钟、2 小时或 8 小时。
+- **终端**：在项目目录里 `railse trust 2h`（默认 2 小时）放行这个项目，这台机器上各个 CLI 在里面的请求都算；`railse trust list` 看，`railse trust revoke <id>` 或 `--all` 撤。`--session <会话 id>` 放行一个 Claude Code 会话。
+- **启动命令**：`RAILSE_TRUST=2h claude`，只放行这一个窗口，从它第一次碰上规则定不了的操作时起算。
+
+**放行期间 Railse 对该范围完全不把关，等同于 Claude Code 的 bypassPermissions 加上审计，到期自动失效，最长 24 小时。** 时长截到 5 分钟～24 小时，每台机器同时至多 20 条。不受影响的：拒绝规则照样拒绝，总开关暂停照样交回终端，选择题照样进手机。手机收件箱顶部有横幅提示，设置页「限时放行」一节列出全部、随时撤销；建、撤、到期都记审计。细节见 [docs/agent-local-loop.md](docs/agent-local-loop.md) 的「限时放行」。
 
 ## 怎么工作
 
@@ -117,17 +127,19 @@ railse setup all --local-hub
 - [docs/setup.md](docs/setup.md)：安装、本机 hub（一台机器就够）、hub 部署（Linux 服务、反向代理）、接入、开机自启、`railse doctor` 各检查项、升级
 - [docs/hub.md](docs/hub.md)：hub 的接口、推送、安全、Fly.io、故障排查
 - [docs/web.md](docs/web.md)：手机网页
-- [docs/agent-local-loop.md](docs/agent-local-loop.md)：守护进程、钩子、规则、审计
+- [docs/agent-local-loop.md](docs/agent-local-loop.md)：守护进程、钩子、规则、限时放行、审计
 - [设计文档](docs/superpowers/specs/2026-10-21-railse-opc-design.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md)
 
 ## 现状与限制
 
-- v0.2.2，作者自用中。
+- v0.2.3，作者自用中。
 - Claude Code 的联网、项目外改动、没见过的命令，Railse 不论哪种权限模式都先交给 Claude 自己：你在 Claude 里配的 allow 列表、auto 模式的分类器放行的就直接跑，Claude 要问人时才到手机；对外与不可逆一律到手机，终端同时弹 Claude 自己的确认框（理由以「Railse：」开头，写明命令里哪一段、什么性质），两边任选其一答；连不上 hub 时只剩终端那一个。想让它们也一律到手机，在 `~/.railse/settings.yaml` 写 `claude_undecided: phone`，再 `railse agent reload`。
 - Railse 在 `PreToolUse` 放行（内置的只读、项目内改动，或你「记住」的放行规则）时，Claude Code 会跳过它自己的权限检查；你在 Claude 的 `settings.json` 里写的 deny 规则仍先生效。
 - 从 0.2.0 升级的：重跑一次 `railse setup hooks --claude`，Claude 的 `PreToolUse` 钩子才会匹配 Bash 等工具（`railse doctor` 的 `hooks.claude` 会提示）；不重跑的话 auto 模式下的审批照旧绕过 Railse。
 - 从 0.2.1 升级的：hub 的库升到 v5（请求多一列触发点），守护进程与 hub 都要升；升级后 `git push`、`rm -rf` 这类操作终端会弹 Claude 自己的确认框，理由以「Railse：」开头，手机上同一条也在，两边任选其一答。重跑一次 `railse setup hooks --claude` 补上 `PostToolUse` 钩子（`railse doctor` 的 `hooks.claude` 会提示）：Claude Code 桌面应用里在本机处理掉的审批，靠它把手机上的卡片收掉，不补的话要等过期。
+- 从 0.2.2 升级的：hub 的库升到 v6（多一张 `trusts` 表放限时放行），第一次打开就升、不能降级，升级前先备份 hub 数据目录。守护进程与 hub 都要升、都要重启，手机上才有限时放行的开关；只升守护进程时 `railse trust` 与 `RAILSE_TRUST` 在本机照样生效，手机上看不到。钩子不用重装。
+- `RAILSE_TRUST` 只认 Claude Code，每个会话只建一次放行：到期或被撤后不会再建，要继续放行就换个窗口重开，或用 `railse trust`。
 - Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。
 - 手机上只能答 Claude Code 的选择题（`AskUserQuestion`）。Codex、Gemini 的提问，以及 agent 停下来等你说下一句话的，仍只提醒，要回终端。
 - 从 0.2 之前升级的：命令行、手机网页、推送文案都跟系统语言走（`RAILSE_LANG` → 数据目录的 `lang` 文件 → `LANG`，zh 开头算中文，其余英文）。**终端里没有设 `LANG` 的，升级后先跑一次 `railse lang zh`**，不然命令行会变英文；手机网页在设置里可以单独切。hub 的库第一次被 0.2 打开时从 v3 升到 v4（推送订阅加语言列），不能降级，升级前先备份 hub 数据目录。

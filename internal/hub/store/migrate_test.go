@@ -126,10 +126,10 @@ func TestMigrateFailureRollsBack(t *testing.T) {
 func TestFreshDBIsLatest(t *testing.T) {
 	s := openTemp(t)
 	var v int
-	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != 5 || SchemaVersion != 5 {
+	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != 6 || SchemaVersion != 6 {
 		t.Fatalf("新库版本 = %d, %v（程序 %d）", v, err, SchemaVersion)
 	}
-	for _, c := range []struct{ table, col string }{{"push_subscriptions", "failures"}, {"requests", "ask"}, {"requests", "answers"}} {
+	for _, c := range []struct{ table, col string }{{"push_subscriptions", "failures"}, {"requests", "ask"}, {"requests", "answers"}, {"trusts", "revoke_reason"}} {
 		var n int
 		if err := s.db.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?", c.table, c.col).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("新库 %s 应有 %s 列: %d %v", c.table, c.col, n, err)

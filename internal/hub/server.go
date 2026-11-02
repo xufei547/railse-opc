@@ -207,6 +207,9 @@ type Server struct {
 	// pauseMu 让总开关的写库与下发按同一顺序进行，守护进程最后收到的就是库里的值。
 	rulesMu sync.Mutex
 	pauseMu sync.Mutex
+	// trustMu 串行化放行的“数条数 → 入库 → 推快照”（手机批准时顺带建、撤销、守护进程报来的变更）：每台机器至多 20 条不被并发突破，
+	// 守护进程最后收到的快照就是库里的。批准时顺带建放行持它直到快照与决定都排进队列（锁序：trustMu 在 decideMu 之前）。
+	trustMu sync.Mutex
 	// beforeSettle 非空时在“记住”学完规则之后、改请求状态之前调用（测试用它制造请求先被别处结束的竞态）。
 	beforeSettle func(store.Request)
 	// ws 记在跑的 WebSocket handler（/ws/agent、/ws/client）：关停开始后不再接纳新的（trackWS 回 503）。
@@ -347,14 +350,14 @@ func (s *Server) routes() {
 	s.pushRoutes()
 }
 
-// handleVersion 无需登录：doctor 与安装脚本用它确认 hub 可达、版本与守护进程协议号。回 {"version","agent_proto"}，
-// 没注入版本（开发构建）时 version 是 dev。
+// handleVersion 无需登录：doctor 与安装脚本用它确认 hub 可达、版本与守护进程协议号，网页用它看 hub 的能力。
+// 回 {"version","agent_proto","features"}，没注入版本（开发构建）时 version 是 dev。
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	v := s.cfg.Version
 	if v == "" {
 		v = "dev"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"version": v, "agent_proto": wire.Proto})
+	writeJSON(w, http.StatusOK, map[string]any{"version": v, "agent_proto": wire.Proto, "features": hubFeatures()})
 }
 
 // Handler 返回根处理器（serveRoot）。
@@ -441,6 +444,11 @@ func (s *Server) serve(parent context.Context, ln net.Listener) error {
 		defer close(sweepDone)
 		s.expireLoop(sweepCtx)
 	}()
+	trustDone := make(chan struct{})
+	go func() {
+		defer close(trustDone)
+		s.sweepTrusts(sweepCtx)
+	}()
 	errCh := make(chan error, 1)
 	go func() { errCh <- hs.Serve(ln) }()
 	var runErr error
@@ -460,6 +468,7 @@ func (s *Server) serve(parent context.Context, ln net.Listener) error {
 	// 过期扫描先停（它会给过期的 webhook 请求发起回调），再停回调与推送
 	stopSweep()
 	<-sweepDone
+	<-trustDone
 	if !s.stopBackground(shutdownCtx) {
 		clean = false
 	}

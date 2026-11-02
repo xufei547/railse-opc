@@ -502,3 +502,74 @@ func TestHubDeciderGraceExpires(t *testing.T) {
 	// 重连后 hello 不再列这条：hub 先按 agent_restart 取消，本机审计到达后以本机终态覆盖
 	waitHubState(t, h, id, "expired", "hub_unreachable")
 }
+
+// ctl 像 railse 命令行一样经 socket 发一条管理命令，返回回执。
+func ctl(t *testing.T, sock string, c proto.Control) proto.ControlReply {
+	t.Helper()
+	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	c.V, c.Kind = proto.Version, "control"
+	if err := proto.WriteLine(conn, c); err != nil {
+		t.Fatal(err)
+	}
+	line, err := proto.ReadLine(bufio.NewReader(conn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply proto.ControlReply
+	if err := json.Unmarshal(line, &reply); err != nil {
+		t.Fatal(err)
+	}
+	return reply
+}
+
+// 限时放行端到端：手机批准时顺带放行这个会话 → hub 推快照，守护进程收下；同一会话再来要人决定的请求就地放行
+// （decided_by trust:<id>），不进 hub；本机撤销报给 hub，hub 那边也撤了。
+func TestHubTrustEndToEnd(t *testing.T) {
+	h := startHub(t)
+	m := enroll(t, h)
+	env := startStack(t, h, m, 10*time.Second)
+	sock := env.cfg.SocketPath
+	res := askAsync(sock, env.cfg.Dir)
+	id := hubPendingID(t, h, m.MachineID)
+	if _, err := h.srv.Decide(hub.DecideInput{RequestID: id, Action: "allow", Trust: &hub.TrustInput{Scope: proto.TrustScopeSession, Minutes: 30}}); err != nil {
+		t.Fatal(err)
+	}
+	if r := waitHook(t, res); r.resp.Decision != "allow" {
+		t.Fatalf("答复: %s", r.line)
+	}
+	var trustID string
+	eventually(t, 5*time.Second, "hub 应有这条放行", func() bool {
+		l, err := h.st.ListTrusts(m.MachineID)
+		if err != nil || len(l) != 1 {
+			return false
+		}
+		trustID = l[0].ID
+		return true
+	})
+	eventually(t, 5*time.Second, "守护进程应收下手机建的放行", func() bool {
+		l := ctl(t, sock, proto.Control{Op: "trust_list"}).Trusts
+		return len(l) == 1 && l[0].ID == trustID && l[0].CreatedBy == "phone"
+	})
+	r := waitHook(t, askAsync(sock, env.cfg.Dir))
+	if r.resp.Decision != "allow" {
+		t.Fatalf("放行中应就地放行: %s", r.line)
+	}
+	if es := localEntries(t, env.cfg.AuditPath, r.resp.RequestID); len(es) != 1 || es[0].DecidedBy != "trust:"+trustID {
+		t.Fatalf("本机审计应记 trust:<id>: %+v", es)
+	}
+	if rs, err := h.st.ListPendingForMachine(m.MachineID); err != nil || len(rs) != 0 {
+		t.Fatalf("放行的请求不该进 hub: %v %v", rs, err)
+	}
+	if reply := ctl(t, sock, proto.Control{Op: "trust_revoke", TrustID: trustID}); !reply.OK {
+		t.Fatalf("撤销: %+v", reply)
+	}
+	eventually(t, 5*time.Second, "本机撤销应报给 hub", func() bool {
+		l, err := h.st.ListTrusts(m.MachineID)
+		return err == nil && len(l) == 0
+	})
+}

@@ -8,6 +8,7 @@ import { usePush } from '../push'
 import { isIOS, isStandalone } from '../pwa'
 import { groupByProject } from '../store'
 import { useStore } from '../StoreProvider'
+import { trustBanner } from '../trust'
 
 const guideKey = 'railse.hideInstallGuide'
 
@@ -24,6 +25,7 @@ export function Inbox() {
   const showGuide = isIOS() && !isStandalone() && !hideGuide
   const groups = groupByProject(state.pending)
   const empty = state.loaded && state.pending.length === 0 && state.questions.length === 0
+  const trustCount = state.status?.trusts ?? 0
 
   function dismissGuide() {
     setHideGuide(true)
@@ -66,6 +68,13 @@ export function Inbox() {
           <Banner tone="info">
             {pauseCopy().banner}
             {/* 英文句子与后面的链接之间要空格，中文不要 */}
+            {lang() === 'en' && ' '}
+            <Link to="/settings">{t('去设置')}</Link>
+          </Banner>
+        )}
+        {trustCount > 0 && (
+          <Banner tone="info">
+            {trustBanner(trustCount, state.trusts)}
             {lang() === 'en' && ' '}
             <Link to="/settings">{t('去设置')}</Link>
           </Banner>

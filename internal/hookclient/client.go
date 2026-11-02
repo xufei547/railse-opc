@@ -167,12 +167,17 @@ func (c Client) Event(ev proto.Event) error {
 	return nil
 }
 
-// Control 发管理命令，整个过程不超过 5 秒。
+// Control 发只有 op 的管理命令，整个过程不超过 5 秒。
 func (c Client) Control(op string) (proto.ControlReply, error) {
+	return c.ControlMsg(proto.Control{V: proto.Version, Kind: "control", Op: op})
+}
+
+// ControlMsg 发一条由调用方给全的管理命令（带参数的 trust_set、trust_revoke 用它），整个过程不超过 5 秒。
+func (c Client) ControlMsg(msg proto.Control) (proto.ControlReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
 	defer cancel()
 	var reply proto.ControlReply
-	if err := c.roundTrip(ctx, proto.Control{V: proto.Version, Kind: "control", Op: op}, &reply); err != nil {
+	if err := c.roundTrip(ctx, msg, &reply); err != nil {
 		return proto.ControlReply{}, err
 	}
 	return reply, nil

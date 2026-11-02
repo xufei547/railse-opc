@@ -2242,3 +2242,20 @@ func TestLocalHubFollowsHubDir(t *testing.T) {
 		t.Fatalf("hub 侧的顺序: %s", got)
 	}
 }
+
+// agent.trusts：有生效中的放行 ok 并报条数，没有或守护进程读不到 skip。
+func TestAgentTrustsCheck(t *testing.T) {
+	o, _ := fakeOpts(t)
+	o.AgentStatus = func(string) (proto.Status, error) { return proto.Status{Hub: "none", Trusts: 2}, nil }
+	if c := find(t, Run(o), "agent.trusts"); c.Status != OK || !strings.Contains(c.Detail, "2") || !strings.Contains(c.Detail, "railse trust list") {
+		t.Fatalf("有放行: %+v", c)
+	}
+	o.AgentStatus = func(string) (proto.Status, error) { return proto.Status{Hub: "none"}, nil }
+	if c := find(t, Run(o), "agent.trusts"); c.Status != Skip || !strings.Contains(c.Detail, "没有生效中的限时放行") {
+		t.Fatalf("没有放行: %+v", c)
+	}
+	o.AgentStatus = func(string) (proto.Status, error) { return proto.Status{}, errors.New("connect: no such file") }
+	if c := find(t, Run(o), "agent.trusts"); c.Status != Skip || c.Detail == "" {
+		t.Fatalf("守护进程没在跑: %+v", c)
+	}
+}

@@ -30,6 +30,8 @@ const (
 	TRules     = "rules"     // hub → 守护进程，规则快照
 	TPaused    = "paused"    // hub → 守护进程，总开关
 	TAudit     = "audit"     // 守护进程 → hub，审计批次
+	TTrusts    = "trusts"    // hub → 守护进程，这台机器的限时放行快照（只含未过期、未撤的）
+	TTrust     = "trust"     // 守护进程 → hub，一条限时放行的变更（本机 railse trust 或 RAILSE_TRUST 建的、撤的、到期的）
 	TPing      = "ping"
 	TPong      = "pong"
 	TError     = "error"
@@ -57,13 +59,21 @@ type Hello struct {
 	AgentVersion string           `json:"agent_version"`
 	HomeDir      string           `json:"home_dir"`
 	Pending      []PendingSummary `json:"pending"`
+	// Features 是守护进程的能力声明（见 Feature*）。旧守护进程不发这个键，hub 按什么都没声明处理；旧 hub 解码时忽略它。
+	Features []string `json:"features,omitempty"`
 }
+
+// Has 报告 hello 是否声明了能力 f。
+func (h Hello) Has(f string) bool { return slices.Contains(h.Features, f) }
 
 // hub 在 welcome 里可声明的能力（Welcome.Features）。
 const (
 	// FeatureAsk：hub 认得提问（kind ask 的 pending 帧，答案经 action answer 的决定下发）。不声明的 hub（0.1.4 及以前）
 	// 会把提问帧当作空载荷的审批登记，守护进程对它一律不送提问，交回终端。
 	FeatureAsk = "ask"
+	// FeatureTrust：限时放行。hub 与守护进程都在各自的 features 里声明：hub 声明了，守护进程才发 trust 帧、收 trusts 快照；
+	// 守护进程声明了，hub 才让手机给它的请求建放行（requestView.can_trust）。
+	FeatureTrust = "trust"
 )
 
 // Welcome 是 hub 的回应。Features 是可选的能力声明（见 Feature*）：旧 hub 不发这个键，守护进程按什么都没声明处理；
@@ -75,6 +85,8 @@ type Welcome struct {
 	Paused       bool      `json:"paused"`
 	ServerTime   time.Time `json:"server_time"`
 	Features     []string  `json:"features,omitempty"`
+	// Trusts 是这台机器的限时放行快照（同 Trusts 帧），只在声明了 FeatureTrust 的 hub 发；没有时省略。
+	Trusts []proto.Trust `json:"trusts,omitempty"`
 }
 
 // Has 报告 welcome 是否声明了能力 f。
@@ -147,6 +159,27 @@ type Paused struct {
 type Audit struct {
 	T       string            `json:"t"`
 	Entries []json.RawMessage `json:"entries"`
+}
+
+// Trusts 是 hub 下发的整台机器的限时放行快照：手机建、撤之后，以及收下守护进程报来的变更之后都发。
+// 守护进程据此合并：快照里有的写入并标已同步，已同步却不在快照里的是被手机撤了。
+type Trusts struct {
+	T      string        `json:"t"`
+	Trusts []proto.Trust `json:"trusts"`
+}
+
+// 守护进程报来的放行变更（TrustChange.Op）。
+const (
+	TrustOpSet     = "set"     // 建或改（Trust 是整条）
+	TrustOpRevoke  = "revoke"  // 本机撤销（只看 Trust.ID）
+	TrustOpExpired = "expired" // 本机到期清理（只看 Trust.ID）
+)
+
+// TrustChange 是守护进程报来的一条放行变更。机器以连接为准，Trust.MachineID 不看。
+type TrustChange struct {
+	T     string      `json:"t"`
+	Op    string      `json:"op"`
+	Trust proto.Trust `json:"trust"`
 }
 
 // Ping、Pong、Error 是控制帧。

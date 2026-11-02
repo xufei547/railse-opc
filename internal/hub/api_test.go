@@ -2280,7 +2280,7 @@ func TestWebUIMountKeepsAPIRouting(t *testing.T) {
 	}
 }
 
-// GET /api/version 无需登录：{"version","agent_proto"}，没注入版本时是 dev。配了 https 的 --public-url 时，
+// GET /api/version 无需登录：{"version","agent_proto","features"}，没注入版本时是 dev。配了 https 的 --public-url 时，
 // 登录与登出的 cookie 都带 Secure（即使 hub 自己收到的是明文 HTTP：TLS 在反向代理那里终止）。
 func TestVersionEndpointAndSecureCookieFromPublicURL(t *testing.T) {
 	var v map[string]any
@@ -2296,7 +2296,7 @@ func TestVersionEndpointAndSecureCookieFromPublicURL(t *testing.T) {
 	}
 	v = nil
 	decodeBody(t, resp, &v)
-	if v["version"] != "1.2.3" || v["agent_proto"] != float64(wire.Proto) || len(v) != 2 {
+	if v["version"] != "1.2.3" || v["agent_proto"] != float64(wire.Proto) || len(v) != 3 {
 		t.Fatalf("version = %v", v)
 	}
 	if _, err := h.srv.SetPassword("hunter22"); err != nil {

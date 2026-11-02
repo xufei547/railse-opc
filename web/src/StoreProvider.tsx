@@ -5,13 +5,14 @@ import { t } from './i18n'
 import { closeStaleNotifications } from './notifications'
 import { createVersionWatcher } from './pwa'
 import { initialState, reduce, waitingIDs, type Action, type State } from './store'
+import type { Status } from './types'
 import { closeSessionInvalid, Live } from './ws'
 
 interface Store {
   state: State
   dispatch: (a: Action) => void
   /**
-   * 全量重新拉收件箱与状态。连上实时通道（含重连）、收到 request_new、实时通道断开、页面回到前台、网络恢复时都会自动调；
+   * 全量重新拉收件箱与状态（有生效中的放行时连同放行列表）。连上实时通道（含重连）、收到 request_new、实时通道断开、页面回到前台、网络恢复时都会自动调；
    * 同一时刻至多一次在拉，期间再要求的合并成结束后的一次。不会 reject（错误进 state.error，401 跳登录页）。
    */
   reload: () => Promise<void>
@@ -20,6 +21,27 @@ interface Store {
 }
 
 const Ctx = createContext<Store | null>(null)
+
+/**
+ * 按 status 里的放行条数拉放行列表：有生效中的才拉，0 条直接清空；老 hub（没有 trusts）不拉、留 null。
+ * 拉不到不算整次加载失败（收件箱照常），留着旧列表，下次重拉再试。
+ */
+function hasTrusts(data: unknown): boolean {
+  return typeof data === 'object' && data !== null && 'trusts' in data
+}
+
+async function loadTrustsFor(status: Status, dispatch: (a: Action) => void): Promise<void> {
+  if (typeof status.trusts !== 'number') return
+  if (status.trusts === 0) {
+    dispatch({ type: 'trusts', trusts: [] })
+    return
+  }
+  try {
+    dispatch({ type: 'trusts', trusts: await hub.trusts() })
+  } catch {
+    // 横幅退回只说条数；设置页显示旧列表
+  }
+}
 
 export function StoreProvider({ children, onUnauthorized }: { children: ReactNode; onUnauthorized: () => void }) {
   const [state, dispatch] = useReducer(reduce, initialState)
@@ -33,6 +55,7 @@ export function StoreProvider({ children, onUnauthorized }: { children: ReactNod
       try {
         const [inbox, status] = await Promise.all([hub.inbox(), hub.status()])
         dispatch({ type: 'loaded', inbox, status })
+        await loadTrustsFor(status, dispatch)
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) return // 登录失效回调已在跳登录页
         dispatch({ type: 'error', error: e instanceof Error ? e.message : String(e) })
@@ -54,7 +77,8 @@ export function StoreProvider({ children, onUnauthorized }: { children: ReactNod
         dispatch({ type: 'frame', frame })
         // hub 不单独推“问题不再等”：收到 request_new 就全量拉一次收件箱。
         // 其余帧若在一次拉取进行中到达，那次的结果可能比这帧旧，结束后再补拉一次。
-        if (frame.type === 'request_new') void reloader()
+        // 放行条数变了（建、撤、到期）也全量拉一次：横幅的最近到期时间与设置页的列表跟着换
+        if (frame.type === 'request_new' || (frame.type === 'status' && hasTrusts(frame.data))) void reloader()
         else reloader.dirty()
       },
       onOpen: () => {

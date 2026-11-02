@@ -2,7 +2,7 @@ import { test as base } from '@playwright/test'
 import { behavior, expect, login, test, watchPage } from './fixtures'
 import { readEnv } from './env'
 
-test('登录、看到请求、批准并记住、规则多一条；再拒绝一条', async ({ page, env, hook }) => {
+test('登录、看到请求、批准并记住、规则多一条；再拒绝一条；批准时顺带限时放行这个项目，设置页撤销', async ({ page, env, hook }) => {
   await login(page, env)
   const nav = page.locator('nav.nav')
   const toast = page.locator('.toast')
@@ -97,6 +97,55 @@ test('登录、看到请求、批准并记住、规则多一条；再拒绝一�
   // 规则仍只有一条学来的：拒绝没有勾“记住”
   await nav.getByRole('link', { name: '规则', exact: true }).click()
   await expect(page.locator('.card.rule')).toHaveCount(3)
+
+  // 3. 又一条联网命令（另一个主机，不中刚学的规则）；批准时打开“接下来一段时间都放行”，选这个项目、2 小时
+  await nav.getByRole('link', { name: /收件箱/ }).click()
+  const hook3 = hook('curl https://trust.example.com/a')
+  const card3 = page.locator('.card', { hasText: 'curl https://trust.example.com/a' })
+  await expect(card3).toBeVisible({ timeout: 15_000 })
+  await card3.click()
+  await page.getByRole('button', { name: '批准', exact: true }).click()
+  await expect(dialog).toBeVisible()
+  const trust = dialog.getByRole('checkbox', { name: /接下来一段时间都放行/ })
+  await expect(trust).toBeVisible()
+  await trust.check()
+  const scope = dialog.getByRole('group', { name: '放行的范围' })
+  // 样本带 session_id：两个范围都可选，默认是范围最小的“这个会话”
+  await expect(scope.getByRole('button', { name: '这个会话' })).toHaveAttribute('aria-pressed', 'true')
+  await scope.getByRole('button', { name: '这个项目' }).click()
+  await expect(scope.getByRole('button', { name: '这个项目' })).toHaveAttribute('aria-pressed', 'true')
+  const minutes = dialog.getByRole('group', { name: '放行的时长' })
+  await minutes.getByRole('button', { name: '8 小时' }).click()
+  await minutes.getByRole('button', { name: '2 小时' }).click()
+  await expect(minutes.getByRole('button', { name: '2 小时' })).toHaveAttribute('aria-pressed', 'true')
+  await dialog.getByTestId('confirm').click()
+  const out3 = await hook3
+  expect(behavior(out3), `钩子输出: ${out3.stdout}${out3.stderr}`).toBe('allow')
+  await expect(dialog).toHaveCount(0)
+
+  // 同一项目的下一条联网命令：守护进程命中放行，直接放行，不进收件箱
+  const out4 = await hook('curl https://trust.example.com/b')
+  expect(behavior(out4), `钩子输出: ${out4.stdout}${out4.stderr}`).toBe('allow')
+
+  // 收件箱顶部横幅：1 个放行生效中，最近的 HH:MM 到期；点进设置页
+  await nav.getByRole('link', { name: /收件箱/ }).click()
+  const banner = page.locator('.banner', { hasText: '放行生效中' })
+  await expect(banner).toHaveText(/^1 个放行生效中，最近的 (\d\d-\d\d )?\d\d:\d\d 到期。去设置$/)
+  await expect(page.locator('.card', { hasText: 'curl https://trust.example.com/b' })).toHaveCount(0)
+  await banner.getByRole('link', { name: '去设置' }).click()
+
+  // 设置页列出这一条：项目 · 机器，剩余 · 手机建；撤销后消失
+  await expect(page.getByRole('heading', { name: '限时放行', exact: true })).toBeVisible()
+  const row = page.locator('.list-item', { hasText: '项目 repo · 机器 e2e-mac' })
+  await expect(row).toHaveCount(1)
+  await expect(row.locator('.sub')).toHaveText(/^剩 (2 小时|1 小时 \d+ 分) · 手机建$/)
+  await row.getByRole('button', { name: /^撤销放行 / }).click()
+  await expect(page.locator('.toast')).toContainText('已撤销放行')
+  await expect(row).toHaveCount(0)
+  await expect(page.getByText('没有生效中的放行')).toBeVisible()
+  await nav.getByRole('link', { name: /收件箱/ }).click()
+  await expect(page.getByText('没有等你处理的事')).toBeVisible()
+  await expect(page.locator('.banner', { hasText: '放行生效中' })).toHaveCount(0)
 })
 
 // 检测器自检：故意塞一段内联脚本（CSP 不许），确认上面的“没有违规”断言不是空转
