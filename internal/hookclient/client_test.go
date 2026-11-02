@@ -60,6 +60,12 @@ func TestPermissionEventControl(t *testing.T) {
 	if err != nil || !reply.OK || reply.Status == nil {
 		t.Fatalf("Control: %+v, %v", reply, err)
 	}
+	// 带参数的管理命令：建一条项目放行，回复带回建好的那条
+	reply, err = c.ControlMsg(proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: repo, Until: time.Now().Add(time.Hour)}})
+	if err != nil || !reply.OK || len(reply.Trusts) != 1 || reply.Trusts[0].ID == "" || reply.Trusts[0].CreatedBy != "cli" {
+		t.Fatalf("ControlMsg: %+v, %v", reply, err)
+	}
 }
 
 func TestNoDaemon(t *testing.T) {

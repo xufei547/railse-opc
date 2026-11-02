@@ -17,6 +17,7 @@ var en = map[string]string{
   policy    策略引擎工具（eval、check）
   hook      各 CLI 钩子调用的翻译器（claude、codex、codex-notify、gemini）
   agent     守护进程（run、status、pause、resume、reload、enroll）
+  trust     限时放行（当前项目或某个 Claude 会话，默认 2 小时）
   hub       云端服务（run、password、token、webhook-token）
   setup     一键接入与安装（all）、钩子（hooks）、开机自启（autostart）、Codex notify（codex-notify）
   doctor    检查安装与运行状态（只读）
@@ -27,6 +28,7 @@ Commands:
   policy    rule engine tools (eval, check)
   hook      translators the CLI hooks call (claude, codex, codex-notify, gemini)
   agent     daemon (run, status, pause, resume, reload, enroll)
+  trust     time-limited trust (this project or one Claude session, 2 hours by default)
   hub       the hub server (run, password, token, webhook-token)
   setup     one-step enroll and install (all), hooks, autostart, Codex notify (codex-notify)
   doctor    check the install and what is running (read-only)
@@ -496,6 +498,11 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	" 或 ":          " or ",
 	"railse setup autostart%s：开机自启、退出后自动拉起": "Run railse setup autostart%s (starts at boot, restarts on exit)",
 
+	// 限时放行（agent.trusts）
+	"限时放行": "Time-limited trusts",
+	"%d 条限时放行生效中（railse trust list 查看）": "%d time-limited trusts active (see railse trust list)",
+	"没有生效中的限时放行":                        "no active trusts",
+
 	// internal/doctor/hooks.go
 	"Codex 钩子":       "Codex hooks",
 	"Claude Code 钩子": "Claude Code hooks",
@@ -795,6 +802,48 @@ Wrote %s; restart the daemon (railse agent run) for it to take effect
   railse agent run [--dir DIR] [--foreground]   start the daemon (runs in the foreground; connects to the hub when machine.json exists; for autostart use railse setup autostart)
   railse agent status|pause|resume|reload [--dir DIR]
   railse agent enroll --hub URL --token TOKEN [--name NAME] [--dir DIR] [--force]   enroll with a hub and write machine.json`,
+
+	// cmd/railse/trust.go
+	`用法:
+  railse trust [时长] [--session 会话id] [--note 文字] [--dir 目录]   放行一段时间：时长如 30m、2h、8h，默认 2h，截到 5m～24h
+  railse trust list [--dir 目录]                                    列出生效中的放行
+  railse trust revoke <id>|--all [--dir 目录]                        撤销一条或全部
+
+不带 --session 放行当前目录所在的项目（git 仓库根，或家目录下的普通目录），这台机器上各个 CLI 在里面的请求都算；
+--session 放行一个 Claude Code 会话（钩子输入里的 session_id，只认 Claude）。只放行一个窗口更省事：RAILSE_TRUST=2h claude。
+放行期间范围内引擎定不了的请求一律本地放行，不弹终端框、不进手机；你手写的 deny 规则与总开关暂停不受影响。`: `Usage:
+  railse trust [DURATION] [--session SESSION_ID] [--note TEXT] [--dir DIR]   trust for a while: a duration like 30m, 2h, 8h; 2h by default, clamped to 5m-24h
+  railse trust list [--dir DIR]                                    list active trusts
+  railse trust revoke <id>|--all [--dir DIR]                        revoke one trust, or all of them
+
+Without --session, this trusts the project the current directory is in (the git repository root, or a plain directory under your home directory), for every CLI on this machine;
+--session trusts one Claude Code session (the session_id in the hook input; Claude only). To trust just one window, the easy way is RAILSE_TRUST=2h claude.
+While a trust is active, requests in its scope that the engine can't decide are allowed locally: no terminal prompt, nothing sent to the phone. Your hand-written deny rules and the pause switch still apply.`,
+	"要放行的 Claude Code 会话 id（钩子输入里的 session_id）": "the Claude Code session id to trust (session_id in the hook input)",
+	"备注，list 与手机上能看到":                           "a note, shown in list and on the phone",
+	"撤销全部放行":                                    "revoke all trusts",
+	"railse trust 不认 %s\n%s\n": `railse trust doesn't take %s
+%s
+`,
+	"railse trust %s 不认 %s\n%s\n": `railse trust %s doesn't take %s
+%s
+`,
+	"要撤哪条：给一个 id，或用 --all 撤全部\n%s\n": `Which trust? Give an id, or use --all to revoke them all
+%s
+`,
+	"%s 不算项目（家目录及其上级、系统目录、点开头的目录都不算）：到项目目录里跑，或用 --session 放行一个会话\n": "%s isn't a project (your home directory and the directories above it, system directories and directories starting with a dot don't count). Run this in a project directory, or trust one session with --session\n",
+	"已放行 Claude 会话 %s，到 %s（%s）  id %s\n": "Trusted Claude session %s until %s (%s)  id %s\n",
+	"已放行 项目 %s（%s），到 %s（%s）  id %s\n":    "Trusted project %s (%s) until %s (%s)  id %s\n",
+	"已撤销":          "Revoked",
+	"没有生效中的放行":     "No active trusts",
+	"剩 %s":         "%s left",
+	"已放行，但未能持久化: ": "Trusted, but it couldn't be saved (it won't survive a daemon restart): ",
+	"守护进程不认这条命令，可能是升级前启动的旧进程：重启它": "The daemon doesn't know this command; it may be an old process started before the upgrade. Restart it",
+	"会话 %s %s":   "session %s %s",
+	"项目 %s":      "project %s",
+	"%d 分钟":      "%dm",
+	"%d 小时":      "%dh",
+	"%d 小时 %d 分": "%dh%dm",
 
 	// cmd/railse/hub.go
 	"警告：hub 正以 root 运行。hub 不需要 root：Linux 上用 %s 装成系统服务（以普通用户运行，只给绑定 443/80 的 CAP_NET_BIND_SERVICE）；macOS 绑定 443/80 不需要特权": "Warning: the hub is running as root. It doesn't need root: on Linux, install it as a system service with %s (it runs as a normal user and is only given CAP_NET_BIND_SERVICE to bind 443/80); macOS needs no privilege to bind 443/80",

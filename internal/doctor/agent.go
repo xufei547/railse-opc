@@ -144,13 +144,14 @@ func agentSocketCheck(o Options) Check {
 	return Check{ID: id, Name: name, Status: OK, Detail: sock}
 }
 
-// agentRunningChecks 问守护进程要状态：在跑没有（agent.running）、连 hub 的情况（agent.hub）。
+// agentRunningChecks 问守护进程要状态：在跑没有（agent.running）、连 hub 的情况（agent.hub）、生效中的限时放行（agent.trusts）。
 func agentRunningChecks(o Options) []Check {
 	st, err := o.AgentStatus(filepath.Join(o.AgentDir, "agent.sock"))
 	if err != nil {
 		return []Check{
 			{ID: "agent.running", Name: i18n.T("守护进程在跑"), Status: Fail, Detail: err.Error(), Hint: i18n.T("railse agent run（前台）或 railse setup autostart（开机自启）")},
 			{ID: "agent.hub", Name: i18n.T("hub 连接"), Status: Skip, Detail: i18n.T("守护进程没在跑")},
+			{ID: "agent.trusts", Name: i18n.T("限时放行"), Status: Skip, Detail: i18n.T("守护进程没在跑")},
 		}
 	}
 	paused := i18n.T("未暂停")
@@ -183,7 +184,18 @@ func agentRunningChecks(o Options) []Check {
 		// 升级了程序却没重启守护进程时，旧进程不报 hub 状态
 		hc = Check{ID: id, Name: name, Status: Warn, Detail: fmt.Sprintf(i18n.T("守护进程没有报告 hub 状态（%q），可能是升级前启动的旧进程"), st.Hub), Hint: i18n.T("重启守护进程：托管的重跑一次 railse setup autostart，前台跑的停掉后重新 railse agent run")}
 	}
-	return []Check{running, hc}
+	return []Check{running, hc, trustsCheck(st.Trusts)}
+}
+
+// trustsCheck 只读地报生效中的限时放行：有就 ok 并报条数（放行是用户自己建的，不算问题），没有 skip。
+// 升级前起的旧守护进程不报这个字段，读出来是 0，同样 skip。
+func trustsCheck(n int) Check {
+	const id = "agent.trusts"
+	name := i18n.T("限时放行")
+	if n > 0 {
+		return Check{ID: id, Name: name, Status: OK, Detail: fmt.Sprintf(i18n.T("%d 条限时放行生效中（railse trust list 查看）"), n)}
+	}
+	return Check{ID: id, Name: name, Status: Skip, Detail: i18n.T("没有生效中的限时放行")}
 }
 
 // autostartCheck 只看托管文件在不在，不跑 launchctl/systemctl。路径与 railse setup autostart 共用 internal/autostart。

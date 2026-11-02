@@ -586,3 +586,39 @@ func TestHookClaudePostToolUseSendsToolDone(t *testing.T) {
 		t.Fatalf("事件: %s", got[0])
 	}
 }
+
+// RAILSE_TRUST 只随 Claude 的 PreToolUse 请求带给守护进程（原文照带，格式由守护进程判断）；没设时为空；
+// PermissionRequest 与 Codex 的请求不带。
+func TestHookTrustForFromEnv(t *testing.T) {
+	codex := `{"session_id":"s","turn_id":"t","cwd":"/p","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git push"}}`
+	trustFor := func(env, stdin, cli string) string {
+		t.Helper()
+		t.Setenv("RAILSE_TRUST", env)
+		sock, lines := fakeDaemon(t, `{"v":1,"decision":"passthrough"}`)
+		runHookWith(t, stdin, cli, "--socket", sock)
+		got := lines()
+		if len(got) != 1 {
+			t.Fatalf("应发一条请求: %q", got)
+		}
+		var req proto.Request
+		if err := json.Unmarshal([]byte(got[0]), &req); err != nil {
+			t.Fatal(err)
+		}
+		return req.TrustFor
+	}
+	if got := trustFor("2h", claudePreToolUse("/p", "curl https://x.y", "default"), "claude"); got != "2h" {
+		t.Fatalf("PreToolUse 应带 RAILSE_TRUST: %q", got)
+	}
+	if got := trustFor("2 hours", claudePreToolUse("/p", "curl https://x.y", "default"), "claude"); got != "2 hours" {
+		t.Fatalf("格式不对也原样带给守护进程: %q", got)
+	}
+	if got := trustFor("", claudePreToolUse("/p", "curl https://x.y", "default"), "claude"); got != "" {
+		t.Fatalf("没设时为空: %q", got)
+	}
+	if got := trustFor("2h", claudePermission("/p", "curl https://x.y"), "claude"); got != "" {
+		t.Fatalf("PermissionRequest 不带: %q", got)
+	}
+	if got := trustFor("2h", codex, "codex"); got != "" {
+		t.Fatalf("Codex 不带: %q", got)
+	}
+}

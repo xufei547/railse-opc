@@ -99,7 +99,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		}
 		if args[0] == "status" && reply.Status != nil {
 			st := reply.Status
-			fmt.Fprintf(stdout, "%s\nrules: %d\npending: %d\nmachine: %s\n%s\nrules_path: %s\nuptime: %s\n", pausedLine(st), st.Rules, st.Pending, st.MachineID, hubLine(st), st.RulesPath, st.Uptime)
+			fmt.Fprintf(stdout, "%s\nrules: %d\npending: %d\ntrusts: %d\nmachine: %s\n%s\nrules_path: %s\nuptime: %s\n", pausedLine(st), st.Rules, st.Pending, st.Trusts, st.MachineID, hubLine(st), st.RulesPath, st.Uptime)
 			return 0
 		}
 		fmt.Fprintln(stdout, "ok")
