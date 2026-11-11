@@ -265,6 +265,19 @@ func touchesControlPlane(p Payload, ctx Context) bool {
 	case PayloadFileWrite:
 		return p.Path != "" && (ctx.isControlPath(resolvePath(p.Path, p.Cwd, ctx.HomeDir)) || mentionsRailseDir(p.Path))
 	case PayloadShell:
+		if tooLongToAnalyze(p) {
+			// 不解析，只看字面：提到 .railse 或受保护目录的就算
+			folded := foldPath(p.Command)
+			if strings.Contains(folded, ".railse") {
+				return true
+			}
+			for _, d := range ctx.ProtectedDirs {
+				if d != "" && strings.Contains(folded, foldPath(filepath.Clean(d))) {
+					return true
+				}
+			}
+			return false
+		}
 		cmds, _ := forbidCommands(p.Command)
 		for _, c := range cmds {
 			for _, seg := range effectiveSegments(c) {

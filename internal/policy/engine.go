@@ -84,8 +84,12 @@ func (e *Engine) Paused() bool { return e.paused.Load() }
 func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 	ctx = ctx.normalized()
 	risk, trig := ClassifyTrace(p, ctx)
+	huge := tooLongToAnalyze(p) // 超过分析上限：不跑规则（匹配也要解析命令），也不看禁用清单，见下
 	var best *compiledRule
 	for i := range e.rules {
+		if huge {
+			break
+		}
 		r := &e.rules[i]
 		if !r.IsEnabled() || !scopeMatches(r.Scope, ctx) || !matchRequest(r, p, risk, ctx) {
 			continue
@@ -105,6 +109,15 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 	// 用户 deny 压过一切（角色、暂停）；它压过其余规则，命中时必是 best。
 	if best != nil && best.userDeny() {
 		return withRule(base, best)
+	}
+	if role != nil && huge {
+		// 看不了里面有什么：任何角色都必须人来定
+		base.Action, base.BeyondRole = ActionAsk, true
+		base.Reason = "超出角色「" + role.Name + "」的边界：含无法检查的子命令"
+		if msg := role.Broken(); msg != "" {
+			base.Reason = "roles.yaml 有误：" + msg
+		}
+		return base
 	}
 	if role != nil {
 		f, opaque := role.forbidHit(p, risk, ctx)

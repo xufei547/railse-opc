@@ -414,3 +414,38 @@ func TestControlPlaneDetection(t *testing.T) {
 		}
 	}
 }
+
+// 超过 128 KiB 的 shell 命令不解析：直接定为 unknown；有角色时按“含无法检查的子命令”越界；没有角色时 ask，绝不放行。
+func TestHugeCommandNotAnalyzed(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	cmd := "git status #" + strings.Repeat("x", 128<<10)
+	start := time.Now()
+	if d := e.Evaluate(shellAt(cmd), roleCtx(t, "")); d.Action != ActionAsk || d.Risk != RiskUnknown {
+		t.Errorf("没有角色: %+v", d)
+	}
+	for _, role := range []string{"写作", "运维"} {
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, role)); d.Action != ActionAsk || !d.BeyondRole || !strings.Contains(d.Reason, "含无法检查的子命令") {
+			t.Errorf("%s: %+v", role, d)
+		}
+	}
+	if d := e.Evaluate(shellAt("cat ~/.railse/rules.yaml #"+strings.Repeat("x", 128<<10)), roleCtx(t, "")); !d.ControlPlane {
+		t.Errorf("超长命令字面提到 .railse 仍算触及配置: %+v", d)
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Errorf("超长命令应几乎不花时间: %v", el)
+	}
+	// 上限以内照常解析
+	if d := e.Evaluate(shellAt("git status #"+strings.Repeat("x", 100<<10)), roleCtx(t, "")); d.Action != ActionAllow {
+		t.Errorf("上限以内照常: %+v", d)
+	}
+}
+
+// 一长串不配对的 { 不能让扫描变成平方级（在上限以内的长度上）。
+func TestBraceScanLinear(t *testing.T) {
+	cmd := "echo " + strings.Repeat("{", 120<<10)
+	start := time.Now()
+	Classify(Payload{Type: PayloadShell, Command: cmd, Cwd: roleHome + "/proj"}, Context{ProjectRoot: roleHome + "/proj", HomeDir: roleHome})
+	if el := time.Since(start); el > 2*time.Second {
+		t.Errorf("120 KiB 的 { 用了 %v", el)
+	}
+}
