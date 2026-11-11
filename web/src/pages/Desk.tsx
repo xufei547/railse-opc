@@ -4,7 +4,7 @@ import { hub } from '../api'
 import { Banner } from '../components/Banner'
 import { boundaryLine, deskGroups, inboxHref } from '../desk'
 import { createDeskLoader } from '../deskLoader'
-import { relativeTime, riskLabel, riskTone, stateLabel } from '../format'
+import { relativeTime, riskLabel, riskTone, roleSourceLabel, stateLabel } from '../format'
 import { splitVars, t } from '../i18n'
 import { useStore } from '../StoreProvider'
 import type { Desk as DeskData, DeskRow } from '../types'
@@ -133,7 +133,7 @@ export function RoleCard({ row: r }: { row: DeskRow }) {
               <span className={`tag ${riskTone(x.risk)}`}>{riskLabel(x.risk)}</span>
               <code className="mono">{x.summary || x.tool_name}</code>
               <span className="sub nowrap">
-                {stateLabel(x.state)} · {relativeTime(x.at)}
+                {roleSourceLabel(x.decided_by ?? '') || stateLabel(x.state)} · {relativeTime(x.at)}
               </span>
               {x.beyond_role && <span className="tag high">{t('超出边界')}</span>}
             </li>

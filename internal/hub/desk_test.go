@@ -161,6 +161,9 @@ func TestDeskAggregates(t *testing.T) {
 	if r := wr.Recent[0]; r.Summary != "git push origin main" || !r.BeyondRole || r.State != "pending" || r.Risk != "outward" || r.ToolName != "Bash" || r.At == "" {
 		t.Fatalf("越界的最近动作: %+v", r)
 	}
+	if r := wr.Recent[2]; r.ID != "w5" || r.DecidedBy != "role:写作" {
+		t.Fatalf("最近动作应带决定来源: %+v", r)
+	}
 	if r := wr.Recent[3]; r.Summary != "github/create_issue" || r.BeyondRole {
 		t.Fatalf("MCP 的摘要: %+v", r)
 	}

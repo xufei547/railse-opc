@@ -38,9 +38,54 @@ export function riskLabel(risk: string): string {
 
 /** 引擎理由里只把“按 <风险> 默认询问”里认识的风险词换成中文；规则 id 等其余文字原样。英文见 engineReasonEn。 */
 export function engineReasonLabel(reason: string): string {
+  // 限时放行没放、后面接着原来的理由（守护进程的 joinReason）：两句分别处理
+  const sep = reason.indexOf('；')
+  if (reason.startsWith(reasonControlPlane + '；') && sep > 0) return `${engineReasonLabel(reason.slice(0, sep))}${lang() === 'en' ? '; ' : '；'}${engineReasonLabel(reason.slice(sep + 1))}`
+  const role = roleReasonLabel(reason)
+  if (role !== null) return role
   if (lang() === 'en') return engineReasonEn(reason)
   const rs = risks()
   return reason.replace(/按 (\S+) 默认询问/, (m, risk: string) => (rs[risk] ? `按「${rs[risk][0]}」默认询问` : m))
+}
+
+// 角色（0.3 起）的理由：原文由机器侧拼（internal/policy/engine.go、roles.go，internal/agent/server.go），格式固定。
+// 英文与 internal/i18n/en.go 的同名句子一致（命令行那边按终端语言重拼）；角色名、禁用条目的简述与 roles.yaml 的错误原文保持原文。
+const reasonControlPlane = '限时放行不覆盖 Railse 自己的配置'
+const inheritedRe = /（继承自上层会话的角色「(.+)」）$/
+
+/** 认出角色的理由并按语言重拼；不是角色的理由回 null。中文只把上限、这次的风险名换成中文叫法。 */
+function roleReasonLabel(reason: string): string | null {
+  const en = lang() === 'en'
+  const inh = inheritedRe.exec(reason)
+  if (inh) {
+    const base = roleReasonLabel(reason.slice(0, inh.index))
+    if (base === null) return null
+    return base + (en ? ` (inherited from the outer session's role "${inh[1]}")` : inh[0])
+  }
+  const risk = (r: string) => (en ? (risks()[r]?.[0] ?? r) : `「${risks()[r]?.[0] ?? r}」`)
+  let m: RegExpExecArray | null
+  if ((m = /^角色「(.+?)」禁用：([\s\S]*)$/.exec(reason))) return en ? `Forbidden for role "${m[1]}": ${m[2]}` : reason
+  if ((m = /^超出角色「(.+?)」的边界（上限 (\S+)，这次是 (\S+)）$/.exec(reason))) {
+    return en ? `Beyond role "${m[1]}"'s boundary (ceiling ${risk(m[2]!)}, this is ${risk(m[3]!)})` : `超出角色「${m[1]}」的边界（上限${risk(m[2]!)}，这次是${risk(m[3]!)}）`
+  }
+  if ((m = /^超出角色「(.+?)」的边界：含无法检查的子命令$/.exec(reason))) return en ? `Beyond role "${m[1]}"'s boundary: contains a subcommand that can't be checked` : reason
+  if ((m = /^超出角色「(.+?)」的边界：试图更改 Railse 的角色或放行设置$/.exec(reason))) return en ? `Beyond role "${m[1]}"'s boundary: tries to change Railse's role or trust settings` : reason
+  if ((m = /^超出角色「(.+?)」的边界，Gemini 无法在这里问人：换个角色，或在别处执行$/.exec(reason))) {
+    return en ? `Beyond role "${m[1]}"'s boundary, and Gemini can't ask a human here: switch roles, or run it somewhere else` : reason
+  }
+  if (reason in roleReasonsEn) return en ? roleReasonsEn[reason]! : reason
+  if ((m = /^roles\.yaml 有误：([\s\S]*)；且试图更改 Railse 的角色或放行设置$/.exec(reason))) {
+    return en ? `roles.yaml is broken: ${m[1]}; and it tries to change Railse's role or trust settings` : reason
+  }
+  if ((m = /^roles\.yaml 有误：([\s\S]*)$/.exec(reason))) return en ? `roles.yaml is broken: ${m[1]}` : reason
+  return null
+}
+
+/** 角色相关的固定句子（与 internal/i18n/en.go 一字不差）。 */
+export const roleReasonsEn: Record<string, string> = {
+  [reasonControlPlane]: "Time-limited trust doesn't cover Railse's own config",
+  '触及 Railse 自己的配置，Gemini 无法在这里问人：在别处执行': "Touches Railse's own config, and Gemini can't ask a human here: run it somewhere else",
+  'roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行': "roles.yaml is broken, and Gemini can't ask a human here: fix the file and retry, or run it somewhere else",
 }
 
 // 守护进程写进本机审计、随历史行带上来的固定理由（internal/agent/server.go、requests.go）。
@@ -155,7 +200,33 @@ export function decidedByLabel(r: Pick<RequestView, 'decided_by' | 'rule_id' | '
   if (by === 'user' && r.state === 'answered') return t('手机上回答')
   if (by === 'user') return r.rule_id ? t('手机上决定（并记住为 {rule}）', { rule: r.rule_id }) : t('手机上决定')
   if (by.startsWith('rule:') || r.rule_id) return t('规则 {rule}', { rule: r.rule_id || by.slice(5) })
+  const role = roleSourceLabel(by)
+  if (role) return role
   return decidedBy()[by] ?? (by || (r.state === 'pending' ? '' : stateLabel(r.state)))
+}
+
+/**
+ * 角色（0.3 起）的决定来源的短说法：role:<角色名>（角色禁用或越界被拒）、roles_yaml（角色文件有误）、control_plane（触及 Railse 自己的配置）。
+ * 依据（详情）与总台的最近动作用它；不是这三种回空串。
+ */
+export function roleSourceLabel(by: string): string {
+  if (by.startsWith('role:')) return t('角色「{role}」禁用', { role: by.slice(5) })
+  if (by === 'roles_yaml') return t('角色文件有误')
+  if (by === 'control_plane') return t('触及 Railse 自己的配置')
+  return ''
+}
+
+/** 角色来源的一句人话结果（历史、请求页的状态行）；不是角色来源回空串。越界被拒（Gemini 问不到人）与禁用分开说。 */
+function roleOutcome(by: string, reason: string): string {
+  if (by.startsWith('role:')) {
+    const role = by.slice(5)
+    return reason.startsWith('超出角色')
+      ? t('超出角色「{role}」的边界，这里问不到你，已拒绝', { role })
+      : t('角色「{role}」禁用了这个操作', { role })
+  }
+  if (by === 'roles_yaml') return t('角色文件有误，暂按只读把关，已拒绝')
+  if (by === 'control_plane') return t('这会改动 Railse 自己的配置，必须你来定；这里问不到你，已拒绝')
+  return ''
 }
 
 /** 不是你、也不是规则决定时，按 decided_by 说一句人话（hub 与守护进程写出的来源，见 internal/hub/requests.go、internal/agent）。 */
@@ -178,9 +249,11 @@ const outcomeBy = (): Record<string, string> => ({
  * 提问在手机上答了说“你答了”，在手机上交回终端说“交回终端问了”；其余结束（过期、终端里先答了等）与审批同一套说法。
  * 详情里的“依据”仍用 decidedByLabel（给排查用）。
  */
-export function outcomeText(r: Pick<RequestView, 'kind' | 'state' | 'decided_by' | 'rule_id'>): string {
+export function outcomeText(r: Pick<RequestView, 'kind' | 'state' | 'decided_by' | 'rule_id'> & { engine_reason?: string }): string {
   const { state, decided_by: by } = r
   if (r.kind === 'question' || r.kind === 'done' || state === 'pending' || state === 'recorded') return ''
+  const role = roleOutcome(by, r.engine_reason ?? '')
+  if (role) return role
   if (lang() === 'en') return outcomeTextEn(r)
   if (by === 'user' && state === 'answered') return '你答了'
   if (by === 'user' && state === 'passthrough' && r.kind === 'ask') return '交回终端问了'

@@ -33,6 +33,7 @@ type deskRecent struct {
 	Summary    string `json:"summary"`
 	Risk       string `json:"risk"`
 	State      string `json:"state"`
+	DecidedBy  string `json:"decided_by"` // 网页据此把角色来源（role:<名>、roles_yaml、control_plane）说成人话
 	BeyondRole bool   `json:"beyond_role"`
 	At         string `json:"at"`
 }
@@ -246,7 +247,7 @@ func finishStats(a *deskAgg) deskStats {
 		if summary == "" {
 			summary = clean(r.ToolName, pushSummaryLen)
 		}
-		st.Recent = append(st.Recent, deskRecent{ID: r.ID, ToolName: r.ToolName, Summary: summary, Risk: r.Risk, State: r.State, BeyondRole: r.BeyondRole, At: r.CreatedAt})
+		st.Recent = append(st.Recent, deskRecent{ID: r.ID, ToolName: r.ToolName, Summary: summary, Risk: r.Risk, State: r.State, DecidedBy: r.DecidedBy, BeyondRole: r.BeyondRole, At: r.CreatedAt})
 	}
 	return st
 }
