@@ -46,7 +46,7 @@ type parentGoneError struct{}
 func (parentGoneError) Error() string { return i18n.T("父进程（CLI）已退出") }
 
 // runHook 永远以“不作决定”收场（stdout 为空、退出 0），除非守护进程明确给了 allow、deny 或答题的答案。
-// 这里绝不打印任何环境变量，只读：找守护进程 socket 与 lang 文件用的 RAILSE_HOME、HOME，以及界面语言用的 RAILSE_LANG、LC_ALL、LC_MESSAGES、LANG（见 internal/i18n），以及 Claude 的 PreToolUse 请求原样带给守护进程的 RAILSE_TRUST（见 hookPermission）：CLI 会往钩子环境里注入令牌。
+// 这里绝不打印任何环境变量，只读：找守护进程 socket 与 lang 文件用的 RAILSE_HOME、HOME，以及界面语言用的 RAILSE_LANG、LC_ALL、LC_MESSAGES、LANG（见 internal/i18n），以及 Claude 的 PreToolUse 请求原样带给守护进程的 RAILSE_TRUST（见 hookPermission）与所有请求、事件都带的 RAILSE_ROLE：CLI 会往钩子环境里注入令牌。
 // 从入口起就接管 SIGTERM、SIGINT、SIGHUP：任何阶段收到信号都不作决定并退出 0，进程不会被信号杀掉。
 func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 	defer func() {
@@ -114,6 +114,8 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 			return passthrough(stderr, err.Error())
 		}
 	}
+	// 会话的角色（0.3 起）：RAILSE_ROLE 原样带给守护进程，由它解析成生效的角色（不存在的名字它按目录绑定）。三家 CLI 的所有事件都带。
+	in.Session.Role = os.Getenv("RAILSE_ROLE")
 	// 读输入期间收到信号：审批不发、事件也不发。
 	if ctx.Err() != nil {
 		return passthrough(stderr, context.Cause(ctx).Error())
@@ -202,6 +204,10 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 // Why 是中文键，按终端语言查英文表（i18n.Lookup，查不到原样）；没有段时性质打头，英文首字母大写。
 func askReason(resp proto.Response) string {
 	tail := i18n.T("已发到手机，也可以在这里直接批")
+	// 越界（角色上限、roles.yaml 有误）的 ask：理由换成角色的那句，比触发点更说明问题。resp.Reason 已由 awaitReply 按终端语言重拼过
+	if isRoleReason(resp.Reason) {
+		return fmt.Sprintf(i18n.T("%s。%s"), resp.Reason, tail)
+	}
 	if resp.Trigger == nil {
 		return tail
 	}
@@ -228,7 +234,58 @@ func localizeReason(resp proto.Response) string {
 	if resp.RuleID != "" && strings.HasPrefix(resp.Reason, "命中规则 ") {
 		return fmt.Sprintf(i18n.T("命中规则 %s"), resp.RuleID)
 	}
+	if r, ok := localizeRoleReason(resp.Reason); ok {
+		return r
+	}
 	return i18n.Lookup(resp.Reason)
+}
+
+// 角色（0.3 起）的三种理由，由守护进程的引擎（internal/policy 的 Evaluate）按这几个格式拼出；那边改了这里要一起改。
+const (
+	roleForbidPrefix = "角色「"
+	roleForbidMid    = "」禁用："
+	roleBeyondPrefix = "超出角色「"
+	roleBeyondMid    = "」的边界（上限 "
+	roleBeyondRisk   = "，这次是 "
+	roleBrokenPrefix = "roles.yaml 有误："
+)
+
+// roleReasonFormats 是角色理由按终端语言重拼用的三个模板（见 localizeRoleReason）。
+var roleReasonFormats = []string{"角色「%s」禁用：%s", "超出角色「%s」的边界（上限 %s，这次是 %s）", "roles.yaml 有误：%s"}
+
+// isRoleReason 判断已按终端语言重拼过的理由是不是角色的理由：以某个模板（当前语言）第一个占位符之前的部分开头。
+func isRoleReason(localized string) bool {
+	for _, f := range roleReasonFormats {
+		prefix, _, _ := strings.Cut(i18n.Lookup(f), "%s")
+		if prefix != "" && strings.HasPrefix(localized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// localizeRoleReason 认出角色的理由并按终端语言重拼：禁用（角色名与禁用条目的简述原样）、越界（角色名与两档风险名原样）、
+// roles.yaml 有误（错误原文原样）。不是这三种返回 false。
+func localizeRoleReason(reason string) (string, bool) {
+	switch {
+	case strings.HasPrefix(reason, roleForbidPrefix):
+		name, brief, ok := strings.Cut(strings.TrimPrefix(reason, roleForbidPrefix), roleForbidMid)
+		if ok {
+			return fmt.Sprintf(i18n.T("角色「%s」禁用：%s"), name, brief), true
+		}
+	case strings.HasPrefix(reason, roleBeyondPrefix):
+		name, rest, ok := strings.Cut(strings.TrimPrefix(reason, roleBeyondPrefix), roleBeyondMid)
+		if !ok {
+			break
+		}
+		ceiling, rest, ok := strings.Cut(rest, roleBeyondRisk)
+		if ok && strings.HasSuffix(rest, "）") {
+			return fmt.Sprintf(i18n.T("超出角色「%s」的边界（上限 %s，这次是 %s）"), name, ceiling, strings.TrimSuffix(rest, "）")), true
+		}
+	case strings.HasPrefix(reason, roleBrokenPrefix):
+		return fmt.Sprintf(i18n.T("roles.yaml 有误：%s"), strings.TrimPrefix(reason, roleBrokenPrefix)), true
+	}
+	return "", false
 }
 
 // hookAsk 把答题请求交给守护进程等答案（见 awaitReply）。只有答复是 answer 才输出：答案合进原 tool_input（questions 等字段

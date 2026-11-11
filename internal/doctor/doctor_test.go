@@ -2259,3 +2259,26 @@ func TestAgentTrustsCheck(t *testing.T) {
 		t.Fatalf("守护进程没在跑: %+v", c)
 	}
 }
+
+// 角色文件：不存在时不出这一项（与 0.2 的体检一样），合法 ok，有误 fail（守护进程这时只读之外一律问人）。
+func TestRolesCheck(t *testing.T) {
+	o, _ := fakeOpts(t)
+	path := filepath.Join(o.AgentDir, "roles.yaml")
+	for _, c := range Run(o).Checks {
+		if c.ID == "agent.roles" {
+			t.Fatalf("没有角色文件时不该出这一项: %+v", c)
+		}
+	}
+	writeFile(t, path, []byte("version: 1\nroles:\n  - name: 写作\n    ceiling: write_in_project\n  - name: 运维\n"))
+	if c := find(t, Run(o), "agent.roles"); c.Status != OK || !strings.Contains(c.Detail, "2 个角色") {
+		t.Fatalf("合法应 ok: %+v", c)
+	}
+	writeFile(t, path, []byte("version: 1\nroles:\n  - name: 写作\n    ceiling: hgih\n"))
+	r := Run(o)
+	if c := find(t, r, "agent.roles"); c.Status != Fail || !strings.Contains(c.Detail, "hgih") || !strings.Contains(c.Hint, "railse role check") {
+		t.Fatalf("有误应 fail: %+v", c)
+	}
+	if !r.Failed() {
+		t.Fatal("角色文件有误时 doctor 应失败")
+	}
+}

@@ -18,6 +18,7 @@ var en = map[string]string{
   hook      各 CLI 钩子调用的翻译器（claude、codex、codex-notify、gemini）
   agent     守护进程（run、status、pause、resume、reload、enroll）
   trust     限时放行（当前项目或某个 Claude 会话，默认 2 小时）
+  role      角色（list、check、which、init）：每个会话的权限边界
   hub       云端服务（run、password、token、webhook-token）
   setup     一键接入与安装（all）、钩子（hooks）、开机自启（autostart）、Codex notify（codex-notify）
   doctor    检查安装与运行状态（只读）
@@ -29,6 +30,7 @@ Commands:
   hook      translators the CLI hooks call (claude, codex, codex-notify, gemini)
   agent     daemon (run, status, pause, resume, reload, enroll)
   trust     time-limited trust (this project or one Claude session, 2 hours by default)
+  role      roles (list, check, which, init): a permission boundary for each session
   hub       the hub server (run, password, token, webhook-token)
   setup     one-step enroll and install (all), hooks, autostart, Codex notify (codex-notify)
   doctor    check the install and what is running (read-only)
@@ -497,6 +499,10 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"没有托管文件 %s":    "no service file %s",
 	" 或 ":          " or ",
 	"railse setup autostart%s：开机自启、退出后自动拉起": "Run railse setup autostart%s (starts at boot, restarts on exit)",
+	"角色文件":      "Roles file",
+	"%s 有误: %v": "%s is broken: %v",
+	"只读之外的审批现在一律问人；改好文件即可恢复（不用重启），railse role check 可以先查": "Everything except reads now asks a human; fix the file to recover (no restart needed). railse role check finds the problem",
+	"%s（%d 个角色）": "%s (%d roles)",
 
 	// 限时放行（agent.trusts）
 	"限时放行": "Time-limited trusts",
@@ -845,6 +851,45 @@ While a trust is active, requests in its scope that the engine can't decide are 
 	"%d 小时":      "%dh",
 	"%d 小时 %d 分": "%dh%dm",
 
+	// cmd/railse/role.go
+	`用法:
+  railse role list  [--dir 目录]   列出角色：名字、上限、禁用条数、放行上限、目录、备注
+  railse role check [--dir 目录]   校验 roles.yaml；报错误、目录重叠、指向不存在目录的模式
+  railse role which [--dir 目录]   当前目录（与当前 RAILSE_ROLE）会解析成哪个角色，以及凭什么
+  railse role init  [--dir 目录]   文件不存在时写一份带注释的起步模板
+
+角色是一道权限边界，定义在守护进程目录的 roles.yaml。会话靠环境变量 RAILSE_ROLE（如 RAILSE_ROLE=写作 claude）
+或项目目录（角色的 dirs）绑定角色；超出上限的一律问人，禁用的直接拒。`: `Usage:
+  railse role list  [--dir DIR]   list roles: name, ceiling, forbidden count, trust limit, directories, note
+  railse role check [--dir DIR]   check roles.yaml; report errors, overlapping directories, and patterns pointing at missing directories
+  railse role which [--dir DIR]   which role this directory (and the current RAILSE_ROLE) resolves to, and why
+  railse role init  [--dir DIR]   write a commented starter file if none exists
+
+A role is a permission boundary, defined in roles.yaml in the daemon directory. A session gets its role from the
+RAILSE_ROLE environment variable (e.g. RAILSE_ROLE=writer claude) or from its project directory (the role's dirs);
+anything above the ceiling asks you, anything forbidden is denied outright.`,
+	"守护进程没在运行，直接读文件": "The daemon isn't running; reading the file directly",
+	"守护进程不认角色（升级前启动的旧进程），重启它后角色才生效；下面直接读文件": "The daemon doesn't know about roles (an old process started before the upgrade); roles take effect after you restart it. Reading the file directly",
+	"%s 里没有角色：所有会话都是未分配\n":                  "%s has no roles: every session is unassigned\n",
+	"上限 %s":   "ceiling %s",
+	"禁用 %d 条": "%d forbidden",
+	"不走限时放行":  "no timed trust",
+	"放行最长 %s": "trust up to %s",
+	"目录 %s":   "dirs %s",
+	"没有角色文件 %s：所有会话都是未分配，按规则走（railse role init 写一份起步模板）\n":  "No roles file %s: every session is unassigned and follows the rules (railse role init writes a starter file)\n",
+	"%s 有误: %s\n只读之外的审批一律问人，直到修好（改完不用重启）\n":                 "%s is broken: %s\nEverything except reads asks a human until it's fixed (no restart needed)\n",
+	"提醒：角色「%s」与「%s」的目录模式重叠（%s / %s），两边都命中的目录按文件顺序绑定到「%s」\n": "Note: roles \"%s\" and \"%s\" have overlapping directory patterns (%s / %s); a directory matching both binds to \"%s\", the first in the file\n",
+	"提醒：角色「%s」的目录模式 %s 指向不存在的目录 %s\n":                       "Note: role \"%s\" has directory pattern %s pointing at a missing directory %s\n",
+	"%s 合法（%d 个角色），有 %d 条提醒\n":                              "%s is valid (%d roles), with %d notes\n",
+	"%s 合法（%d 个角色）\n":                             "%s is valid (%d roles)\n",
+	"角色：%s（RAILSE_ROLE=%s）\n":                     "Role: %s (RAILSE_ROLE=%s)\n",
+	"角色：%s（目录 %s 命中 dirs 里的 %s）\n":                "Role: %s (directory %s matches %s in dirs)\n",
+	"未分配：RAILSE_ROLE 与目录都没有指到角色，按规则走":             "Unassigned: neither RAILSE_ROLE nor the directory points at a role, so the rules apply",
+	"注意：RAILSE_ROLE=%s 在 roles.yaml 里没有，改按目录绑定\n": "Note: RAILSE_ROLE=%s isn't in roles.yaml, so the directory decides\n",
+	"注意：这里不在角色「%s」的目录内，没有项目根，写入一律按项目外处理\n":        "Note: this directory is outside role \"%s\"'s dirs, so there's no project root and every write counts as outside the project\n",
+	"%s 已存在，不覆盖\n":                                "%s already exists; not overwriting it\n",
+	"已写入 %s：三个起步角色，dirs 都注释着，写下它不改变任何会话。\n试一下：RAILSE_ROLE=%s claude\n": "Wrote %s: three starter roles, with dirs commented out, so no session changes yet.\nTry it: RAILSE_ROLE=%s claude\n",
+
 	// cmd/railse/hub.go
 	"警告：hub 正以 root 运行。hub 不需要 root：Linux 上用 %s 装成系统服务（以普通用户运行，只给绑定 443/80 的 CAP_NET_BIND_SERVICE）；macOS 绑定 443/80 不需要特权": "Warning: the hub is running as root. It doesn't need root: on Linux, install it as a system service with %s (it runs as a normal user and is only given CAP_NET_BIND_SERVICE to bind 443/80); macOS needs no privilege to bind 443/80",
 	"可信代理地址为空":                    "the trusted proxy address is empty",
@@ -960,6 +1005,10 @@ Switched to a new key and deleted %d push subscriptions. Every phone has to turn
 	"%s。%s":          "%s. %s",
 	"命令里的「%s」会%s。%s": `"%s" %s. %s`,
 	"命令里的「%s」%s。%s":  `"%s" %s. %s`,
+	// 角色的理由（localizeRoleReason 按 internal/policy/engine.go 的格式拆开重拼）
+	"角色「%s」禁用：%s":               "Forbidden for role \"%s\": %s",
+	"超出角色「%s」的边界（上限 %s，这次是 %s）": "Beyond role \"%s\"'s boundary (ceiling %s, this is %s)",
+	"roles.yaml 有误：%s":          "roles.yaml is broken: %s",
 
 	// internal/policy/trigger.go 的 Why 短语（经 i18n.Lookup 动态查）。动词短语，接在引号括起的命令段后面；
 	// 与 web/src/format.ts 的 triggerWhysEn 一字不差（web/src/i18n.sync.test.ts 核对）
