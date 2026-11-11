@@ -338,3 +338,63 @@ func TestRoleControls(t *testing.T) {
 		t.Fatalf("坏文件时 role_list 应报错误: %+v", reply.Roles)
 	}
 }
+
+// 暂停不覆盖越界（含坏文件 fail closed）：PreToolUse 照旧回 ask，PermissionRequest 走人工决定（送 Decider，带 BeyondRole）；
+// forbid 在暂停下仍拒。
+func TestPausedDoesNotOverrideBeyondRole(t *testing.T) {
+	for _, broken := range []bool{false, true} {
+		var mu sync.Mutex
+		var got []PendingRequest
+		dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
+			mu.Lock()
+			got = append(got, pr)
+			mu.Unlock()
+			return Outcome{Action: "deny", DecidedBy: "user"}, nil
+		})
+		env := startServer(t, dec, nil)
+		role, cmd := "开发", "git push origin main"
+		if broken {
+			writeRoles(t, env.cfg.RolesPath, "version: 1\nroles:\n  - name: a\n    ceiling: hgih\n")
+			role, cmd = "", "touch a"
+		} else {
+			rolesFor(t, env, "")
+		}
+		roundTrip(t, env.cfg.SocketPath, control("pause"))
+		resp := send(t, env, withRole(preToolUse(env.repo, cmd, "bypassPermissions", "toolu_p"), role))
+		if resp.Decision != "ask" {
+			t.Fatalf("broken=%v 暂停时越界的 PreToolUse 应回 ask: %+v", broken, resp)
+		}
+		pr := withRole(permission(env.repo, cmd), role)
+		pr.Source = proto.SourcePermissionRequest
+		if resp := send(t, env, pr); resp.Decision != "deny" || resp.DecidedBy != "user" {
+			t.Fatalf("broken=%v 暂停时越界的 PermissionRequest 应由人定: %+v", broken, resp)
+		}
+		codex := withRole(permission(env.repo, cmd), role)
+		codex.Session.Tool, codex.Source = "codex", ""
+		if resp := send(t, env, codex); resp.Decision != "deny" || resp.DecidedBy != "user" {
+			t.Fatalf("broken=%v 暂停时越界的 Codex 请求应由人定: %+v", broken, resp)
+		}
+		mu.Lock()
+		if len(got) != 2 || !got[0].BeyondRole || !got[1].BeyondRole {
+			t.Fatalf("broken=%v 送 Decider 的应是两条越界请求: %+v", broken, got)
+		}
+		mu.Unlock()
+		// 暂停下不越界的照旧交回终端
+		if resp := send(t, env, withRole(permission(env.repo, "git status"), role)); resp.Decision != "passthrough" || resp.DecidedBy != "paused" {
+			t.Fatalf("broken=%v 暂停下不越界的照旧交回终端: %+v", broken, resp)
+		}
+	}
+}
+
+func TestPausedForbidStillDenies(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	roundTrip(t, env.cfg.SocketPath, control("pause"))
+	for _, src := range []string{proto.SourcePreToolUse, proto.SourcePermissionRequest} {
+		r := permission(env.repo, "git push origin main")
+		r.Source = src
+		if resp := send(t, env, r); resp.Decision != "deny" || resp.DecidedBy != "role:写作" {
+			t.Fatalf("%s: 暂停时禁用仍应拒: %+v", src, resp)
+		}
+	}
+}

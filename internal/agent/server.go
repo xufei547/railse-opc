@@ -468,8 +468,10 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		}
 		resp.Decision, resp.DecidedBy = "deny", entry.DecidedBy
 	default:
-		if s.rules.Paused() {
+		if s.rules.Paused() && !d.BeyondRole {
 			// 总开关打开：用户 deny 与角色禁用仍由引擎处理，其余一律交回终端，不去打扰 hub。
+			// 越界（含 roles.yaml 有误）不归暂停管：交回终端在 auto、acceptEdits、bypassPermissions 下等于放行，
+			// 它照下面的路走（PreToolUse 回 ask 强制终端确认，其余送人工决定），暂停只停自动决定、不放宽边界。
 			// 只管审批：答题（handleAsk）不走这里，不看暂停开关，照样送 hub。
 			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "paused", "自动审批已暂停，交回终端处理"
 			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
