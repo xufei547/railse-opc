@@ -104,3 +104,27 @@ func TestReplaceMachineRoles(t *testing.T) {
 		t.Fatalf("清空后只剩 b 的: %+v", got)
 	}
 }
+
+// ReplaceMachineRoles 中途失败（第二条撞主键）时整个事务回滚：先删的旧角色表还在，不会留下半份或空表。
+func TestReplaceMachineRolesRollsBack(t *testing.T) {
+	s := openTemp(t)
+	m, _ := s.CreateMachine("mac", "sec", "")
+	old := []proto.RoleSummary{{Name: "开发"}, {Name: "写作"}}
+	if err := s.ReplaceMachineRoles(m.ID, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceMachineRoles(m.ID, []proto.RoleSummary{{Name: "运维"}, {Name: "运维"}}); err == nil {
+		t.Fatal("重名应报错")
+	}
+	got, err := s.ListMachineRoles()
+	if err != nil || len(got) != 2 || got[0].Name != "开发" || got[1].Name != "写作" {
+		t.Fatalf("失败后应保留旧角色表: %+v %v", got, err)
+	}
+	// 机器不存在（外键）时同样不留痕
+	if err := s.ReplaceMachineRoles("nope", []proto.RoleSummary{{Name: "x"}}); err == nil {
+		t.Fatal("不存在的机器应报错")
+	}
+	if got, _ := s.ListMachineRoles(); len(got) != 2 {
+		t.Fatalf("外键失败后: %+v", got)
+	}
+}
