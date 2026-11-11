@@ -390,8 +390,10 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"触及 Railse 自己的配置，Gemini 无法在这里问人：在别处执行": "Touches Railse's own config, and Gemini can't ask a human here: run it somewhere else",
 	"触及 Railse 自己的配置，不接受自动放行":              "Touches Railse's own config; no automatic approval",
 	"取不到钩子进程的凭据，无法核实有没有上层会话的角色":            "Couldn't read the hook process's credentials, so Railse can't verify whether an outer session's role applies",
-	"限时放行不覆盖 Railse 自己的配置":                 "Time-limited trust doesn't cover Railse's own config",
-	"限时放行中":                                "Within a time-limited trust",
+	"命令超过 128 KiB，Railse 不解析这么长的命令，必须你来定":  "The command is over 128 KiB; Railse doesn't analyze commands this long, so it needs you",
+	"命令超过 128 KiB，Railse 不解析这么长的命令，必须你来定；Gemini 无法在这里问人，已拒绝": "The command is over 128 KiB; Railse doesn't analyze commands this long, so it needs you. Gemini can't ask a human here, so it was denied",
+	"限时放行不覆盖 Railse 自己的配置": "Time-limited trust doesn't cover Railse's own config",
+	"限时放行中": "Within a time-limited trust",
 
 	// internal/agent/trust.go 与 server.go 的限时放行管理命令回给 railse trust 的固定错误（命令行用 i18n.Lookup 显示）；那边改了这里要一起改。
 	"放行范围只能是 session 或 project":                          "The trust scope must be session or project",

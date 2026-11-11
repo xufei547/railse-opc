@@ -206,13 +206,15 @@ export function decidedByLabel(r: Pick<RequestView, 'decided_by' | 'rule_id' | '
 }
 
 /**
- * 角色（0.3 起）的决定来源的短说法：role:<角色名>（角色禁用或越界被拒）、roles_yaml（角色文件有误）、control_plane（触及 Railse 自己的配置）。
+ * 角色（0.3 起）的决定来源的短说法：role:<角色名>（角色禁用或越界被拒）、roles_yaml（角色文件有误）、control_plane（触及 Railse 自己的配置）、
+ * unanalyzed（命令超过 128 KiB，Railse 不解析，必须人来定）。
  * 依据（详情）与总台的最近动作用它；不是这三种回空串。
  */
 export function roleSourceLabel(by: string): string {
   if (by.startsWith('role:')) return t('角色「{role}」禁用', { role: by.slice(5) })
   if (by === 'roles_yaml') return t('角色文件有误')
   if (by === 'control_plane') return t('触及 Railse 自己的配置')
+  if (by === 'unanalyzed') return t('命令太长，不解析')
   return ''
 }
 
@@ -226,6 +228,7 @@ function roleOutcome(by: string, reason: string): string {
   }
   if (by === 'roles_yaml') return t('角色文件有误，暂按只读把关，已拒绝')
   if (by === 'control_plane') return t('这会改动 Railse 自己的配置，必须你来定；这里问不到你，已拒绝')
+  if (by === 'unanalyzed') return t('命令超过 128 KiB，Railse 不解析，必须你来定；这里问不到你，已拒绝')
   return ''
 }
 

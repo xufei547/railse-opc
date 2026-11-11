@@ -513,4 +513,6 @@ export const en: Record<string, string> = {
   '角色「{role}」禁用了这个操作': 'Role "{role}" forbids this',
   '角色文件有误，暂按只读把关，已拒绝': 'The roles file is broken, so only reads pass; denied',
   '这会改动 Railse 自己的配置，必须你来定；这里问不到你，已拒绝': "This changes Railse's own config and needs you; there was no one to ask here, so it was denied",
+  '命令太长，不解析': 'Command too long to analyze',
+  '命令超过 128 KiB，Railse 不解析，必须你来定；这里问不到你，已拒绝': "The command is over 128 KiB and Railse doesn't analyze it, so it needs you; there was no one to ask here, so it was denied",
 }

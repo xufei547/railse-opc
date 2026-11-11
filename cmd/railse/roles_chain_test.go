@@ -496,3 +496,65 @@ func TestChainWrapperWalkerRepros(t *testing.T) {
 		}
 	}
 }
+
+// 超过 128 KiB 的命令：一律必须人来定（有没有角色都一样，任何放行规则、限时放行、RAILSE_TRUST、暂停下的交回都不适用）；
+// 不依赖解析的 deny（只按 payload、risk，或 command_prefix 的字面前缀）照常拒。
+func TestChainHugeCommandNeedsHuman(t *testing.T) {
+	pad := " #" + strings.Repeat("x", 130<<10)
+	permissive := "version: 1\nrules:\n  - id: user-allow-unknown\n    source: user\n    scope: global\n    match: {risk: unknown}\n    action: allow\n"
+	for _, withRole := range []bool{false, true} {
+		for _, paused := range []bool{false, true} {
+			sock, repo, cfg := startTestAgent(t)
+			writeRules(t, sock, cfg, permissive)
+			t.Setenv("RAILSE_ROLE", "")
+			if withRole {
+				os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 运维\n    ceiling: destructive\n"), 0o600)
+				t.Setenv("RAILSE_ROLE", "运维")
+			}
+			c := hookclient.Client{SocketPath: sock, ConnectTimeout: 2 * time.Second}
+			c.ControlMsg(proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+				Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: agent.CleanCwd(repo), Until: time.Now().Add(time.Hour)}})
+			t.Setenv("RAILSE_TRUST", "2h")
+			if paused {
+				pauseAgent(t, sock)
+			}
+			for cli, want := range map[string]string{"claude-pre": "ask", "claude-pr": "pass", "codex": "pass", "gemini": "deny"} {
+				stdin, ad := chainInput(t, cli, repo, "ls"+pad)
+				out, _, code := runHookWith(t, stdin, ad, "--socket", sock)
+				label := fmt.Sprintf("role=%v paused=%v %s", withRole, paused, cli)
+				if code != 0 || outcomeOf(out) != want {
+					t.Errorf("%s: 想要 %s，得到 code=%d %.200q", label, want, code, out)
+				}
+				if !withRole && (cli == "claude-pre" || cli == "gemini") && !strings.Contains(out, "命令超过 128 KiB") {
+					t.Errorf("%s: 理由应写明超长: %.300q", label, out)
+				}
+			}
+			if r, _ := c.ControlMsg(proto.Control{V: proto.Version, Kind: "control", Op: "trust_list"}); len(r.Trusts) != 1 {
+				t.Errorf("超长命令不该按 RAILSE_TRUST 建放行: %+v", r.Trusts)
+			}
+			t.Setenv("RAILSE_TRUST", "")
+		}
+	}
+	// 不依赖解析的 deny 照常拒
+	sock, repo, cfg := startTestAgent(t)
+	t.Setenv("RAILSE_ROLE", "")
+	deny := func(match string) string {
+		return "version: 1\nrules:\n  - id: user-deny\n    source: user\n    scope: global\n    match: " + match + "\n    action: deny\n"
+	}
+	for _, c := range []struct {
+		match, cmd, want string
+	}{
+		{`{payload: shell, command_prefix: "git push"}`, "git push origin main" + pad, "deny"},
+		{`{payload: shell, command_prefix: "git push"}`, "   git push origin main" + pad, "deny"},
+		{`{payload: shell, command_prefix: "git push"}`, "git pushx" + pad, "ask"},
+		{`{payload: shell}`, "ls" + pad, "deny"},
+		{`{risk: unknown}`, "ls" + pad, "deny"},
+		{`{payload: shell, command_regex: "^ls"}`, "ls" + pad, "ask"}, // 正则不跑
+	} {
+		writeRules(t, sock, cfg, deny(c.match))
+		stdin, ad := chainInput(t, "claude-pre", repo, c.cmd)
+		if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != c.want {
+			t.Errorf("deny %s 对 %.30q: 想要 %s，得到 %.200q", c.match, c.cmd, c.want, out)
+		}
+	}
+}
