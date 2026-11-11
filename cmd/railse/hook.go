@@ -194,10 +194,11 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 	}
 	resp, err := awaitReply(ctx, ad, client, req)
 	if err != nil {
-		if isDialError(err) {
-			// 守护进程没起、连不上 socket：0.2.3 的现状，交回终端（没装守护进程的人不该被卡住）
+		if isDialError(err) && !enabledHere(currentHookSocket) {
+			// 这台机器没启用 Railse（守护进程目录不在，或从没运行过）：0.2.3 的现状，交回终端（没装守护进程的人不该被卡住）
 			return passthrough(stderr, err.Error())
 		}
+		// 启用了却连不上（接入过 hub、或 socket 残留着）：可能是守护进程挂了，也可能是有人让钩子连不上，同样拿不到结论
 		return noVerdict(stdout, stderr, ad, in, err.Error())
 	}
 	switch resp.Decision {
@@ -251,6 +252,20 @@ func rolesFileNear(socket string) bool {
 	}
 	_, err := os.Lstat(filepath.Join(filepath.Dir(socket), "roles.yaml"))
 	return !errors.Is(err, os.ErrNotExist)
+}
+
+// enabledHere 报告 socket 所在的守护进程目录像是启用过的：有 machine.json（接入过 hub），或 socket 文件还在（守护进程正常退出时
+// 会删掉它，留着多半是崩溃或被杀）。目录不在、或只有别的文件时按没启用。
+func enabledHere(socket string) bool {
+	if socket == "" {
+		return false
+	}
+	for _, p := range []string{filepath.Join(filepath.Dir(socket), "machine.json"), socket} {
+		if _, err := os.Lstat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // isDialError 判断是不是连不上守护进程（socket 不在、没人监听、没权限）：这一类保持 0.2.3 的交回终端。

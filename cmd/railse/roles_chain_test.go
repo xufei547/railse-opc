@@ -413,3 +413,35 @@ func TestChainHomeChangeIsBeyond(t *testing.T) {
 		t.Fatalf("Gemini 越界一律拒: %q", out)
 	}
 }
+
+// 拨号失败时区分：守护进程目录不存在（这台机器没启用 Railse）保持交回；目录在、且曾经运行过（有 machine.json 或残留的 socket）
+// 却连不上时，Claude PreToolUse 回 ask、Gemini 拒，Claude PermissionRequest 与 Codex 交回。
+func TestHookEnabledButUnreachable(t *testing.T) {
+	_, repo, _ := startTestAgent(t)
+	want := map[string]string{"claude-pre": "ask", "gemini": "deny", "claude-pr": "pass", "codex": "pass"}
+	none := map[string]string{"claude-pre": "pass", "gemini": "pass", "claude-pr": "pass", "codex": "pass"}
+	try := func(label, sock string, want map[string]string) {
+		t.Helper()
+		for cli, w := range want {
+			stdin, ad := chainInput(t, cli, repo, "git push origin main")
+			out, _, code := runHookWith(t, stdin, ad, "--socket", sock)
+			if code != 0 || outcomeOf(out) != w {
+				t.Errorf("%s %s: 想要 %s，得到 code=%d %q", label, cli, w, code, out)
+			}
+		}
+	}
+	base, _ := os.MkdirTemp("", "rs")
+	t.Cleanup(func() { os.RemoveAll(base) })
+	try("目录不存在", filepath.Join(base, "nope", "agent.sock"), none)
+	empty := filepath.Join(base, "empty")
+	os.MkdirAll(empty, 0o700)
+	try("目录在但从没运行过", filepath.Join(empty, "agent.sock"), none)
+	enrolled := filepath.Join(base, "enrolled")
+	os.MkdirAll(enrolled, 0o700)
+	os.WriteFile(filepath.Join(enrolled, "machine.json"), []byte("{}"), 0o600)
+	try("接入过 hub 的", filepath.Join(enrolled, "agent.sock"), want)
+	stale := filepath.Join(base, "stale")
+	os.MkdirAll(stale, 0o700)
+	os.WriteFile(filepath.Join(stale, "agent.sock"), nil, 0o600) // 残留的 socket 文件（守护进程崩溃后留下的）
+	try("socket 残留", filepath.Join(stale, "agent.sock"), want)
+}
