@@ -304,6 +304,7 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s：%s"), path, err.Error()), Hint: fmt.Sprintf(i18n.T("修好 JSON 后再 %s"), hint)}
 	}
 	var missing, short, others, socks, explicitDirs []string
+	noSocket := false // 有我们的条目没带 --socket（0.2.x 的默认目录写法）
 	seen := map[string]bool{}
 	for ev, min := range hooksconf.Expected(cli) {
 		st := ins.Events[ev]
@@ -316,6 +317,9 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 		if st.Program != "" && o.Bin != "" && !samePath(st.Program, o.Bin) && !seen[st.Program] {
 			seen[st.Program] = true
 			others = append(others, st.Program)
+		}
+		if st.Present && st.Program != "" && st.Socket == "" {
+			noSocket = true
 		}
 		// 认不出命令形状的（别人改过的、只按 name 认的）不比对 socket
 		if st.Present && (st.Program != "" || st.Socket != "") {
@@ -353,6 +357,10 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 	} else if cli == "claude" && pre.Present && (!hooksconf.MatcherCovers(pre.Matcher, "WebSearch") || !hooksconf.MatcherCovers(pre.Matcher, "mcp__x__y")) {
 		// 0.2.3 及以前的匹配器没有 MCP 工具与 WebSearch：Claude 不需要原生确认时它们进不了 Railse，角色的禁用与上限管不到
 		warns = append(warns, i18n.T("PreToolUse 的匹配器是旧版（不含 MCP 工具与 WebSearch）：角色的禁用与上限管不到它们"))
+	}
+	if noSocket && len(socks) == 0 {
+		// 0.3 起钩子命令一律写死 --socket：不带的按 CLI 起钩子时的 $HOME 找守护进程，agent 改了 HOME 再起 CLI 就连不上、交回终端了事
+		warns = append(warns, i18n.T("钩子命令没带 --socket：改了 HOME 再起的会话会连不上守护进程"))
 	}
 	sort.Strings(missing)
 	sort.Strings(short)

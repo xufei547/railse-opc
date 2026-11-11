@@ -81,7 +81,7 @@ func TestSetupCodexNotifyNoConfig(t *testing.T) {
 		t.Fatalf("新建的 config.toml 应是 0600，得到 %o", m)
 	}
 	body := readFile(t, script)
-	if !bytes.Equal(body, hooksconf.NotifyScript(nil, "/opt/railse", "")) {
+	if !bytes.Equal(body, hooksconf.NotifyScript(nil, "/opt/railse", defaultSock(t))) {
 		t.Fatalf("脚本:\n%s", body)
 	}
 	if !strings.Contains(string(body), "# railse-prev-notify: []\n") || strings.Count(string(body), `"$@"`) != 2 { // 注释里一个、railse 那一行一个
@@ -116,7 +116,7 @@ func TestSetupCodexNotifyChainsExisting(t *testing.T) {
 	}
 	prev := []string{"/usr/local/bin/notify wrap", `--title="Codex"`, "--sound\tdefault"}
 	body := readFile(t, script)
-	if !bytes.Equal(body, hooksconf.NotifyScript(prev, "/opt/railse", "")) {
+	if !bytes.Equal(body, hooksconf.NotifyScript(prev, "/opt/railse", defaultSock(t))) {
 		t.Fatalf("脚本的前一跳应是原来的 notify:\n%s", body)
 	}
 	if want := `'/usr/local/bin/notify wrap' '--title="Codex"' '--sound` + "\t" + `default' "$@"` + "\n"; !strings.Contains(string(body), want) {
@@ -153,7 +153,7 @@ func TestSetupCodexNotifyChainsExisting(t *testing.T) {
 	if _, errOut, code = codexNotify(t, "--bin", "/opt/new/railse"); code != 0 {
 		t.Fatalf("换 --bin: code=%d stderr=%s", code, errOut)
 	}
-	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(prev, "/opt/new/railse", "")) {
+	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(prev, "/opt/new/railse", defaultSock(t))) {
 		t.Fatalf("换 --bin 后脚本应更新、前一跳保留:\n%s", got)
 	}
 	if string(readFile(t, cfg)) != want || len(backups(t, cfg)) != 1 {
@@ -168,7 +168,7 @@ func TestSetupCodexNotifyReplacesOldRailse(t *testing.T) {
 	if _, errOut, code := codexNotify(t, "--bin", "/opt/railse"); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, errOut)
 	}
-	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", "")) {
+	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", defaultSock(t))) {
 		t.Fatalf("旧写法不该成为前一跳:\n%s", got)
 	}
 	if got := string(readFile(t, cfg)); got != "model = \"x\"\n"+notifyLine(script)+"\n" {
@@ -205,7 +205,7 @@ func TestSetupCodexNotifyNonDefaultDir(t *testing.T) {
 	if _, errOut, code := codexNotify(t, "--bin", "/opt/railse"); code != 0 {
 		t.Fatalf("换回默认目录: code=%d stderr=%s", code, errOut)
 	}
-	if got := readFile(t, defScript); !bytes.Equal(got, hooksconf.NotifyScript(prev, "/opt/railse", "")) {
+	if got := readFile(t, defScript); !bytes.Equal(got, hooksconf.NotifyScript(prev, "/opt/railse", defaultSock(t))) {
 		t.Fatalf("换目录后前一跳应保留、不带 --socket:\n%s", got)
 	}
 	if got := string(readFile(t, cfg)); got != notifyLine(defScript)+"\n" {
@@ -224,7 +224,7 @@ func TestSetupCodexNotifyUnreadableOwnScript(t *testing.T) {
 	if code != 0 || !strings.Contains(errOut, "警告") || !strings.Contains(errOut, script) {
 		t.Fatalf("脚本不在时应警告: code=%d stderr=%s", code, errOut)
 	}
-	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", "")) {
+	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", defaultSock(t))) {
 		t.Fatalf("不该把自己当前一跳:\n%s", got)
 	}
 }
@@ -245,7 +245,7 @@ func TestSetupCodexNotifyDeletedOldScript(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, errOut)
 	}
-	if got := readFile(t, defScript); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", "")) {
+	if got := readFile(t, defScript); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", defaultSock(t))) {
 		t.Fatalf("读不到的旧脚本不该成为前一跳（标记行应是 []、没有前一跳那一行）:\n%s", got)
 	}
 	if !strings.Contains(errOut, "警告") || !strings.Contains(errOut, old) || !strings.Contains(errOut, cfg+".railse-bak-") {
@@ -281,7 +281,7 @@ func TestSetupCodexNotifyNeverChainsItself(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("%s: code=%d stderr=%s", notify, code, errOut)
 		}
-		if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", "")) {
+		if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", defaultSock(t))) {
 			t.Fatalf("%s: 脚本不该调自己:\n%s", notify, got)
 		}
 		if !strings.Contains(errOut, "警告") || !strings.Contains(errOut, alias) {
@@ -361,7 +361,7 @@ func TestSetupCodexNotifyDryRun(t *testing.T) {
 			t.Fatalf("dry-run 不该建 %s", p)
 		}
 	}
-	if !strings.Contains(out, string(hooksconf.NotifyScript(nil, "/opt/railse", ""))) || !strings.Contains(out, notifyLine(script)) {
+	if !strings.Contains(out, string(hooksconf.NotifyScript(nil, "/opt/railse", defaultSock(t)))) || !strings.Contains(out, notifyLine(script)) {
 		t.Fatalf("dry-run 应打印脚本与 config.toml:\n%s", out)
 	}
 	orig := "notify = [\"/bin/other\"]\n[tui]\nx = 1\n"
@@ -374,7 +374,7 @@ func TestSetupCodexNotifyDryRun(t *testing.T) {
 		t.Fatal("dry-run 不该写脚本")
 	}
 	if !strings.Contains(out, "会先备份到 "+cfg+".railse-bak-") || !strings.Contains(out, notifyLine(script)+"\n[tui]\nx = 1\n") ||
-		!strings.Contains(out, string(hooksconf.NotifyScript([]string{"/bin/other"}, "/opt/railse", ""))) {
+		!strings.Contains(out, string(hooksconf.NotifyScript([]string{"/bin/other"}, "/opt/railse", defaultSock(t)))) {
 		t.Fatalf("dry-run 应打印改写后的内容并说会备份到哪里:\n%s", out)
 	}
 }
@@ -394,7 +394,7 @@ func TestSetupCodexNotifyUnderTable(t *testing.T) {
 	if !strings.Contains(errOut, "警告") || !strings.Contains(errOut, "[mcp_servers.foo]") || !strings.Contains(errOut, "手动删") {
 		t.Fatalf("应警告表下面的 notify 被忽略: %s", errOut)
 	}
-	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", "")) {
+	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript(nil, "/opt/railse", defaultSock(t))) {
 		t.Fatalf("表下面的 notify 不当前一跳:\n%s", got)
 	}
 }
@@ -545,7 +545,7 @@ func TestSetupCodexNotifyUpdatesPreGuardScript(t *testing.T) {
 	if code != 0 || errOut != "" {
 		t.Fatalf("code=%d stderr=%s", code, errOut)
 	}
-	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript([]string{"/bin/other"}, "/opt/railse", "")) || bytes.Equal(got, []byte(old)) {
+	if got := readFile(t, script); !bytes.Equal(got, hooksconf.NotifyScript([]string{"/bin/other"}, "/opt/railse", defaultSock(t))) || bytes.Equal(got, []byte(old)) {
 		t.Fatalf("旧脚本应重新生成、前一跳保留:\n%s", got)
 	}
 	if !strings.Contains(out, "已写入 "+script) || strings.Contains(out, script+" 已是最新") || !strings.Contains(out, cfg+" 已是最新") {
@@ -559,4 +559,10 @@ func TestSetupUsageMentionsCodexNotify(t *testing.T) {
 	if code := run([]string{"setup"}, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]") {
 		t.Fatalf("用法应列出 setup codex-notify: %d %s", code, errOut.String())
 	}
+}
+
+// defaultSock 是测试的 HOME 下默认守护进程目录里的 socket：0.3 起 setup 一律把它写进钩子命令与 notify 脚本。
+func defaultSock(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(os.Getenv("HOME"), ".railse", "agent.sock")
 }
