@@ -1,8 +1,10 @@
 package hub
 
 import (
+	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -298,5 +300,52 @@ func TestDecideBeyondRoleRefusesRememberAndTrust(t *testing.T) {
 	}
 	if rules, _ := h.st.ListRules(); len(rules) != len(rulesBefore)+1 {
 		t.Fatalf("应学到一条拒绝规则: %d → %d", len(rulesBefore), len(rules))
+	}
+}
+
+// 同一机器快速重连：旧连接的 hello 或 roles 帧晚于新连接落库时不得覆盖新连接的角色表（只认当前连接）。
+func TestStaleConnectionCannotOverwriteRoles(t *testing.T) {
+	h := newTestHub(t)
+	m, err := h.st.CreateMachine("mac", "sec", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := func() *agentConn {
+		c := newFakeConn(m.ID, 16)
+		c.features = []string{wire.FeatureRole}
+		return c
+	}
+	old, cur := conn(), conn()
+	h.srv.agents.register(old)
+	h.srv.agents.register(cur) // 新连接顶替旧连接
+	h.srv.storeHelloRoles(cur, true, []proto.RoleSummary{{Name: "新"}})
+	// 旧连接晚到的 hello 与 roles 帧：都丢弃
+	h.srv.storeHelloRoles(old, true, []proto.RoleSummary{{Name: "旧"}})
+	h.srv.onRoles(old, wire.Roles{T: tRoles, Roles: []proto.RoleSummary{{Name: "旧2"}}})
+	h.srv.storeHelloRoles(old, false, nil) // 旧连接是老守护进程时的“清空”也不算
+	if got := machineRoles(t, h, m.ID); !slices.Equal(got, []string{"新"}) {
+		t.Fatalf("旧连接覆盖了新连接的角色表: %v", got)
+	}
+	if !strings.Contains(h.logs.String(), "不是这台机器的当前连接") {
+		t.Fatalf("应记日志: %s", h.logs.String())
+	}
+
+	// 并发交错：旧连接不停地发，新连接最后发的一份必须留下
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			h.srv.onRoles(old, wire.Roles{T: tRoles, Roles: []proto.RoleSummary{{Name: fmt.Sprintf("旧%d", i)}}})
+		}()
+		go func() {
+			defer wg.Done()
+			h.srv.onRoles(cur, wire.Roles{T: tRoles, Roles: []proto.RoleSummary{{Name: "新"}, {Name: fmt.Sprintf("新%d", i)}}})
+		}()
+	}
+	wg.Wait()
+	h.srv.onRoles(cur, wire.Roles{T: tRoles, Roles: []proto.RoleSummary{{Name: "最后"}}})
+	if got := machineRoles(t, h, m.ID); !slices.Equal(got, []string{"最后"}) {
+		t.Fatalf("并发之后应是新连接最后一份: %v", got)
 	}
 }

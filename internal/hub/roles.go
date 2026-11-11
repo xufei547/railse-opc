@@ -79,14 +79,12 @@ func cleanRoles(in []proto.RoleSummary) []proto.RoleSummary {
 	return out
 }
 
-// storeRoles 按 hello 存这台机器的角色表：声明了 role 时整份替换为 hello 带的（兜底后），没声明时清空。
-func (s *Server) storeRoles(machineID string, declared bool, roles []proto.RoleSummary) {
+// storeHelloRoles 按连接 c 的 hello 存这台机器的角色表：声明了 role 时整份替换为 hello 带的（兜底后），没声明时清空。
+func (s *Server) storeHelloRoles(c *agentConn, declared bool, roles []proto.RoleSummary) {
 	if !declared {
 		roles = nil
 	}
-	if err := s.store.ReplaceMachineRoles(machineID, cleanRoles(roles)); err != nil {
-		s.log.Printf("存机器 %s 的角色表: %v", machineID, err)
-	}
+	s.replaceRoles(c, roles)
 }
 
 // onRoles 收守护进程重载 roles.yaml 后整份重发的角色摘要。没声明 role 的连接发来的不收（记日志）。
@@ -95,5 +93,19 @@ func (s *Server) onRoles(c *agentConn, f wire.Roles) {
 		s.log.Printf("机器 %s 没声明 role 能力却发来 roles 帧，不收", c.machine.ID)
 		return
 	}
-	s.storeRoles(c.machine.ID, true, f.Roles)
+	s.replaceRoles(c, f.Roles)
+}
+
+// replaceRoles 整份替换这台机器的角色表，只认当前连接：同一机器快速重连时，旧连接晚到的 hello 或 roles 帧不得覆盖新连接写下的。
+// 在这台机器的锁（roleLocks）里再确认 c 仍是当前连接才写；新连接登记（顶替旧连接）之后，旧连接的写入一律丢弃（记日志）。
+func (s *Server) replaceRoles(c *agentConn, roles []proto.RoleSummary) {
+	unlock := s.roleLocks.lock(c.machine.ID)
+	defer unlock()
+	if !s.agents.current(c) {
+		s.log.Printf("机器 %s 的角色摘要来自已不是这台机器的当前连接，丢弃", c.machine.ID)
+		return
+	}
+	if err := s.store.ReplaceMachineRoles(c.machine.ID, cleanRoles(roles)); err != nil {
+		s.log.Printf("存机器 %s 的角色表: %v", c.machine.ID, err)
+	}
 }

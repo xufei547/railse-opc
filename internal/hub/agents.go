@@ -339,7 +339,7 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 角色表按 hello 整份替换（没声明 role 时清空）：在 welcome 之前写好，之后这条连接上的请求、总台都看得到
-	s.storeRoles(machine.ID, hello.Has(wire.FeatureRole), hello.Roles)
+	s.storeHelloRoles(c, hello.Has(wire.FeatureRole), hello.Roles)
 	trustOf := "" // 守护进程声明了 trust 才在 welcome 里带放行快照
 	if hello.Has(wire.FeatureTrust) {
 		trustOf = machine.ID
