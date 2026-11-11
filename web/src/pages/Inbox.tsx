@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useReducer, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { Banner } from '../components/Banner'
 import { RequestCard } from '../components/RequestCard'
 import { hub } from '../api'
-import { applyFilter, filterLabel, knownRoles, parseFilter } from '../desk'
+import { filterLabel, initialRoles, knownRoles, parseFilter, rolesReducer, unassignedLists, type RolesState } from '../desk'
+import { createDeskLoader } from '../deskLoader'
+import { deskPollMs, deskThrottleMs } from './Desk'
 import { lang, splitVars, t } from '../i18n'
 import { pauseCopy } from '../manage'
 import { usePush } from '../push'
@@ -15,7 +17,7 @@ import { trustBanner } from '../trust'
 const guideKey = 'railse.hideInstallGuide'
 
 export function Inbox() {
-  const { state, reload, dispatch } = useStore()
+  const { state, reload } = useStore()
   const push = usePush()
   const [hideGuide, setHideGuide] = useState(() => {
     try {
@@ -28,21 +30,39 @@ export function Inbox() {
   // 总台跳来时按角色与机器筛选（/inbox?role=…&machine=…）；筛选条可清除
   const [params, setParams] = useSearchParams()
   const filter = parseFilter(params)
-  // “未分配”要知道每台机器当前的角色表（角色已删的也算未分配）：总台取过就有，没有时取一次；老 hub 取不到时只认空串
-  const wantRoles = filter?.role === '' && state.deskRoles === null
+  // “未分配”要知道每台机器当前的角色表（角色已删的也算未分配）：进入筛选时重新取一次，筛选开着期间随请求事件节流重取（deskLoader）；
+  // 取到完整快照前显示加载中，取失败显示错误与重试，都不展示部分结果；老 hub（404）没有角色，只认空串
+  const unassigned = filter?.role === ''
+  const [roles, rolesDispatch] = useReducer(rolesReducer, initialRoles)
+  const [rolesLoader] = useState(() =>
+    createDeskLoader({
+      fetch: hub.desk,
+      onData: (d) => rolesDispatch({ type: 'data', known: knownRoles(d) }),
+      onError: (e) => rolesDispatch({ type: 'error', message: e instanceof Error ? e.message : String(e) }),
+      onUnsupported: () => rolesDispatch({ type: 'unsupported' }),
+      throttleMs: deskThrottleMs,
+      pollMs: deskPollMs,
+    }),
+  )
   useEffect(() => {
-    if (!wantRoles) return
-    let alive = true
-    hub.desk().then(
-      (d) => alive && dispatch({ type: 'desk_roles', roles: knownRoles(d) }),
-      () => {},
-    )
-    return () => {
-      alive = false
-    }
-  }, [wantRoles, dispatch])
-  const pending = applyFilter(state.pending, filter, state.deskRoles)
-  const questions = applyFilter(state.questions, filter, state.deskRoles)
+    if (!unassigned) return
+    rolesDispatch({ type: 'enter' })
+    rolesLoader.start()
+    return () => rolesLoader.stop()
+  }, [unassigned, rolesLoader])
+  useEffect(() => {
+    if (unassigned) rolesLoader.request()
+  }, [unassigned, rolesLoader, state.tick, state.loads])
+  const retryRoles = () => {
+    rolesDispatch({ type: 'retry' })
+    rolesLoader.stop()
+    rolesLoader.start()
+  }
+  const pendingView = unassignedLists(roles, state.pending, filter)
+  const questionsView = unassignedLists(roles, state.questions, filter)
+  const pending = pendingView.kind === 'list' ? pendingView.items : []
+  const questions = questionsView.kind === 'list' ? questionsView.items : []
+  const gated = pendingView.kind !== 'list'
   const machineName =
     filter?.machine == null
       ? ''
@@ -50,7 +70,7 @@ export function Inbox() {
         state.status?.machines.find((m) => m.id === filter.machine)?.name ??
         '')
   const groups = groupByProject(pending)
-  const empty = state.loaded && pending.length === 0 && questions.length === 0
+  const empty = state.loaded && !gated && pending.length === 0 && questions.length === 0
   const trustCount = state.status?.trusts ?? 0
 
   function dismissGuide() {
@@ -132,6 +152,7 @@ export function Inbox() {
             </button>
           </div>
         )}
+        {filter && gated && <RolesGate state={roles} onRetry={retryRoles} />}
         {questions.length > 0 && (
           <section>
             <h2 className="section-title">{t('等你回答')}</h2>
@@ -160,5 +181,19 @@ export function Inbox() {
         {empty && <div className="empty">{t('没有等你处理的事')}</div>}
       </div>
     </>
+  )
+}
+
+/** “未分配”筛选的角色表还没取到（加载中）或取失败（错误与重试）时，放在筛选条下面代替列表。取到了不显示任何东西。 */
+export function RolesGate({ state, onRetry }: { state: RolesState; onRetry: () => void }) {
+  if (state.status === 'loading') return <div className="empty">{t('正在取角色表…')}</div>
+  if (state.status !== 'error') return null
+  return (
+    <Banner tone="warn">
+      {t('取不到角色表，没法判断哪些是未分配：{reason}', { reason: state.message })}
+      <button type="button" className="btn" onClick={onRetry}>
+        {t('重试')}
+      </button>
+    </Banner>
   )
 }

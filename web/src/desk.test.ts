@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { applyFilter, boundaryLine, deskGroups, filterLabel, inboxHref, knownRoles, parseFilter, roleText } from './desk'
+import { applyFilter, boundaryLine, deskGroups, filterLabel, inboxHref, initialRoles, knownRoles, parseFilter, roleText, rolesReducer, unassignedLists, type KnownRoles } from './desk'
 import { setLang } from './i18n'
 import type { Desk, DeskRow } from './types'
 
@@ -114,5 +114,57 @@ describe('未分配 = 角色为空，或不在该机器当前角色表里', () =
       m2: ['运维'],
       m3: [],
     })
+  })
+})
+
+describe('收件箱“未分配”筛选的角色表快照', () => {
+  const list = [
+    { id: 'a', role: '写作', machine_id: 'm1' },
+    { id: 'b', role: '', machine_id: 'm1' },
+    { id: 'c', role: '已删', machine_id: 'm1' },
+    { id: 'n1', role: '新角色', machine_id: 'm9' }, // 快照之后才接入的机器
+    { id: 'n2', role: '', machine_id: 'm9' },
+  ]
+  const ids = (known: KnownRoles) => applyFilter(list, { role: '', machine: null }, known).map((x) => x.id)
+
+  it('多机器：快照里没有的机器不当成空角色表，它的请求只按“角色为空”判未分配', () => {
+    expect(ids({ m1: ['写作'] })).toEqual(['b', 'c', 'n2'])
+  })
+
+  it('陈旧：角色新增、删除后按最新的快照判', () => {
+    let s = rolesReducer(initialRoles, { type: 'enter' })
+    s = rolesReducer(s, { type: 'data', known: { m1: ['写作'] } })
+    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'list', items: [list[1], list[2]] })
+    // 新增了“已删”这个角色（比如改名回来）、删掉了“写作”
+    s = rolesReducer(s, { type: 'data', known: { m1: ['已删'] } })
+    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'list', items: [list[0], list[1]] })
+  })
+
+  it('进入筛选时先显示加载中，取到完整快照前不展示部分结果', () => {
+    const s = rolesReducer(rolesReducer(initialRoles, { type: 'data', known: { m1: [] } }), { type: 'enter' })
+    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'loading' })
+  })
+
+  it('取失败：显示错误，不展示部分结果；重试回到加载中；之后成功照常', () => {
+    let s = rolesReducer(initialRoles, { type: 'enter' })
+    s = rolesReducer(s, { type: 'error', message: '连不上 hub' })
+    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'error', message: '连不上 hub' })
+    // 成功过之后再失败也一样不展示（快照可能已过时）
+    s = rolesReducer(rolesReducer(s, { type: 'data', known: { m1: [] } }), { type: 'error', message: '超时' })
+    expect(unassignedLists(s, list, { role: '', machine: 'm1' }).kind).toBe('error')
+    s = rolesReducer(s, { type: 'retry' })
+    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'loading' })
+    s = rolesReducer(s, { type: 'data', known: { m1: ['写作', '已删'] } })
+    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'list', items: [list[1]] })
+  })
+
+  it('老 hub（没有总台）：没有角色，只认空串', () => {
+    const s = rolesReducer(rolesReducer(initialRoles, { type: 'enter' }), { type: 'unsupported' })
+    expect(unassignedLists(s, list, { role: '', machine: null })).toEqual({ kind: 'list', items: [list[1], list[4]] })
+  })
+
+  it('不是“未分配”筛选时不看快照', () => {
+    expect(unassignedLists(initialRoles, list, { role: '写作', machine: null })).toEqual({ kind: 'list', items: [list[0]] })
+    expect(unassignedLists(initialRoles, list, null)).toEqual({ kind: 'list', items: list })
   })
 })

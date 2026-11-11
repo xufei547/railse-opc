@@ -504,4 +504,6 @@ export const en: Record<string, string> = {
   清除筛选: 'Clear filter',
   角色: 'Role',
   'hub 版本过旧，不支持总台。升级 hub 后刷新本页。': 'This hub is too old for the desk. Upgrade the hub, then refresh this page.',
+  '正在取角色表…': 'Loading roles…',
+  '取不到角色表，没法判断哪些是未分配：{reason}': "Couldn't load the roles, so unassigned requests can't be told apart: {reason}",
 }

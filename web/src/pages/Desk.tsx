@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { hub } from '../api'
 import { Banner } from '../components/Banner'
-import { boundaryLine, deskGroups, inboxHref, knownRoles } from '../desk'
+import { boundaryLine, deskGroups, inboxHref } from '../desk'
 import { createDeskLoader } from '../deskLoader'
 import { relativeTime, riskLabel, riskTone, stateLabel } from '../format'
 import { splitVars, t } from '../i18n'
@@ -20,7 +20,7 @@ export const deskPollMs = 30_000
  * （合并在途、节流 1 秒、开着时每 30 秒轮询、卸载才丢弃；老 hub 回 404 时说明版本过旧并停止轮询）。
  */
 export function Desk() {
-  const { state, dispatch } = useStore()
+  const { state } = useStore()
   const [desk, setDesk] = useState<DeskData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [unsupported, setUnsupported] = useState(false)
@@ -30,7 +30,6 @@ export function Desk() {
       onData: (d) => {
         setDesk(d)
         setError(null)
-        dispatch({ type: 'desk_roles', roles: knownRoles(d) }) // 收件箱的“未分配”筛选要用
       },
       onError: (e) => setError(e instanceof Error ? e.message : String(e)),
       onUnsupported: () => setUnsupported(true),

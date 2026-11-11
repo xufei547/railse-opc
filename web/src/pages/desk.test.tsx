@@ -10,7 +10,7 @@ import type { State } from '../store'
 import { StoreProvider } from '../StoreProvider'
 import type { Desk, DeskRow, RequestView } from '../types'
 import { DeskBody, DeskUnsupported, RoleCard } from './Desk'
-import { Inbox } from './Inbox'
+import { Inbox, RolesGate } from './Inbox'
 
 const store = vi.hoisted(() => ({ over: null as Partial<State> | null }))
 
@@ -169,28 +169,27 @@ describe('收件箱按角色筛选', () => {
     expect(h).toContain('只看：角色「写作」 · mac')
     expect(h).toContain('清除筛选')
   })
-  it('未分配', () => {
-    const h = render('/inbox?role=&machine=m1')
-    expect(h).toContain('cmd-b')
-    expect(h).not.toContain('cmd-a')
-    expect(h).toContain('只看：未分配 · mac')
-  })
   it('没有筛选参数时全显示，没有筛选条', () => {
     const h = render('/')
     for (const c of ['cmd-a', 'cmd-b', 'cmd-c']) expect(h).toContain(c)
     expect(h).not.toContain('filter-bar')
   })
-  it('未分配：角色已从文件里删掉的请求也在（按总台给的角色表）', () => {
-    store.over = {
-      ...store.over,
-      pending: [...(store.over?.pending ?? []), req({ id: 'g', role: '已删', payload: { type: 'shell', command: 'cmd-gone' } })],
-      deskRoles: { m1: ['写作'] },
-    }
+  it('未分配：取到角色表之前显示加载中，不展示部分结果', () => {
     const h = render('/inbox?role=&machine=m1')
-    expect(h).toContain('cmd-b')
-    expect(h).toContain('cmd-gone')
-    expect(h).not.toContain('cmd-a')
     expect(h).toContain('只看：未分配 · mac')
+    expect(h).toContain('正在取角色表…')
+    expect(h).not.toContain('cmd-b')
+  })
+  it('角色表取失败：筛选条下显示错误与重试按钮', () => {
+    const h = html(<RolesGate state={{ status: 'error', message: '连不上 hub' }} onRetry={() => {}} />)
+    expect(h).toContain('取不到角色表，没法判断哪些是未分配：连不上 hub')
+    expect(h).toContain('>重试</button>')
+    expect(html(<RolesGate state={{ status: 'loading' }} onRetry={() => {}} />)).toContain('正在取角色表…')
+    expect(html(<RolesGate state={{ status: 'ok', known: {} }} onRetry={() => {}} />)).toBe('')
+    setLang('en')
+    const en = html(<RolesGate state={{ status: 'error', message: 'x' }} onRetry={() => {}} />)
+    expect(en).toContain("Couldn&#x27;t load the roles, so unassigned requests can&#x27;t be told apart: x")
+    expect(html(<RolesGate state={{ status: 'loading' }} onRetry={() => {}} />)).toContain('Loading roles…')
   })
   it('筛选后什么都没有：照常说没有等你处理的事', () => {
     expect(render('/inbox?role=%E8%BF%90%E7%BB%B4')).toContain('没有等你处理的事')
