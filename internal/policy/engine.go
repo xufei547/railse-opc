@@ -19,6 +19,11 @@ type Decision struct {
 	RuleID  string   `json:"rule_id,omitempty"` // 命中的规则，默认决定时为空
 	Reason  string   `json:"reason"`            // 给人看的依据
 	Trigger *Trigger `json:"trigger,omitempty"` // 定级时起决定作用的那一处；read、write_in_project 为 nil
+	// 角色（0.3 起，见 Context.Role）：Role 是会话角色名（未分配、角色文件有误时为空）；Forbidden 为真表示命中角色的禁用清单
+	// （Action 为 deny）；BeyondRole 为真表示风险超出角色的上限（Action 为 ask），规则与限时放行都不适用，必须人来定。
+	Role       string `json:"role,omitempty"`
+	BeyondRole bool   `json:"beyond_role,omitempty"`
+	Forbidden  bool   `json:"forbidden,omitempty"`
 }
 
 // Engine 持有编译好的规则。规则在 NewEngine 之后不再改动，Evaluate 可并发调用；
@@ -66,6 +71,10 @@ func (e *Engine) Paused() bool { return e.paused.Load() }
 
 // Evaluate 先定级，再按范围、条件、底线和优先级选出一条规则；没有则 ask。项目根太宽时按没有项目根处理（见 Context.Root），
 // 范围是那个目录的规则也就不匹配。
+//
+// 有角色（Context.Role）时的顺序（设计 §3.2）：用户 deny > 角色的 forbid（deny）> 其余来源的 deny 规则 > ceiling（越界 ask）>
+// 暂停 > 规则、底线、默认 ask。角色写了 dirs 而项目根不在其内时项目根按空处理（见 Context.Root），写入一律 write_outside。
+// 其余来源（builtin、learned）的 deny 排在 ceiling 前面：规格只写了“ceiling 压过规则”，但 deny 比越界的 ask 更严，不该被放宽。
 func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 	ctx = ctx.normalized()
 	risk, trig := ClassifyTrace(p, ctx)
@@ -82,14 +91,62 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 			best = r
 		}
 	}
-	// 暂停只停自动决定，命中的用户 deny 仍然生效；它压过一切，命中时必是 best。
-	if e.paused.Load() && (best == nil || !best.userDeny()) {
-		return Decision{Action: ActionAsk, Risk: risk, Reason: "自动审批已暂停", Trigger: trig}
+	role := ctx.Role
+	base := Decision{Risk: risk, Trigger: trig}
+	if role != nil {
+		base.Role = role.Name
+	}
+	// 用户 deny 压过一切（角色、暂停）；它压过其余规则，命中时必是 best。
+	if best != nil && best.userDeny() {
+		return withRule(base, best)
+	}
+	if role != nil {
+		if f := role.forbidHit(p, risk, ctx); f != nil {
+			base.Action, base.Forbidden = ActionDeny, true
+			base.Reason = "角色「" + role.Name + "」禁用：" + f.Match.Brief()
+			return base
+		}
+		if best != nil && best.Action == ActionDeny && !e.paused.Load() {
+			return withRule(base, best)
+		}
+		if role.Ceiling != nil && risk > *role.Ceiling {
+			base.Action, base.BeyondRole = ActionAsk, true
+			if msg := role.Broken(); msg != "" {
+				base.Reason = "roles.yaml 有误：" + msg
+			} else {
+				base.Reason = "超出角色「" + role.Name + "」的边界（上限 " + role.Ceiling.String() + "，这次是 " + risk.String() + "）"
+			}
+			return base
+		}
+	}
+	// 暂停只停自动决定，命中的用户 deny 与角色的 forbid 仍然生效（上面已返回）。
+	if e.paused.Load() {
+		base.Action, base.Reason = ActionAsk, "自动审批已暂停"
+		return base
 	}
 	if best != nil {
-		return Decision{Action: best.Action, Risk: risk, RuleID: best.ID, Reason: "命中规则 " + best.ID, Trigger: trig}
+		return withRule(base, best)
 	}
-	return Decision{Action: ActionAsk, Risk: risk, Reason: "无规则命中，按 " + risk.String() + " 默认询问", Trigger: trig}
+	base.Action, base.Reason = ActionAsk, "无规则命中，按 "+risk.String()+" 默认询问"
+	return base
+}
+
+// withRule 把命中的规则填进结论。
+func withRule(d Decision, r *compiledRule) Decision {
+	d.Action, d.RuleID, d.Reason = r.Action, r.ID, "命中规则 "+r.ID
+	return d
+}
+
+// forbidHit 返回命中的第一条禁用（deny 语义，见 compileForbid），没有返回 nil。编不了的条件当作命中（fail closed）。
+func (r *Role) forbidHit(p Payload, risk Risk, ctx Context) *compiledRule {
+	rules := r.forbidRules()
+	for i := range rules {
+		f := &rules[i]
+		if f.bad || matchRequest(f, p, risk, ctx) {
+			return f
+		}
+	}
+	return nil
 }
 
 // mayAllow 是底线：outward 只有 user 规则能放行；destructive 还要求规则显式写 risk: destructive。
