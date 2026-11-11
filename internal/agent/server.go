@@ -102,6 +102,12 @@ type Server struct {
 	// procRoles 是有角色的会话的 CLI 进程（进程号@启动时间）→ 约束它的角色名（自己的与继承的），由 pinMu 保护：嵌套会话的祖先链里
 	// 有这些进程时继承它们（见 inheritRole）。随钉住表一起有上限、session_end 时释放。
 	procRoles map[string]procRole
+	// effective 是每个会话最近一次审批时的生效角色名（含从上层会话继承的），由 pinMu 保护：答题与事件没有祖先链，
+	// 统一读这里，免得把继承来的角色报成未分配。随钉住表一起有上限、session_end 时释放。
+	effective map[string]rolePin
+	// sessionProc 是会话（tool + cli_session_id）→ 它的 CLI 进程（有祖先链时才知道），由 pinMu 保护：清理钉住、继承记录与生效角色时
+	// 看这个进程还在不在（见 pruneSessions）。session_end 谁都能伪造，不据它清。
+	sessionProc map[string]proto.Proc
 
 	mu      sync.Mutex
 	closed  bool
@@ -312,6 +318,12 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			_, _ = conn.Read(b[:]) // 读到什么都不要，只等它返回
 			cancel(errHookGone)
 		}()
+		// 祖先链用连接对端的进程凭据自己重建，不信请求里自报的；取不到凭据时才退回用自报的，并在审计里标注
+		if chain, ok := peerAncestry(conn); ok {
+			req.Ancestors, req.AncestrySource = chain, ancestryPeer
+		} else if len(req.Ancestors) > 0 {
+			req.AncestrySource = ancestrySelfReported
+		}
 		handle := s.handlePermission
 		if kind == "ask" {
 			handle = s.handleAsk
@@ -376,6 +388,7 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID, ProtectedDirs: s.protected}
 	pctx.Role = s.sessionRole(&req.Session, pctx.Root(), cwd, true)
 	pctx.Role = s.inheritRole(&req, pctx.Role)
+	s.recordEffective(req.Session, pctx.Role)
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx, req.Session
 }
 
@@ -414,6 +427,12 @@ func (s *Server) sessionRole(sess *proto.Session, root, cwd string, pin bool) *p
 		role = s.pinRole(*sess, role, st.Set, pin)
 	}
 	sess.Role = roleName(role)
+	// 答题与事件（pin 为假）没有祖先链：这个会话审批时继承过上层角色的，显示同一个生效角色
+	if !pin && st.Err == nil && st.Exists {
+		if name, ok := s.effectiveName(*sess); ok {
+			sess.Role = name
+		}
+	}
 	return role
 }
 
@@ -461,23 +480,77 @@ func (s *Server) pinRole(sess proto.Session, role *policy.Role, set policy.RoleS
 	return r
 }
 
-// unpin 释放会话钉住的角色与它的 CLI 进程上记的角色（session_end）。
-func (s *Server) unpin(sess proto.Session) {
+// recordEffective 记下会话这次审批的生效角色（含继承）；没有会话 id 的不记。满了淘汰最久没用的。
+func (s *Server) recordEffective(sess proto.Session, role *policy.Role) {
+	if sess.CLISessionID == "" {
+		return
+	}
 	key := sess.Tool + "\x00" + sess.CLISessionID
+	now := time.Now()
 	s.pinMu.Lock()
-	delete(s.pinned, key)
-	for k, p := range s.procRoles {
-		if p.session == key {
+	defer s.pinMu.Unlock()
+	if role == nil || len(role.Inherited()) == 0 {
+		delete(s.effective, key) // 没有继承时答题与事件自己解析，结果与审批一致
+		return
+	}
+	if _, ok := s.effective[key]; !ok && len(s.effective) >= maxPinned {
+		oldest, first := "", true
+		for k, p := range s.effective {
+			if first || p.at.Before(s.effective[oldest].at) {
+				oldest, first = k, false
+			}
+		}
+		delete(s.effective, oldest)
+	}
+	if s.effective == nil {
+		s.effective = map[string]rolePin{}
+	}
+	s.effective[key] = rolePin{name: role.Name, at: now}
+}
+
+// effectiveName 返回会话记下的、含继承的生效角色名；没有时 ok 为假。
+func (s *Server) effectiveName(sess proto.Session) (string, bool) {
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	p, ok := s.effective[sess.Tool+"\x00"+sess.CLISessionID]
+	return p.name, ok
+}
+
+// pruneSessions 清掉不在了的会话：会话的 CLI 进程（进程号加启动时间对不上）已经退出的，连同它的钉住、生效角色与继承记录；
+// 不知道 CLI 进程的条目与取不到进程信息的，超过 pinTTL 没用到才清。到期清理循环每分钟调一次。
+func (s *Server) pruneSessions() {
+	now := time.Now()
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	for key, p := range s.sessionProc {
+		if !procAlive(p) {
+			delete(s.sessionProc, key)
+			delete(s.pinned, key)
+			delete(s.effective, key)
+		}
+	}
+	for k, rec := range s.procRoles {
+		if !procAlive(rec.proc) || now.Sub(rec.at) > pinTTL {
 			delete(s.procRoles, k)
 		}
 	}
-	s.pinMu.Unlock()
+	for k, p := range s.pinned {
+		if now.Sub(p.at) > pinTTL {
+			delete(s.pinned, k)
+		}
+	}
+	for k, p := range s.effective {
+		if now.Sub(p.at) > pinTTL {
+			delete(s.effective, k)
+		}
+	}
 }
 
 // procRole 是一个 CLI 进程上记的角色约束。
 type procRole struct {
 	names   []string
 	session string
+	proc    proto.Proc
 	at      time.Time
 }
 
@@ -548,7 +621,15 @@ func (s *Server) inheritRole(req *proto.Request, role *policy.Role) *policy.Role
 		if s.procRoles == nil {
 			s.procRoles = map[string]procRole{}
 		}
-		s.procRoles[key] = procRole{names: names, session: req.Session.Tool + "\x00" + req.Session.CLISessionID, at: now}
+		s.procRoles[key] = procRole{names: names, session: req.Session.Tool + "\x00" + req.Session.CLISessionID, proc: self, at: now}
+	}
+	if req.Session.CLISessionID != "" && self.Start != "" {
+		if s.sessionProc == nil {
+			s.sessionProc = map[string]proto.Proc{}
+		}
+		if _, ok := s.sessionProc[req.Session.Tool+"\x00"+req.Session.CLISessionID]; ok || len(s.sessionProc) < maxPinned {
+			s.sessionProc[req.Session.Tool+"\x00"+req.Session.CLISessionID] = self
+		}
 	}
 	req.Session.Role = roleName(eff)
 	return eff
@@ -647,10 +728,15 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 	id := NewID()
 	reported, d, pctx, sess := s.evaluate(req)
 	req.Session = sess
+	// 0.3 新接进 PreToolUse 的工具（MCP、WebSearch）只为角色而来：会话没有生效角色（没有角色文件，或未分配且没继承）时
+	// 一律忽略，与 0.2.3 完全相同（那时钩子根本不触发）：不写审计、不送 hub、钩子不输出
+	if pctx.Role == nil && req.Source == proto.SourcePreToolUse && roleOnlyPreToolUse(req.ToolName) {
+		return proto.Response{V: proto.Version, Decision: "passthrough", DecidedBy: "ignored"}
+	}
 	root := pctx.Root() // 生效的项目根：角色地盘外为空，限时放行与上报 hub 都用它
 	redacted := redact.Payload(reported)
 	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "permission", Session: req.Session, ToolName: req.ToolName, Payload: &redacted, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason,
-		Source: req.Source, PermissionMode: req.PermissionMode, ToolUseID: req.ToolUseID, Role: d.Role, BeyondRole: d.BeyondRole}
+		Source: req.Source, PermissionMode: req.PermissionMode, ToolUseID: req.ToolUseID, Role: d.Role, BeyondRole: d.BeyondRole, Ancestry: req.AncestrySource}
 	resp := proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason}
 	switch d.Action {
 	case policy.ActionAllow:
@@ -676,7 +762,8 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 			resp.Decision, resp.DecidedBy, resp.Reason = "deny", entry.DecidedBy, entry.Reason
 			break
 		}
-		if s.rules.Paused() && !d.BeyondRole {
+		if s.rules.Paused() && !d.BeyondRole && !d.ControlPlane {
+			// 越界与触及 Railse 配置的都不归暂停管（见下）。
 			// 总开关打开：用户 deny 与角色禁用仍由引擎处理，其余一律交回终端，不去打扰 hub。
 			// 越界（含 roles.yaml 有误）不归暂停管：交回终端在 auto、acceptEdits、bypassPermissions 下等于放行，
 			// 它照下面的路走（PreToolUse 回 ask 强制终端确认，其余送人工决定），暂停只停自动决定、不放宽边界。
@@ -711,13 +798,13 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		if req.Source == proto.SourcePreToolUse {
 			// 本来会命中限时放行、因触及 Railse 配置而没放的（d.Reason 为 reasonControlPlane）也回 ask：交给 Claude 自己的流程
 			// 在 auto、bypassPermissions 下等于放行，放行本来要替人做的决定得交回人
-			if d.BeyondRole || d.Reason == reasonControlPlane || d.Risk >= policy.RiskOutward || s.settings.Load().ClaudeUndecided == UndecidedPhone {
+			if d.BeyondRole || d.ControlPlane || d.Risk >= policy.RiskOutward || s.settings.Load().ClaudeUndecided == UndecidedPhone {
 				// 硬底线、越界（或设置成一律送手机）：不在这里等手机。回 ask 让 Claude 弹终端确认框并触发 PermissionRequest，
 				// 那一条按老路送 hub；终端里同时能看到命令与触发点，谁先答谁算。不看 hub 状态：hub 不可达时
 				// PermissionRequest 交回终端，确认框还在（见 docs/superpowers/specs/2026-11-02-railse-opc-v0.2.2-two-screens-design.md §2.1）。
 				// 越界时理由换成角色的那句（钩子按终端语言重拼后放进确认框）。
 				reason := reasonAsked
-				if d.BeyondRole || d.Reason == reasonControlPlane {
+				if d.BeyondRole || d.Reason == reasonControlPlane || d.Reason == "触及 Railse 自己的配置，不接受自动放行" {
 					reason = d.Reason
 				}
 				entry.Action, entry.State, entry.DecidedBy, entry.Reason, entry.Trigger = "ask", "asked", decidedByAsk, reason, redactTrigger(d.Trigger)
@@ -754,6 +841,11 @@ func reasonGeminiBeyond(d policy.Decision) string {
 		return "roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行"
 	}
 	return "超出角色「" + d.Role + "」的边界，Gemini 无法在这里问人：换个角色，或在别处执行"
+}
+
+// roleOnlyPreToolUse 报告工具是不是 0.3 只为角色接进 Claude PreToolUse 的（WebSearch 与 MCP 工具，见 hooksconf.ClaudePreToolUseMatcher）。
+func roleOnlyPreToolUse(tool string) bool {
+	return tool == "WebSearch" || strings.HasPrefix(tool, "mcp__")
 }
 
 // redactTrigger 对触发段脱敏（它是命令原文的一部分，可能带凭据），返回副本；nil 原样。
@@ -941,10 +1033,8 @@ func (s *Server) handleEvent(ev proto.Event) proto.EventAck {
 		if n := s.pending.CancelSession(ev.Session.CLISessionID, errSettledElsewhere); n > 0 {
 			s.log.Printf("会话 %q 的这一轮已结束，取消 %d 条挂着的请求", clipText(ev.Session.CLISessionID, hubLogFieldMax), n)
 		}
-		if ev.Kind == "session_end" {
-			// 会话结束，释放它钉住的角色：放在返回前，下面写审计时还能读到角色名
-			defer s.unpin(ev.Session)
-		}
+		// session_end 不释放钉住与继承记录：它可以伪造（agent 在一次 Bash 调用里给钩子喂一条，填上层会话的 id），
+		// 拿不准是不是真的会话结束，就不释放；清理看进程是否还活着（见 pruneSessions）
 	}
 	// 事件只带上生效的角色名（设计 §3.4）
 	cwd := CleanCwd(ev.Session.Cwd)

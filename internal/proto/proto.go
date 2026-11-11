@@ -109,6 +109,8 @@ type Request struct {
 	// Ancestors 是钩子进程的祖先链（0.3 起），从直接父进程往上到 1 号进程为止，至多 MaxAncestors 层；取不到时为空（老钩子也不带）。
 	// 守护进程靠它认出嵌套会话：链里有另一个有角色的会话的 CLI 进程时，继承那个角色的约束（取更严的一边）。
 	Ancestors []Proc `json:"ancestors,omitempty"`
+	// AncestrySource 只在守护进程里用（不上线）：Ancestors 是按连接对端的进程凭据重建的（peer），还是请求自报的（self_reported）。
+	AncestrySource string `json:"-"`
 	// TrustFor 是钩子从环境变量 RAILSE_TRUST 带来的时长原文（如 "2h"）：守护进程第一次见到带它的会话时建一条会话放行，之后不再看它。
 	TrustFor string `json:"trust_for,omitempty"`
 }

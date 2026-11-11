@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -88,6 +89,7 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 		*socket = cfg.SocketPath
 	}
 	client := hookclient.Client{SocketPath: *socket, ConnectTimeout: 2 * time.Second}
+	currentHookSocket = *socket
 
 	var in adapter.Input
 	var ad adapter.Adapter
@@ -192,10 +194,11 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 	}
 	resp, err := awaitReply(ctx, ad, client, req)
 	if err != nil {
-		if isDialError(err) {
-			// 守护进程没起、连不上 socket：0.2.3 的现状，交回终端（没装守护进程的人不该被卡住）
+		if isDialError(err) && !enabledHere(currentHookSocket) {
+			// 这台机器没启用 Railse（守护进程目录不在，或从没运行过）：0.2.3 的现状，交回终端（没装守护进程的人不该被卡住）
 			return passthrough(stderr, err.Error())
 		}
+		// 启用了却连不上（接入过 hub、或 socket 残留着）：可能是守护进程挂了，也可能是有人让钩子连不上，同样拿不到结论
 		return noVerdict(stdout, stderr, ad, in, err.Error())
 	}
 	switch resp.Decision {
@@ -239,6 +242,32 @@ func truncatedInput(cli string, ad adapter.Adapter, raw []byte, stdout, stderr i
 	return 0, false
 }
 
+// currentHookSocket 是这次钩子连的守护进程 socket（runHook 定下后填）；角色文件在它旁边。
+var currentHookSocket string
+
+// rolesFileNear 报告守护进程目录（socket 所在目录）里有没有 roles.yaml；判断不了时按有（偏严）。
+func rolesFileNear(socket string) bool {
+	if socket == "" {
+		return true
+	}
+	_, err := os.Lstat(filepath.Join(filepath.Dir(socket), "roles.yaml"))
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// enabledHere 报告 socket 所在的守护进程目录像是启用过的：有 machine.json（接入过 hub），或 socket 文件还在（守护进程正常退出时
+// 会删掉它，留着多半是崩溃或被杀）。目录不在、或只有别的文件时按没启用。
+func enabledHere(socket string) bool {
+	if socket == "" {
+		return false
+	}
+	for _, p := range []string{filepath.Join(filepath.Dir(socket), "machine.json"), socket} {
+		if _, err := os.Lstat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // isDialError 判断是不是连不上守护进程（socket 不在、没人监听、没权限）：这一类保持 0.2.3 的交回终端。
 func isDialError(err error) bool {
 	var op *net.OpError
@@ -251,6 +280,10 @@ func isDialError(err error) bool {
 // 这是相对 0.2.3 的有意收紧：以前一律交回，在 auto、bypassPermissions、yolo 下等于放行。
 func noVerdict(stdout, stderr io.Writer, ad adapter.Adapter, in adapter.Input, why string) int {
 	fmt.Fprintln(stderr, "railse hook: "+why)
+	// MCP、WebSearch 的 PreToolUse 只为角色而来：守护进程目录里没有 roles.yaml 时按 0.2.3（那时钩子不触发），交回
+	if in.Source == proto.SourcePreToolUse && (in.ToolName == "WebSearch" || strings.HasPrefix(in.ToolName, "mcp__")) && !rolesFileNear(currentHookSocket) {
+		return passthrough(stderr, why)
+	}
 	switch {
 	case in.Source == proto.SourcePreToolUse:
 		return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: "ask",
@@ -267,7 +300,7 @@ func noVerdict(stdout, stderr io.Writer, ad adapter.Adapter, in adapter.Input, w
 func askReason(resp proto.Response) string {
 	tail := i18n.T("已发到手机，也可以在这里直接批")
 	// 越界（角色上限、roles.yaml 有误）的 ask：理由换成角色的那句，比触发点更说明问题。resp.Reason 已由 awaitReply 按终端语言重拼过
-	if isRoleReason(resp.Reason) || resp.Reason == i18n.Lookup(reasonControlPlaneZH) {
+	if isRoleReason(resp.Reason) || resp.Reason == i18n.Lookup(reasonControlPlaneZH) || resp.Reason == i18n.Lookup("触及 Railse 自己的配置，不接受自动放行") {
 		return fmt.Sprintf(i18n.T("%s。%s"), resp.Reason, tail)
 	}
 	if resp.Trigger == nil {

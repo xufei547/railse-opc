@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -66,6 +67,7 @@ func fakeOpts(t *testing.T) (Options, string) {
 	if err := os.Chmod(sock, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	testDefaultSock = sock
 	return Options{
 		AgentDir: agentDir, Home: home, GOOS: "darwin", Version: "1.0.0", Now: time.Now(),
 		DefaultSocket: sock, // 不看测试进程的 $RAILSE_HOME 与真实家目录：默认目录就是这个守护进程目录
@@ -356,9 +358,15 @@ func TestHubReachableProblems(t *testing.T) {
 }
 
 // planDoc 返回 hooksconf 为 cli 生成的整份钩子配置；socket 可省（不带 --socket）。
+// planDoc 是 setup 会写的钩子配置。不给 socket 时用当前测试守护进程的 socket（fakeOpts 记下的）：0.3 起 setup 一律写 --socket；
+// 要 0.2.x 不带 --socket 的写法，显式给 ""。
 func planDoc(t *testing.T, cli, bin string, socket ...string) []byte {
 	t.Helper()
-	doc, err := hooksconf.Merge(nil, bin, hooksconf.Plan(cli, bin, strings.Join(socket, "")))
+	sock := testDefaultSock
+	if len(socket) > 0 {
+		sock = strings.Join(socket, "")
+	}
+	doc, err := hooksconf.Merge(nil, bin, hooksconf.Plan(cli, bin, sock))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,17 +462,8 @@ func TestHookChecks(t *testing.T) {
 	}
 	o.Bin = bin
 	// PreToolUse 超时不够：选择题等不到手机上的回答，照超时不够 fail
-	shortPre := strings.Replace(string(doc), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/local/bin/railse hook claude",
-            "timeout": 86400`, `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/local/bin/railse hook claude",
-            "timeout": 60`, 1)
+	shortPre := regexp.MustCompile(`("matcher": "AskUserQuestion\|[^"]*",\s*"hooks": \[\s*\{\s*"type": "command",\s*"command": "[^"]*",\s*"timeout": )86400`).
+		ReplaceAllString(string(doc), "${1}60")
 	if shortPre == string(doc) {
 		t.Fatalf("没替换到 PreToolUse 的超时:\n%s", doc)
 	}
@@ -676,8 +675,20 @@ func TestHookSocketMismatch(t *testing.T) {
 			}
 		}
 	}
-	// 默认目录、不带 --socket：对得上
+	// 默认目录、不带 --socket（0.2.x 的写法）：对得上，但 0.3 起提示带上 --socket（改了 HOME 的会话会连不上）
 	install("")
+	{
+		r := Run(o)
+		for _, id := range []string{"hooks.claude", "hooks.codex", "hooks.gemini"} {
+			if c := find(t, r, id); c.Status != Warn || !strings.Contains(c.Detail, "没带 --socket") {
+				t.Fatalf("%s: %+v", id, c)
+			}
+		}
+		if c := find(t, r, "hooks.codex_notify"); c.Status != OK {
+			t.Fatalf("notify 连的是默认 socket、对得上: %+v", c)
+		}
+	}
+	install(defSock)
 	expect(OK)
 	// 守护进程在非默认目录，钩子还是旧的（不带 --socket，连默认 socket）：warn，提示带 --dir 重装
 	o.AgentDir = data
@@ -712,7 +723,8 @@ func TestHookSocketMismatch(t *testing.T) {
 	o.Home = ""
 	t.Setenv("RAILSE_HOME", "")
 	t.Setenv("HOME", "")
-	if c := find(t, Run(o), "hooks.gemini"); c.Status != OK {
+	// 不比对连的是哪个 socket，只剩 0.3 起“没带 --socket”的提示
+	if c := find(t, Run(o), "hooks.gemini"); c.Status != Warn || strings.Contains(c.Detail, "连的是") || !strings.Contains(c.Detail, "没带 --socket") {
 		t.Fatalf("推不出基准 socket 时不比对: %+v", c)
 	}
 }
@@ -2288,5 +2300,22 @@ func TestRolesCheck(t *testing.T) {
 	}
 	if !r.Failed() {
 		t.Fatal("角色文件有误时 doctor 应失败")
+	}
+}
+
+// testDefaultSock 是最近一次 fakeOpts 的守护进程 socket（doctor 的测试不并行）。
+var testDefaultSock string
+
+// 0.2.x 装的钩子不带 --socket：warn，并给重装命令。
+func TestHookWithoutSocketWarns(t *testing.T) {
+	o, home := fakeOpts(t)
+	writeFile(t, hooksconf.ClaudeUserPath(home), planDoc(t, "claude", "/usr/local/bin/railse", ""))
+	o.Bin = "/usr/local/bin/railse"
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "没带 --socket") || !strings.Contains(c.Hint, "setup hooks") {
+		t.Fatalf("没带 --socket: %+v", c)
+	}
+	writeFile(t, hooksconf.ClaudeUserPath(home), planDoc(t, "claude", "/usr/local/bin/railse"))
+	if c := find(t, Run(o), "hooks.claude"); c.Status != OK {
+		t.Fatalf("带了 --socket 应 ok: %+v", c)
 	}
 }

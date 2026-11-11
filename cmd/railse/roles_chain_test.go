@@ -65,7 +65,7 @@ func pauseAgent(t *testing.T, sock string) {
 
 // 越界、roles.yaml 有误、触及 Railse 配置目录，在“来源 × hub（没有 / 不可达 / 可达）× 暂停与否”上的最终输出。
 // Gemini 一律 deny（它的钩子交回终端等于继续执行）；Claude PreToolUse 越界回 ask；Claude PermissionRequest 与 Codex 交回
-// CLI 自己的确认框，hub 可达时由手机定（这里手机拒了）。暂停下触及配置目录而不越界的，Claude 与 Codex 照 0.2.3 交回终端。
+// CLI 自己的确认框，hub 可达时由手机定（这里手机拒了）。暂停不管越界，也不管触及配置目录（配置目录不接受任何自动放行）。
 func TestRolesChainRoutingTable(t *testing.T) {
 	deciders := map[string]agent.Decider{
 		"none":        agent.LocalDecider{},
@@ -100,8 +100,6 @@ func TestRolesChainRoutingTable(t *testing.T) {
 					switch {
 					case cli == "gemini":
 						want = "deny"
-					case kind == "control" && paused:
-						want = "pass" // 0.2.3：暂停即交回终端
 					case cli == "claude-pre":
 						want = "ask"
 					case hub == "reachable":
@@ -270,6 +268,7 @@ func TestReadAncestorsReal(t *testing.T) {
 
 // 完整链路：上层会话（RAILSE_ROLE=写作）里起的嵌套 CLI 用 RAILSE_ROLE=运维 换角色，仍受写作的禁用约束，钩子输出拒绝。
 func TestChainNestedCLIInheritsRole(t *testing.T) {
+	agent.SetPeerAncestryForTest(t, nil) // 测试进程里跑钩子：用注入的祖先链（守护进程取到的对端是测试进程自己）
 	sock, repo, cfg := startTestAgent(t)
 	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 写作\n    forbid:\n      - {command_prefix: \"git push\"}\n  - name: 运维\n    ceiling: destructive\n"), 0o600)
 	outer := []proto.Proc{{PID: 101, Start: "a", Name: "sh"}, {PID: 11, Start: "b", Name: "claude"}, {PID: 5, Start: "c", Name: "zsh"}}
@@ -294,4 +293,155 @@ func TestChainNestedCLIInheritsRole(t *testing.T) {
 	if out := run([]proto.Proc{{PID: 303, Start: "g", Name: "sh"}, {PID: 33, Start: "h", Name: "claude"}, {PID: 5, Start: "c", Name: "zsh"}}, "运维", "other", "git push origin main"); outcomeOf(out) == "deny" {
 		t.Fatalf("不在上层会话之下不该继承: %q", out)
 	}
+}
+
+// writeRules 换掉守护进程的规则（规则文件 + reload）。
+func writeRules(t *testing.T, sock string, cfg agent.Config, yaml string) {
+	t.Helper()
+	os.WriteFile(cfg.RulesPath, []byte(yaml), 0o600)
+	c := hookclient.Client{SocketPath: sock, ConnectTimeout: 2 * time.Second}
+	if r, err := c.Control("reload"); err != nil || !r.OK {
+		t.Fatalf("reload: %v %+v", err, r)
+	}
+}
+
+// 配置目录不接受任何自动放行：哪怕用户手写了显式 risk: destructive 的 allow 规则，暂停与否、有无角色都一样，一律进人工决定。
+func TestChainControlPlaneNeverAutoAllowed(t *testing.T) {
+	for _, paused := range []bool{false, true} {
+		sock, repo, cfg := startTestAgent(t)
+		t.Setenv("RAILSE_ROLE", "")
+		writeRules(t, sock, cfg, "version: 1\nrules:\n  - id: user-cp\n    source: user\n    scope: global\n    match: {payload: shell, command_prefix: \"cp\", risk: destructive}\n    action: allow\n")
+		if paused {
+			pauseAgent(t, sock)
+		}
+		// 对照：同一条规则放行项目外的普通 cp（敏感路径之外的 destructive 不存在，这里用 .env 当 destructive 的对照）
+		if !paused {
+			stdin, ad := chainInput(t, "claude-pr", repo, "cp a .env")
+			if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "allow" {
+				t.Fatalf("对照：用户的 destructive allow 规则照常放行别的敏感路径: %q", out)
+			}
+		}
+		for cli, want := range map[string]string{"claude-pre": "ask", "claude-pr": "pass", "codex": "pass", "gemini": "deny"} {
+			stdin, ad := chainInput(t, cli, repo, "cp replacement.yaml ../h/roles.yaml")
+			out, _, code := runHookWith(t, stdin, ad, "--socket", sock)
+			if code != 0 || outcomeOf(out) != want {
+				t.Errorf("paused=%v %s: 想要 %s，得到 code=%d %q", paused, cli, want, code, out)
+			}
+		}
+	}
+}
+
+// 包装改目录后覆盖配置、包装藏起推送：完整链路上不被内置规则或限时放行放过。
+func TestChainWrapperEffects(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 开发\n    ceiling: network\n    forbid:\n      - {command_prefix: \"git push\"}\n"), 0o600)
+	c := hookclient.Client{SocketPath: sock, ConnectTimeout: 2 * time.Second}
+	if r, err := c.ControlMsg(proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: agent.CleanCwd(repo), Until: time.Now().Add(time.Hour)}}); err != nil || !r.OK {
+		t.Fatalf("建放行: %v %+v", err, r)
+	}
+	t.Setenv("RAILSE_ROLE", "")
+	// 没有角色：env -C 到守护进程目录里覆盖 roles.yaml
+	for cli, want := range map[string]string{"claude-pre": "ask", "claude-pr": "pass", "codex": "pass", "gemini": "deny"} {
+		stdin, ad := chainInput(t, cli, repo, "env -C ../h cp ../repo/replacement.yaml roles.yaml")
+		if out, _, code := runHookWith(t, stdin, ad, "--socket", sock); code != 0 || outcomeOf(out) != want {
+			t.Errorf("env -C %s: 想要 %s，得到 code=%d %q", cli, want, code, out)
+		}
+	}
+	// 有角色：command 包着的 git push（深剥后归一化）照样命中禁用；command git push 的定级是 outward，超出 network 上限、不被放行放过
+	t.Setenv("RAILSE_ROLE", "开发")
+	for _, cmd := range []string{"command /usr/bin/git -C . push origin main", "timeout 5 git push origin main"} {
+		stdin, ad := chainInput(t, "claude-pre", repo, cmd)
+		if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "deny" {
+			t.Errorf("%s: 应按禁用拒: %q", cmd, out)
+		}
+	}
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 开发\n    ceiling: network\n"), 0o600)
+	stdin, ad := chainInput(t, "claude-pr", repo, "command git push origin main")
+	if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) == "allow" {
+		t.Errorf("command git push 应越界、不被放行放过: %q", out)
+	}
+}
+
+// 没有生效角色时（没有角色文件，或会话未分配且没有继承角色），MCP 与 WebSearch 的 PreToolUse 一律忽略：
+// 与 0.2.3 完全相同（钩子不输出、守护进程不写审计），claude_undecided: phone 与用户 deny 规则都不起作用。
+func TestChainNewPreToolUseToolsIgnoredWithoutRole(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	os.WriteFile(cfg.SettingsPath, []byte("claude_undecided: phone\n"), 0o600)
+	writeRules(t, sock, cfg, "version: 1\nrules:\n  - id: user-deny-mcp\n    source: user\n    scope: global\n    match: {payload: mcp}\n    action: deny\n  - id: user-deny-search\n    source: user\n    scope: global\n    match: {payload: network}\n    action: deny\n")
+	mcp := claudeTool(t, "PreToolUse", repo, "mcp__github__create_issue", `{"title":"x"}`)
+	search := claudeTool(t, "PreToolUse", repo, "WebSearch", `{"query":"x"}`)
+	t.Setenv("RAILSE_ROLE", "")
+	check := func(label string) {
+		t.Helper()
+		before, _ := os.ReadFile(cfg.AuditPath)
+		for name, stdin := range map[string]string{"MCP": mcp, "WebSearch": search} {
+			if out, _, code := runHookWith(t, stdin, "claude", "--socket", sock); code != 0 || out != "" {
+				t.Errorf("%s %s: 应忽略（同 0.2.3）: code=%d %q", label, name, code, out)
+			}
+		}
+		if after, _ := os.ReadFile(cfg.AuditPath); len(after) != len(before) {
+			t.Errorf("%s: 忽略的请求不该写审计: %s", label, after[len(before):])
+		}
+	}
+	check("没有角色文件")
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 写作\n    ceiling: read\n"), 0o600)
+	check("会话未分配")
+	// 对照：同样的配置下 PermissionRequest 照旧受 deny 规则管（0.2.3 也是）
+	pr := claudeTool(t, "PermissionRequest", repo, "mcp__github__create_issue", `{"title":"x"}`)
+	if out, _, _ := runHookWith(t, pr, "claude", "--socket", sock); outcomeOf(out) != "deny" {
+		t.Errorf("PermissionRequest 照旧: %q", out)
+	}
+	// 有生效角色时进判定
+	t.Setenv("RAILSE_ROLE", "写作")
+	if out, _, _ := runHookWith(t, mcp, "claude", "--socket", sock); outcomeOf(out) != "deny" {
+		t.Errorf("有角色时 MCP 进判定（用户 deny 规则）: %q", out)
+	}
+}
+
+// 完整链路：有角色的会话里换 HOME 再起 CLI，按越界交人；没有角色时照旧。
+func TestChainHomeChangeIsBeyond(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 运维\n    ceiling: destructive\n"), 0o600)
+	t.Setenv("RAILSE_ROLE", "运维")
+	stdin, ad := chainInput(t, "claude-pre", repo, "HOME=/tmp/elsewhere claude -p deploy")
+	if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "ask" || !strings.Contains(out, "试图更改 Railse 的角色或放行设置") {
+		t.Fatalf("换 HOME 应越界: %q", out)
+	}
+	stdin, ad = chainInput(t, "gemini", repo, "XDG_CONFIG_HOME=/tmp/x gemini -p hi")
+	if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "deny" {
+		t.Fatalf("Gemini 越界一律拒: %q", out)
+	}
+}
+
+// 拨号失败时区分：守护进程目录不存在（这台机器没启用 Railse）保持交回；目录在、且曾经运行过（有 machine.json 或残留的 socket）
+// 却连不上时，Claude PreToolUse 回 ask、Gemini 拒，Claude PermissionRequest 与 Codex 交回。
+func TestHookEnabledButUnreachable(t *testing.T) {
+	_, repo, _ := startTestAgent(t)
+	want := map[string]string{"claude-pre": "ask", "gemini": "deny", "claude-pr": "pass", "codex": "pass"}
+	none := map[string]string{"claude-pre": "pass", "gemini": "pass", "claude-pr": "pass", "codex": "pass"}
+	try := func(label, sock string, want map[string]string) {
+		t.Helper()
+		for cli, w := range want {
+			stdin, ad := chainInput(t, cli, repo, "git push origin main")
+			out, _, code := runHookWith(t, stdin, ad, "--socket", sock)
+			if code != 0 || outcomeOf(out) != w {
+				t.Errorf("%s %s: 想要 %s，得到 code=%d %q", label, cli, w, code, out)
+			}
+		}
+	}
+	base, _ := os.MkdirTemp("", "rs")
+	t.Cleanup(func() { os.RemoveAll(base) })
+	try("目录不存在", filepath.Join(base, "nope", "agent.sock"), none)
+	empty := filepath.Join(base, "empty")
+	os.MkdirAll(empty, 0o700)
+	try("目录在但从没运行过", filepath.Join(empty, "agent.sock"), none)
+	enrolled := filepath.Join(base, "enrolled")
+	os.MkdirAll(enrolled, 0o700)
+	os.WriteFile(filepath.Join(enrolled, "machine.json"), []byte("{}"), 0o600)
+	try("接入过 hub 的", filepath.Join(enrolled, "agent.sock"), want)
+	stale := filepath.Join(base, "stale")
+	os.MkdirAll(stale, 0o700)
+	os.WriteFile(filepath.Join(stale, "agent.sock"), nil, 0o600) // 残留的 socket 文件（守护进程崩溃后留下的）
+	try("socket 残留", filepath.Join(stale, "agent.sock"), want)
 }

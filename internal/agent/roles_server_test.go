@@ -658,7 +658,7 @@ func TestBeyondRoleRoutingTable(t *testing.T) {
 	}
 }
 
-// 钉住表满了：淘汰最久没用的再存，不放弃钉住；session_end 释放这个会话的条目。
+// 钉住表满了：淘汰最久没用的再存，不放弃钉住；session_end 不释放（可伪造）。
 func TestRolePinCapacityAndSessionEnd(t *testing.T) {
 	setVar(t, &maxPinned, 3)
 	env := startServer(t, LocalDecider{}, nil)
@@ -686,9 +686,10 @@ func TestRolePinCapacityAndSessionEnd(t *testing.T) {
 	if got := role(nowhere, "a"); got != "写作" {
 		t.Fatalf("a 不该被淘汰: %q", got)
 	}
+	// session_end 谁都能伪造（agent 在一次 Bash 调用里给钩子喂一条），不再据它释放：钉住照旧，清理看进程是否还活着
 	roundTrip(t, env.cfg.SocketPath, proto.Event{V: proto.Version, Kind: "session_end", Session: proto.Session{Tool: "claude", CLISessionID: "a", Cwd: nowhere}})
-	if got := role(nowhere, "a"); got != "" {
-		t.Fatalf("session_end 后应释放: %q", got)
+	if got := role(nowhere, "a"); got != "写作" {
+		t.Fatalf("session_end 不该释放钉住: %q", got)
 	}
 }
 
@@ -775,6 +776,7 @@ func proc(pid int, start, name string) proto.Proc {
 
 // 嵌套会话继承上层会话的角色约束（看进程树，不看环境变量）：取更严的一边，角色名显示为自己的，理由注明继承。
 func TestNestedSessionInheritsAncestorRole(t *testing.T) {
+	SetPeerAncestryForTest(t, nil) // 用请求里注入的祖先链
 	env := startServer(t, LocalDecider{}, nil)
 	rolesFor(t, env, "")
 	term := []proto.Proc{proc(5, "s5", "zsh"), proc(2, "s2", "Terminal"), proc(1, "s1", "launchd")}
@@ -840,5 +842,106 @@ func TestNestedSessionInheritsAncestorRole(t *testing.T) {
 	// 取不到祖先链（老钩子）：不继承
 	if resp := send(t, env, req("git push origin main", "nochain", "运维", env.repo, nil)); resp.Decision == "deny" {
 		t.Errorf("没有祖先链不该继承: %+v", resp)
+	}
+}
+
+// 继承来的角色不只进审批：同一会话的答题与事件也带同一个生效角色（hub 不会把它改回未分配）。
+func TestInheritedRoleOnAskAndEvents(t *testing.T) {
+	SetPeerAncestryForTest(t, nil) // 用请求里注入的祖先链
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	outer := []proto.Proc{proc(100, "a", "sh"), proc(10, "b", "claude"), proc(5, "c", "zsh")}
+	nested := append([]proto.Proc{proc(200, "d", "sh"), proc(20, "e", "claude"), proc(150, "f", "bash")}, outer[1:]...)
+	nowhere := t.TempDir()
+	r := withRole(permission(env.repo, "git status"), "写作")
+	r.Session.CLISessionID, r.Ancestors = "outer", outer
+	send(t, env, r)
+	r = permission(nowhere, "git status")
+	r.Session.CLISessionID, r.Ancestors = "nested", nested
+	send(t, env, r)
+	if e := lastAudit(t, env); e.Session.Role != "写作" {
+		t.Fatalf("审批: %+v", e.Session)
+	}
+	ask := askRequest(nowhere)
+	ask.Session.CLISessionID = "nested"
+	send(t, env, ask)
+	if e := lastAudit(t, env); e.Kind != "ask" || e.Session.Role != "写作" {
+		t.Fatalf("答题应带同一个生效角色: %+v", e.Session)
+	}
+	for _, kind := range []string{"question", "done"} {
+		roundTrip(t, env.cfg.SocketPath, proto.Event{V: proto.Version, Kind: kind, Session: proto.Session{Tool: "claude", CLISessionID: "nested", Cwd: nowhere}, Message: "x"})
+		if e := lastAudit(t, env); e.Kind != kind || e.Session.Role != "写作" {
+			t.Fatalf("%s 事件应带同一个生效角色: %+v", kind, e.Session)
+		}
+	}
+}
+
+// 祖先链用连接对端的进程凭据重建，忽略请求里自报的；取不到凭据时才用自报的，审计里标注。
+func TestPeerAncestryOverridesSelfReported(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	fake := []proto.Proc{proc(100, "x", "sh"), proc(4242, "fake", "claude")}
+	r := withRole(permission(env.repo, "git status"), "写作")
+	r.Session.CLISessionID, r.Ancestors = "peer", fake
+	send(t, env, r)
+	if e := lastAudit(t, env); e.Ancestry != "peer" {
+		t.Fatalf("应按对端凭据重建: %+v", e)
+	}
+	real := ReadAncestorsFrom(os.Getpid())
+	if len(real) == 0 {
+		t.Skip("这个平台取不到祖先链")
+	}
+	env.srv.pinMu.Lock()
+	_, gotFake := env.srv.procRoles[procKey(fake[1])]
+	_, gotReal := env.srv.procRoles[procKey(real[cliIndex(real)])]
+	env.srv.pinMu.Unlock()
+	if gotFake || !gotReal {
+		t.Fatalf("应记下真实的 CLI 进程、不记自报的: fake=%v real=%v", gotFake, gotReal)
+	}
+	SetPeerAncestryForTest(t, nil)
+	r.Session.CLISessionID = "self"
+	send(t, env, r)
+	if e := lastAudit(t, env); e.Ancestry != "self_reported" {
+		t.Fatalf("取不到凭据时用自报的并标注: %+v", e)
+	}
+}
+
+// 伪造上层会话的 session_end 清不掉继承记录；记录只在那个 CLI 进程不在了（进程号加启动时间对不上）时才清。
+func TestInheritanceSurvivesForgedSessionEnd(t *testing.T) {
+	SetPeerAncestryForTest(t, nil)
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	// 上层会话的 CLI 用测试进程自己（活着），另一个已经不在的进程号当对照
+	self := ReadAncestorsFrom(os.Getpid())
+	me := proto.Proc{PID: os.Getpid(), Name: "claude"}
+	if cur, _, ok := procInfo(os.Getpid()); ok {
+		me.Start = cur.Start
+	}
+	dead := proto.Proc{PID: 99999999, Start: "gone", Name: "claude"}
+	register := func(session string, cli proto.Proc) {
+		r := withRole(permission(env.repo, "git status"), "写作")
+		r.Session.CLISessionID, r.Ancestors = session, append([]proto.Proc{proc(1000, "x", "sh"), cli}, self...)
+		send(t, env, r)
+	}
+	register("outer", me)
+	register("gone", dead)
+	nested := func(cli proto.Proc) string {
+		r := permission(t.TempDir(), "git push origin main")
+		r.Source, r.Session.CLISessionID = proto.SourcePermissionRequest, "nested-"+cli.Start
+		r.Ancestors = []proto.Proc{proc(2000, "y", "sh"), proc(20, "n", "claude"), proc(150, "b", "bash"), cli}
+		return send(t, env, r).Reason
+	}
+	roundTrip(t, env.cfg.SocketPath, proto.Event{V: proto.Version, Kind: "session_end", Session: proto.Session{Tool: "claude", CLISessionID: "outer"}})
+	if reason := nested(me); !strings.Contains(reason, "继承自上层会话的角色「写作」") && !strings.Contains(reason, "写作") {
+		t.Fatalf("伪造的 session_end 不该清掉继承记录: %q", reason)
+	}
+	env.srv.pruneSessions()
+	env.srv.pinMu.Lock()
+	_, liveKept := env.srv.procRoles[procKey(me)]
+	_, deadKept := env.srv.procRoles[procKey(dead)]
+	_, pinGone := env.srv.pinned["claude\x00gone"]
+	env.srv.pinMu.Unlock()
+	if !liveKept || deadKept || pinGone {
+		t.Fatalf("清理应只清不在了的进程: live=%v dead=%v pinOfDead=%v", liveKept, deadKept, pinGone)
 	}
 }

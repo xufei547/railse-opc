@@ -388,6 +388,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"决定来源给的答案不完整，交回终端处理":                   "The answer was incomplete; handed back to the terminal",
 	"脱敏后有题面相同的题，分不清答的是哪道，交回终端处理":           "Two questions read the same after redaction, so answers can't be matched; handed back to the terminal",
 	"触及 Railse 自己的配置，Gemini 无法在这里问人：在别处执行": "Touches Railse's own config, and Gemini can't ask a human here: run it somewhere else",
+	"触及 Railse 自己的配置，不接受自动放行":              "Touches Railse's own config; no automatic approval",
 	"限时放行不覆盖 Railse 自己的配置":                 "Time-limited trust doesn't cover Railse's own config",
 	"限时放行中":                                "Within a time-limited trust",
 
@@ -539,6 +540,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"%s（超时 %d，要 ≥ %d）":                                 "%s (timeout %d, needs ≥ %d)",
 	"PreToolUse 只匹配 %s：auto 模式下审批进不了 Railse":           "PreToolUse only matches %s: in auto mode approvals bypass Railse",
 	"PreToolUse 的匹配器是旧版（不含 MCP 工具与 WebSearch）：角色的禁用与上限管不到它们": "the PreToolUse matcher is outdated (no MCP tools or WebSearch), so role limits and forbidden lists don't reach them",
+	"钩子命令没带 --socket：改了 HOME 再起的会话会连不上守护进程":                  "the hook command has no --socket, so a session started with a different HOME can't reach the daemon",
 	"缺 PreToolUse：Claude Code 的选择题进不了手机":                     "missing PreToolUse: Claude Code's questions can't reach your phone",
 	"缺 PostToolUse：桌面应用里已在本机处理的审批，手机上要等过期才消失":                "missing PostToolUse: in the desktop app, requests already handled on this machine stay on your phone until they expire",
 	"缺 %s":                                                       "missing %s",

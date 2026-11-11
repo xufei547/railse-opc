@@ -445,7 +445,8 @@ func TestBraceScanLinear(t *testing.T) {
 	cmd := "echo " + strings.Repeat("{", 120<<10)
 	start := time.Now()
 	Classify(Payload{Type: PayloadShell, Command: cmd, Cwd: roleHome + "/proj"}, Context{ProjectRoot: roleHome + "/proj", HomeDir: roleHome})
-	if el := time.Since(start); el > 2*time.Second {
+	// 平方级时这里要 28 秒以上（不带 -race）；线性时孤立跑 -race 约 0.35 秒。预算留给并行跑全部测试时的负载波动
+	if el := time.Since(start); el > 10*time.Second {
 		t.Errorf("120 KiB 的 { 用了 %v", el)
 	}
 }
@@ -520,6 +521,90 @@ func TestWrappersSeenThrough(t *testing.T) {
 	} {
 		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "写作")); !d.Forbidden {
 			t.Errorf("%s: 禁用应看穿包装: %+v", cmd, d)
+		}
+	}
+}
+
+// 包装命令的副作用：env -C、sudo -D 改了内层的工作目录，内层按改后的目录定级与查配置目录；认不出的选项整条按不透明。
+// 定级取包装本身与深剥后内层两者的较高值；deny、禁用对深剥结果照样归一化（basename、git 全局选项）。
+func TestWrapperEffectsAndDeepRisk(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	ctx := Context{ProjectRoot: roleHome + "/proj", HomeDir: roleHome, ProtectedDirs: []string{roleHome + "/dd"}}
+	at := func(cmd string) Payload { return Payload{Type: PayloadShell, Command: cmd, Cwd: roleHome + "/proj"} }
+	for _, cmd := range []string{
+		"env -C " + roleHome + "/dd cp " + roleHome + "/proj/replacement.yaml roles.yaml",
+		"env --chdir=" + roleHome + "/dd touch roles.yaml",
+		"env -C ../dd cp replacement.yaml rules.yaml",
+		"sudo -D " + roleHome + "/dd cp a roles.yaml",
+		"sudo --chdir=../dd tee roles.yaml",
+	} {
+		d := e.Evaluate(at(cmd), ctx)
+		if !d.ControlPlane || d.Action == ActionAllow {
+			t.Errorf("%s: 改目录后应算触及配置、不放行: %+v", cmd, d)
+		}
+	}
+	if r := Classify(at("env -C /tmp touch a"), ctx); r != RiskWriteOutside {
+		t.Errorf("env -C /tmp 之后的写入在项目外: %s", r)
+	}
+	for _, cmd := range []string{"env --frobnicate touch a", "time -o out.txt ls", "sudo -R /mnt ls", "sudo -e a.txt", "nice --weird ls", "timeout --nope 5 ls"} {
+		if r := Classify(at(cmd), ctx); r < RiskUnknown {
+			t.Errorf("%s: 认不出或改输出、改根的选项按不透明: %s", cmd, r)
+		}
+		if d := e.Evaluate(at(cmd), Context{ProjectRoot: ctx.ProjectRoot, HomeDir: roleHome, Role: roleCtx(t, "写作").Role}); !d.BeyondRole {
+			t.Errorf("%s: 带命令类禁用的角色应越界: %+v", cmd, d)
+		}
+	}
+	// 定级取较高值
+	for cmd, want := range map[string]Risk{
+		"command git push origin main":   RiskOutward,
+		"exec git push origin main":      RiskOutward,
+		"xargs git push origin main":     RiskOutward,
+		"timeout 5 git push origin main": RiskOutward,
+		"command ls":                     RiskUnknown, // command 自身不在名单里：max(unknown, read)
+		"sudo ls":                        RiskDestructive,
+	} {
+		if r := Classify(at(cmd), ctx); r != want {
+			t.Errorf("%s: 定级 %s，想要 %s", cmd, r, want)
+		}
+	}
+	// 禁用与 deny 对深剥结果归一化
+	for _, cmd := range []string{"command /usr/bin/git -C . push origin main", "sudo /usr/bin/git --no-pager push origin main", "timeout 5 /usr/local/bin/git -c x=y push"} {
+		if d := e.Evaluate(at(cmd), roleCtx(t, "写作")); !d.Forbidden {
+			t.Errorf("%s: 禁用应命中: %+v", cmd, d)
+		}
+	}
+	if d := e.Evaluate(at("command /usr/bin/npm publish"), roleCtx(t, "")); d.Action != ActionDeny {
+		t.Errorf("用户 deny 规则对深剥结果归一化: %+v", d)
+	}
+}
+
+// 有角色的会话里改会挪走 CLI 或 Railse 配置位置的环境变量（HOME、XDG_*、CLAUDE_CONFIG_DIR、CODEX_HOME、GEMINI_*、RAILSE_*），
+// 与改 RAILSE_ROLE 一样按越界。
+func TestConfigLocationEnvChangeIsBeyond(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	for _, cmd := range []string{
+		"HOME=/tmp/x claude -p hi",
+		"env HOME=/tmp/x gemini",
+		"export HOME=/tmp/x; claude",
+		"unset HOME; codex",
+		"XDG_CONFIG_HOME=/tmp/x gemini",
+		"CLAUDE_CONFIG_DIR=/tmp/x claude",
+		"CODEX_HOME=/tmp/x codex exec y",
+		"GEMINI_CLI_HOME=/tmp/x gemini",
+		"RAILSE_LANG=en claude",
+		"env -u HOME claude",
+		"env --unset=HOME claude",
+	} {
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "运维")); !d.BeyondRole || !strings.Contains(d.Reason, "试图更改") {
+			t.Errorf("%s: 应越界: %+v", cmd, d)
+		}
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "")); d.BeyondRole {
+			t.Errorf("%s: 没有角色时照旧: %+v", cmd, d)
+		}
+	}
+	for _, cmd := range []string{"echo $HOME", "ls $XDG_CONFIG_HOME", "PATH=/x:$PATH make", "FOO_HOME=/x make"} {
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "运维")); strings.Contains(d.Reason, "试图更改") {
+			t.Errorf("%s: 不该算: %+v", cmd, d)
 		}
 	}
 }

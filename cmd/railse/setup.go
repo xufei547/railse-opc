@@ -447,7 +447,12 @@ func runSetupHooks(args []string, notifyHint bool, stdout, stderr io.Writer) int
 			remindProjectLevel(cwd, *bin, *doClaude, *doGemini, userData, userSettings, stderr)
 		}
 	}
-	if socket != "" && len(writes) > 0 {
+	// 默认目录（~/.railse）也写 --socket，但提示与 notify 建议只在目录不是默认的时候提
+	custom := socket
+	if socket != "" && base != "" && samePath(filepath.Dir(socket), base) {
+		custom = ""
+	}
+	if custom != "" && len(writes) > 0 {
 		if base == "" {
 			base = i18n.T("~/.railse（取不到家目录）")
 		}
@@ -460,7 +465,7 @@ func runSetupHooks(args []string, notifyHint bool, stdout, stderr io.Writer) int
 		if binGiven {
 			given = *bin
 		}
-		fmt.Fprintf(stdout, i18n.T("提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify（完成与提问事件）请运行 %s（会保留已有的 notify）。\n"), codexNotifyCmd(socket, given))
+		fmt.Fprintf(stdout, i18n.T("提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核；notify（完成与提问事件）请运行 %s（会保留已有的 notify）。\n"), codexNotifyCmd(custom, given))
 	case *doCodex:
 		fmt.Fprintln(stdout, i18n.T("提醒 Codex：钩子只在交互会话里审批（codex exec 不触发）；首次使用请在 Codex 里用 /hooks 审核。"))
 	}
@@ -528,10 +533,9 @@ func hookSocket(dir string) (socket, base string, err error) {
 		if base, err = filepath.Abs(filepath.Join(home, ".railse")); err != nil {
 			return "", "", err
 		}
-		if samePath(abs, base) {
-			return "", base, nil
-		}
 	}
+	// 0.3 起一律写死 socket 的绝对路径（包括默认的 ~/.railse）：不带 --socket 的钩子按 CLI 起钩子时的环境（$HOME、$RAILSE_HOME）
+	// 找守护进程，agent 改了 HOME 再起 CLI，钩子就连不上、交回终端了事
 	return agent.ConfigIn(abs).SocketPath, base, nil
 }
 
