@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -285,4 +286,32 @@ func roleName(r *policy.Role) string {
 		return ""
 	}
 	return r.Name
+}
+
+// RolesInfoOf 把角色文件的状态编成 role_list、role_which 的答复（守护进程与命令行回退共用）。
+func RolesInfoOf(path string, st RolesState) *proto.RolesInfo {
+	info := &proto.RolesInfo{Path: path, Exists: st.Exists, Roles: RoleSummaries(st.Set)}
+	if st.Err != nil {
+		info.Error = st.Err.Error()
+	}
+	return info
+}
+
+// WhichRole 说明目录 cwd（与 RAILSE_ROLE 的值 env）会解析成哪个角色、凭什么，口径与守护进程判定时相同：cwd 先清理（解析符号链接），
+// 项目根按 ResolveProjectRoot 定并经 policy.Context.Root 规范化；ProjectRoot 是再按角色地盘处理后的生效项目根。
+func WhichRole(st RolesState, env, cwd, home string) proto.RoleWhich {
+	w := proto.RoleWhich{Env: env}
+	clean := CleanCwd(cwd)
+	root := ""
+	if filepath.IsAbs(clean) {
+		root, _ = ResolveProjectRoot(clean)
+	} else {
+		clean = ""
+	}
+	norm := policy.Context{ProjectRoot: root, HomeDir: home}.Root()
+	role, why := ResolveRole(st, env, norm, clean, home)
+	w.Role, w.Kind, w.Pattern, w.Dir, w.EnvUnknown = roleName(role), why.Kind, why.Pattern, why.Dir, why.EnvUnknown
+	w.ProjectRoot = policy.Context{ProjectRoot: norm, HomeDir: home, Role: role}.Root()
+	w.OutsideDirs = role != nil && len(role.Dirs) > 0 && norm != "" && w.ProjectRoot == ""
+	return w
 }

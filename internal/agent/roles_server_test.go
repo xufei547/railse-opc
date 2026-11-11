@@ -1,0 +1,340 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/xufei547/railse-opc/internal/proto"
+)
+
+// realRepo 是 env.repo 解析符号链接后的路径（macOS 的临时目录在 /var → /private/var 之下）：守护进程按它算项目根。
+func realRepo(t *testing.T, env *testEnv) string {
+	t.Helper()
+	p, err := filepath.EvalSymlinks(env.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// rolesFor 写一份 roles.yaml：写作的地盘是 env.repo（上限项目内写、禁用 git push），开发不写 dirs（上限 network），
+// 运维上限 destructive。extra 追加在文件末尾（更多角色）。
+func rolesFor(t *testing.T, env *testEnv, extra string) {
+	t.Helper()
+	text := `version: 1
+roles:
+  - name: 写作
+    dirs: ["` + realRepo(t, env) + `"]
+    ceiling: write_in_project
+    forbid:
+      - {command_prefix: "git push"}
+  - name: 开发
+    ceiling: network
+  - name: 运维
+    ceiling: destructive
+` + extra
+	writeRoles(t, env.cfg.RolesPath, text)
+}
+
+func withRole(r proto.Request, role string) proto.Request {
+	r.Session.Role = role
+	return r
+}
+
+func lastAudit(t *testing.T, env *testEnv) AuditEntry {
+	t.Helper()
+	all := readAudit(t, env.cfg.AuditPath)
+	if len(all) == 0 {
+		t.Fatal("没有审计")
+	}
+	return all[len(all)-1]
+}
+
+func send(t *testing.T, env *testEnv, msg any) proto.Response {
+	t.Helper()
+	var resp proto.Response
+	if err := json.Unmarshal(roundTrip(t, env.cfg.SocketPath, msg), &resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestRoleBindingEnvDirUnknown(t *testing.T) {
+	logs := &logBuf{}
+	env := startServerLog(t, LocalDecider{}, nil, logs)
+	rolesFor(t, env, "")
+	// 按目录：env.repo 在写作的地盘里
+	send(t, env, permission(env.repo, "git status"))
+	if e := lastAudit(t, env); e.Session.Role != "写作" || e.Role != "写作" {
+		t.Fatalf("按目录应绑到写作: %+v", e)
+	}
+	// RAILSE_ROLE 优先
+	send(t, env, withRole(permission(env.repo, "git status"), "运维"))
+	if e := lastAudit(t, env); e.Session.Role != "运维" || e.Role != "运维" {
+		t.Fatalf("RAILSE_ROLE 应优先: %+v", e)
+	}
+	// 不存在的名字：按目录走，日志里每个会话只记一次
+	for range 2 {
+		send(t, env, withRole(permission(env.repo, "git status"), "不存在"))
+	}
+	if e := lastAudit(t, env); e.Session.Role != "写作" {
+		t.Fatalf("不存在的名字应按目录走: %+v", e)
+	}
+	if n := strings.Count(logs.String(), "不存在"); n != 1 {
+		t.Fatalf("不存在的角色名应只记一次日志，得到 %d 次:\n%s", n, logs.String())
+	}
+	// 地盘外、没有 RAILSE_ROLE：未分配
+	other := filepath.Join(filepath.Dir(env.repo), "other")
+	os.MkdirAll(filepath.Join(other, ".git"), 0o755)
+	send(t, env, permission(other, "git status"))
+	if e := lastAudit(t, env); e.Session.Role != "" || e.Role != "" {
+		t.Fatalf("地盘外应未分配: %+v", e)
+	}
+}
+
+func TestRoleOverlapTakesFirst(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "  - name: 重叠\n    dirs: [\""+realRepo(t, env)+"\"]\n")
+	send(t, env, permission(env.repo, "git status"))
+	if e := lastAudit(t, env); e.Session.Role != "写作" {
+		t.Fatalf("重叠时应取文件里靠前的: %+v", e)
+	}
+}
+
+func TestRoleForbidDenies(t *testing.T) {
+	calls := 0
+	dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
+		calls++
+		return Outcome{Action: "allow", DecidedBy: "user"}, nil
+	})
+	env := startServer(t, dec, nil)
+	rolesFor(t, env, "")
+	// 项目放行也挡不住禁用
+	roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: env.repo, Until: time.Now().Add(time.Hour)}})
+	for _, src := range []string{proto.SourcePreToolUse, proto.SourcePermissionRequest} {
+		r := permission(env.repo, "git push origin main")
+		r.Source = src
+		resp := send(t, env, r)
+		if resp.Decision != "deny" || resp.DecidedBy != "role:写作" || !strings.Contains(resp.Reason, "角色「写作」禁用") {
+			t.Fatalf("%s: 禁用应直接拒: %+v", src, resp)
+		}
+		e := lastAudit(t, env)
+		if e.State != "auto_denied" || e.DecidedBy != "role:写作" || e.Role != "写作" || e.BeyondRole {
+			t.Fatalf("%s: 审计: %+v", src, e)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("禁用不该送手机: %d", calls)
+	}
+}
+
+// 越界：跳过限时放行（包括 RAILSE_TRUST）；PreToolUse 一律回 ask，PermissionRequest 送 Decider 并带 BeyondRole。
+func TestBeyondRoleSkipsTrust(t *testing.T) {
+	var mu sync.Mutex
+	var got []PendingRequest
+	dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
+		mu.Lock()
+		got = append(got, pr)
+		mu.Unlock()
+		return Outcome{Action: "deny", DecidedBy: "user"}, nil
+	})
+	env := startServer(t, dec, nil)
+	rolesFor(t, env, "")
+	roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: env.repo, Until: time.Now().Add(time.Hour)}})
+
+	// 开发的上限是 network：git push（outward）越界，PreToolUse 回 ask，不放行
+	r := withRole(preToolUse(env.repo, "git push origin main", "auto", "toolu_1"), "开发")
+	r.TrustFor = "2h"
+	resp := send(t, env, r)
+	if resp.Decision != "ask" || strings.HasPrefix(resp.DecidedBy, "trust:") || !strings.Contains(resp.Reason, "超出角色「开发」的边界") {
+		t.Fatalf("越界的 PreToolUse 应回 ask: %+v", resp)
+	}
+	if e := lastAudit(t, env); !e.BeyondRole || e.Role != "开发" || e.State != "asked" {
+		t.Fatalf("越界审计: %+v", e)
+	}
+	// RAILSE_TRUST 没有因为越界的那条建会话放行
+	var reply proto.ControlReply
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_list"}), &reply)
+	if len(reply.Trusts) != 1 {
+		t.Fatalf("越界请求不该按 RAILSE_TRUST 建放行: %+v", reply.Trusts)
+	}
+	// PermissionRequest 越界：不放行，送 Decider，带 BeyondRole
+	pr := withRole(permission(env.repo, "git push origin main"), "开发")
+	pr.Source = proto.SourcePermissionRequest
+	if resp := send(t, env, pr); resp.Decision != "deny" {
+		t.Fatalf("越界的 PermissionRequest 应由人定: %+v", resp)
+	}
+	mu.Lock()
+	if len(got) != 1 || !got[0].BeyondRole || got[0].Req.Session.Role != "开发" {
+		t.Fatalf("送 Decider 的请求应带 BeyondRole 与角色: %+v", got)
+	}
+	mu.Unlock()
+	// 上限之内的照旧走放行：curl 是 network
+	pr = withRole(permission(env.repo, "curl https://example.com"), "开发")
+	pr.Source = proto.SourcePermissionRequest
+	if resp := send(t, env, pr); resp.Decision != "allow" || !strings.HasPrefix(resp.DecidedBy, "trust:") {
+		t.Fatalf("上限之内应照旧放行: %+v", resp)
+	}
+}
+
+// 越界的中间几档（这里是项目内写入超出 read 上限）在 PreToolUse 上也回 ask，不交给 Claude 自己的分类器（它可能自动放行）。
+func TestBeyondRolePreToolUseMidTierAsks(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "  - name: 只读\n    ceiling: read\n")
+	resp := send(t, env, withRole(preToolUse(env.repo, "touch a", "acceptEdits", "toolu_m"), "只读"))
+	if resp.Decision != "ask" || resp.Risk != "write_in_project" {
+		t.Fatalf("越界的项目内写入应回 ask: %+v", resp)
+	}
+	// 只读照旧按内置规则放行
+	resp = send(t, env, preToolUse(env.repo, "ls", "acceptEdits", "toolu_n"))
+	if resp.Decision != "allow" {
+		t.Fatalf("只读照旧放行: %+v", resp)
+	}
+}
+
+func TestRoleTrustMax(t *testing.T) {
+	dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
+		return Outcome{Action: "deny", DecidedBy: "user"}, nil
+	})
+	env := startServer(t, dec, nil)
+	rolesFor(t, env, "  - name: 短\n    trust_max: 2h\n  - name: 不放\n    trust_max: none\n")
+	set := func(created time.Time) string {
+		var reply proto.ControlReply
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+			Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: env.repo, Until: time.Now().Add(20 * time.Hour), CreatedAt: created}}), &reply)
+		if !reply.OK {
+			t.Fatalf("建放行: %+v", reply)
+		}
+		return reply.Trusts[0].ID
+	}
+	revokeAll := func() {
+		roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_revoke", TrustID: "all"})
+	}
+	req := func(role string) proto.Response {
+		r := withRole(permission(env.repo, "curl https://example.com"), role)
+		r.Source = proto.SourcePermissionRequest
+		return send(t, env, r)
+	}
+	set(time.Now().Add(-3 * time.Hour))
+	if resp := req("短"); resp.Decision == "allow" {
+		t.Fatalf("建了 3 小时的放行对 trust_max 2h 的角色应无效: %+v", resp)
+	}
+	if resp := req("运维"); resp.Decision != "allow" {
+		t.Fatalf("没设 trust_max 的角色照旧放行: %+v", resp)
+	}
+	revokeAll()
+	set(time.Now())
+	if resp := req("短"); resp.Decision != "allow" {
+		t.Fatalf("2 小时内的放行应有效: %+v", resp)
+	}
+	if resp := req("不放"); resp.Decision == "allow" {
+		t.Fatalf("trust_max none 的角色不走放行: %+v", resp)
+	}
+}
+
+func TestBrokenRolesFailClosedAndRecover(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	writeRoles(t, env.cfg.RolesPath, "version: 1\nroles:\n  - name: a\n    ceiling: hgih\n")
+	if resp := send(t, env, permission(env.repo, "git status")); resp.Decision != "allow" {
+		t.Fatalf("坏文件时只读照旧放行: %+v", resp)
+	}
+	resp := send(t, env, preToolUse(env.repo, "touch a", "acceptEdits", "toolu_b"))
+	if resp.Decision != "ask" || !strings.Contains(resp.Reason, "roles.yaml 有误") {
+		t.Fatalf("坏文件时写入应问人: %+v", resp)
+	}
+	if e := lastAudit(t, env); !e.BeyondRole || e.Role != "" || !strings.Contains(e.Reason, "hgih") {
+		t.Fatalf("坏文件审计: %+v", e)
+	}
+	// 修好后恢复（mtime 变了就重读）
+	writeRoles(t, env.cfg.RolesPath, "version: 1\nroles:\n  - name: a\n    ceiling: network\n")
+	if resp := send(t, env, preToolUse(env.repo, "touch a", "acceptEdits", "toolu_c")); resp.Decision != "allow" {
+		t.Fatalf("修好后应恢复: %+v", resp)
+	}
+}
+
+func TestRolesReloadOnChange(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	if resp := send(t, env, preToolUse(env.repo, "curl https://example.com", "auto", "t1")); resp.Decision != "ask" {
+		t.Fatalf("写作的上限是项目内写，联网应越界: %+v", resp)
+	}
+	text := strings.Replace(mustRead(t, env.cfg.RolesPath), "ceiling: write_in_project", "ceiling: network", 1)
+	writeRoles(t, env.cfg.RolesPath, text)
+	if resp := send(t, env, preToolUse(env.repo, "curl https://example.com", "auto", "t2")); resp.Decision != "passthrough" {
+		t.Fatalf("改成 network 后联网应回到常规流程（交给 Claude）: %+v", resp)
+	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestAskAndEventsCarryRole(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	send(t, env, askRequest(env.repo))
+	if e := lastAudit(t, env); e.Kind != "ask" || e.Session.Role != "写作" {
+		t.Fatalf("答题应带角色: %+v", e)
+	}
+	roundTrip(t, env.cfg.SocketPath, proto.Event{V: proto.Version, Kind: "done", Session: proto.Session{Tool: "claude", CLISessionID: "s1", Cwd: env.repo, Role: "运维"}})
+	if e := lastAudit(t, env); e.Kind != "done" || e.Session.Role != "运维" {
+		t.Fatalf("事件应带生效的角色: %+v", e)
+	}
+}
+
+// 没有 roles.yaml：与 0.2.3 一样，审计里连 role 键都没有。
+func TestNoRolesFileUnchanged(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	send(t, env, withRole(permission(env.repo, "git push origin main"), "运维"))
+	b := mustRead(t, env.cfg.AuditPath)
+	if strings.Contains(b, `"role"`) || strings.Contains(b, "beyond_role") {
+		t.Fatalf("没有角色文件时审计不该带角色: %s", b)
+	}
+}
+
+func TestRoleControls(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	var reply proto.ControlReply
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, control("role_list")), &reply)
+	if !reply.OK || reply.Roles == nil || reply.Roles.Exists || reply.Roles.Path != env.cfg.RolesPath {
+		t.Fatalf("没有文件时: %+v", reply)
+	}
+	rolesFor(t, env, "")
+	reply = proto.ControlReply{}
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, control("role_list")), &reply)
+	if !reply.OK || len(reply.Roles.Roles) != 3 || reply.Roles.Roles[0].Name != "写作" || reply.Roles.Roles[0].ForbidCount != 1 {
+		t.Fatalf("role_list: %+v", reply.Roles)
+	}
+	c := control("role_which")
+	c.Cwd = env.repo
+	reply = proto.ControlReply{}
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, c), &reply)
+	if w := reply.Roles.Which; w == nil || w.Role != "写作" || w.Kind != RoleByDir || w.ProjectRoot != realRepo(t, env) {
+		t.Fatalf("role_which 按目录: %+v", reply.Roles)
+	}
+	c.Role = "开发"
+	reply = proto.ControlReply{}
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, c), &reply)
+	if w := reply.Roles.Which; w == nil || w.Role != "开发" || w.Kind != RoleByEnv || w.OutsideDirs {
+		t.Fatalf("role_which 按环境变量: %+v", reply.Roles)
+	}
+	writeRoles(t, env.cfg.RolesPath, "version: 9\n")
+	reply = proto.ControlReply{}
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, control("role_list")), &reply)
+	if !reply.OK || reply.Roles.Error == "" {
+		t.Fatalf("坏文件时 role_list 应报错误: %+v", reply.Roles)
+	}
+}

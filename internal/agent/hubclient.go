@@ -743,7 +743,7 @@ func toWire(pr PendingRequest) wire.PendingRequest {
 		return w
 	}
 	w.ToolName, w.Payload, w.Risk, w.ProjectRoot, w.EngineReason = pr.Req.ToolName, pr.Redacted, pr.Risk.String(), pr.ProjectRoot, pr.EngineReason
-	w.Trigger = pr.Trigger
+	w.Trigger, w.BeyondRole = pr.Trigger, pr.BeyondRole
 	return w
 }
 

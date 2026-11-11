@@ -206,6 +206,12 @@ func (t *trusts) hasSession(tool, cliSession string) bool {
 
 // match 找命中的放行：session 范围按 Tool + CLISessionID，project 范围按项目根字符串相等（空项目根不命中）；多条取 Until 最晚。
 func (t *trusts) match(sess proto.Session, projectRoot string) (proto.Trust, bool) {
+	return t.matchFiltered(sess, projectRoot, nil)
+}
+
+// matchFiltered 同 match，只在 ok 认可的放行里挑（ok 为 nil 表示都认可）；角色的 trust_max 用它（见 trustAllowedFor）。
+// ok 在持锁时调用，不能回调放行表。
+func (t *trusts) matchFiltered(sess proto.Session, projectRoot string, ok func(proto.Trust) bool) (proto.Trust, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
@@ -217,6 +223,9 @@ func (t *trusts) match(sess proto.Session, projectRoot string) (proto.Trust, boo
 		}
 		hit := (tr.Scope == proto.TrustScopeSession && sess.CLISessionID != "" && tr.Tool == sess.Tool && tr.CLISession == sess.CLISessionID) ||
 			(tr.Scope == proto.TrustScopeProject && projectRoot != "" && tr.Project == projectRoot)
+		if hit && ok != nil && !ok(tr) {
+			continue
+		}
 		if hit && (!found || tr.Until.After(best.Until)) {
 			best, found = tr, true
 		}

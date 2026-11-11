@@ -86,6 +86,12 @@ type Server struct {
 	envMu   sync.Mutex
 	envSeen map[string]time.Time
 
+	// roles 是角色文件 roles.yaml（0.3 起），每次判定前看文件变没变（见 Roles）。
+	roles *Roles
+	// unknownRoleLogged 是已在日志里说过“RAILSE_ROLE 指的角色不存在”的会话（tool + cli_session_id），每个会话只说一次，
+	// 最多记 maxNonGitLogged 个；由 nonGitMu 保护。
+	unknownRoleLogged map[string]struct{}
+
 	mu      sync.Mutex
 	closed  bool
 	stop    context.CancelFunc // Serve 运行时非空，取消全部连接
@@ -93,8 +99,9 @@ type Server struct {
 }
 
 // New 组装服务。IO 只有读本机设置 settings.yaml 与放行表 trusts.json，读坏了记日志、按默认值（空表）跑。
+// 角色文件 roles.yaml 在第一次判定时才读（见 Roles）。
 func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Logger) *Server {
-	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now()}
+	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now(), roles: NewRoles(cfg.RolesPath)}
 	_ = s.ReloadSettings() // 读坏了它自己记日志
 	tr, err := newTrusts(cfg.TrustsPath, time.Now)
 	if err != nil {
@@ -333,11 +340,13 @@ func (s *Server) reply(conn net.Conn, kind string, v any) {
 	}
 }
 
-// evaluate 清理 cwd（载荷没带时取会话的 cwd，解析符号链接）、算项目根并跑引擎，返回上报用的载荷（带清理后的 cwd）。
+// evaluate 清理 cwd（载荷没带时取会话的 cwd，解析符号链接）、算项目根、解析会话角色并跑引擎，
+// 返回上报用的载荷（带清理后的 cwd）与 Role 改写成生效值的会话。
 // 审计与上报 hub 都用这份载荷：hub 侧“记住”按载荷 cwd 与项目根重新定级，两者必须同一口径
 // （macOS 的 /var 是 /private/var 的链接，口径不一会把项目内的相对路径写入判成项目外）。
 // 载荷与会话都没有 cwd 时，引擎照旧按 CleanCwd("") 得到的 "." 评估，上报的载荷保持空 cwd，不写这个 "."。
-func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, policy.Context) {
+// 返回的 Context 带角色；它的 Root() 是生效的项目根（角色地盘外为空），限时放行与上报 hub 都用它。
+func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, policy.Context, proto.Session) {
 	p := req.Payload
 	cwd := p.Cwd
 	if cwd == "" {
@@ -353,7 +362,43 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	p.Cwd = cwd
 	root := s.projectRootFor(cwd)
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID}
-	return reported, s.rules.Engine().Evaluate(p, pctx), pctx
+	pctx.Role = s.sessionRole(&req.Session, pctx.Root(), cwd)
+	return reported, s.rules.Engine().Evaluate(p, pctx), pctx, req.Session
+}
+
+// sessionRole 按设计 §3.1 解析会话的角色（钩子带来的 RAILSE_ROLE 在 sess.Role 里），把 sess.Role 改写成生效的角色名
+// （未分配、角色文件有误时为空），返回给引擎的角色（未分配为 nil，有误时是 policy.BrokenRole）。
+// root 是规范化后的项目根（不含地盘那一步），为空时按 cwd 匹配；cwd 不是绝对路径（钩子没给）时不按目录匹配。
+// RAILSE_ROLE 指了不存在的角色时，每个会话在日志里记一行。
+func (s *Server) sessionRole(sess *proto.Session, root, cwd string) *policy.Role {
+	if !filepath.IsAbs(cwd) {
+		cwd = ""
+	}
+	env := sess.Role
+	role, why := ResolveRole(s.roles.Current(), env, root, cwd, s.cfg.HomeDir)
+	if why.EnvUnknown {
+		s.noteUnknownRole(*sess, env)
+	}
+	sess.Role = roleName(role)
+	return role
+}
+
+// noteUnknownRole 在日志里说一次：这个会话的 RAILSE_ROLE 指的角色不存在，按目录绑定。来自钩子的字段截断后按 %q 记。
+func (s *Server) noteUnknownRole(sess proto.Session, env string) {
+	key := sess.Tool + "\x00" + sess.CLISessionID
+	s.nonGitMu.Lock()
+	_, seen := s.unknownRoleLogged[key]
+	first := !seen && len(s.unknownRoleLogged) < maxNonGitLogged
+	if first {
+		if s.unknownRoleLogged == nil {
+			s.unknownRoleLogged = map[string]struct{}{}
+		}
+		s.unknownRoleLogged[key] = struct{}{}
+	}
+	s.nonGitMu.Unlock()
+	if first {
+		s.log.Printf("会话 %q 的 RAILSE_ROLE=%q 在 roles.yaml 里没有，按项目目录绑定角色", clipText(sess.CLISessionID, hubLogFieldMax), clipText(env, hubLogFieldMax))
+	}
 }
 
 // projectRootFor 从清理后的 cwd 算项目根（审批与提问共用）：相对路径（含空 cwd 清理后的 "."）会按守护进程自己的工作目录解析，
@@ -401,12 +446,16 @@ func (s *Server) noteRoot(dir string, kind RootKind) {
 }
 
 // handlePermission 是审批主路径：引擎能定就定，定不了交给 Decider。
+// 角色（0.3 起）：命中禁用（Forbidden）直接拒，decided_by role:<name>；越界（BeyondRole）跳过限时放行（包括 RAILSE_TRUST），
+// PreToolUse 来的一律回 ask（不交 Claude 自己的分类器，它可能自动放行），PermissionRequest 来的送 Decider 并标明越界。
 func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.Response {
 	id := NewID()
-	reported, d, pctx := s.evaluate(req)
+	reported, d, pctx, sess := s.evaluate(req)
+	req.Session = sess
+	root := pctx.Root() // 生效的项目根：角色地盘外为空，限时放行与上报 hub 都用它
 	redacted := redact.Payload(reported)
 	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "permission", Session: req.Session, ToolName: req.ToolName, Payload: &redacted, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason,
-		Source: req.Source, PermissionMode: req.PermissionMode, ToolUseID: req.ToolUseID}
+		Source: req.Source, PermissionMode: req.PermissionMode, ToolUseID: req.ToolUseID, Role: d.Role, BeyondRole: d.BeyondRole}
 	resp := proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason}
 	switch d.Action {
 	case policy.ActionAllow:
@@ -414,10 +463,13 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		resp.Decision, resp.DecidedBy = "allow", entry.DecidedBy
 	case policy.ActionDeny:
 		entry.Action, entry.State, entry.DecidedBy = "deny", "auto_denied", "rule:"+d.RuleID
+		if d.Forbidden {
+			entry.DecidedBy = "role:" + d.Role
+		}
 		resp.Decision, resp.DecidedBy = "deny", entry.DecidedBy
 	default:
 		if s.rules.Paused() {
-			// 总开关打开：用户 deny 仍由引擎处理，其余一律交回终端，不去打扰 hub。
+			// 总开关打开：用户 deny 与角色禁用仍由引擎处理，其余一律交回终端，不去打扰 hub。
 			// 只管审批：答题（handleAsk）不走这里，不看暂停开关，照样送 hub。
 			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "paused", "自动审批已暂停，交回终端处理"
 			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
@@ -425,22 +477,31 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		}
 		// 限时放行：只改引擎定不了的这一档（规则的 allow、deny 在上面已定，用户 deny 压过放行；暂停压过放行），
 		// 命中就本地放行，不弹终端框、不送手机。RAILSE_TRUST 只看 PreToolUse 带来的（Claude 每次调用先经它）。
-		if req.TrustFor != "" && req.Source == proto.SourcePreToolUse {
-			s.trustFromEnv(req)
-		}
-		if tr, ok := s.trusts.match(req.Session, pctx.ProjectRoot); ok {
-			entry.Action, entry.State, entry.DecidedBy = "allow", "auto_allowed", "trust:"+tr.ID
-			entry.Reason = fmt.Sprintf("限时放行（%s，剩 %s）", trustScopeLabel(tr), formatRemain(tr.Until.Sub(s.trusts.clock())))
-			resp.Decision, resp.DecidedBy, resp.Reason = "allow", entry.DecidedBy, reasonTrusted
-			break
+		// 越界的请求不碰放行：既不按 RAILSE_TRUST 建，也不匹配；角色的 trust_max 再限一道（见 trustAllowedFor）。
+		if !d.BeyondRole {
+			if req.TrustFor != "" && req.Source == proto.SourcePreToolUse {
+				s.trustFromEnv(req)
+			}
+			now := s.trusts.clock()
+			if tr, ok := s.trusts.matchFiltered(req.Session, root, func(tr proto.Trust) bool { return trustAllowedFor(pctx.Role, tr, now) }); ok {
+				entry.Action, entry.State, entry.DecidedBy = "allow", "auto_allowed", "trust:"+tr.ID
+				entry.Reason = fmt.Sprintf("限时放行（%s，剩 %s）", trustScopeLabel(tr), formatRemain(tr.Until.Sub(now)))
+				resp.Decision, resp.DecidedBy, resp.Reason = "allow", entry.DecidedBy, reasonTrusted
+				break
+			}
 		}
 		if req.Source == proto.SourcePreToolUse {
-			if d.Risk >= policy.RiskOutward || s.settings.Load().ClaudeUndecided == UndecidedPhone {
-				// 硬底线（或设置成一律送手机）：不在这里等手机。回 ask 让 Claude 弹终端确认框并触发 PermissionRequest，
+			if d.BeyondRole || d.Risk >= policy.RiskOutward || s.settings.Load().ClaudeUndecided == UndecidedPhone {
+				// 硬底线、越界（或设置成一律送手机）：不在这里等手机。回 ask 让 Claude 弹终端确认框并触发 PermissionRequest，
 				// 那一条按老路送 hub；终端里同时能看到命令与触发点，谁先答谁算。不看 hub 状态：hub 不可达时
 				// PermissionRequest 交回终端，确认框还在（见 docs/superpowers/specs/2026-11-02-railse-opc-v0.2.2-two-screens-design.md §2.1）。
-				entry.Action, entry.State, entry.DecidedBy, entry.Reason, entry.Trigger = "ask", "asked", decidedByAsk, reasonAsked, redactTrigger(d.Trigger)
-				resp.Decision, resp.DecidedBy, resp.Reason, resp.Trigger = "ask", decidedByAsk, reasonAsked, entry.Trigger
+				// 越界时理由换成角色的那句（钩子按终端语言重拼后放进确认框）。
+				reason := reasonAsked
+				if d.BeyondRole {
+					reason = d.Reason
+				}
+				entry.Action, entry.State, entry.DecidedBy, entry.Reason, entry.Trigger = "ask", "asked", decidedByAsk, reason, redactTrigger(d.Trigger)
+				resp.Decision, resp.DecidedBy, resp.Reason, resp.Trigger = "ask", decidedByAsk, reason, entry.Trigger
 				break
 			}
 			// 中间三级不看模式，先让 Claude 自己的 allow 列表与分类器（auto 模式）处理，Railse 不比它更吵；
@@ -450,7 +511,7 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 			break
 		}
 		entry.Trigger = redactTrigger(d.Trigger)
-		return s.waitDecision(ctx, id, req, d, pctx.ProjectRoot, redacted, entry)
+		return s.waitDecision(ctx, id, req, d, root, redacted, entry)
 	}
 	s.writeAudit(entry)
 	return resp
@@ -467,7 +528,8 @@ func redactTrigger(t *policy.Trigger) *policy.Trigger {
 // waitDecision 登记审批请求并等 Decider（见 await），把结论映射成 allow、deny 或交回终端。
 // projectRoot、redacted 与引擎理由随请求登记，hub 客户端上报时只用脱敏后的载荷。
 func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request, d policy.Decision, projectRoot string, redacted policy.Payload, entry AuditEntry) proto.Response {
-	pr := &PendingRequest{ID: id, Kind: "permission", Req: req, Risk: d.Risk, ProjectRoot: projectRoot, Redacted: redacted, EngineReason: d.Reason, Trigger: entry.Trigger}
+	pr := &PendingRequest{ID: id, Kind: "permission", Req: req, Risk: d.Risk, ProjectRoot: projectRoot, Redacted: redacted, EngineReason: d.Reason, Trigger: entry.Trigger,
+		BeyondRole: d.BeyondRole}
 	out, resp, ok := s.await(ctx, pr, entry, proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String()})
 	if !ok {
 		return resp
@@ -485,6 +547,10 @@ func (s *Server) handleAsk(ctx context.Context, req proto.Request) proto.Respons
 		return proto.Response{V: proto.Version, Decision: "passthrough", Reason: "请求格式错误: " + err.Error()}
 	}
 	id := NewID()
+	// 答题不经判定，只带上生效的角色名（设计 §3.4）；项目根随上报帧带给 hub，推送标题与收件箱靠它显示项目名
+	cwd := CleanCwd(req.Session.Cwd)
+	root := s.projectRootFor(cwd)
+	s.sessionRole(&req.Session, policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir}.Root(), cwd)
 	red := redactAsk(req.Ask)
 	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "ask", Session: req.Session, ToolName: proto.AskToolName, Ask: red}
 	resp := proto.Response{V: proto.Version, RequestID: id}
@@ -502,8 +568,7 @@ func (s *Server) handleAsk(ctx context.Context, req proto.Request) proto.Respons
 		s.writeAudit(entry)
 		return resp
 	}
-	// 载荷没有 cwd，取会话的 cwd；项目根随上报帧带给 hub，推送标题与收件箱靠它显示项目名
-	pr := &PendingRequest{ID: id, Kind: "ask", Ask: red, Req: req, ProjectRoot: s.projectRootFor(CleanCwd(req.Session.Cwd))}
+	pr := &PendingRequest{ID: id, Kind: "ask", Ask: red, Req: req, ProjectRoot: root}
 	out, resp, ok := s.await(ctx, pr, entry, resp)
 	if !ok {
 		return resp
@@ -624,6 +689,13 @@ func (s *Server) handleEvent(ev proto.Event) proto.EventAck {
 			s.log.Printf("会话 %q 的这一轮已结束，取消 %d 条挂着的请求", clipText(ev.Session.CLISessionID, hubLogFieldMax), n)
 		}
 	}
+	// 事件只带上生效的角色名（设计 §3.4）
+	cwd := CleanCwd(ev.Session.Cwd)
+	if filepath.IsAbs(cwd) {
+		s.sessionRole(&ev.Session, policy.Context{ProjectRoot: s.projectRootFor(cwd), HomeDir: s.cfg.HomeDir}.Root(), cwd)
+	} else {
+		s.sessionRole(&ev.Session, "", "")
+	}
 	state := "recorded"
 	if ev.Kind == "question" && s.pending.HasSession(ev.Session.CLISessionID) {
 		state = "suppressed"
@@ -668,6 +740,9 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 		if err := s.ReloadSettings(); err != nil {
 			return proto.ControlReply{V: proto.Version, OK: false, Error: "规则已重载；本机设置读不了，按默认值: " + err.Error()}
 		}
+		if st := s.roles.Reload(); st.Err != nil {
+			return proto.ControlReply{V: proto.Version, OK: false, Error: "规则已重载；roles.yaml 有误，只读之外的审批一律问人: " + st.Err.Error()}
+		}
 		s.writeAudit(AuditEntry{TS: time.Now(), Kind: "control", State: "recorded", Message: "reload"})
 		return ok
 	case "trust_set":
@@ -707,9 +782,23 @@ func (s *Server) handleControl(c proto.Control) proto.ControlReply {
 		}
 		ok.Trusts = s.trusts.list()
 		return ok
+	case "role_list":
+		ok.Roles = s.rolesInfo(s.roles.Current())
+		return ok
+	case "role_which":
+		st := s.roles.Current()
+		ok.Roles = s.rolesInfo(st)
+		w := WhichRole(st, c.Role, c.Cwd, s.cfg.HomeDir)
+		ok.Roles.Which = &w
+		return ok
 	default:
 		return proto.ControlReply{V: proto.Version, OK: false, Error: "未知的管理命令 " + c.Op}
 	}
+}
+
+// rolesInfo 把角色文件的状态编成 role_list、role_which 的答复。
+func (s *Server) rolesInfo(st RolesState) *proto.RolesInfo {
+	return RolesInfoOf(s.roles.Path(), st)
 }
 
 // status 汇总当前状态；三个暂停字段在 pauseMu 内一次读出，彼此一致。

@@ -157,11 +157,38 @@ type EventAck struct {
 type Control struct {
 	V    int    `json:"v"`
 	Kind string `json:"kind"`
-	Op   string `json:"op"` // status、pause、resume、reload、trust_set、trust_list、trust_revoke
+	Op   string `json:"op"` // status、pause、resume、reload、trust_set、trust_list、trust_revoke、role_list、role_which
 	// Trust 是 trust_set 要建的放行（ID、CreatedAt 由守护进程补，CreatedBy 空按 cli）。
 	Trust *Trust `json:"trust,omitempty"`
 	// TrustID 是 trust_revoke 要撤的放行；"all" 撤全部。
 	TrustID string `json:"trust_id,omitempty"`
+	// Role 与 Cwd 只给 role_which（0.3 起）：命令行所在终端的 RAILSE_ROLE 原文，与要解析的目录（绝对路径）。
+	Role string `json:"role,omitempty"`
+	Cwd  string `json:"cwd,omitempty"`
+}
+
+// RolesInfo 是 role_list、role_which 的答复（0.3 起）：角色文件的路径、在不在、错误（有误时所有审批按上限 read 处理），
+// 与按文件顺序的角色摘要；role_which 另带 Which。
+type RolesInfo struct {
+	Path   string        `json:"path"`
+	Exists bool          `json:"exists"`
+	Error  string        `json:"error,omitempty"`
+	Roles  []RoleSummary `json:"roles,omitempty"`
+	Which  *RoleWhich    `json:"which,omitempty"`
+}
+
+// RoleWhich 说明一个目录（与 RAILSE_ROLE）会解析成哪个角色、凭什么。Kind：absent（没有角色文件）、broken（文件有误）、
+// env（RAILSE_ROLE 指名）、dir（目录命中 Pattern）、none（未分配）。EnvUnknown 为真表示 RAILSE_ROLE 指的角色不存在。
+// ProjectRoot 是守护进程会用的项目根（已按角色的地盘处理：地盘外为空）；OutsideDirs 为真表示角色写了 dirs 而这里不在其内。
+type RoleWhich struct {
+	Role        string `json:"role,omitempty"`
+	Kind        string `json:"kind"`
+	Pattern     string `json:"pattern,omitempty"`
+	Dir         string `json:"dir,omitempty"`
+	Env         string `json:"env,omitempty"`
+	EnvUnknown  bool   `json:"env_unknown,omitempty"`
+	ProjectRoot string `json:"project_root,omitempty"`
+	OutsideDirs bool   `json:"outside_dirs,omitempty"`
 }
 
 // Trust 是一条限时放行：范围内引擎定不了（ask）的审批在 Until 之前一律放行。守护进程是执行者，hub 存副本给手机看、建、撤。
@@ -212,6 +239,8 @@ type ControlReply struct {
 	Status *Status `json:"status,omitempty"`
 	// Trusts 是 trust_set 建好的那条，或 trust_list、trust_revoke 之后生效中的全部（按到期先后）。
 	Trusts []Trust `json:"trusts,omitempty"`
+	// Roles 是 role_list、role_which 的答复（0.3 起）。
+	Roles *RolesInfo `json:"roles,omitempty"`
 }
 
 // WriteLine 把 v 编成一行 JSON 并写出，末尾带换行。

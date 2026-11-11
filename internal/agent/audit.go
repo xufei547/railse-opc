@@ -33,6 +33,9 @@ type AuditEntry struct {
 	Source         string `json:"source,omitempty"`
 	PermissionMode string `json:"permission_mode,omitempty"`
 	ToolUseID      string `json:"tool_use_id,omitempty"`
+	// 仅审批（0.3 起）：判定时的角色名（同 Session.Role），与是否超出角色的上限。没有角色文件时都为空，不出现在 JSON 里。
+	Role       string `json:"role,omitempty"`
+	BeyondRole bool   `json:"beyond_role,omitempty"`
 }
 
 // Audit 是只追加的 JSONL 文件。
