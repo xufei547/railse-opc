@@ -12,6 +12,8 @@ const repoRoot = fileURLToPath(new URL('../../', import.meta.url))
 const fakeSrc = fileURLToPath(new URL('./fakeagent/main.go', import.meta.url))
 
 test('越界请求：总台 → 按角色筛选的收件箱 → 批准面板只能单次批准', async ({ page, env }) => {
+  // 先登录（login 要等到空的收件箱），再起假守护进程：它的请求先到会让登录的检查落空
+  await login(page, env)
   const bin = join(env.base, 'fakeagent')
   execFileSync('go', ['build', '-o', bin, fakeSrc], { cwd: repoRoot, stdio: 'inherit', timeout: 120_000 })
   const tok = /(?:接入码|Enroll token): (\S+)/.exec(runBin(env, ['hub', 'token', '--dir', env.hubDir]))?.[1]
@@ -25,7 +27,6 @@ test('越界请求：总台 → 按角色筛选的收件箱 → 批准面板只�
   })
   fake.catch(() => {})
 
-  await login(page, env)
   const nav = page.locator('nav.nav')
   await nav.getByRole('link', { name: '总台', exact: true }).click()
   await expect(page.getByRole('heading', { level: 1, name: '总台', exact: true })).toBeVisible()
