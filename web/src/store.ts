@@ -1,5 +1,6 @@
 import { t } from './i18n'
 import type { Frame } from './ws'
+import type { KnownRoles } from './desk'
 import type { Inbox, Machine, RequestView, Rule, Status, TrustView } from './types'
 
 export interface State {
@@ -15,6 +16,8 @@ export interface State {
   machines: Machine[] | null
   /** 生效中的限时放行（GET /api/trusts）；还没拉过、老 hub 时为 null。收件箱横幅取最近的到期时间，设置页列出。 */
   trusts: TrustView[] | null
+  /** 每台机器当前的角色名（总台取到 /api/desk 时记下）；收件箱的“未分配”筛选用它。还没取过、老 hub 时为 null。 */
+  deskRoles: KnownRoles | null
   error: string | null
   /** 每处理一帧有效的请求变化就加一；历史页、详情页据此重新拉取。 */
   tick: number
@@ -40,6 +43,7 @@ export const initialState: State = {
   rulesStale: false,
   machines: null,
   trusts: null,
+  deskRoles: null,
   error: null,
   tick: 0,
   loads: 0,
@@ -53,6 +57,7 @@ export type Action =
   | { type: 'rules_stale' }
   | { type: 'machines'; machines: Machine[] }
   | { type: 'trusts'; trusts: TrustView[] }
+  | { type: 'desk_roles'; roles: KnownRoles }
   | { type: 'status'; status: Status }
   | { type: 'connected'; connected: boolean }
   | { type: 'error'; error: string | null }
@@ -155,6 +160,8 @@ export function reduce(state: State, action: Action): State {
       return { ...state, machines: action.machines }
     case 'trusts':
       return { ...state, trusts: action.trusts }
+    case 'desk_roles':
+      return { ...state, deskRoles: action.roles }
     case 'status':
       return { ...state, status: action.status }
     case 'connected':

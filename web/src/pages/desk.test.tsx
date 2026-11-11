@@ -175,6 +175,18 @@ describe('收件箱按角色筛选', () => {
     for (const c of ['cmd-a', 'cmd-b', 'cmd-c']) expect(h).toContain(c)
     expect(h).not.toContain('filter-bar')
   })
+  it('未分配：角色已从文件里删掉的请求也在（按总台给的角色表）', () => {
+    store.over = {
+      ...store.over,
+      pending: [...(store.over?.pending ?? []), req({ id: 'g', role: '已删', payload: { type: 'shell', command: 'cmd-gone' } })],
+      deskRoles: { m1: ['写作'] },
+    }
+    const h = render('/inbox?role=&machine=m1')
+    expect(h).toContain('cmd-b')
+    expect(h).toContain('cmd-gone')
+    expect(h).not.toContain('cmd-a')
+    expect(h).toContain('只看：未分配 · mac')
+  })
   it('筛选后什么都没有：照常说没有等你处理的事', () => {
     expect(render('/inbox?role=%E8%BF%90%E7%BB%B4')).toContain('没有等你处理的事')
   })

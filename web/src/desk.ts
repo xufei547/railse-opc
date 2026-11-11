@@ -60,10 +60,31 @@ export function parseFilter(q: URLSearchParams): InboxFilter | null {
   return { role: q.get('role'), machine: q.get('machine') }
 }
 
-/** 按筛选留下匹配的请求；没有 role 键的（老 hub）算未分配。 */
-export function applyFilter<T extends Pick<RequestView, 'machine_id'> & { role?: string }>(list: T[], f: InboxFilter | null): T[] {
+/** 每台机器当前角色表里的角色名（来自 GET /api/desk）；只出现在未分配一栏的机器为空数组。收件箱的“未分配”筛选据此判断。 */
+export type KnownRoles = Record<string, string[]>
+
+export function knownRoles(d: Desk): KnownRoles {
+  const out: KnownRoles = {}
+  for (const r of [...d.roles, ...d.unassigned]) {
+    out[r.machine_id] ??= []
+    if (r.name !== undefined) out[r.machine_id]!.push(r.name)
+  }
+  return out
+}
+
+/**
+ * 按筛选留下匹配的请求；没有 role 键的（老 hub）算空串。“未分配”（role 为空串）与总台同口径：角色为空，或不在该机器当前的角色表里
+ * （角色已从 roles.yaml 删掉的）；还没拿到角色表（known 为空）时只认空串。
+ */
+export function applyFilter<T extends Pick<RequestView, 'machine_id'> & { role?: string }>(list: T[], f: InboxFilter | null, known?: KnownRoles | null): T[] {
   if (!f) return list
-  return list.filter((r) => (f.role === null || (r.role ?? '') === f.role) && (f.machine === null || r.machine_id === f.machine))
+  const roleOK = (r: T) => {
+    const role = r.role ?? ''
+    if (f.role === null) return true
+    if (f.role !== '') return role === f.role
+    return role === '' || (!!known && !(known[r.machine_id] ?? []).includes(role))
+  }
+  return list.filter((r) => roleOK(r) && (f.machine === null || r.machine_id === f.machine))
 }
 
 /** 筛选条上的说明：角色「写作」或“未分配”，有机器名时接在后面。 */

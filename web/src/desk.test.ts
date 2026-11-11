@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { applyFilter, boundaryLine, deskGroups, filterLabel, inboxHref, parseFilter, roleText } from './desk'
+import { applyFilter, boundaryLine, deskGroups, filterLabel, inboxHref, knownRoles, parseFilter, roleText } from './desk'
 import { setLang } from './i18n'
 import type { Desk, DeskRow } from './types'
 
@@ -87,5 +87,32 @@ describe('roleText', () => {
     expect(roleText({})).toBeNull()
     setLang('en')
     expect(roleText({ role: 'writer', beyond_role: true })).toEqual({ text: 'Beyond the limits of role "writer"', beyond: true })
+  })
+})
+
+describe('未分配 = 角色为空，或不在该机器当前角色表里', () => {
+  const list = [
+    { id: 'a', role: '写作', machine_id: 'm1' },
+    { id: 'b', role: '', machine_id: 'm1' },
+    { id: 'c', role: '已删', machine_id: 'm1' },
+    { id: 'd', role: '写作', machine_id: 'm2' }, // m2 没有“写作”：对 m2 也是未分配
+    { id: 'e', role: '运维', machine_id: 'm2' },
+  ]
+  const known = { m1: ['写作'], m2: ['运维'] }
+  const ids = (f: Parameters<typeof applyFilter>[1], k?: Record<string, string[]>) => applyFilter(list, f, k).map((x) => x.id)
+  it('有角色表时按它判', () => {
+    expect(ids({ role: '', machine: 'm1' }, known)).toEqual(['b', 'c'])
+    expect(ids({ role: '', machine: null }, known)).toEqual(['b', 'c', 'd'])
+    expect(ids({ role: '写作', machine: 'm1' }, known)).toEqual(['a'])
+  })
+  it('还没有角色表时只认空串', () => {
+    expect(ids({ role: '', machine: 'm1' })).toEqual(['b'])
+  })
+  it('knownRoles 从总台取每台机器的角色名', () => {
+    expect(knownRoles({ window_hours: 24, roles: [row({ name: '写作' }), row({ name: '开发' }), row({ machine_id: 'm2', name: '运维' })], unassigned: [row({ machine_id: 'm3' })] })).toEqual({
+      m1: ['写作', '开发'],
+      m2: ['运维'],
+      m3: [],
+    })
   })
 })

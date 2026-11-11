@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { Banner } from '../components/Banner'
 import { RequestCard } from '../components/RequestCard'
-import { applyFilter, filterLabel, parseFilter } from '../desk'
+import { hub } from '../api'
+import { applyFilter, filterLabel, knownRoles, parseFilter } from '../desk'
 import { lang, splitVars, t } from '../i18n'
 import { pauseCopy } from '../manage'
 import { usePush } from '../push'
@@ -14,7 +15,7 @@ import { trustBanner } from '../trust'
 const guideKey = 'railse.hideInstallGuide'
 
 export function Inbox() {
-  const { state, reload } = useStore()
+  const { state, reload, dispatch } = useStore()
   const push = usePush()
   const [hideGuide, setHideGuide] = useState(() => {
     try {
@@ -27,8 +28,21 @@ export function Inbox() {
   // 总台跳来时按角色与机器筛选（/inbox?role=…&machine=…）；筛选条可清除
   const [params, setParams] = useSearchParams()
   const filter = parseFilter(params)
-  const pending = applyFilter(state.pending, filter)
-  const questions = applyFilter(state.questions, filter)
+  // “未分配”要知道每台机器当前的角色表（角色已删的也算未分配）：总台取过就有，没有时取一次；老 hub 取不到时只认空串
+  const wantRoles = filter?.role === '' && state.deskRoles === null
+  useEffect(() => {
+    if (!wantRoles) return
+    let alive = true
+    hub.desk().then(
+      (d) => alive && dispatch({ type: 'desk_roles', roles: knownRoles(d) }),
+      () => {},
+    )
+    return () => {
+      alive = false
+    }
+  }, [wantRoles, dispatch])
+  const pending = applyFilter(state.pending, filter, state.deskRoles)
+  const questions = applyFilter(state.questions, filter, state.deskRoles)
   const machineName =
     filter?.machine == null
       ? ''
