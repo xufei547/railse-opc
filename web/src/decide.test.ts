@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ApiError } from './api'
 import {
+  beyondBlock,
   canConfirm,
   canRemember,
   classifyError,
@@ -642,5 +643,29 @@ describe('限时放行（批准时顺带）', () => {
     setLang('en')
     expect(trustScopeOptions(trustable()).map((o) => o.label)).toEqual(['This session', 'This project'])
     expect(trustMinutesOptions.map(minutesLabel)).toEqual(['30 min', '2 hours', '24 hours'])
+  })
+})
+
+describe('越界的请求（beyond_role）', () => {
+  const beyond = () => req({ role: '写作', beyond_role: true, can_trust: true, risk: 'outward' })
+  it('批准时不能记住、不能限时放行，说明原因；拒绝照常能记住', () => {
+    expect(beyondBlock(beyond(), 'allow')).toBe('超出角色「写作」的边界：这次只能单次批准，不能记住，也不能限时放行。')
+    expect(beyondBlock(req({ beyond_role: true, role: '' }), 'allow')).toBe('超出角色的边界：这次只能单次批准，不能记住，也不能限时放行。')
+    expect(beyondBlock(beyond(), 'deny')).toBeNull()
+    expect(beyondBlock(req({ role: '写作' }), 'allow')).toBeNull()
+    const s = initSheet(beyond(), 'allow')
+    expect(s.rememberable).toBe(false)
+    expect(s.trustable).toBe(false)
+    expect(sheetReducer(s, { type: 'remember', on: true }).remember).toBe(false)
+    expect(sheetReducer(s, { type: 'trust', on: true }).trust).toBe(false)
+    expect(decideBody(s, '')).toEqual({ action: 'allow' })
+    const d = initSheet(beyond(), 'deny')
+    expect(d.rememberable).toBe(true)
+    expect(d.trustable).toBe(false)
+  })
+  it('英文', () => {
+    setLang('en')
+    expect(beyondBlock(beyond(), 'allow')).toBe('Beyond the limits of role "写作": you can only approve this once. It can\'t be remembered or trusted for a while.')
+    setLang('zh')
   })
 })

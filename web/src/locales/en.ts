@@ -474,4 +474,18 @@ export const en: Record<string, string> = {
   手机建: 'From the phone',
   终端建: 'From the terminal',
   启动命令建: 'From the launch command',
+  // 角色与总台（0.3 起）：desk.ts、pages/Desk.tsx、pages/Inbox.tsx、components/RequestCard.tsx、DecideSheet.tsx
+  '{n} 小时': '{n} hr',
+  '上限 {risk}': 'Up to {risk}',
+  '禁用 {n} 项': '{n} forbidden',
+  不许限时放行: 'No time-limited trust',
+  '放行最长 {d}': 'Trust up to {d}',
+  未分配: 'Unassigned',
+  '角色「{role}」': 'Role "{role}"',
+  '超出角色「{role}」的边界': 'Beyond the limits of role "{role}"',
+  超出角色的边界: 'Beyond the limits of its role',
+  '超出角色「{role}」的边界：这次只能单次批准，不能记住，也不能限时放行。':
+    'Beyond the limits of role "{role}": you can only approve this once. It can\'t be remembered or trusted for a while.',
+  '超出角色的边界：这次只能单次批准，不能记住，也不能限时放行。':
+    "Beyond the limits of its role: you can only approve this once. It can't be remembered or trusted for a while.",
 }
