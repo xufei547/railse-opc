@@ -153,7 +153,7 @@ hello 里声明 `trust` 能力；连着同样声明了 `trust` 的 hub 时才同
 
 角色是一道权限边界：给每个 agent 会话一个角色，角色限定它能自动做到哪一步（风险上限）、哪些事一律不许做（禁用清单）、限时放行最长管多久，以及它的地盘在哪些目录。
 
-**定位：** 角色对“正常接入钩子、Railse 能识别的工具调用”提供约束，用来挡住 agent 的误操作和明显越权。它不是沙箱，不能保证一个被注入、刻意规避的 agent 无法用可见的命令绕过（下面“角色防什么、不防什么”列了已知的绕法）。要硬隔离，请配合操作系统级的沙箱或容器。设计见 [v0.3 角色设计](superpowers/specs/2026-11-11-railse-opc-v0.3-roles-design.md)。**没有 `roles.yaml` 时仍有 0.3 的保护收紧**：守护进程目录用 `--dir` 或 `RAILSE_HOME` 指到 `~/.railse` 之外时，里面的读写按 `destructive`（见“文件有误时”）；触及 Railse 自己配置的请求不接受任何自动放行，暂停也不例外；拿不到策略结论或启用了却连不上守护进程时按来源收紧回退（见“交回终端与故障回退”）。差分测试（`internal/policy/nofile_diff_test.go`、`internal/agent/nofile_diff_test.go`）拿 main 上的代码逐条核对。
+**定位：** 角色对“正常接入钩子、Railse 能识别的工具调用”提供约束，用来挡住 agent 的误操作和明显越权。它不是沙箱，不能保证一个被注入、刻意规避的 agent 无法用可见的命令绕过（下面“角色防什么、不防什么”列了已知的绕法）。要硬隔离，请配合操作系统级的沙箱或容器。设计见 [v0.3 角色设计](superpowers/specs/2026-11-11-railse-opc-v0.3-roles-design.md)。**没有 `roles.yaml` 时仍有 0.3 的保护收紧**：守护进程目录用 `--dir` 或 `RAILSE_HOME` 指到 `~/.railse` 之外时，里面的读写按 `destructive`（见“文件有误时”）；触及 Railse 自己配置的请求不接受任何自动放行，暂停也不例外；拿不到策略结论或启用了却连不上守护进程时按来源收紧回退（见“交回终端与故障回退”）；超过 128 KiB 的 shell 命令一律必须你来定（见“超长命令”）。差分测试（`internal/policy/nofile_diff_test.go`、`internal/agent/nofile_diff_test.go`）拿 main 上的代码逐条核对。
 
 ### `roles.yaml`
 
@@ -207,14 +207,14 @@ roles:
 
 | 顺序 | 条件 | 结果 |
 | --- | --- | --- |
-| 1 | 你手写的 deny 规则（`source: user`）命中（超过 128 KiB 的 shell 命令跳过全部规则，见下文） | `deny`，压过一切 |
+| 1 | 你手写的 deny 规则（`source: user`）命中（超过 128 KiB 的 shell 命令只做廉价匹配，见下文） | `deny`，压过一切 |
 | 2 | 角色的 `forbid` 命中 | `deny`，审计 `auto_denied`、`decided_by: role:<角色名>`，理由“角色「写作」禁用：command_prefix "git push"”原样给模型看；不进手机 |
 | 3 | 按优先级选出的规则是其余来源（内置、学来的）的 deny，且没暂停 | `deny`（比越界的 ask 更严，不被放宽）。学来的 deny 输给命中的用户 allow 是 0.2 的既定语义，那时选中的是 allow，照样走第 4 步 |
-| 4 | 风险高于 `ceiling`、试图更改 Railse 设置，或角色有按命令的禁用而命令里有解析不了的结构（超过 128 KiB 的命令在第 1 步前跳过规则，有角色时直接越界） | 越界：规则的 allow（含写了 `risk: destructive` 的 user allow）与限时放行都不适用，必须人来定。审计 `beyond_role: true`，理由“超出角色「写作」的边界（上限 write_in_project，这次是 outward）” |
+| 4 | 风险高于 `ceiling`、试图更改 Railse 设置，或角色有按命令的禁用而命令里有解析不了的结构（超过 128 KiB 的命令不论有没有角色都必须人来定，见下文） | 越界：规则的 allow（含写了 `risk: destructive` 的 user allow）与限时放行都不适用，必须人来定。审计 `beyond_role: true`，理由“超出角色「写作」的边界（上限 write_in_project，这次是 outward）” |
 | 5 | 其余 | 照旧：暂停、规则、底线、限时放行、默认 ask |
 
 - **改 Railse 设置的命令。** 有角色的会话（含 `roles.yaml` 有误时）里，给 `RAILSE_*`、`HOME`、`XDG_*`、`CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`GEMINI_*` 赋值或删除它们的命令（前缀赋值、`env`、`env -u`、`export`、`declare`、`typeset`、`readonly`、`local`、`unset`，以及 `sh -c`、命令替换与 `eval` 里的同样写法；设置类命令的参数含变量展开时看不出改的是谁，也算）按越界处理，理由“试图更改 Railse 的角色或放行设置”。典型是嵌套起一个换了角色的 CLI（`RAILSE_ROLE=运维 claude …`）。读取（`echo $RAILSE_ROLE`）不算；未分配的会话照旧。
-- **禁用看穿命令替换。** `$(…)`、反引号、进程替换 `<(…)` `>(…)` 与 `eval` 里的命令逐层参与 `forbid` 的匹配（`echo "$(git push)"` 照样拒）。角色带有按命令的禁用（`command_prefix`、`command_regex`）而命令里有解析不了的结构（heredoc、没闭合的引号或括号、裸括号、带转义的 `$'…'`、嵌套过深）时，看不见里面有没有禁用的命令，按越界问人（理由“含无法检查的子命令”），不直接拒、也不走限时放行。`eval` 剥掉 `--` 后再看；`eval` 与 `sh -c` 类的命令参数含变量展开或通配（`eval "git ${OP}"`、`bash -c "$CMD"`）时运行时才知道是什么命令，同样算解析不了。展开有上限（`sh -c` 嵌套 32 层、命令替换 8 层、累计 2 MiB 文本或 1024 条命令），超了也按解析不了处理。超过 128 KiB 的 shell 命令根本不解析：直接定为 `unknown`、不跑任何规则匹配（含用户 deny 与只按风险匹配的 allow）；无角色时按 `unknown` 默认处理，有角色时按“含无法检查的子命令”越界；字面上提到 `.railse` 或守护进程目录的照样算触及配置。
+- **禁用看穿命令替换。** `$(…)`、反引号、进程替换 `<(…)` `>(…)` 与 `eval` 里的命令逐层参与 `forbid` 的匹配（`echo "$(git push)"` 照样拒）。角色带有按命令的禁用（`command_prefix`、`command_regex`）而命令里有解析不了的结构（heredoc、没闭合的引号或括号、裸括号、带转义的 `$'…'`、嵌套过深）时，看不见里面有没有禁用的命令，按越界问人（理由“含无法检查的子命令”），不直接拒、也不走限时放行。`eval` 剥掉 `--` 后再看；`eval` 与 `sh -c` 类的命令参数含变量展开或通配（`eval "git ${OP}"`、`bash -c "$CMD"`）时运行时才知道是什么命令，同样算解析不了。展开有上限（`sh -c` 嵌套 32 层、命令替换 8 层、累计 2 MiB 文本或 1024 条命令），超了也按解析不了处理。超过 128 KiB 的 shell 命令见下面“超长命令”。
 - **暂停时**第 1、2 步照常生效；第 3 步不生效；越界（第 4 步，含文件有误）也不归暂停管：`PreToolUse` 照旧回 `ask`，其余照旧送人工决定——交回终端在 auto、acceptEdits、bypassPermissions 下等于放行。触及 Railse 自己配置的请求也不归暂停管（见下）；其余交回终端。
 - **越界的去向。** Claude 的 `PreToolUse` 一律回 `ask`：Claude 在终端弹确认框（理由是角色那句）并触发 `PermissionRequest` 送手机；中间几档（项目内写、联网）也一样，不交 Claude 自己的分类器——它可能自动放行。`PermissionRequest` 与 Codex 的请求送 hub，`pending` 帧带 `beyond_role: true`，手机上不出现“记住”与“接下来一段时间都放行”。越界的请求也不按 `RAILSE_TRUST` 建放行。
 - **越界在各来源上的去向。** 越界必须人来定；问不到人的地方一律拒，绝不交回终端了事：
@@ -266,11 +266,12 @@ roles:
 - 被识别为触及 Railse 自己配置（`~/.railse`、任何 `.railse` 目录、实际的守护进程目录）的请求：不接受任何自动放行（规则、限时放行都不行），暂停也不例外。识别只看字面与能算出的工作目录，见下面“不防的”。
 - 审批请求拿不到策略结论，或这台机器启用了 Railse 却连不上守护进程时，按来源收紧回退，见“交回终端与故障回退”。
 
-**看不清的，不一定交人：** 除了下述超长命令，只有角色带按命令的禁用（`command_prefix`、`command_regex`）时，解析不了的结构（heredoc、没闭合的引号、`eval "$X"`、`bash -c "$CMD"` 等）才强制越界。其余情况下这类命令定为 `unknown`：带命令匹配条件（`command_prefix`、`command_regex`）的放行规则不认它，但只按 `risk: unknown` 匹配的放行规则照样放行它；上限在 `unknown` 以上的角色、没有角色的会话、限时放行期间，它也都可能被放过。超过 128 KiB 的 shell 命令另有硬上限：不解析，也不跑任何规则匹配（allow / deny 都不会命中，用户 deny 也不生效，角色禁用同样跳过）；有角色时直接越界，无角色时按 `unknown` 的默认处理，仍可能被限时放行或 Claude 自己的权限流程放过。字面触及 Railse 配置的检查仍保留。
+**看不清的，不一定交人：** 除了下述超长命令，只有角色带按命令的禁用（`command_prefix`、`command_regex`）时，解析不了的结构（heredoc、没闭合的引号、`eval "$X"`、`bash -c "$CMD"` 等）才强制越界。其余情况下这类命令定为 `unknown`：带命令匹配条件（`command_prefix`、`command_regex`）的放行规则不认它，但只按 `risk: unknown` 匹配的放行规则照样放行它；上限在 `unknown` 以上的角色、没有角色的会话、限时放行期间，它也都可能被放过。**超长命令（相对 0.2.3 的有意收紧）：** 超过 128 KiB 的 shell 命令 Railse 不解析，一律必须你来定，有没有角色都一样：任何放行规则、限时放行（含 `RAILSE_TRUST`）、暂停下的交回都不适用；Claude 的 `PreToolUse` 回 ask、Gemini 拒（`decided_by: unanalyzed`），`PermissionRequest` 与 Codex 送人工决定。理由是固定的“命令超过 128 KiB，Railse 不解析这么长的命令，必须你来定”（有角色时沿用“含无法检查的子命令”的越界理由，行为一样）。不依赖解析的 deny 规则照常拒：只按 `payload`、`risk` 匹配的，以及 `command_prefix` 对去掉前导空白的原始命令做字面前缀比较（按词边界）命中的——于是在 `git push` 后面垫一大段注释躲不开 `deny git push`；带 `command_regex`、`path_glob`、`domain`、MCP 条件的 deny 与角色的禁用清单对超长命令不跑（交给你定）。字面上提到 `.railse` 或守护进程目录的照样算触及配置。
 
 **不防的（已知限制，五轮审查里定为不修的与本轮新确认的都在这里）：**
 
 - **脚本与解释器里的内容。** Railse 看到的是 agent 要跑的那一行命令，看不到 `bash deploy.sh`、`make release`、`npm run x`、`python -c "…"` 里面做了什么；这些里面的 `git push` 不会被 `git push` 的禁用拦下，只按外层那一行定级。
+- **超长命令上的规则只做廉价匹配。** 超过 128 KiB 的 shell 命令不解析：带 `command_regex`、`path_glob`、`domain`、MCP 条件的 deny 与角色的禁用清单对它不跑。它照样一律交你定、不会被自动放行，只是这些规则不会替你直接拒掉它（`command_prefix` 的字面前缀与只按 `payload`、`risk` 的 deny 仍会拒）。
 - **变量拼出来的命令与路径。** `X=git; $X push`、`cat "$D/rules.yaml"` 这类，命令名或路径要运行时才知道：定为 `unknown`，禁用与配置目录检查看不出来（工作目录在 `cd "$X"` 之后算不出时，相对路径一律按触及配置处理，但绝对路径里的变量仍看不出）。
 - **脱离进程树的子进程。** `setsid`、`nohup … &` 后父进程退出、经 launchd / cron / systemd、ssh 到别的主机启动的 CLI，祖先链里没有上层会话，继承不到它的角色。
 - **Codex 的免确认模式与 `codex exec`。** Railse 只接了 Codex 的 `PermissionRequest`，它只在 Codex 本来就要问人时触发；Codex 自己不问的调用，角色管不到，嵌套起的 Codex 也继承不了。
