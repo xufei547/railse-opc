@@ -117,7 +117,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | 定不了，总开关暂停 | 任意 | 照旧交回终端（暂停压过放行） |
 | 定不了 | 有，且未过期 | `allow`，审计 `state: auto_allowed`、`decided_by: trust:<id>`、`reason` 形如“限时放行（会话 claude，剩 1 小时 5 分）”；钩子看到的理由是固定的“限时放行中” |
 | 定不了 | 无 | 照旧（硬底线回 ask，中间三级交 Claude，`PermissionRequest` 送手机） |
-| 定不了，读写 Railse 自己的配置（0.3 起） | 任意 | 不走放行，照常进人工决定路径（`PreToolUse` 回 ask，其余送手机，Gemini 照旧交回它自己的确认）；本来会命中放行时理由写明“限时放行不覆盖 Railse 自己的配置” |
+| 定不了，读写 Railse 自己的配置（0.3 起） | 任意 | 不走放行，照常进人工决定路径（`PreToolUse` 回 ask，其余送手机，Gemini 一律拒）；本来会命中放行时理由写明“限时放行不覆盖 Railse 自己的配置” |
 
 - **怎么算命中。** 会话范围要请求的 CLI（`tool`）与会话 id（`cli_session_id`）都相同，请求没有会话 id 不命中；项目范围要请求算出的项目根（见“项目根”）与放行的项目根字符串相等，没有项目根不命中。同时命中几条记最晚到期的那条。`PreToolUse`、`PermissionRequest` 与 Codex 的请求都看；Gemini 的钩子不能放行，命中了也只是渲染成不作决定，照旧交回终端。
 - **不覆盖 Railse 自己的配置（0.3 起）。** 请求读写 `~/.railse`、任何 `.railse` 目录或实际的守护进程目录（`--dir`、`RAILSE_HOME`）时，会话放行、项目放行与 `RAILSE_TRUST` 都不适用：放行期间 agent 改规则、角色、放行表，等于改掉管它自己的东西。文件写入看目标路径；shell 命令看每一段（看穿 `sh -c`、命令替换与 `eval`）的参数与重定向，字面上提到 `.railse` 的也算；命令名与 URL 不当路径。有没有 `roles.yaml`、会话有没有角色都一样；别的敏感路径（`.env`、ssh 密钥等）在放行期间的行为与 0.2.3 相同。
@@ -224,6 +224,8 @@ roles:
   | Gemini | `deny`：它的钩子只能拒不能放，交回终端等于继续执行（yolo、headless 下直接跑），也不进 hub | `deny`（同左） | `deny` |
 
   Gemini 被拒时 `decided_by` 为 `role:<角色名>`（文件有误时为 `roles_yaml`），理由写明“Gemini 无法在这里问人：换个角色，或在别处执行”。
+
+  触及 Railse 自己的配置（见“限时放行”）同样必须人来定：Gemini 在任何 hub 状态、暂停与否下都 `deny`（`decided_by: control_plane`）；Claude 与 Codex 照越界的路走，只是暂停时按 0.2.3 交回终端。整张表（越界、文件有误、触及配置 × 来源 × hub × 暂停）有走完整钩子链路的测试（`cmd/railse/roles_chain_test.go`）。
 - **`trust_max`。** 限时放行命中时再看会话角色：设了时长的，这条放行只在它建立后 `trust_max` 之内对这个角色有效；`none` 一律不放行。不改放行本身。
 - **地盘。** 角色写了 `dirs`、而项目根不在任何一条 `dirs` 内（典型：用 `RAILSE_ROLE` 在别处启动）时，按没有项目根处理：写入一律 `write_outside`，项目放行也不命中。地盘内项目根不变，不扩大到角色的全部目录。没写 `dirs` 的角色不做这一步。
 - **选择题与事件**（`AskUserQuestion`、question、done、tool_done）不经判定，只带上角色名。

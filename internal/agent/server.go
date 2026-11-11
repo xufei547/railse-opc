@@ -573,6 +573,19 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		}
 		resp.Decision, resp.DecidedBy = "deny", entry.DecidedBy
 	default:
+		// 必须人来定而又问不到人：Gemini 的钩子只能拒绝不能放行，交回终端等于继续执行（yolo、headless 下直接跑），也不进 hub。
+		// 越界（含 roles.yaml 有误）与触及 Railse 自己的配置都必须人来定，这里问不到人，只能拒；暂停也不例外。
+		// 其余来源能强制问人，见下与 docs/agent-local-loop.md。
+		if (d.BeyondRole || d.ControlPlane) && strings.EqualFold(req.Session.Tool, "gemini") {
+			entry.Action, entry.State = "deny", "auto_denied"
+			if d.BeyondRole {
+				entry.DecidedBy, entry.Reason = beyondDecidedBy(d), reasonGeminiBeyond(d)
+			} else {
+				entry.DecidedBy, entry.Reason = "control_plane", reasonGeminiControl
+			}
+			resp.Decision, resp.DecidedBy, resp.Reason = "deny", entry.DecidedBy, entry.Reason
+			break
+		}
 		if s.rules.Paused() && !d.BeyondRole {
 			// 总开关打开：用户 deny 与角色禁用仍由引擎处理，其余一律交回终端，不去打扰 hub。
 			// 越界（含 roles.yaml 有误）不归暂停管：交回终端在 auto、acceptEdits、bypassPermissions 下等于放行，
@@ -580,14 +593,6 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 			// 只管审批：答题（handleAsk）不走这里，不看暂停开关，照样送 hub。
 			entry.Action, entry.State, entry.DecidedBy, entry.Reason = "passthrough", "passthrough", "paused", "自动审批已暂停，交回终端处理"
 			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
-			break
-		}
-		// 越界而又问不到人：Gemini 的钩子只能拒绝不能放行，交回终端等于继续执行（yolo、headless 下直接跑），也不进 hub。
-		// 越界必须人来定，这里问不到人，只能拒（含 roles.yaml 有误的 fail closed）。其余来源能强制问人，见下与 docs/agent-local-loop.md。
-		if d.BeyondRole && strings.EqualFold(req.Session.Tool, "gemini") {
-			entry.Action, entry.State, entry.DecidedBy = "deny", "auto_denied", beyondDecidedBy(d)
-			entry.Reason = reasonGeminiBeyond(d)
-			resp.Decision, resp.DecidedBy, resp.Reason = "deny", entry.DecidedBy, entry.Reason
 			break
 		}
 		// 限时放行：只改引擎定不了的这一档（规则的 allow、deny 在上面已定，用户 deny 压过放行；暂停压过放行），
@@ -647,6 +652,9 @@ func beyondDecidedBy(d policy.Decision) string {
 	}
 	return "role:" + d.Role
 }
+
+// reasonGeminiControl 是 Gemini 触及 Railse 自己的配置被拒时的理由（固定句子，钩子 i18n.Lookup）。
+const reasonGeminiControl = "触及 Railse 自己的配置，Gemini 无法在这里问人：在别处执行"
 
 // reasonGeminiBeyond 是 Gemini 越界被拒时给模型看的理由。格式固定：钩子按终端语言重拼（见 cmd/railse 的 localizeRoleReason）。
 func reasonGeminiBeyond(d policy.Decision) string {
