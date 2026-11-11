@@ -49,13 +49,14 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | --- | --- |
 | `ts`、`request_id` | 时间；审批请求的 ID（事件没有） |
 | `kind` | `permission`、`ask`、`question`、`done`、`session_end`、`control` |
-| `session` | `tool`、`cli_session_id`、`turn_id`、`cwd` |
+| `session` | `tool`、`cli_session_id`、`turn_id`、`cwd`；有角色时还有 `role`（生效的角色名，见“角色”） |
 | `tool_name`、`payload`、`risk` | 工具名；脱敏后的统一载荷；风险档（`read` 到 `destructive`）。`ask` 不适用：它的 `tool_name` 固定是 `AskUserQuestion`，没有 `payload` 与风险档 |
 | `ask`、`answers` | 仅 `ask`：脱敏后的题目；`answers` 仅手机上答了的，脱敏后的题面 → 脱敏后的答案 |
 | `action` | `allow`、`deny`、`passthrough`、`answer`（`ask` 在手机上答了） |
 | `state` | 见下表 |
-| `rule_id`、`reason`、`decided_by` | 命中的规则与理由；谁定的：`rule:<id>`、`trust:<放行 id>`（限时放行命中）、`no_hub`、`paused`、`timeout`、`terminal`、`shutdown`、`error`；管理命令里限时放行的建、撤、到期记建的人 `cli`、`env`、`phone`，被手机撤掉的记 `hub` |
+| `rule_id`、`reason`、`decided_by` | 命中的规则与理由；谁定的：`rule:<id>`、`trust:<放行 id>`（限时放行命中）、`role:<角色名>`（角色禁用）、`no_hub`、`paused`、`timeout`、`terminal`、`shutdown`、`error`；管理命令里限时放行的建、撤、到期记建的人 `cli`、`env`、`phone`，被手机撤掉的记 `hub` |
 | `message` | 事件文本，如最后一条回复 |
+| `role`、`beyond_role` | 仅审批（0.3 起）：判定时的角色名，与是否超出角色的上限。没有 `roles.yaml` 时不出现 |
 
 | `state` | 含义 |
 | --- | --- |
@@ -145,6 +146,92 @@ hello 里声明 `trust` 能力；连着同样声明了 `trust` 的 hub 时才同
 
 - **本机 → hub。** 本机建、撤、到期都经 `trust` 帧（`op` 为 `set`、`revoke`、`expired`）报给 hub，走单独的发送队列，不拖慢审批。
 - **hub → 本机。** welcome 与之后的 `trusts` 帧带这台机器的全部放行。合并：快照里有的写入并标已同步；已同步却不在快照里的删掉（被手机撤了，审计 `trust_revoke`、`decided_by: hub`）；未同步的（断线期间或老 hub 时建的）保留并补发 `set`；本机撤掉的有墓碑，快照里还带着时不复活、重发 `revoke`。本机建的条目等 hub 的快照回来才算同步。welcome 不带 `trusts` 键时：welcome 远小于单帧上限就当空快照；否则可能是 hub 带不下、紧跟着单发，按不完整处理，不删任何条目。
+
+## 角色（0.3 起）
+
+角色是一道权限边界：给每个 agent 会话一个角色，角色限定它能自动做到哪一步（风险上限）、哪些事一律不许做（禁用清单）、限时放行最长管多久，以及它的地盘在哪些目录。设计见 [v0.3 角色设计](superpowers/specs/2026-11-11-railse-opc-v0.3-roles-design.md)。**没有 `roles.yaml` 时一切与 0.2.3 完全一样。**
+
+### `roles.yaml`
+
+在守护进程的数据目录里（随 `--dir` 走，默认 `~/.railse/roles.yaml`），一个文件装全部角色。`railse role init` 写一份带注释的起步模板（开发 / 写作 / 运维；英文界面为 dev / writer / ops），模板里的 `dirs` 都注释着，写下它不改变任何会话。
+
+```yaml
+version: 1
+roles:
+  - name: 开发
+    note: 写代码、跑测试
+    dirs: ["~/RailseWork", "~/我的程序/**"]
+    ceiling: network          # 超过这一档（outward、destructive）一律问人
+    forbid:
+      - {command_prefix: "fly "}
+    trust_max: 24h
+  - name: 写作
+    note: 只改文档
+    dirs: ["~/dev/*/docs"]
+    ceiling: write_in_project
+    forbid:
+      - {command_prefix: "git push"}
+      - {payload: mcp}
+    trust_max: 2h
+```
+
+| 字段 | 必填 | 含义 |
+| --- | --- | --- |
+| `name` | 是 | 1～32 个字符，不含空白与控制字符，文件内唯一；可以是中文 |
+| `note` | 否 | 一行说明（≤120 字符），手机总台上看得到 |
+| `dirs` | 否 | 路径模式（`~` 与 `**` 通配，同规则的 `scope.project`：等于或通配命中项目根）。按目录绑定会话；也划定角色的地盘 |
+| `ceiling` | 否 | 风险上限，`read` 到 `destructive` 之一；风险**高于**它的请求超出边界。不写不设上限 |
+| `forbid` | 否 | 禁用清单，每条的写法与规则的 `match` 相同（同一套匹配：任一段命中即算、看穿 `sh -c`）；不能有空条目 |
+| `trust_max` | 否 | 限时放行最长多久（`30m`、`2h`，5m～24h，超界报错不截断），或 `none`：这个角色的请求从不走限时放行 |
+
+校验与规则文件一样严格：未知字段、拼错的键、重名、坏正则、坏时长都报错。两个角色的 `dirs` 重叠不算错，按文件先后取第一个，`railse role check` 会提醒。
+
+### 会话绑到哪个角色
+
+钩子（三家 CLI 的所有事件）把环境变量 `RAILSE_ROLE` 原样带给守护进程，守护进程按这个顺序定生效的角色，并把它写进审计与上报 hub 的 `session.role`：
+
+1. `RAILSE_ROLE` 是 `roles.yaml` 里有的名字 → 就是它（`RAILSE_ROLE=写作 claude`）。
+2. 否则按项目根（没有项目根时按 cwd）匹配各角色的 `dirs`，文件顺序第一个命中的。
+3. 都没有 → 未分配，按规则走。
+
+`RAILSE_ROLE` 指了不存在的名字时按第 2 步走，`agent.log` 里每个会话记一行。
+
+### 判定顺序
+
+| 顺序 | 条件 | 结果 |
+| --- | --- | --- |
+| 1 | 你手写的 deny 规则（`source: user`）命中 | `deny`，压过一切 |
+| 2 | 角色的 `forbid` 命中 | `deny`，审计 `auto_denied`、`decided_by: role:<角色名>`，理由“角色「写作」禁用：command_prefix "git push"”原样给模型看；不进手机 |
+| 3 | 其余来源的 deny 规则命中 | `deny`（比越界的 ask 更严，不被放宽） |
+| 4 | 风险高于 `ceiling` | 越界：规则的 allow（含写了 `risk: destructive` 的 user allow）与限时放行都不适用，必须人来定。审计 `beyond_role: true`，理由“超出角色「写作」的边界（上限 write_in_project，这次是 outward）” |
+| 5 | 其余 | 照旧：暂停、规则、底线、限时放行、默认 ask |
+
+- **暂停时**第 1、2、3 步照常生效（拒绝不受暂停影响），其余交回终端。
+- **越界的去向。** Claude 的 `PreToolUse` 一律回 `ask`：Claude 在终端弹确认框（理由是角色那句）并触发 `PermissionRequest` 送手机；中间几档（项目内写、联网）也一样，不交 Claude 自己的分类器——它可能自动放行。`PermissionRequest` 与 Codex 的请求送 hub，`pending` 帧带 `beyond_role: true`，手机上不出现“记住”与“接下来一段时间都放行”。越界的请求也不按 `RAILSE_TRUST` 建放行。
+- **`trust_max`。** 限时放行命中时再看会话角色：设了时长的，这条放行只在它建立后 `trust_max` 之内对这个角色有效；`none` 一律不放行。不改放行本身。
+- **地盘。** 角色写了 `dirs`、而项目根不在任何一条 `dirs` 内（典型：用 `RAILSE_ROLE` 在别处启动）时，按没有项目根处理：写入一律 `write_outside`，项目放行也不命中。地盘内项目根不变，不扩大到角色的全部目录。没写 `dirs` 的角色不做这一步。
+- **选择题与事件**（`AskUserQuestion`、question、done、tool_done）不经判定，只带上角色名。
+
+### 文件有误时
+
+守护进程每次判定前比对 `roles.yaml` 的修改时间与大小，变了就重读，改完不用重启（`railse agent reload` 也会重读）。读到坏文件（解析失败、校验不过、读不了、空文件）就 **fail closed**：所有会话按上限 `read` 处理——只读照旧自动放行，其余一律越界问人，理由“roles.yaml 有误：<错误>”；不沿用上一版好文件，免得一次手误悄悄放宽或悄悄失效。修好后下一条请求就恢复。
+
+`roles.yaml` 在 `~/.railse` 下，本来就是敏感路径：agent 改它按 `destructive` 定级，除非角色的上限就是 `destructive`，否则越界问人。数据目录不是 `~/.railse` 时（`--dir`），它不在敏感路径表里，按普通文件定级。
+
+### 命令
+
+```sh
+railse role list  [--dir 目录]   # 每个角色一行：名字、上限、禁用条数、放行上限、目录、备注
+railse role check [--dir 目录]   # 校验；提醒目录重叠、指向不存在目录的模式；有误退出 1
+railse role which [--dir 目录]   # 当前目录（与当前终端的 RAILSE_ROLE）会解析成哪个角色、凭什么；地盘外会说明
+railse role init  [--dir 目录]   # 文件不存在时写起步模板（0600），已存在不覆盖
+```
+
+`list`、`which` 经本机 socket 问守护进程（管理命令 `role_list`、`role_which`）；守护进程没在跑、或是升级前启动的旧进程时直接读文件并在 stderr 注明。`railse doctor` 在 `roles.yaml` 存在时多一项 `agent.roles`：合法 ok，有误 fail（不存在时不出这一项）。
+
+### 与 hub
+
+hello 里声明 `role` 能力并带角色摘要（名字、备注、上限、禁用条数、放行上限分钟数——不设为 0，`none` 为 -1——与目录模式）；文件有误时不带摘要。重读成功、且这条连接的 hub 也声明了 `role` 时，整份重发一帧 `roles`（删掉文件就发空表），hub 整份替换这台机器的角色表。老 hub 配新守护进程：角色照样在本机生效，只是手机上看不到；新 hub 配老守护进程：总台只有“未分配”。
 
 ## 三家 CLI 的差异
 
