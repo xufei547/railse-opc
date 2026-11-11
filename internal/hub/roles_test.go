@@ -115,7 +115,7 @@ func TestCleanRoles(t *testing.T) {
 		{Name: ""},        // 空名丢
 		{Name: "a b"},     // 含空白丢
 		{Name: "a\u0007"}, // 控制字符丢
-		{Name: "a​"},      // 格式字符丢
+		{Name: "a\u200b"}, // 格式字符丢
 		{Name: long},      // 超过 32 个字符丢
 		{Name: strings.Repeat("长", 32), ForbidCount: -3, TrustMaxMins: -9}, // 恰好 32 个字符留；负数规整
 		{Name: "开发", Note: "token=sk-ant-api03-" + strings.Repeat("x", 40) + " " + strings.Repeat("备", 200), Ceiling: strings.Repeat("c", 300),
