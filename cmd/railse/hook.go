@@ -184,7 +184,8 @@ func readStdin(ctx context.Context, stdin io.Reader) ([]byte, error) {
 // 让人知道这次是 Claude 自己在把关。
 func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.Client, in adapter.Input, stdout, stderr io.Writer) int {
 	req := proto.Request{Kind: "permission", Session: in.Session, ToolName: in.ToolName, Payload: in.Payload,
-		Source: in.Source, PermissionMode: in.PermissionMode, ToolUseID: in.ToolUseID}
+		Source: in.Source, PermissionMode: in.PermissionMode, ToolUseID: in.ToolUseID,
+		Ancestors: readAncestors()} // 嵌套会话靠它继承上层会话的角色（见 agent 的 inheritRole）
 	if in.Source == proto.SourcePreToolUse {
 		// RAILSE_TRUST=2h claude：原文照带，格式由守护进程判断（不对只记它的日志）；Claude 每次调用先经 PreToolUse，只带这一路
 		req.TrustFor = os.Getenv("RAILSE_TRUST")
@@ -318,6 +319,9 @@ const (
 	roleGeminiBroken = "roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行"
 )
 
+// inheritedSuffix 认出理由末尾的“（继承自上层会话的角色「X」）”（policy 的 Role.inheritedSuffix 拼的）。
+var inheritedSuffix = regexp.MustCompile(`（继承自上层会话的角色「(.+)」）$`)
+
 // roleReasonFormats 是角色理由按终端语言重拼用的三个模板（见 localizeRoleReason）。
 var roleReasonFormats = []string{"角色「%s」禁用：%s", "超出角色「%s」的边界（上限 %s，这次是 %s）", "超出角色「%s」的边界：含无法检查的子命令",
 	"超出角色「%s」的边界，Gemini 无法在这里问人：换个角色，或在别处执行", "超出角色「%s」的边界：试图更改 Railse 的角色或放行设置",
@@ -337,6 +341,14 @@ func isRoleReason(localized string) bool {
 // localizeRoleReason 认出角色的理由并按终端语言重拼：禁用（角色名与禁用条目的简述原样）、越界（角色名与两档风险名原样）、
 // roles.yaml 有误（错误原文原样）。不是这三种返回 false。
 func localizeRoleReason(reason string) (string, bool) {
+	// 嵌套会话继承上层角色时理由末尾多一句“（继承自上层会话的角色「X」）”：先拆下来，各自重拼再接上
+	if m := inheritedSuffix.FindStringSubmatchIndex(reason); m != nil {
+		base, ok := localizeRoleReason(reason[:m[0]])
+		if !ok {
+			return "", false
+		}
+		return base + fmt.Sprintf(i18n.T("（继承自上层会话的角色「%s」）"), reason[m[2]:m[3]]), true
+	}
 	switch {
 	case strings.HasPrefix(reason, roleForbidPrefix):
 		name, brief, ok := strings.Cut(strings.TrimPrefix(reason, roleForbidPrefix), roleForbidMid)

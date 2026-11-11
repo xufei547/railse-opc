@@ -767,3 +767,76 @@ func TestTrustNeverCoversControlPlane(t *testing.T) {
 		}
 	}
 }
+
+// proc 是测试里的一个进程。
+func proc(pid int, start, name string) proto.Proc { return proto.Proc{PID: pid, Start: start, Name: name} }
+
+// 嵌套会话继承上层会话的角色约束（看进程树，不看环境变量）：取更严的一边，角色名显示为自己的，理由注明继承。
+func TestNestedSessionInheritsAncestorRole(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	term := []proto.Proc{proc(5, "s5", "zsh"), proc(2, "s2", "Terminal"), proc(1, "s1", "launchd")}
+	outer := append([]proto.Proc{proc(100, "s100", "sh"), proc(10, "s10", "claude")}, term...)
+	req := func(cmd, session, role, cwd string, chain []proto.Proc) proto.Request {
+		r := withRole(permission(cwd, cmd), role)
+		r.Session.CLISessionID, r.Source, r.Ancestors = session, proto.SourcePermissionRequest, chain
+		return r
+	}
+	// 上层会话：RAILSE_ROLE=写作（上限项目内写，禁用 git push）
+	send(t, env, req("git status", "outer", "写作", env.repo, outer))
+	nowhere := t.TempDir()
+	nested := func(pid int, start string, mid ...proto.Proc) []proto.Proc {
+		c := []proto.Proc{proc(pid*10, "x", "sh"), proc(pid, start, "claude")}
+		c = append(c, mid...)
+		return append(c, outer[1:]...) // 上层 CLI（10）在链里
+	}
+	cases := []struct {
+		name  string
+		role  string
+		cwd   string
+		chain []proto.Proc
+	}{
+		{"环境变量换角色", "运维", env.repo, nested(20, "s20", proc(150, "s150", "bash"))},
+		{"换目录启动", "", nowhere, nested(21, "s21", proc(151, "s151", "bash"))},
+		{"脚本里启动", "运维", nowhere, nested(22, "s22", proc(152, "s152", "bash"), proc(153, "s153", "bash"))},
+	}
+	for _, c := range cases {
+		resp := send(t, env, req("git push origin main", c.name, c.role, c.cwd, c.chain))
+		if resp.Decision != "deny" || !strings.Contains(resp.Reason, "继承自上层会话的角色「写作」") {
+			t.Errorf("%s: 应继承写作的禁用: %+v", c.name, resp)
+		}
+		e := lastAudit(t, env)
+		want := c.role
+		if want == "" {
+			want = "写作" // 自己未分配时显示上层的
+		}
+		if e.Session.Role != want {
+			t.Errorf("%s: 角色名应显示为 %q: %+v", c.name, want, e.Session)
+		}
+		pr := req("curl https://example.com", c.name, c.role, c.cwd, c.chain)
+		if resp := send(t, env, pr); resp.Decision == "allow" || !lastAudit(t, env).BeyondRole {
+			t.Errorf("%s: 联网超出写作的上限: %+v %+v", c.name, resp, lastAudit(t, env))
+		}
+	}
+	// 三层嵌套：第三层的链里只看得到第二层（第一层被截掉），照样经第二层继承到写作
+	mid := nested(30, "s30", proc(160, "s160", "bash"))
+	send(t, env, req("git status", "mid", "运维", env.repo, mid))
+	third := []proto.Proc{proc(400, "x", "sh"), proc(40, "s40", "codex"), proc(170, "s170", "bash"), proc(30, "s30", "claude")}
+	if resp := send(t, env, req("git push origin main", "third", "运维", env.repo, third)); resp.Decision != "deny" || !strings.Contains(resp.Reason, "写作") {
+		t.Errorf("三层嵌套: %+v", resp)
+	}
+	// 进程号复用：同一进程号、启动时间不同，不算上层
+	reused := []proto.Proc{proc(500, "x", "sh"), proc(50, "s50", "claude"), proc(10, "s10-new", "claude"), proc(5, "s5", "zsh")}
+	if resp := send(t, env, req("git push origin main", "reused", "运维", env.repo, reused)); resp.Decision == "deny" {
+		t.Errorf("进程号复用不该继承: %+v", resp)
+	}
+	// 同一终端里另起的会话（祖先只有终端与 shell）：不继承
+	sibling := append([]proto.Proc{proc(600, "x", "sh"), proc(60, "s60", "claude")}, term...)
+	if resp := send(t, env, req("git push origin main", "sibling", "运维", env.repo, sibling)); resp.Decision == "deny" {
+		t.Errorf("兄弟会话不该继承: %+v", resp)
+	}
+	// 取不到祖先链（老钩子）：不继承
+	if resp := send(t, env, req("git push origin main", "nochain", "运维", env.repo, nil)); resp.Decision == "deny" {
+		t.Errorf("没有祖先链不该继承: %+v", resp)
+	}
+}

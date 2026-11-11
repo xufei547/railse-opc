@@ -209,3 +209,45 @@ func TestPrepareDirs(t *testing.T) {
 		t.Error("家目录未知时 ~ 模式不该命中")
 	}
 }
+
+// CombineRoles 取更严的一边：上限取低，禁用取并集，放行上限取短（none 最短），地盘同时满足，文件有误按有误。
+func TestCombineRoles(t *testing.T) {
+	rs, err := ParseRoleSet([]byte(`version: 1
+roles:
+  - name: 宽
+    dirs: ["/w/**"]
+    ceiling: destructive
+    forbid: [{command_prefix: "fly "}]
+    trust_max: 24h
+  - name: 窄
+    dirs: ["/w/docs"]
+    ceiling: write_in_project
+    forbid: [{payload: mcp}]
+    trust_max: 2h
+  - name: 不放
+    trust_max: none
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wide, narrow, none := rs.Find("宽"), rs.Find("窄"), rs.Find("不放")
+	if CombineRoles(wide, nil) != wide {
+		t.Fatal("没有上层时原样返回")
+	}
+	c := CombineRoles(wide, []*Role{narrow})
+	if c.Name != "宽" || *c.Ceiling != RiskWriteInProject || len(c.Forbid) != 2 || c.TrustMax.D != 2*time.Hour || strings.Join(c.Inherited(), ",") != "窄" {
+		t.Fatalf("合并: %+v", c)
+	}
+	if ctx := (Context{ProjectRoot: "/w/app", Role: c}); ctx.Root() != "" {
+		t.Error("/w/app 在宽的地盘、不在窄的地盘：合并后不算地盘内")
+	}
+	if ctx := (Context{ProjectRoot: "/w/docs", Role: c}); ctx.Root() != "/w/docs" {
+		t.Error("/w/docs 两个地盘都在")
+	}
+	if c := CombineRoles(nil, []*Role{none, wide}); c.Name != "不放" || !c.TrustMax.None || *c.Ceiling != RiskDestructive {
+		t.Fatalf("自己未分配: %+v", c)
+	}
+	if c := CombineRoles(wide, []*Role{BrokenRole(errTest("坏"))}); c.Broken() == "" || *c.Ceiling != RiskRead {
+		t.Fatalf("上层有误按有误: %+v", c)
+	}
+}

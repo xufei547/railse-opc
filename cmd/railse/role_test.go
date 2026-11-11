@@ -235,3 +235,18 @@ func TestAskReasonControlPlane(t *testing.T) {
 		t.Fatalf("确认框理由: %q", got)
 	}
 }
+
+// 继承上层角色的理由按终端语言重拼，两部分都译。
+func TestLocalizeInheritedRoleReason(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	for _, in := range []string{
+		`角色「运维」禁用：command_prefix "git push"（继承自上层会话的角色「写作」）`,
+		"超出角色「运维」的边界（上限 network，这次是 outward）（继承自上层会话的角色「写作、审稿」）",
+	} {
+		got, ok := localizeRoleReason(in)
+		if !ok || hasCJK(strings.NewReplacer("运维", "", "写作", "", "审稿", "", "、", "").Replace(got)) || !strings.Contains(got, "inherited from") || !isRoleReason(got) {
+			t.Errorf("%q → %q %v", in, got, ok)
+		}
+	}
+}

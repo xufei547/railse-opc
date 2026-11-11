@@ -106,9 +106,22 @@ type Request struct {
 	PermissionMode string `json:"permission_mode,omitempty"`
 	// ToolUseID 是 Claude Code 给这次工具调用的编号，只有 PreToolUse 带，用来认出同一调用。
 	ToolUseID string `json:"tool_use_id,omitempty"`
+	// Ancestors 是钩子进程的祖先链（0.3 起），从直接父进程往上到 1 号进程为止，至多 MaxAncestors 层；取不到时为空（老钩子也不带）。
+	// 守护进程靠它认出嵌套会话：链里有另一个有角色的会话的 CLI 进程时，继承那个角色的约束（取更严的一边）。
+	Ancestors []Proc `json:"ancestors,omitempty"`
 	// TrustFor 是钩子从环境变量 RAILSE_TRUST 带来的时长原文（如 "2h"）：守护进程第一次见到带它的会话时建一条会话放行，之后不再看它。
 	TrustFor string `json:"trust_for,omitempty"`
 }
+
+// Proc 是祖先链里的一个进程：进程号、启动时间（不透明的字符串，同一进程号被复用时不同）与名字（取不到时为空）。
+type Proc struct {
+	PID   int    `json:"pid"`
+	Start string `json:"start,omitempty"`
+	Name  string `json:"name,omitempty"`
+}
+
+// MaxAncestors 是钩子带的祖先链层数上限。
+const MaxAncestors = 32
 
 // 审批请求的来源钩子事件。
 const (

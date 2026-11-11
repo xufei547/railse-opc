@@ -99,6 +99,9 @@ type Server struct {
 	// 只在内存里，守护进程重启后重新解析。
 	pinMu  sync.Mutex
 	pinned map[string]rolePin
+	// procRoles 是有角色的会话的 CLI 进程（进程号@启动时间）→ 约束它的角色名（自己的与继承的），由 pinMu 保护：嵌套会话的祖先链里
+	// 有这些进程时继承它们（见 inheritRole）。随钉住表一起有上限、session_end 时释放。
+	procRoles map[string]procRole
 
 	mu      sync.Mutex
 	closed  bool
@@ -372,6 +375,7 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	root := s.projectRootFor(cwd)
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID, ProtectedDirs: s.protected}
 	pctx.Role = s.sessionRole(&req.Session, pctx.Root(), cwd, true)
+	pctx.Role = s.inheritRole(&req, pctx.Role)
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx, req.Session
 }
 
@@ -457,11 +461,97 @@ func (s *Server) pinRole(sess proto.Session, role *policy.Role, set policy.RoleS
 	return r
 }
 
-// unpin 释放会话钉住的角色（session_end）。
+// unpin 释放会话钉住的角色与它的 CLI 进程上记的角色（session_end）。
 func (s *Server) unpin(sess proto.Session) {
+	key := sess.Tool + "\x00" + sess.CLISessionID
 	s.pinMu.Lock()
-	delete(s.pinned, sess.Tool+"\x00"+sess.CLISessionID)
+	delete(s.pinned, key)
+	for k, p := range s.procRoles {
+		if p.session == key {
+			delete(s.procRoles, k)
+		}
+	}
 	s.pinMu.Unlock()
+}
+
+// procRole 是一个 CLI 进程上记的角色约束。
+type procRole struct {
+	names   []string
+	session string
+	at      time.Time
+}
+
+// hookShells 是钩子与 CLI 之间常见的中间进程：CLI 多经 sh -c 起钩子，直接父进程是一次性的 shell，不是 CLI 本身。
+var hookShells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "fish": true, "ksh": true, "tcsh": true, "csh": true, "env": true}
+
+// cliIndex 是祖先链里会话的 CLI 进程：第一个不是 shell 的；名字都取不到时按直接父进程。
+func cliIndex(chain []proto.Proc) int {
+	for i, p := range chain {
+		if p.Name == "" {
+			return i
+		}
+		if !hookShells[filepath.Base(p.Name)] {
+			return i
+		}
+	}
+	return 0
+}
+
+func procKey(p proto.Proc) string { return fmt.Sprintf("%d@%s", p.PID, p.Start) }
+
+// inheritRole 让嵌套会话继承上层会话的角色约束（设计之外的加固，见 docs/agent-local-loop.md“角色防什么、不防什么”）：
+// 请求的祖先链里，在自己的 CLI 进程之上，若有另一个有角色的会话的 CLI 进程（进程号与启动时间都对上，防进程号复用），
+// 生效约束取自己与它们中更严的一边（policy.CombineRoles）。然后把这个会话的 CLI 进程连同约束它的角色名记下，供更下层继承
+// （三层嵌套靠这一步传递）。没有祖先链（老钩子、取不到）、没有角色文件或文件有误时原样返回。会话的 Role 改写成生效的名字。
+func (s *Server) inheritRole(req *proto.Request, role *policy.Role) *policy.Role {
+	chain := req.Ancestors
+	if len(chain) == 0 {
+		return role
+	}
+	st := s.roles.Current()
+	if st.Err != nil || !st.Exists {
+		return role
+	}
+	idx := cliIndex(chain)
+	self := chain[idx]
+	now := time.Now()
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	var ups []*policy.Role
+	for _, p := range chain[idx+1:] {
+		rec, ok := s.procRoles[procKey(p)]
+		if !ok {
+			continue
+		}
+		for _, n := range rec.names {
+			if r := st.Set.Find(n); r != nil {
+				ups = append(ups, r)
+			}
+		}
+	}
+	eff := policy.CombineRoles(role, ups)
+	if eff != nil && self.Start != "" {
+		names := append([]string{}, eff.Inherited()...)
+		if role != nil {
+			names = append([]string{role.Name}, names...)
+		}
+		key := procKey(self)
+		if _, ok := s.procRoles[key]; !ok && len(s.procRoles) >= maxPinned {
+			oldest, first := "", true
+			for k, p := range s.procRoles {
+				if first || p.at.Before(s.procRoles[oldest].at) {
+					oldest, first = k, false
+				}
+			}
+			delete(s.procRoles, oldest)
+		}
+		if s.procRoles == nil {
+			s.procRoles = map[string]procRole{}
+		}
+		s.procRoles[key] = procRole{names: names, session: req.Session.Tool + "\x00" + req.Session.CLISessionID, at: now}
+	}
+	req.Session.Role = roleName(eff)
+	return eff
 }
 
 // storePinLocked 记下会话钉住的角色。新会话进表前清掉过期的；还是满的就淘汰最久没用的那个。调用方持 pinMu。

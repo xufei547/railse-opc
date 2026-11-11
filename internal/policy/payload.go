@@ -86,8 +86,12 @@ func (c Context) Root() string {
 	}
 	// 角色的地盘（设计 §3.3）：写了 dirs 的角色在地盘外（典型：用 RAILSE_ROLE 在别处启动）没有项目根，写入一律 write_outside。
 	// 地盘内项目根语义不变，不扩大到角色的全部目录。
-	if c.Role != nil && len(c.Role.Dirs) > 0 && !c.Role.Covers(c.ProjectRoot, c.HomeDir) {
-		return ""
+	if c.Role != nil {
+		for _, r := range c.Role.territoryRoles() { // 合并过的角色要同时在每个来源的地盘里（见 CombineRoles）
+			if len(r.Dirs) > 0 && !r.Covers(c.ProjectRoot, c.HomeDir) {
+				return ""
+			}
+		}
 	}
 	return c.ProjectRoot
 }

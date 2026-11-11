@@ -82,6 +82,15 @@ func (e *Engine) Paused() bool { return e.paused.Load() }
 // 比越界的 ask 更严，不该被放宽。learned deny 输给命中的 user allow 是 0.2 的既定语义（见 betterRule），那时选中的是 allow，
 // 照样按 ceiling 越界。
 func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
+	d := e.evaluate(p, ctx)
+	// 合并了上层会话的角色时，越界与禁用的理由注明继承自谁
+	if (d.BeyondRole || d.Forbidden) && ctx.Role != nil {
+		d.Reason += ctx.Role.inheritedSuffix()
+	}
+	return d
+}
+
+func (e *Engine) evaluate(p Payload, ctx Context) Decision {
 	ctx = ctx.normalized()
 	risk, trig := ClassifyTrace(p, ctx)
 	huge := tooLongToAnalyze(p) // 超过分析上限：不跑规则（匹配也要解析命令），也不看禁用清单，见下

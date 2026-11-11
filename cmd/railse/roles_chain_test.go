@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -250,5 +251,48 @@ func TestChainClaudeMCPAndWebSearchPreToolUse(t *testing.T) {
 	}
 	if out, _, code := runHookWith(t, read, "claude", "--socket", sock); code != 0 || out != "" {
 		t.Errorf("Read 不进判定: code=%d %q", code, out)
+	}
+}
+
+// 真实取到的祖先链：从直接父进程起，带启动时间与名字（darwin、linux）。
+func TestReadAncestorsReal(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("这个平台取不到祖先链")
+	}
+	chain := readAncestors()
+	if len(chain) == 0 || chain[0].PID != os.Getppid() || chain[0].Start == "" || chain[0].Name == "" {
+		t.Fatalf("祖先链: %+v", chain)
+	}
+	again := readAncestors()
+	if again[0] != chain[0] {
+		t.Fatalf("同一进程两次取到的身份应相同: %+v %+v", chain[0], again[0])
+	}
+}
+
+// 完整链路：上层会话（RAILSE_ROLE=写作）里起的嵌套 CLI 用 RAILSE_ROLE=运维 换角色，仍受写作的禁用约束，钩子输出拒绝。
+func TestChainNestedCLIInheritsRole(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 写作\n    forbid:\n      - {command_prefix: \"git push\"}\n  - name: 运维\n    ceiling: destructive\n"), 0o600)
+	outer := []proto.Proc{{PID: 101, Start: "a", Name: "sh"}, {PID: 11, Start: "b", Name: "claude"}, {PID: 5, Start: "c", Name: "zsh"}}
+	nested := append([]proto.Proc{{PID: 202, Start: "d", Name: "sh"}, {PID: 22, Start: "e", Name: "claude"}, {PID: 150, Start: "f", Name: "bash"}}, outer[1:]...)
+	old := readAncestors
+	t.Cleanup(func() { readAncestors = old })
+	run := func(chain []proto.Proc, role, session, cmd string) string {
+		readAncestors = func() []proto.Proc { return chain }
+		t.Setenv("RAILSE_ROLE", role)
+		var doc map[string]any
+		json.Unmarshal([]byte(claudeTool(t, "PreToolUse", repo, "Bash", `{"command":"`+cmd+`"}`)), &doc)
+		doc["session_id"] = session
+		b, _ := json.Marshal(doc)
+		out, _, _ := runHookWith(t, string(b), "claude", "--socket", sock)
+		return out
+	}
+	run(outer, "写作", "outer", "git status")
+	if out := run(nested, "运维", "nested", "git push origin main"); outcomeOf(out) != "deny" || !strings.Contains(out, "继承自上层会话的角色「写作」") {
+		t.Fatalf("嵌套 CLI 换角色仍受上层约束: %q", out)
+	}
+	// 对照：不在上层会话之下的同角色会话不受影响（运维上限 destructive，git push 回 ask 交终端确认）
+	if out := run([]proto.Proc{{PID: 303, Start: "g", Name: "sh"}, {PID: 33, Start: "h", Name: "claude"}, {PID: 5, Start: "c", Name: "zsh"}}, "运维", "other", "git push origin main"); outcomeOf(out) == "deny" {
+		t.Fatalf("不在上层会话之下不该继承: %q", out)
 	}
 }

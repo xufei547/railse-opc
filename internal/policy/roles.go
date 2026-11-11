@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -113,6 +114,90 @@ type Role struct {
 	// 折叠大小写比较。没调 PrepareDirs 时为 nil，按原样展开 ~ 比较。
 	dirPats  [][]string
 	foldDirs bool
+	// inherited 是合并进来的上层会话的角色名（见 CombineRoles），理由里注明；territories 是要同时满足地盘的各个角色
+	// （自己与上层的），为空时只看自己。
+	inherited   []string
+	territories []*Role
+}
+
+// CombineRoles 把嵌套会话自己的角色 own（可为 nil，未分配）与上层会话的角色 inherited 合成生效的约束，取更严的一边：
+// 上限取最低的，禁用取并集，放行时长上限取最短的（none 最短），地盘要同时在每个写了 dirs 的角色里（见 Context.Root），
+// 有一个是“roles.yaml 有误”就按有误处理。名字显示自己的；自己未分配时显示第一个上层的。inherited 为空时原样返回 own。
+func CombineRoles(own *Role, inherited []*Role) *Role {
+	var ups []*Role
+	for _, r := range inherited {
+		if r != nil {
+			ups = append(ups, r)
+		}
+	}
+	if len(ups) == 0 {
+		return own
+	}
+	all := append([]*Role{}, ups...)
+	c := &Role{}
+	if own != nil {
+		all = append([]*Role{own}, ups...)
+		c.Name, c.Note = own.Name, own.Note
+		c.Dirs, c.dirPats, c.foldDirs = own.Dirs, own.dirPats, own.foldDirs
+	} else {
+		c.Name = ups[0].Name
+	}
+	for _, r := range all {
+		if r.Ceiling != nil && (c.Ceiling == nil || *r.Ceiling < *c.Ceiling) {
+			v := *r.Ceiling
+			c.Ceiling = &v
+		}
+		c.Forbid = append(c.Forbid, r.Forbid...)
+		c.compiled = append(c.compiled, r.forbidRules()...)
+		c.TrustMax = shorterTrust(c.TrustMax, r.TrustMax)
+		if r.broken != "" && c.broken == "" {
+			c.broken = r.broken
+		}
+		c.territories = append(c.territories, r.territoryRoles()...)
+	}
+	for _, r := range ups {
+		names := append([]string{r.Name}, r.inherited...)
+		for _, n := range names {
+			if n != "" && (own == nil || n != own.Name) && !slices.Contains(c.inherited, n) {
+				c.inherited = append(c.inherited, n)
+			}
+		}
+	}
+	return c
+}
+
+// shorterTrust 取两个放行时长上限里更短的：none 最短，不设最长。
+func shorterTrust(a, b TrustLimit) TrustLimit {
+	switch {
+	case !a.Set:
+		return b
+	case !b.Set:
+		return a
+	case a.None || b.None:
+		return TrustLimit{Set: true, None: true}
+	case b.D < a.D:
+		return b
+	}
+	return a
+}
+
+// territoryRoles 是判断地盘时要同时满足的角色：合并过的是各个来源，否则就是自己。
+func (r *Role) territoryRoles() []*Role {
+	if len(r.territories) > 0 {
+		return r.territories
+	}
+	return []*Role{r}
+}
+
+// Inherited 返回合并进来的上层会话的角色名（没有合并过为空）。
+func (r *Role) Inherited() []string { return r.inherited }
+
+// inheritedSuffix 是理由后面注明继承的那一句，没有继承时为空。
+func (r *Role) inheritedSuffix() string {
+	if r == nil || len(r.inherited) == 0 {
+		return ""
+	}
+	return "（继承自上层会话的角色「" + strings.Join(r.inherited, "、") + "」）"
 }
 
 // RoleSet 是 roles.yaml 的整体。
