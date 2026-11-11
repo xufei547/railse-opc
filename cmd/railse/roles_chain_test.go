@@ -398,3 +398,18 @@ func TestChainNewPreToolUseToolsIgnoredWithoutRole(t *testing.T) {
 		t.Errorf("有角色时 MCP 进判定（用户 deny 规则）: %q", out)
 	}
 }
+
+// 完整链路：有角色的会话里换 HOME 再起 CLI，按越界交人；没有角色时照旧。
+func TestChainHomeChangeIsBeyond(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 运维\n    ceiling: destructive\n"), 0o600)
+	t.Setenv("RAILSE_ROLE", "运维")
+	stdin, ad := chainInput(t, "claude-pre", repo, "HOME=/tmp/elsewhere claude -p deploy")
+	if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "ask" || !strings.Contains(out, "试图更改 Railse 的角色或放行设置") {
+		t.Fatalf("换 HOME 应越界: %q", out)
+	}
+	stdin, ad = chainInput(t, "gemini", repo, "XDG_CONFIG_HOME=/tmp/x gemini -p hi")
+	if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "deny" {
+		t.Fatalf("Gemini 越界一律拒: %q", out)
+	}
+}

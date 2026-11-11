@@ -3,6 +3,7 @@ package policy
 import (
 	"github.com/bmatcuk/doublestar/v4"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -191,9 +192,26 @@ func (r *Role) hasCommandForbid() bool {
 	return false
 }
 
-// railseEnvNames 是钩子从环境里读、决定会话角色与放行的变量：RAILSE_ROLE（角色）、RAILSE_TRUST（建会话放行）、RAILSE_HOME
-// （钩子连哪个守护进程）。有角色的会话改它们再起一个 CLI，就换到了别的角色、放行或守护进程。
-var railseEnvNames = []string{"RAILSE_ROLE", "RAILSE_TRUST", "RAILSE_HOME"}
+// railseEnvNames 与 railseEnvPrefixes 是改了就能换掉会话的角色、放行或配置位置的环境变量：RAILSE_*（角色、放行、守护进程目录等），
+// HOME 与 XDG_*（钩子按它们找守护进程与配置；CLI 也按它们找自己的设置与钩子配置），CLAUDE_CONFIG_DIR、CODEX_HOME、GEMINI_*
+// （各家 CLI 的配置目录：换了就等于换了一套没装钩子的配置）。有角色的会话改它们再起一个 CLI，就逃出了角色。
+var (
+	railseEnvNames    = []string{"HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"}
+	railseEnvPrefixes = []string{"RAILSE_", "XDG_", "GEMINI_"}
+)
+
+// isRailseEnvName 报告环境变量名 n 是不是上面这些。
+func isRailseEnvName(n string) bool {
+	if slices.Contains(railseEnvNames, n) {
+		return true
+	}
+	for _, p := range railseEnvPrefixes {
+		if strings.HasPrefix(n, p) && len(n) > len(p) {
+			return true
+		}
+	}
+	return false
+}
 
 // envSetters 是能设置或删除环境变量的命令：它们的参数里出现变量名本身（export X、unset X）也算改。
 var envSetters = map[string]bool{"export": true, "unset": true, "declare": true, "typeset": true, "readonly": true, "local": true, "env": true}
@@ -224,13 +242,21 @@ func segChangesRailseEnv(seg segment) bool {
 		setter = setter || envSetters[filepath.Base(argv[0])]
 	}
 	for i, w := range seg.argv {
-		for _, n := range railseEnvNames {
-			if strings.HasPrefix(w, n+"=") || strings.HasPrefix(w, n+"+=") || strings.HasPrefix(w, "-u"+n) {
+		name := w
+		if k, _, ok := strings.Cut(w, "="); ok {
+			name = strings.TrimSuffix(k, "+") // NAME=、NAME+=
+			if isRailseEnvName(name) {
 				return true
 			}
-			if setter && w == n {
-				return true
-			}
+		}
+		if strings.HasPrefix(name, "-u") && isRailseEnvName(name[2:]) { // env -uNAME
+			return true
+		}
+		if strings.HasPrefix(w, "--unset=") && isRailseEnvName(strings.TrimPrefix(w, "--unset=")) {
+			return true
+		}
+		if setter && isRailseEnvName(w) { // export NAME、unset NAME、env -u NAME
+			return true
 		}
 		if setter && i > 0 && flagAt(seg.argvFlags, i).expand {
 			return true

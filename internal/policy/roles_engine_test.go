@@ -576,3 +576,34 @@ func TestWrapperEffectsAndDeepRisk(t *testing.T) {
 		t.Errorf("用户 deny 规则对深剥结果归一化: %+v", d)
 	}
 }
+
+// 有角色的会话里改会挪走 CLI 或 Railse 配置位置的环境变量（HOME、XDG_*、CLAUDE_CONFIG_DIR、CODEX_HOME、GEMINI_*、RAILSE_*），
+// 与改 RAILSE_ROLE 一样按越界。
+func TestConfigLocationEnvChangeIsBeyond(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	for _, cmd := range []string{
+		"HOME=/tmp/x claude -p hi",
+		"env HOME=/tmp/x gemini",
+		"export HOME=/tmp/x; claude",
+		"unset HOME; codex",
+		"XDG_CONFIG_HOME=/tmp/x gemini",
+		"CLAUDE_CONFIG_DIR=/tmp/x claude",
+		"CODEX_HOME=/tmp/x codex exec y",
+		"GEMINI_CLI_HOME=/tmp/x gemini",
+		"RAILSE_LANG=en claude",
+		"env -u HOME claude",
+		"env --unset=HOME claude",
+	} {
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "运维")); !d.BeyondRole || !strings.Contains(d.Reason, "试图更改") {
+			t.Errorf("%s: 应越界: %+v", cmd, d)
+		}
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "")); d.BeyondRole {
+			t.Errorf("%s: 没有角色时照旧: %+v", cmd, d)
+		}
+	}
+	for _, cmd := range []string{"echo $HOME", "ls $XDG_CONFIG_HOME", "PATH=/x:$PATH make", "FOO_HOME=/x make"} {
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "运维")); strings.Contains(d.Reason, "试图更改") {
+			t.Errorf("%s: 不该算: %+v", cmd, d)
+		}
+	}
+}
