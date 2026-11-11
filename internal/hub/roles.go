@@ -3,11 +3,14 @@ package hub
 import (
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/xufei547/railse-opc/internal/hub/wire"
+	"github.com/xufei547/railse-opc/internal/policy"
 	"github.com/xufei547/railse-opc/internal/proto"
+	"github.com/xufei547/railse-opc/internal/redact"
 )
 
 // 角色（0.3 起）在 hub 这一侧：守护进程是判定者，hub 只存、聚合、展示。守护进程在 hello 与 roles 帧里报 roles.yaml 的角色摘要，
@@ -23,6 +26,7 @@ const (
 	maxRoleNameLen = 32  // 角色名的字符上限（同规格：1～32 个字符）
 	maxRoleNoteLen = 120 // 备注的字符上限
 	maxRoleDirs    = 32  // 每个角色至多这么多条目录模式
+	maxRoleForbid  = 999 // 禁用条数的上限，多的按它显示
 )
 
 // has 报告这条连接的守护进程在 hello 里声明了能力 f。
@@ -44,8 +48,10 @@ func sessionRole(c *agentConn, sess proto.Session) string {
 	return sess.Role
 }
 
-// cleanRoles 给守护进程报来的角色摘要兜底，返回副本：名字不合规的、重名的（留第一个）丢弃，至多 maxRoles 个；备注脱敏后截断，
-// 上限截断；禁用条数为负按 0；放行上限小于 -1 按 0（-1 是“不允许限时放行”）；目录去掉空的与超长的（截断会改变模式的意思），至多 maxRoleDirs 条。
+// cleanRoles 给守护进程报来的角色摘要兜底，返回副本：名字不合规的、重名的（留第一个）丢弃，至多 maxRoles 个；
+// 备注脱敏后并成一行（同推送正文的 clean：控制字符、换行当空白，去掉双向控制符等不可见的格式字符）、截到 maxRoleNoteLen 个字符；
+// 上限只认空串或 policy 认得的风险名，否则置空；禁用条数夹到 0～maxRoleForbid；放行上限只认 -1（不允许）、0（不设）或 5～1440 分钟，否则置 0；
+// 目录同样并成一行，原文超长的丢（截断会改变模式的意思），规整后为空的丢，至多 maxRoleDirs 条。
 func cleanRoles(in []proto.RoleSummary) []proto.RoleSummary {
 	out := make([]proto.RoleSummary, 0, min(len(in), maxRoles))
 	seen := map[string]bool{}
@@ -57,15 +63,20 @@ func cleanRoles(in []proto.RoleSummary) []proto.RoleSummary {
 			continue
 		}
 		seen[r.Name] = true
-		r.Note = redactText(r.Note, maxRoleNoteLen)
-		r.Ceiling = truncate(r.Ceiling, maxFieldLen)
-		r.ForbidCount = max(r.ForbidCount, 0)
-		if r.TrustMaxMins < -1 {
+		r.Note = clean(redact.Text(r.Note), maxRoleNoteLen)
+		if _, err := policy.ParseRisk(r.Ceiling); r.Ceiling != "" && err != nil {
+			r.Ceiling = ""
+		}
+		r.ForbidCount = min(max(r.ForbidCount, 0), maxRoleForbid)
+		if m := r.TrustMaxMins; m != -1 && m != 0 && (m < int(proto.TrustMin/time.Minute) || m > int(proto.TrustMax/time.Minute)) {
 			r.TrustMaxMins = 0
 		}
 		var dirs []string
 		for _, d := range r.Dirs {
-			if d == "" || len(d) > maxPathLen {
+			if len(d) > maxPathLen {
+				continue
+			}
+			if d = clean(d, maxPathLen); d == "" {
 				continue
 			}
 			if len(dirs) == maxRoleDirs {

@@ -349,3 +349,26 @@ func TestStaleConnectionCannotOverwriteRoles(t *testing.T) {
 		t.Fatalf("并发之后应是新连接最后一份: %v", got)
 	}
 }
+
+// 兜底再加严：备注与目录并成一行、去掉控制字符与双向控制符；上限只认空串或已知的风险名；禁用条数有上限；
+// 放行上限只认 -1、0 或 5～1440。
+func TestCleanRolesStrict(t *testing.T) {
+	got := cleanRoles([]proto.RoleSummary{
+		{Name: "a", Note: "第一行\n第二行‮反转\u0007", Ceiling: "network", ForbidCount: 5000, TrustMaxMins: 4, Dirs: []string{"~/a\nb", "~/⁦x⁩", "​"}},
+		{Name: "b", Ceiling: "everything", TrustMaxMins: 1441},
+		{Name: "c", Ceiling: "destructive", TrustMaxMins: 5},
+		{Name: "d", TrustMaxMins: 1440},
+		{Name: "e", TrustMaxMins: -1, ForbidCount: maxRoleForbid},
+	})
+	a := got[0]
+	if a.Note != "第一行 第二行反转" || a.Ceiling != "network" || a.ForbidCount != maxRoleForbid || a.TrustMaxMins != 0 ||
+		!slices.Equal(a.Dirs, []string{"~/a b", "~/x"}) {
+		t.Fatalf("a: %+v", a)
+	}
+	if got[1].Ceiling != "" || got[1].TrustMaxMins != 0 {
+		t.Fatalf("不认识的上限、超出范围的放行上限应置空、置 0: %+v", got[1])
+	}
+	if got[2].Ceiling != "destructive" || got[2].TrustMaxMins != 5 || got[3].TrustMaxMins != 1440 || got[4].TrustMaxMins != -1 || got[4].ForbidCount != maxRoleForbid {
+		t.Fatalf("合规的照留: %+v", got[2:])
+	}
+}
