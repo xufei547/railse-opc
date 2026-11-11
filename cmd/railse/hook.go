@@ -267,7 +267,7 @@ func noVerdict(stdout, stderr io.Writer, ad adapter.Adapter, in adapter.Input, w
 func askReason(resp proto.Response) string {
 	tail := i18n.T("已发到手机，也可以在这里直接批")
 	// 越界（角色上限、roles.yaml 有误）的 ask：理由换成角色的那句，比触发点更说明问题。resp.Reason 已由 awaitReply 按终端语言重拼过
-	if isRoleReason(resp.Reason) || resp.Reason == i18n.Lookup(reasonControlPlaneZH) {
+	if isRoleReason(resp.Reason) || resp.Reason == i18n.Lookup(reasonControlPlaneZH) || resp.Reason == i18n.Lookup("触及 Railse 自己的配置，不接受自动放行") {
 		return fmt.Sprintf(i18n.T("%s。%s"), resp.Reason, tail)
 	}
 	if resp.Trigger == nil {

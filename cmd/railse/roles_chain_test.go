@@ -65,7 +65,7 @@ func pauseAgent(t *testing.T, sock string) {
 
 // 越界、roles.yaml 有误、触及 Railse 配置目录，在“来源 × hub（没有 / 不可达 / 可达）× 暂停与否”上的最终输出。
 // Gemini 一律 deny（它的钩子交回终端等于继续执行）；Claude PreToolUse 越界回 ask；Claude PermissionRequest 与 Codex 交回
-// CLI 自己的确认框，hub 可达时由手机定（这里手机拒了）。暂停下触及配置目录而不越界的，Claude 与 Codex 照 0.2.3 交回终端。
+// CLI 自己的确认框，hub 可达时由手机定（这里手机拒了）。暂停不管越界，也不管触及配置目录（配置目录不接受任何自动放行）。
 func TestRolesChainRoutingTable(t *testing.T) {
 	deciders := map[string]agent.Decider{
 		"none":        agent.LocalDecider{},
@@ -100,8 +100,6 @@ func TestRolesChainRoutingTable(t *testing.T) {
 					switch {
 					case cli == "gemini":
 						want = "deny"
-					case kind == "control" && paused:
-						want = "pass" // 0.2.3：暂停即交回终端
 					case cli == "claude-pre":
 						want = "ask"
 					case hub == "reachable":
@@ -293,5 +291,41 @@ func TestChainNestedCLIInheritsRole(t *testing.T) {
 	// 对照：不在上层会话之下的同角色会话不受影响（运维上限 destructive，git push 回 ask 交终端确认）
 	if out := run([]proto.Proc{{PID: 303, Start: "g", Name: "sh"}, {PID: 33, Start: "h", Name: "claude"}, {PID: 5, Start: "c", Name: "zsh"}}, "运维", "other", "git push origin main"); outcomeOf(out) == "deny" {
 		t.Fatalf("不在上层会话之下不该继承: %q", out)
+	}
+}
+
+// writeRules 换掉守护进程的规则（规则文件 + reload）。
+func writeRules(t *testing.T, sock string, cfg agent.Config, yaml string) {
+	t.Helper()
+	os.WriteFile(cfg.RulesPath, []byte(yaml), 0o600)
+	c := hookclient.Client{SocketPath: sock, ConnectTimeout: 2 * time.Second}
+	if r, err := c.Control("reload"); err != nil || !r.OK {
+		t.Fatalf("reload: %v %+v", err, r)
+	}
+}
+
+// 配置目录不接受任何自动放行：哪怕用户手写了显式 risk: destructive 的 allow 规则，暂停与否、有无角色都一样，一律进人工决定。
+func TestChainControlPlaneNeverAutoAllowed(t *testing.T) {
+	for _, paused := range []bool{false, true} {
+		sock, repo, cfg := startTestAgent(t)
+		t.Setenv("RAILSE_ROLE", "")
+		writeRules(t, sock, cfg, "version: 1\nrules:\n  - id: user-cp\n    source: user\n    scope: global\n    match: {payload: shell, command_prefix: \"cp\", risk: destructive}\n    action: allow\n")
+		if paused {
+			pauseAgent(t, sock)
+		}
+		// 对照：同一条规则放行项目外的普通 cp（敏感路径之外的 destructive 不存在，这里用 .env 当 destructive 的对照）
+		if !paused {
+			stdin, ad := chainInput(t, "claude-pr", repo, "cp a .env")
+			if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "allow" {
+				t.Fatalf("对照：用户的 destructive allow 规则照常放行别的敏感路径: %q", out)
+			}
+		}
+		for cli, want := range map[string]string{"claude-pre": "ask", "claude-pr": "pass", "codex": "pass", "gemini": "deny"} {
+			stdin, ad := chainInput(t, cli, repo, "cp replacement.yaml ../h/roles.yaml")
+			out, _, code := runHookWith(t, stdin, ad, "--socket", sock)
+			if code != 0 || outcomeOf(out) != want {
+				t.Errorf("paused=%v %s: 想要 %s，得到 code=%d %q", paused, cli, want, code, out)
+			}
+		}
 	}
 }

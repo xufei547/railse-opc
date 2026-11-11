@@ -169,12 +169,21 @@ func (e *Engine) evaluate(p Payload, ctx Context) Decision {
 		base.Action, base.Reason = ActionAsk, "自动审批已暂停"
 		return base
 	}
+	// Railse 自己的配置不接受任何自动放行：内置、学来的、用户手写的（哪怕显式写了 risk: destructive）allow 都不适用，交人定；
+	// 拒绝规则照常生效。限时放行由守护进程据 ControlPlane 跳过
+	if base.ControlPlane && best != nil && best.Action == ActionAllow {
+		base.Action, base.Reason = ActionAsk, reasonControlPlaneNoAllow
+		return base
+	}
 	if best != nil {
 		return withRule(base, best)
 	}
 	base.Action, base.Reason = ActionAsk, "无规则命中，按 "+risk.String()+" 默认询问"
 	return base
 }
+
+// reasonControlPlaneNoAllow 是触及 Railse 自己的配置、规则本会放行却不放时的理由（固定句子，钩子 i18n.Lookup）。
+const reasonControlPlaneNoAllow = "触及 Railse 自己的配置，不接受自动放行"
 
 // withRule 把命中的规则填进结论。
 func withRule(d Decision, r *compiledRule) Decision {

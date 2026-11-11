@@ -676,7 +676,8 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 			resp.Decision, resp.DecidedBy, resp.Reason = "deny", entry.DecidedBy, entry.Reason
 			break
 		}
-		if s.rules.Paused() && !d.BeyondRole {
+		if s.rules.Paused() && !d.BeyondRole && !d.ControlPlane {
+			// 越界与触及 Railse 配置的都不归暂停管（见下）。
 			// 总开关打开：用户 deny 与角色禁用仍由引擎处理，其余一律交回终端，不去打扰 hub。
 			// 越界（含 roles.yaml 有误）不归暂停管：交回终端在 auto、acceptEdits、bypassPermissions 下等于放行，
 			// 它照下面的路走（PreToolUse 回 ask 强制终端确认，其余送人工决定），暂停只停自动决定、不放宽边界。
@@ -711,13 +712,13 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		if req.Source == proto.SourcePreToolUse {
 			// 本来会命中限时放行、因触及 Railse 配置而没放的（d.Reason 为 reasonControlPlane）也回 ask：交给 Claude 自己的流程
 			// 在 auto、bypassPermissions 下等于放行，放行本来要替人做的决定得交回人
-			if d.BeyondRole || d.Reason == reasonControlPlane || d.Risk >= policy.RiskOutward || s.settings.Load().ClaudeUndecided == UndecidedPhone {
+			if d.BeyondRole || d.ControlPlane || d.Risk >= policy.RiskOutward || s.settings.Load().ClaudeUndecided == UndecidedPhone {
 				// 硬底线、越界（或设置成一律送手机）：不在这里等手机。回 ask 让 Claude 弹终端确认框并触发 PermissionRequest，
 				// 那一条按老路送 hub；终端里同时能看到命令与触发点，谁先答谁算。不看 hub 状态：hub 不可达时
 				// PermissionRequest 交回终端，确认框还在（见 docs/superpowers/specs/2026-11-02-railse-opc-v0.2.2-two-screens-design.md §2.1）。
 				// 越界时理由换成角色的那句（钩子按终端语言重拼后放进确认框）。
 				reason := reasonAsked
-				if d.BeyondRole || d.Reason == reasonControlPlane {
+				if d.BeyondRole || d.Reason == reasonControlPlane || d.Reason == "触及 Railse 自己的配置，不接受自动放行" {
 					reason = d.Reason
 				}
 				entry.Action, entry.State, entry.DecidedBy, entry.Reason, entry.Trigger = "ask", "asked", decidedByAsk, reason, redactTrigger(d.Trigger)
