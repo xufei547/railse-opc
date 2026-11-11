@@ -82,7 +82,8 @@ func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 // request_updated 都用它。提问（kind ask）带 ask（题目），作答后带 answers（题面 → 答案原文）。
 // HasRedacted 为 true 表示载荷（或提问的题目）里有被脱敏抹掉的部分：网页展示的不是原文（命令行语境的脱敏可能连带吞掉紧贴的后半截命令），
 // 必须醒目告警，建议去终端核对。
-// CanTrust 为 true 表示批准时可以顺带限时放行：请求是审批（kind permission），所属机器在线且其守护进程声明了 trust 能力。
+// CanTrust 为 true 表示批准时可以顺带限时放行：请求是审批（kind permission）、没有超出角色的边界（beyond_role），
+// 所属机器在线且其守护进程声明了 trust 能力。role 与 beyond_role 来自 store.Request（0.3 起）。
 type requestView struct {
 	store.Request
 	// CLI 是请求所属会话的 sessions.tool 原值（claude、codex、gemini）；没有会话、查不到为空，读库出错记日志也为空；显示名由网页按它算。
@@ -149,7 +150,7 @@ func (s *Server) views(rs []store.Request) []requestView {
 			tools[r.SessionID] = tool
 		}
 		out = append(out, requestView{Request: r, CLI: tool, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: requestHasRedacted(r),
-			CanTrust: r.Kind == "permission" && s.trustSupported(r.MachineID)})
+			CanTrust: r.Kind == "permission" && !r.BeyondRole && s.trustSupported(r.MachineID)})
 	}
 	return out
 }

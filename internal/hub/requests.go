@@ -150,6 +150,7 @@ func cleanSession(sess proto.Session) proto.Session {
 	sess.CLISessionID = truncate(sess.CLISessionID, maxFieldLen)
 	sess.TurnID = truncate(sess.TurnID, maxFieldLen)
 	sess.Cwd = truncate(sess.Cwd, maxPathLen)
+	sess.Role = truncate(sess.Role, maxFieldLen) // 记进 hub 前还要过 sessionRole
 	return sess
 }
 
@@ -270,6 +271,7 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 		return
 	}
 	sess := cleanSession(p.Session)
+	sess.Role = sessionRole(c, sess)
 	toolName := truncate(p.ToolName, maxFieldLen)
 	if body.Kind == "ask" {
 		toolName = proto.AskToolName // 提问只有这一个工具，不照收帧里的（sameRequest 同口径）
@@ -289,7 +291,7 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 	r := store.Request{ID: p.RequestID, MachineID: m.ID, SessionID: s.upsertSession(m.ID, sess, projectName(root)), Kind: body.Kind,
 		ToolName: toolName, Payload: body.Payload, Ask: body.Ask, PayloadHash: body.Hash, Risk: body.Risk, ProjectRoot: root,
 		EngineReason: body.EngineReason, Trigger: body.Trigger, State: "pending", TurnID: sess.TurnID, CLISessionID: sess.CLISessionID,
-		CreatedAt: store.FormatTime(created), ExpiresAt: &expires}
+		CreatedAt: store.FormatTime(created), ExpiresAt: &expires, Role: sess.Role, BeyondRole: body.BeyondRole}
 	if err := s.store.InsertRequest(r); err != nil {
 		s.log.Printf("登记请求 %q: %v", p.RequestID, err)
 		s.rejectPending(c, p.RequestID, "登记失败")
@@ -374,6 +376,8 @@ type pendingBody struct {
 	Risk         string
 	EngineReason string
 	Trigger      *policy.Trigger
+	// BeyondRole 是守护进程说的“超出角色的边界”，只有审批有。不论守护进程声明没声明 role 都照收：它只会让 hub 少给“记住”与“限时放行”。
+	BeyondRole bool
 }
 
 // readPending 按种类读出守护进程送来的待决请求：没有 kind（旧守护进程）或 permission 是审批，载荷再脱敏（守护进程已脱敏，
@@ -384,7 +388,7 @@ func readPending(p wire.PendingRequest) (pendingBody, error) {
 	case "", "permission":
 		payload := redact.Payload(p.Payload)
 		return pendingBody{Kind: "permission", Payload: payload, Hash: store.PayloadHash(payload), Risk: truncate(p.Risk, maxFieldLen),
-			EngineReason: redactText(p.EngineReason, maxTextLen), Trigger: cleanTrigger(p.Trigger)}, nil
+			EngineReason: redactText(p.EngineReason, maxTextLen), Trigger: cleanTrigger(p.Trigger), BeyondRole: p.BeyondRole}, nil
 	case "ask":
 		if err := checkAsk(p.Ask); err != nil {
 			return pendingBody{}, err
@@ -943,9 +947,11 @@ func (s *Server) expireLoop(ctx context.Context) {
 	}
 }
 
-// onAudit 收守护进程的审计批次：每条兜底脱敏后入库；question/done 存成 recorded 行；permission、ask 条目按白名单更新 hub。
+// onAudit 收守护进程从连接 c 送来的审计批次：每条兜底脱敏后入库；question/done 存成 recorded 行；permission、ask 条目按白名单更新 hub。
 // 条目指向别的机器的请求时，审计行不挂到那条请求上（request_id 置空，detail 保留原值），也不据它改 hub。
-func (s *Server) onAudit(m store.Machine, a wire.Audit) {
+// 补的行与会话的角色按 sessionRole（守护进程没声明 role 时为未分配）。
+func (s *Server) onAudit(c *agentConn, a wire.Audit) {
+	m := c.machine
 	bad, foreign := 0, 0
 	for _, raw := range a.Entries {
 		var e agent.AuditEntry
@@ -955,6 +961,7 @@ func (s *Server) onAudit(m store.Machine, a wire.Audit) {
 		}
 		idOK := validRequestID(e.RequestID)
 		e = cleanEntry(e)
+		e.Session.Role = sessionRole(c, e.Session)
 		ts := hubTime(e.TS)
 		// detail 用解码后的结构重新编码：未知字段（如钩子进程的环境变量）被丢弃，载荷与文本已再脱敏
 		detail, err := json.Marshal(e)
@@ -1014,7 +1021,8 @@ func eventID(machineID string, e agent.AuditEntry, detail []byte) string {
 // e 已经过 cleanEntry：Message 已脱敏。同一条目再来（批次重发，含两条连接并发处理同一批）时该行已存在，静默跳过。
 func (s *Server) recordEvent(m store.Machine, e agent.AuditEntry, ts time.Time, detail []byte) {
 	r := store.Request{ID: eventID(m.ID, e, detail), MachineID: m.ID, SessionID: s.upsertSession(m.ID, e.Session, ""), Kind: e.Kind, ToolName: e.ToolName,
-		State: "recorded", Title: truncate(e.Message, maxTitleLen), TurnID: e.Session.TurnID, CLISessionID: e.Session.CLISessionID, CreatedAt: store.FormatTime(ts)}
+		State: "recorded", Title: truncate(e.Message, maxTitleLen), TurnID: e.Session.TurnID, CLISessionID: e.Session.CLISessionID, CreatedAt: store.FormatTime(ts),
+		Role: e.Session.Role}
 	inserted, err := s.store.InsertRequestIfAbsent(r)
 	if err != nil {
 		s.log.Printf("记机器 %s 的 %q 事件: %v", m.ID, e.Kind, err)
@@ -1067,7 +1075,7 @@ func (s *Server) applyAgentFinal(m store.Machine, e agent.AuditEntry, ts time.Ti
 	created := store.FormatTime(ts)
 	r := store.Request{ID: e.RequestID, MachineID: m.ID, SessionID: s.upsertSession(m.ID, e.Session, ""), Kind: e.Kind, ToolName: e.ToolName,
 		Risk: e.Risk, EngineReason: e.Reason, Trigger: e.Trigger, State: e.State, DecidedBy: e.DecidedBy, RuleID: e.RuleID, TurnID: e.Session.TurnID,
-		CLISessionID: e.Session.CLISessionID, CreatedAt: created, DecidedAt: &created}
+		CLISessionID: e.Session.CLISessionID, CreatedAt: created, DecidedAt: &created, Role: e.Session.Role}
 	switch {
 	case e.Kind == "ask":
 		r.Ask, r.Risk = e.Ask, ""
