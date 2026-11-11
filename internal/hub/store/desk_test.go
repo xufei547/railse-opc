@@ -203,3 +203,28 @@ func TestDeskWindowBoundary(t *testing.T) {
 		t.Fatalf("早于窗口的会话不算: %v", n)
 	}
 }
+
+// 计数里 pending 那一支走状态索引（requests_state_created），不论多旧都查得到又不全表扫。
+func TestDeskPendingBranchUsesStateIndex(t *testing.T) {
+	s := openTemp(t)
+	rows, err := s.db.Query("EXPLAIN QUERY PLAN "+deskCountsSQL, FormatTime(time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused int
+		var d string
+		if err := rows.Scan(&id, &parent, &notused, &d); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, d)
+	}
+	if !slices.ContainsFunc(plan, func(d string) bool { return strings.Contains(d, "requests_state_created") }) {
+		t.Fatalf("pending 那一支应走 requests_state_created: %q", plan)
+	}
+	if !slices.ContainsFunc(plan, func(d string) bool { return strings.Contains(d, "requests_window") }) {
+		t.Fatalf("窗口那一支应走 requests_window: %q", plan)
+	}
+}

@@ -11,7 +11,8 @@ import (
 )
 
 // 总台（0.3 起）：GET /api/desk 按角色聚合每台机器的等我、放行中、拦下、自动放行、会话数与最近动作。口径（规格第 6 节）：
-//   - 行 = 角色表的每一行（按机器、文件里的先后），加上每台机器一行“未分配”：该机器 24 小时内有未分配的请求或有未分配的生效放行时才出现。
+//   - 行 = 角色表的每一行（按机器、文件里的先后），加上每台机器一行“未分配”：该机器有未分配的待批（不论多旧）、24 小时内有未分配的请求
+//     或有未分配的生效放行时才出现。
 //     库里有请求、会话、放行但角色已从文件里删掉的，并进未分配。已吊销的机器与 webhook 不进总台。
 //   - waiting：pending 的 permission 与 ask。denied：24 小时内（按创建时间）permission 的 denied + auto_denied。
 //     auto_allowed：24 小时内 permission 的 auto_allowed。sessions：24 小时内有事件的会话数（按会话当前的角色）。
@@ -211,7 +212,7 @@ func (s *Server) buildDesk(now time.Time) (deskView, error) {
 			out.Roles = append(out.Roles, deskRole{deskMachine: dm, Name: r.Name, Note: r.Note, Ceiling: r.Ceiling, ForbidCount: r.ForbidCount,
 				TrustMaxMins: r.TrustMaxMins, Dirs: dirs, deskStats: finishStats(agg[store.DeskKey{MachineID: m.ID, Role: r.Name}])})
 		}
-		if a := agg[store.DeskKey{MachineID: m.ID}]; a != nil && (a.requests > 0 || a.TrustsActive > 0) {
+		if a := agg[store.DeskKey{MachineID: m.ID}]; a != nil && (a.Waiting > 0 || a.requests > 0 || a.TrustsActive > 0) {
 			out.Unassigned = append(out.Unassigned, deskUnassigned{deskMachine: dm, deskStats: finishStats(a)})
 		}
 	}

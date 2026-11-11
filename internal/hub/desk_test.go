@@ -212,3 +212,30 @@ func TestDeskRequiresLogin(t *testing.T) {
 		t.Fatalf("没登录应 401: %d", resp.StatusCode)
 	}
 }
+
+// 超过 24 小时的待批也要看得到：角色为空、角色已从文件里删掉的 permission 与 ask，不论多旧都并进未分配、计入等我，未分配一行照样出现。
+func TestDeskOldPendingUnassigned(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	m, err := h.st.CreateMachine("mac", "sec", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.st.ReplaceMachineRoles(m.ID, []proto.RoleSummary{{Name: "写作"}}); err != nil {
+		t.Fatal(err)
+	}
+	old := 30 * time.Hour
+	deskInsert(t, h, store.Request{ID: "e1", MachineID: m.ID, Kind: "permission", State: "pending", Role: ""}, old)
+	deskInsert(t, h, store.Request{ID: "e2", MachineID: m.ID, Kind: "ask", State: "pending", Role: "", ToolName: proto.AskToolName}, old)
+	deskInsert(t, h, store.Request{ID: "g1", MachineID: m.ID, Kind: "permission", State: "pending", Role: "已删"}, old)
+	deskInsert(t, h, store.Request{ID: "g2", MachineID: m.ID, Kind: "ask", State: "pending", Role: "已删", ToolName: proto.AskToolName}, old)
+	deskInsert(t, h, store.Request{ID: "k1", MachineID: m.ID, Kind: "permission", State: "pending", Role: "写作"}, old)
+	var got deskJSON
+	getJSON(t, h, ck, "/api/desk", &got)
+	if len(got.Roles) != 1 || got.Roles[0].Waiting != 1 {
+		t.Fatalf("写作的等我: %+v", got.Roles)
+	}
+	if len(got.Unassigned) != 1 || got.Unassigned[0].Waiting != 4 {
+		t.Fatalf("超过 24 小时的未分配与已删角色的待批应在未分配一行、等我 4: %+v", got.Unassigned)
+	}
+}
