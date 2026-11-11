@@ -163,6 +163,8 @@ export interface Inbox {
   pending: RequestView[]
   /** 最近 24 小时还在等回答的 question，按创建时间倒序。 */
   questions: RequestView[]
+  /** pending 被截断（只给了最新的 500 条），还有更早的；老 hub 没有这个键。 */
+  pending_truncated?: boolean
 }
 
 /** POST /api/requests/{id}/propose 的返回：“记住”会生成的规则草案。 */

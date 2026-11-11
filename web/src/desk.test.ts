@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { applyFilter, boundaryLine, deskGroups, filterLabel, inboxHref, initialRoles, knownRoles, parseFilter, roleText, rolesReducer, unassignedLists, type KnownRoles } from './desk'
+import { boundaryLine, deskGroups, filterLabel, filterReducer, inboxHref, inboxQuery, initialFilter, parseFilter, roleText } from './desk'
 import { setLang } from './i18n'
 import type { Desk, DeskRow } from './types'
 
@@ -55,19 +55,20 @@ describe('筛选', () => {
     expect(parseFilter(new URLSearchParams('machine=m2'))).toEqual({ role: null, machine: 'm2' })
     expect(parseFilter(new URLSearchParams(inboxHref(row({ name: '写作' })).split('?')[1]))).toEqual({ role: '写作', machine: 'm1' })
   })
-  it('applyFilter：按角色（没有键的算未分配）与机器', () => {
-    const list = [
-      { id: 'a', role: '写作', machine_id: 'm1' },
-      { id: 'b', role: '', machine_id: 'm1' },
-      { id: 'c', machine_id: 'm1' },
-      { id: 'd', role: '写作', machine_id: 'm2' },
-    ]
-    const ids = (f: ReturnType<typeof parseFilter>) => applyFilter(list, f).map((x) => x.id)
-    expect(ids(null)).toEqual(['a', 'b', 'c', 'd'])
-    expect(ids({ role: '写作', machine: 'm1' })).toEqual(['a'])
-    expect(ids({ role: '', machine: 'm1' })).toEqual(['b', 'c'])
-    expect(ids({ role: '写作', machine: null })).toEqual(['a', 'd'])
-    expect(ids({ role: null, machine: 'm2' })).toEqual(['d'])
+  it('inboxQuery：筛选进查询串（role 为空串也带上，表示未分配），没有筛选为空', () => {
+    expect(inboxQuery(null)).toBe('')
+    expect(inboxQuery({ role: '', machine: 'm1' })).toBe('?role=&machine=m1')
+    expect(inboxQuery({ role: '写 作', machine: null })).toBe('?role=%E5%86%99+%E4%BD%9C')
+    expect(inboxQuery({ role: null, machine: 'm2' })).toBe('?machine=m2')
+  })
+  it('filterReducer：进入或重试为加载中，取到为 ok，失败为 error', () => {
+    let s = filterReducer(initialFilter, { type: 'enter' })
+    expect(s).toEqual({ status: 'loading' })
+    s = filterReducer(s, { type: 'data', inbox: { pending: [], questions: [] } })
+    expect(s.status).toBe('ok')
+    s = filterReducer(s, { type: 'error', message: '超时' })
+    expect(s).toEqual({ status: 'error', message: '超时' })
+    expect(filterReducer(s, { type: 'retry' })).toEqual({ status: 'loading' })
   })
   it('filterLabel', () => {
     expect(filterLabel({ role: '写作', machine: 'm1' }, 'mac')).toBe('角色「写作」 · mac')
@@ -87,84 +88,5 @@ describe('roleText', () => {
     expect(roleText({})).toBeNull()
     setLang('en')
     expect(roleText({ role: 'writer', beyond_role: true })).toEqual({ text: 'Beyond the limits of role "writer"', beyond: true })
-  })
-})
-
-describe('未分配 = 角色为空，或不在该机器当前角色表里', () => {
-  const list = [
-    { id: 'a', role: '写作', machine_id: 'm1' },
-    { id: 'b', role: '', machine_id: 'm1' },
-    { id: 'c', role: '已删', machine_id: 'm1' },
-    { id: 'd', role: '写作', machine_id: 'm2' }, // m2 没有“写作”：对 m2 也是未分配
-    { id: 'e', role: '运维', machine_id: 'm2' },
-  ]
-  const known = { m1: ['写作'], m2: ['运维'] }
-  const ids = (f: Parameters<typeof applyFilter>[1], k?: Record<string, string[]>) => applyFilter(list, f, k).map((x) => x.id)
-  it('有角色表时按它判', () => {
-    expect(ids({ role: '', machine: 'm1' }, known)).toEqual(['b', 'c'])
-    expect(ids({ role: '', machine: null }, known)).toEqual(['b', 'c', 'd'])
-    expect(ids({ role: '写作', machine: 'm1' }, known)).toEqual(['a'])
-  })
-  it('还没有角色表时只认空串', () => {
-    expect(ids({ role: '', machine: 'm1' })).toEqual(['b'])
-  })
-  it('knownRoles 从总台取每台机器的角色名', () => {
-    expect(knownRoles({ window_hours: 24, roles: [row({ name: '写作' }), row({ name: '开发' }), row({ machine_id: 'm2', name: '运维' })], unassigned: [row({ machine_id: 'm3' })] })).toEqual({
-      m1: ['写作', '开发'],
-      m2: ['运维'],
-      m3: [],
-    })
-  })
-})
-
-describe('收件箱“未分配”筛选的角色表快照', () => {
-  const list = [
-    { id: 'a', role: '写作', machine_id: 'm1' },
-    { id: 'b', role: '', machine_id: 'm1' },
-    { id: 'c', role: '已删', machine_id: 'm1' },
-    { id: 'n1', role: '新角色', machine_id: 'm9' }, // 快照之后才接入的机器
-    { id: 'n2', role: '', machine_id: 'm9' },
-  ]
-  const ids = (known: KnownRoles) => applyFilter(list, { role: '', machine: null }, known).map((x) => x.id)
-
-  it('多机器：快照里没有的机器不当成空角色表，它的请求只按“角色为空”判未分配', () => {
-    expect(ids({ m1: ['写作'] })).toEqual(['b', 'c', 'n2'])
-  })
-
-  it('陈旧：角色新增、删除后按最新的快照判', () => {
-    let s = rolesReducer(initialRoles, { type: 'enter' })
-    s = rolesReducer(s, { type: 'data', known: { m1: ['写作'] } })
-    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'list', items: [list[1], list[2]] })
-    // 新增了“已删”这个角色（比如改名回来）、删掉了“写作”
-    s = rolesReducer(s, { type: 'data', known: { m1: ['已删'] } })
-    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'list', items: [list[0], list[1]] })
-  })
-
-  it('进入筛选时先显示加载中，取到完整快照前不展示部分结果', () => {
-    const s = rolesReducer(rolesReducer(initialRoles, { type: 'data', known: { m1: [] } }), { type: 'enter' })
-    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'loading' })
-  })
-
-  it('取失败：显示错误，不展示部分结果；重试回到加载中；之后成功照常', () => {
-    let s = rolesReducer(initialRoles, { type: 'enter' })
-    s = rolesReducer(s, { type: 'error', message: '连不上 hub' })
-    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'error', message: '连不上 hub' })
-    // 成功过之后再失败也一样不展示（快照可能已过时）
-    s = rolesReducer(rolesReducer(s, { type: 'data', known: { m1: [] } }), { type: 'error', message: '超时' })
-    expect(unassignedLists(s, list, { role: '', machine: 'm1' }).kind).toBe('error')
-    s = rolesReducer(s, { type: 'retry' })
-    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'loading' })
-    s = rolesReducer(s, { type: 'data', known: { m1: ['写作', '已删'] } })
-    expect(unassignedLists(s, list, { role: '', machine: 'm1' })).toEqual({ kind: 'list', items: [list[1]] })
-  })
-
-  it('老 hub（没有总台）：没有角色，只认空串', () => {
-    const s = rolesReducer(rolesReducer(initialRoles, { type: 'enter' }), { type: 'unsupported' })
-    expect(unassignedLists(s, list, { role: '', machine: null })).toEqual({ kind: 'list', items: [list[1], list[4]] })
-  })
-
-  it('不是“未分配”筛选时不看快照', () => {
-    expect(unassignedLists(initialRoles, list, { role: '写作', machine: null })).toEqual({ kind: 'list', items: [list[0]] })
-    expect(unassignedLists(initialRoles, list, null)).toEqual({ kind: 'list', items: list })
   })
 })

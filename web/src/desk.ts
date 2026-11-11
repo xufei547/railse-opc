@@ -3,7 +3,7 @@
 import { minutesLabel } from './decide'
 import { riskLabel } from './format'
 import { t } from './i18n'
-import type { Desk, DeskRow, RequestView } from './types'
+import type { Desk, DeskRow, Inbox, RequestView } from './types'
 
 /** 放行上限的时长：30 分钟、2 小时、24 小时用面板上那几个按钮的说法；整小时说小时，其余说分钟。 */
 function durationLabel(mins: number): string {
@@ -60,88 +60,32 @@ export function parseFilter(q: URLSearchParams): InboxFilter | null {
   return { role: q.get('role'), machine: q.get('machine') }
 }
 
-/** 每台机器当前角色表里的角色名（来自 GET /api/desk）；只出现在未分配一栏的机器为空数组。收件箱的“未分配”筛选据此判断。 */
-export type KnownRoles = Record<string, string[]>
-
-export function knownRoles(d: Desk): KnownRoles {
-  const out: KnownRoles = {}
-  for (const r of [...d.roles, ...d.unassigned]) {
-    out[r.machine_id] ??= []
-    if (r.name !== undefined) out[r.machine_id]!.push(r.name)
-  }
-  return out
+/** 收件箱筛选的查询串（GET /api/inbox?role=…&machine=…）：role 为空串也带上（表示未分配，由 hub 判）；没有筛选为空串。 */
+export function inboxQuery(f: InboxFilter | null): string {
+  if (!f) return ''
+  const q = new URLSearchParams()
+  if (f.role !== null) q.set('role', f.role)
+  if (f.machine !== null) q.set('machine', f.machine)
+  return '?' + q.toString()
 }
 
 /**
- * 按筛选留下匹配的请求；没有 role 键的（老 hub）算空串。“未分配”（role 为空串）与总台同口径：角色为空，或不在该机器当前的角色表里
- * （角色已从 roles.yaml 删掉的）。快照里没有的机器（快照之后才接入、或没取到）不当成空角色表，它的请求只按“角色为空”判；
- * 没有快照（known 为空，老 hub）时一律只认空串。
+ * 收件箱有筛选时的列表：由 hub 筛好（在截断之前，“未分配”也由 hub 判），网页不拿全局列表自己筛。
+ * 进入筛选或重试为 loading（不展示列表），取到为 ok，取失败为 error（给重试）。筛选开着期间随事件重取，成功就换成最新的。
  */
-export function applyFilter<T extends Pick<RequestView, 'machine_id'> & { role?: string }>(list: T[], f: InboxFilter | null, known?: KnownRoles | null): T[] {
-  if (!f) return list
-  const roleOK = (r: T) => {
-    const role = r.role ?? ''
-    if (f.role === null) return true
-    if (f.role !== '') return role === f.role
-    if (role === '') return true
-    const names = known?.[r.machine_id]
-    return names !== undefined && !names.includes(role)
-  }
-  return list.filter((r) => roleOK(r) && (f.machine === null || r.machine_id === f.machine))
-}
+export type FilterState = { status: 'loading' } | { status: 'ok'; inbox: Inbox } | { status: 'error'; message: string }
+export type FilterAction = { type: 'enter' } | { type: 'retry' } | { type: 'data'; inbox: Inbox } | { type: 'error'; message: string }
+export const initialFilter: FilterState = { status: 'loading' }
 
-/**
- * 收件箱“未分配”筛选用的角色表快照：进入筛选时重新取（loading），取到为 ok，取失败为 error（不展示部分结果，给重试），
- * 老 hub（没有总台）为 unsupported（没有角色，只认空串）。筛选开着期间随事件重取，成功就换成最新的。
- */
-export type RolesState =
-  | { status: 'loading' }
-  | { status: 'ok'; known: KnownRoles }
-  | { status: 'error'; message: string }
-  | { status: 'unsupported' }
-
-export type RolesAction =
-  | { type: 'enter' }
-  | { type: 'retry' }
-  | { type: 'data'; known: KnownRoles }
-  | { type: 'error'; message: string }
-  | { type: 'unsupported' }
-
-export const initialRoles: RolesState = { status: 'loading' }
-
-export function rolesReducer(s: RolesState, a: RolesAction): RolesState {
+export function filterReducer(_s: FilterState, a: FilterAction): FilterState {
   switch (a.type) {
     case 'enter':
     case 'retry':
       return { status: 'loading' }
     case 'data':
-      return { status: 'ok', known: a.known }
+      return { status: 'ok', inbox: a.inbox }
     case 'error':
       return { status: 'error', message: a.message }
-    case 'unsupported':
-      return { status: 'unsupported' }
-  }
-}
-
-/**
- * 收件箱某一列表在筛选下该显示什么：不是“未分配”筛选时直接筛；是“未分配”时要有完整的快照才筛，
- * 还在取为 loading，取失败为 error（这两种都不展示列表）。
- */
-export function unassignedLists<T extends Pick<RequestView, 'machine_id'> & { role?: string }>(
-  roles: RolesState,
-  list: T[],
-  f: InboxFilter | null,
-): { kind: 'list'; items: T[] } | { kind: 'loading' } | { kind: 'error'; message: string } {
-  if (f?.role !== '') return { kind: 'list', items: applyFilter(list, f) }
-  switch (roles.status) {
-    case 'loading':
-      return { kind: 'loading' }
-    case 'error':
-      return { kind: 'error', message: roles.message }
-    case 'unsupported':
-      return { kind: 'list', items: applyFilter(list, f, null) }
-    case 'ok':
-      return { kind: 'list', items: applyFilter(list, f, roles.known) }
   }
 }
 

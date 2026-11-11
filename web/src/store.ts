@@ -9,6 +9,8 @@ export interface State {
   pending: RequestView[]
   /** 还在等回答的问题，按创建时间倒序（与 hub 一致）。 */
   questions: RequestView[]
+  /** 全局待批列表被 hub 截断了（还有更早的没给）：收件箱底部提示并给按机器查看的入口。 */
+  pendingTruncated: boolean
   status: Status | null
   rules: Rule[] | null
   rulesStale: boolean
@@ -35,6 +37,7 @@ export const initialState: State = {
   connected: false,
   pending: [],
   questions: [],
+  pendingTruncated: false,
   status: null,
   rules: null,
   rulesStale: false,
@@ -144,6 +147,7 @@ export function reduce(state: State, action: Action): State {
         error: null,
         pending: [...action.inbox.pending].sort(byCreated),
         questions: action.inbox.questions,
+        pendingTruncated: action.inbox.pending_truncated === true,
         status: action.status,
         loads: state.loads + 1,
       }

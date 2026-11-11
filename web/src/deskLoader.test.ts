@@ -127,6 +127,21 @@ describe('createDeskLoader', () => {
     h.loader.stop()
   })
 
+  it('404 → 离开 → 返回：再次启动时重新告诉页面“不支持”，不会一直加载', async () => {
+    const h = harness()
+    h.loader.start()
+    await vi.advanceTimersByTimeAsync(0)
+    h.calls[0]!.reject(new ApiError(404, '没有这个接口'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.unsupported()).toBe(1)
+    h.loader.stop()
+    h.loader.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.unsupported()).toBe(2)
+    expect(h.calls).toHaveLength(1)
+    h.loader.stop()
+  })
+
   it('401 不报错（登录失效回调已在跳登录页）', async () => {
     const h = harness()
     h.loader.start()

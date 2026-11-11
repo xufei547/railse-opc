@@ -204,6 +204,7 @@ ol.steps li { margin: 4px 0; }
 .filter-bar { display: flex; align-items: center; gap: 8px; padding: 6px 0 10px; font-size: 14px; }
 .filter-bar .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .filter-bar .btn.small { margin-left: 0; }
+.truncated-hint { margin: 12px 0; overflow-wrap: anywhere; }
 /* 超出角色边界：卡片上的红色标签行、详情属性里的标签、批准面板里代替“记住”“放行”两个开关的说明 */
 .card .role-line { margin-top: 6px; }
 .tag.attr-tag { margin-left: 6px; }

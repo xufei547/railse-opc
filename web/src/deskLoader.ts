@@ -1,14 +1,13 @@
-// 总台页的重取调度（纯逻辑，Desk.tsx 原样使用；不依赖 React，便于用假定时器测）。
+// 总台页与收件箱筛选结果的重取调度（纯逻辑，Desk.tsx、Inbox.tsx 原样使用；不依赖 React，便于用假定时器测）。
 // 规则：同一时刻至多一次在取；在途期间来的事件只标“脏”，在途的结果照常采用，结束后若脏再取一次（事件再密也不会饿死）；
 // 两次开始之间至少隔 throttleMs；开着时每 pollMs 再取一次（机器上下线、角色表变化没有实时事件）；
-// stop（卸载）之后在途的结果丢弃；老 hub 回 404 时调 onUnsupported 一次，停止轮询，之后的事件也不再取；401 不报（登录失效回调已在跳登录页）。
+// stop（卸载）之后在途的结果丢弃；老 hub 回 404 时调 onUnsupported，停止轮询，之后的事件也不再取，再次 start 时再调一次 onUnsupported；401 不报（登录失效回调已在跳登录页）。
 
 import { ApiError } from './api'
-import type { Desk } from './types'
 
-export interface DeskLoaderOptions {
-  fetch: () => Promise<Desk>
-  onData: (d: Desk) => void
+export interface DeskLoaderOptions<T> {
+  fetch: () => Promise<T>
+  onData: (d: T) => void
   onError: (e: unknown) => void
   onUnsupported: () => void
   throttleMs: number
@@ -24,7 +23,7 @@ export interface DeskLoader {
   stop(): void
 }
 
-export function createDeskLoader(o: DeskLoaderOptions): DeskLoader {
+export function createDeskLoader<T>(o: DeskLoaderOptions<T>): DeskLoader {
   let gen = 0 // 每次 stop 加一：上一轮挂载的在途结果据此丢弃
   let running = false
   let inflight = false
@@ -89,7 +88,11 @@ export function createDeskLoader(o: DeskLoaderOptions): DeskLoader {
       inflight = false
       dirty = false
       last = -Infinity // 新挂载要立刻有数据，不跟上一轮的节流
-      if (!unsupported) poll = setInterval(request, o.pollMs)
+      if (unsupported) {
+        o.onUnsupported() // 已知不支持：再告诉页面一次（离开再回来的页面状态是新的），不再请求
+        return
+      }
+      poll = setInterval(request, o.pollMs)
       request()
     },
     request,

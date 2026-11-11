@@ -10,7 +10,8 @@ import type { State } from '../store'
 import { StoreProvider } from '../StoreProvider'
 import type { Desk, DeskRow, RequestView } from '../types'
 import { DeskBody, DeskUnsupported, RoleCard } from './Desk'
-import { Inbox, RolesGate } from './Inbox'
+import { Inbox } from './Inbox'
+import type { FilterState } from '../desk'
 
 const store = vi.hoisted(() => ({ over: null as Partial<State> | null }))
 
@@ -161,38 +162,59 @@ describe('收件箱按角色筛选', () => {
       questions: [],
     }
   })
-  it('只显示匹配的，顶部有可清除的筛选条', () => {
-    const h = render('/inbox?role=%E5%86%99%E4%BD%9C&machine=m1')
-    expect(h).toContain('cmd-a')
-    expect(h).not.toContain('cmd-b')
-    expect(h).not.toContain('cmd-c')
-    expect(h).toContain('只看：角色「写作」 · mac')
+  const filtered = (url: string, f: FilterState) =>
+    html(
+      <StoreProvider onUnauthorized={() => {}}>
+        <Inbox initialFiltered={f} />
+      </StoreProvider>,
+      url,
+    )
+  it('有筛选时不拿全局列表在前端筛：先显示加载中，顶部有可清除的筛选条', () => {
+    const h = render('/inbox?role=&machine=m1')
+    expect(h).toContain('只看：未分配 · mac')
     expect(h).toContain('清除筛选')
+    expect(h).toContain('加载中…')
+    for (const c of ['cmd-a', 'cmd-b', 'cmd-c']) expect(h).not.toContain(c)
+  })
+  it('筛选结果来自后端（hub 已在截断之前筛好）', () => {
+    const h = filtered('/inbox?role=&machine=m1', {
+      status: 'ok',
+      inbox: { pending: [req({ id: 'g', role: '已删', payload: { type: 'shell', command: 'cmd-gone' } })], questions: [] },
+    })
+    expect(h).toContain('cmd-gone')
+    expect(h).not.toContain('cmd-a')
+    expect(h).toContain('只看：未分配 · mac')
+  })
+  it('筛选结果取失败：错误与重试，不展示列表', () => {
+    const h = filtered('/inbox?machine=m1', { status: 'error', message: '连不上 hub' })
+    expect(h).toContain('连不上 hub')
+    expect(h).toContain('>重试</button>')
+    expect(h).not.toContain('cmd-a')
+    expect(h).not.toContain('没有等你处理的事')
+  })
+  it('筛选后什么都没有：照常说没有等你处理的事', () => {
+    expect(filtered('/inbox?role=%E8%BF%90%E7%BB%B4', { status: 'ok', inbox: { pending: [], questions: [] } })).toContain('没有等你处理的事')
   })
   it('没有筛选参数时全显示，没有筛选条', () => {
     const h = render('/')
     for (const c of ['cmd-a', 'cmd-b', 'cmd-c']) expect(h).toContain(c)
     expect(h).not.toContain('filter-bar')
+    expect(h).not.toContain('还有更早的待批')
   })
-  it('未分配：取到角色表之前显示加载中，不展示部分结果', () => {
-    const h = render('/inbox?role=&machine=m1')
-    expect(h).toContain('只看：未分配 · mac')
-    expect(h).toContain('正在取角色表…')
-    expect(h).not.toContain('cmd-b')
-  })
-  it('角色表取失败：筛选条下显示错误与重试按钮', () => {
-    const h = html(<RolesGate state={{ status: 'error', message: '连不上 hub' }} onRetry={() => {}} />)
-    expect(h).toContain('取不到角色表，没法判断哪些是未分配：连不上 hub')
-    expect(h).toContain('>重试</button>')
-    expect(html(<RolesGate state={{ status: 'loading' }} onRetry={() => {}} />)).toContain('正在取角色表…')
-    expect(html(<RolesGate state={{ status: 'ok', known: {} }} onRetry={() => {}} />)).toBe('')
+  it('全局列表被截断：底部提示还有更早的待批，给出按机器查看的入口', () => {
+    store.over = {
+      ...store.over,
+      pendingTruncated: true,
+      status: { paused: false, pending: 600, rules_version: 1, uptime: '1m', push_enabled: false, push_subscriptions: 0,
+        machines: [{ id: 'm1', name: 'mac', online: true, last_seen: null, revoked: false }, { id: 'm2', name: 'box', online: false, last_seen: null, revoked: false }, { id: 'm3', name: 'gone', online: false, last_seen: null, revoked: true }] },
+    }
+    const h = render('/')
+    expect(h).toContain('还有更早的待批没显示。按机器查看：')
+    expect(h).toContain('<a href="/inbox?machine=m1"')
+    expect(h).toContain('<a href="/inbox?machine=m2"')
+    expect(h).not.toContain('machine=m3')
     setLang('en')
-    const en = html(<RolesGate state={{ status: 'error', message: 'x' }} onRetry={() => {}} />)
-    expect(en).toContain("Couldn&#x27;t load the roles, so unassigned requests can&#x27;t be told apart: x")
-    expect(html(<RolesGate state={{ status: 'loading' }} onRetry={() => {}} />)).toContain('Loading roles…')
-  })
-  it('筛选后什么都没有：照常说没有等你处理的事', () => {
-    expect(render('/inbox?role=%E8%BF%90%E7%BB%B4')).toContain('没有等你处理的事')
+    expect(render('/')).toContain('Older pending requests aren&#x27;t shown. View by machine:')
   })
 })
 

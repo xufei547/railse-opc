@@ -90,7 +90,8 @@ export const hub = {
   logout: () => post<void>('/api/logout'),
   status: () => get<Status>('/api/status'),
   version: () => get<{ version: string }>('/api/version'),
-  inbox: () => get<Inbox>('/api/inbox'),
+  /** query 是 desk.ts 的 inboxQuery 的结果（有筛选时由 hub 在截断之前筛）。 */
+  inbox: (query = '') => get<Inbox>('/api/inbox' + query),
   requests: (state = '', limit = 50) => get<RequestView[]>(`/api/requests?state=${enc(state)}&limit=${limit}`),
   request: (id: string) => get<{ request: RequestView; audit: AuditEvent[] }>(`/api/requests/${enc(id)}`),
   decide: (id: string, body: DecideBody) => post<RequestView>(`/api/requests/${enc(id)}/decide`, body),

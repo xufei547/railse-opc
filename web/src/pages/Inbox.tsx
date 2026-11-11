@@ -3,8 +3,8 @@ import { Link, useSearchParams } from 'react-router'
 import { Banner } from '../components/Banner'
 import { RequestCard } from '../components/RequestCard'
 import { hub } from '../api'
-import { filterLabel, initialRoles, knownRoles, parseFilter, rolesReducer, unassignedLists, type RolesState } from '../desk'
-import { createDeskLoader } from '../deskLoader'
+import { filterLabel, filterReducer, inboxQuery, initialFilter, parseFilter, type FilterState } from '../desk'
+import { createDeskLoader, type DeskLoader } from '../deskLoader'
 import { deskPollMs, deskThrottleMs } from './Desk'
 import { lang, splitVars, t } from '../i18n'
 import { pauseCopy } from '../manage'
@@ -16,7 +16,8 @@ import { trustBanner } from '../trust'
 
 const guideKey = 'railse.hideInstallGuide'
 
-export function Inbox() {
+/** initialFiltered 只给测试用（服务端渲染不跑 effect，拿不到 hub 筛好的结果）。 */
+export function Inbox({ initialFiltered = initialFilter }: { initialFiltered?: FilterState } = {}) {
   const { state, reload } = useStore()
   const push = usePush()
   const [hideGuide, setHideGuide] = useState(() => {
@@ -30,39 +31,41 @@ export function Inbox() {
   // 总台跳来时按角色与机器筛选（/inbox?role=…&machine=…）；筛选条可清除
   const [params, setParams] = useSearchParams()
   const filter = parseFilter(params)
-  // “未分配”要知道每台机器当前的角色表（角色已删的也算未分配）：进入筛选时重新取一次，筛选开着期间随请求事件节流重取（deskLoader）；
-  // 取到完整快照前显示加载中，取失败显示错误与重试，都不展示部分结果；老 hub（404）没有角色，只认空串
-  const unassigned = filter?.role === ''
-  const [roles, rolesDispatch] = useReducer(rolesReducer, initialRoles)
-  const [rolesLoader] = useState(() =>
-    createDeskLoader({
-      fetch: hub.desk,
-      onData: (d) => rolesDispatch({ type: 'data', known: knownRoles(d) }),
-      onError: (e) => rolesDispatch({ type: 'error', message: e instanceof Error ? e.message : String(e) }),
-      onUnsupported: () => rolesDispatch({ type: 'unsupported' }),
+  // 有筛选时由 hub 在截断之前筛好（GET /api/inbox?role=…&machine=…，“未分配”也由 hub 判），网页不拿全局列表自己筛：
+  // 进入筛选或换筛选时重取，筛选开着期间随请求事件节流重取（deskLoader）；取到前显示加载中，取失败给错误与重试，都不展示列表
+  const query = inboxQuery(filter)
+  const [filtered, filterDispatch] = useReducer(filterReducer, initialFiltered)
+  const [filterLoader, setFilterLoader] = useState<DeskLoader | null>(null)
+  useEffect(() => {
+    if (!query) return
+    const loader = createDeskLoader({
+      fetch: () => hub.inbox(query),
+      onData: (inbox) => filterDispatch({ type: 'data', inbox }),
+      onError: (e) => filterDispatch({ type: 'error', message: e instanceof Error ? e.message : String(e) }),
+      onUnsupported: () => filterDispatch({ type: 'error', message: t('请求失败（{status}）', { status: 404 }) }),
       throttleMs: deskThrottleMs,
       pollMs: deskPollMs,
-    }),
-  )
+    })
+    setFilterLoader(loader)
+    filterDispatch({ type: 'enter' })
+    loader.start()
+    return () => {
+      loader.stop()
+      setFilterLoader(null)
+    }
+  }, [query])
   useEffect(() => {
-    if (!unassigned) return
-    rolesDispatch({ type: 'enter' })
-    rolesLoader.start()
-    return () => rolesLoader.stop()
-  }, [unassigned, rolesLoader])
-  useEffect(() => {
-    if (unassigned) rolesLoader.request()
-  }, [unassigned, rolesLoader, state.tick, state.loads])
-  const retryRoles = () => {
-    rolesDispatch({ type: 'retry' })
-    rolesLoader.stop()
-    rolesLoader.start()
+    filterLoader?.request()
+  }, [filterLoader, state.tick, state.loads])
+  const retryFilter = () => {
+    filterDispatch({ type: 'retry' })
+    filterLoader?.stop()
+    filterLoader?.start()
   }
-  const pendingView = unassignedLists(roles, state.pending, filter)
-  const questionsView = unassignedLists(roles, state.questions, filter)
-  const pending = pendingView.kind === 'list' ? pendingView.items : []
-  const questions = questionsView.kind === 'list' ? questionsView.items : []
-  const gated = pendingView.kind !== 'list'
+  const listed = !filter ? { pending: state.pending, questions: state.questions } : filtered.status === 'ok' ? filtered.inbox : null
+  const pending = listed?.pending ?? []
+  const questions = listed?.questions ?? []
+  const gated = listed === null
   const machineName =
     filter?.machine == null
       ? ''
@@ -152,7 +155,7 @@ export function Inbox() {
             </button>
           </div>
         )}
-        {filter && gated && <RolesGate state={roles} onRetry={retryRoles} />}
+        {filter && gated && <FilterGate state={filtered} onRetry={retryFilter} />}
         {questions.length > 0 && (
           <section>
             <h2 className="section-title">{t('等你回答')}</h2>
@@ -179,21 +182,38 @@ export function Inbox() {
         )}
         {!state.loaded && !state.error && <div className="empty">{t('加载中…')}</div>}
         {empty && <div className="empty">{t('没有等你处理的事')}</div>}
+        {!filter && state.pendingTruncated && <TruncatedHint machines={state.status?.machines ?? []} />}
       </div>
     </>
   )
 }
 
-/** “未分配”筛选的角色表还没取到（加载中）或取失败（错误与重试）时，放在筛选条下面代替列表。取到了不显示任何东西。 */
-export function RolesGate({ state, onRetry }: { state: RolesState; onRetry: () => void }) {
-  if (state.status === 'loading') return <div className="empty">{t('正在取角色表…')}</div>
+/** 有筛选时 hub 的结果还没到（加载中）或取失败（错误与重试），放在筛选条下面代替列表。取到了不显示任何东西。 */
+export function FilterGate({ state, onRetry }: { state: FilterState; onRetry: () => void }) {
+  if (state.status === 'loading') return <div className="empty">{t('加载中…')}</div>
   if (state.status !== 'error') return null
   return (
     <Banner tone="warn">
-      {t('取不到角色表，没法判断哪些是未分配：{reason}', { reason: state.message })}
+      {state.message}
       <button type="button" className="btn" onClick={onRetry}>
         {t('重试')}
       </button>
     </Banner>
+  )
+}
+
+/** 全局待批列表被 hub 截断（只给了最新的 500 条）时的底部提示：还有更早的，按机器看（按机器筛选由 hub 在截断之前筛）。 */
+function TruncatedHint({ machines }: { machines: { id: string; name: string; revoked: boolean }[] }) {
+  const live = machines.filter((m) => !m.revoked)
+  return (
+    <p className="sub truncated-hint">
+      {t('还有更早的待批没显示。按机器查看：')}
+      {live.map((m, i) => (
+        <span key={m.id}>
+          {i > 0 && ' · '}
+          <Link to={`/inbox?machine=${encodeURIComponent(m.id)}`}>{m.name}</Link>
+        </span>
+      ))}
+    </p>
   )
 }
