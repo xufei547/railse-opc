@@ -2,6 +2,7 @@ package policy
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -407,21 +408,88 @@ func nextCwd(seg segment, cwd string, ctx Context) (string, bool) {
 	return resolvePath(args[0], cwd, ctx.HomeDir), true
 }
 
-// stripWrappers 去掉开头的环境变量赋值和 env、time、nohup、nice、caffeinate 这类包装。
-// 只剩一个 token 时不再剥，避免把 "env" 本身剥成空。
+// stripWrappers 去掉开头的环境变量赋值和 env、time、nohup、nice、caffeinate 这类包装（按 basename 认，/usr/bin/env 等同 env），
+// 连同它们的选项（env 的 -i、-u 名字、--unset=名字、-C 目录、-S 串等，nice 的 -n 数，time 的 -p）。
+// 只剩一个 token 时不再剥，避免把 "env" 本身剥成空。总是返回 argv 的后缀（commandWords 靠这一点对齐标志）；
+// env -S 的串要拆成新的词，不是后缀，由 peelWrappers 处理。
 func stripWrappers(argv []string) []string {
+	out, _ := peelWrappers(argv, false)
+	return out
+}
+
+// deepWrappers 是只在“看穿”时剥掉的包装：定级时它们自有档位（sudo、doas 按 destructive，xargs 不在名单里按 unknown），
+// 不能剥；禁用清单、改 Railse 设置、sh -c 识别与配置目录检查要看它们里面跑的是什么。
+var deepWrappers = map[string]bool{"sudo": true, "doas": true, "xargs": true, "timeout": true, "command": true, "exec": true}
+
+// wrapperArgOptions 是各包装带一个参数的选项（参数是下一个词，或以 = 连写）：剥选项时连参数一起跳过。
+var wrapperArgOptions = map[string][]string{
+	"env":     {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+	"nice":    {"-n", "--adjustment"},
+	"time":    {"-f", "--format", "-o", "--output"},
+	"sudo":    {"-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host", "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user", "-D", "--chdir", "-R", "--chroot", "-T", "--command-timeout"},
+	"doas":    {"-u", "-C"},
+	"xargs":   {"-I", "-i", "-n", "--max-args", "-P", "--max-procs", "-L", "--max-lines", "-d", "--delimiter", "-E", "-e", "--eof", "-s", "--max-chars", "-a", "--arg-file"},
+	"timeout": {"-s", "--signal", "-k", "--kill-after"},
+	"exec":    {"-a"},
+}
+
+// deepArgv 是一段剥掉全部包装（含 sudo、xargs、timeout 等，见 deepWrappers）之后的命令词，供 deny、ask 匹配与“看穿”用。
+func deepArgv(seg segment) []string {
+	out, _ := peelWrappers(seg.argv, true)
+	return out
+}
+
+// peelWrappers 剥掉开头的赋值与包装（deep 为真时连 deepWrappers 一起），返回剩下的命令词；env -S（--split-string）的串按
+// shell 规则拆成词接在前面（于是不再是 argv 的后缀，split 为真）。timeout 剥掉选项后还要跳过时长。
+func peelWrappers(argv []string, deep bool) (out []string, split bool) {
 	for len(argv) > 1 {
 		a := argv[0]
-		switch {
-		case isEnvAssignment(a):
+		if isEnvAssignment(a) {
 			argv = argv[1:]
-		case a == "env" || a == "time" || a == "nohup" || a == "nice" || a == "caffeinate":
-			argv = argv[1:]
-		default:
-			return argv
+			continue
 		}
+		name := filepath.Base(a)
+		switch {
+		case name == "env" || name == "time" || name == "nohup" || name == "nice" || name == "caffeinate":
+		case deep && deepWrappers[name]:
+		default:
+			return argv, split
+		}
+		rest := argv[1:]
+		for len(rest) > 0 && strings.HasPrefix(rest[0], "-") && rest[0] != "-" {
+			opt := rest[0]
+			rest = rest[1:]
+			if opt == "--" {
+				break
+			}
+			key, val, hasVal := strings.Cut(opt, "=")
+			takes := slices.Contains(wrapperArgOptions[name], key)
+			if !takes && len(key) > 2 && key[1] != '-' && slices.Contains(wrapperArgOptions[name], key[:2]) {
+				key, val, hasVal, takes = key[:2], key[2:], true, true // -uNAME、-n5 这类连写
+			}
+			if !takes {
+				continue
+			}
+			if !hasVal && len(rest) > 0 {
+				val, rest = rest[0], rest[1:]
+			}
+			if name == "env" && (key == "-S" || key == "--split-string") {
+				// 串里是命令（可带赋值）：拆成词，接在剩下的前面再接着剥
+				words := parseSegment(val).argv
+				rest = append(append([]string(nil), words...), rest...)
+				split = true
+				break
+			}
+		}
+		if name == "timeout" && len(rest) > 0 {
+			rest = rest[1:] // 时长
+		}
+		if len(rest) == 0 {
+			return argv, split
+		}
+		argv = rest
 	}
-	return argv
+	return argv, split
 }
 
 func isEnvAssignment(s string) bool {
@@ -515,7 +583,7 @@ func touchesSensitiveWords(args []string, flags []wordFlags, cwd string, ctx Con
 		if !ok || wordUnresolvable(p, flagAt(flags, i), ctx) {
 			continue
 		}
-		if isSensitive(resolvePath(p, cwd, ctx.HomeDir), ctx.HomeDir) {
+		if ctx.sensitive(resolvePath(p, cwd, ctx.HomeDir)) {
 			return true
 		}
 	}
@@ -547,11 +615,24 @@ func hasSQLDrop(text string) bool {
 // （sh -c、bash -lc、fish -C 等，判断与 shellRisk 相同）时，在它后面递归附上命令串拆出的各段。
 // 供 deny 与 ask 规则匹配用：它们要看穿 shell 包装。命令串严格短于外层，递归必然结束。
 func effectiveSegments(command string) []segment {
-	var out []segment
+	out, _ := effectiveSegmentsLimited(command)
+	return out
+}
+
+// maxShellNesting 是 effectiveSegments 看穿 sh -c 包装的层数上限：更深的不再展开（避免畸形输入递归过深），
+// 角色的禁用检查据 truncated 按解析不了处理（见 forbidCommands）。
+const maxShellNesting = 32
+
+// effectiveSegmentsLimited 同 effectiveSegments，truncated 报告是否因层数上限少展开了内层。
+func effectiveSegmentsLimited(command string) (out []segment, truncated bool) {
+	return effectiveSegmentsDepth(command, 0)
+}
+
+func effectiveSegmentsDepth(command string, depth int) (out []segment, truncated bool) {
 	for _, s := range splitSegments(command) {
 		seg := parseSegment(s)
 		out = append(out, seg)
-		argv := stripWrappers(seg.argv)
+		argv := deepArgv(seg) // sudo sh -c、timeout 5 bash -c 也看进去
 		if len(argv) == 0 {
 			continue
 		}
@@ -563,11 +644,17 @@ func effectiveSegments(command string) []segment {
 		if !ok {
 			continue
 		}
+		if depth >= maxShellNesting {
+			truncated = true
+			continue
+		}
 		for _, inner := range call.inline() {
-			out = append(out, effectiveSegments(inner)...)
+			segs, tr := effectiveSegmentsDepth(inner, depth+1)
+			out = append(out, segs...)
+			truncated = truncated || tr
 		}
 	}
-	return out
+	return out, truncated
 }
 
 // scriptInterpreters 是不带脚本参数（或参数是 -）时从标准输入读脚本来执行的解释器（shell 由 isShell 认）。

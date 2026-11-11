@@ -454,12 +454,12 @@ func TestHookChecks(t *testing.T) {
 	}
 	o.Bin = bin
 	// PreToolUse 超时不够：选择题等不到手机上的回答，照超时不够 fail
-	shortPre := strings.Replace(string(doc), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch",
+	shortPre := strings.Replace(string(doc), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
         "hooks": [
           {
             "type": "command",
             "command": "/usr/local/bin/railse hook claude",
-            "timeout": 86400`, `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch",
+            "timeout": 86400`, `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
         "hooks": [
           {
             "type": "command",
@@ -484,6 +484,14 @@ func TestHookChecks(t *testing.T) {
 		!strings.Contains(c.Hint, "setup hooks") || !strings.Contains(c.Hint, "--claude") {
 		t.Fatalf("旧匹配器: %+v", c)
 	}
+	// 0.2.3 的匹配器（覆盖 Bash，但没有 MCP 工具与 WebSearch）：角色管不到它们，warn 并给重装命令
+	om["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)["matcher"] = "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"
+	omb023, _ := json.MarshalIndent(om, "", "  ")
+	writeFile(t, local, omb023)
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "PreToolUse 的匹配器是旧版") || !strings.Contains(c.Hint, "setup hooks") {
+		t.Fatalf("0.2.3 的匹配器: %+v", c)
+	}
+	writeFile(t, local, []byte(oldMatcher))
 	// 旧匹配器又换过安装路径：两条都在
 	o.Bin = "/opt/new/railse"
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "/opt/new/railse") || !strings.Contains(c.Detail, "只匹配 AskUserQuestion") {
@@ -2257,5 +2265,28 @@ func TestAgentTrustsCheck(t *testing.T) {
 	o.AgentStatus = func(string) (proto.Status, error) { return proto.Status{}, errors.New("connect: no such file") }
 	if c := find(t, Run(o), "agent.trusts"); c.Status != Skip || c.Detail == "" {
 		t.Fatalf("守护进程没在跑: %+v", c)
+	}
+}
+
+// 角色文件：不存在时不出这一项（与 0.2 的体检一样），合法 ok，有误 fail（守护进程这时只读之外一律问人）。
+func TestRolesCheck(t *testing.T) {
+	o, _ := fakeOpts(t)
+	path := filepath.Join(o.AgentDir, "roles.yaml")
+	for _, c := range Run(o).Checks {
+		if c.ID == "agent.roles" {
+			t.Fatalf("没有角色文件时不该出这一项: %+v", c)
+		}
+	}
+	writeFile(t, path, []byte("version: 1\nroles:\n  - name: 写作\n    ceiling: write_in_project\n  - name: 运维\n"))
+	if c := find(t, Run(o), "agent.roles"); c.Status != OK || !strings.Contains(c.Detail, "2 个角色") {
+		t.Fatalf("合法应 ok: %+v", c)
+	}
+	writeFile(t, path, []byte("version: 1\nroles:\n  - name: 写作\n    ceiling: hgih\n"))
+	r := Run(o)
+	if c := find(t, r, "agent.roles"); c.Status != Fail || !strings.Contains(c.Detail, "hgih") || !strings.Contains(c.Hint, "railse role check") {
+		t.Fatalf("有误应 fail: %+v", c)
+	}
+	if !r.Failed() {
+		t.Fatal("角色文件有误时 doctor 应失败")
 	}
 }

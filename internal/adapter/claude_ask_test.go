@@ -114,7 +114,7 @@ func TestClaudeParseAskIgnored(t *testing.T) {
 	a, _ := Get("claude")
 	for name, raw := range map[string][]byte{
 		"PreToolUse 不认识的工具 Foo":             askHook("PreToolUse", "Foo", `{"command":"ls"}`),
-		"PreToolUse 的 MCP 工具":               askHook("PreToolUse", "mcp__fs__read", `{}`),
+		"PreToolUse 的 Task":                 askHook("PreToolUse", "Task", `{}`), // 0.3 起 MCP 工具在 PreToolUse 当审批处理，见 TestClaudePreToolUseMCPAndWebSearch
 		"PermissionRequest+AskUserQuestion": askHook("PermissionRequest", "AskUserQuestion", askToolInput),
 	} {
 		in, err := a.Parse(raw)

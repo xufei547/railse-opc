@@ -300,7 +300,7 @@ func resolvedPathRisk(p, cwd string, ctx Context) Risk {
 	switch {
 	case harmlessDevice(abs):
 		return RiskRead
-	case isSensitive(abs, ctx.HomeDir):
+	case ctx.sensitive(abs):
 		return RiskDestructive
 	case isWithin(abs, ctx.ProjectRoot):
 		return RiskWriteInProject

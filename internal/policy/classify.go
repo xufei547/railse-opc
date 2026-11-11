@@ -13,6 +13,9 @@ func Classify(p Payload, ctx Context) Risk {
 // write_in_project 一律按 write_outside，包括不做路径分析、默认改动工作目录的命令（git commit、make），触发点也说"改项目外的文件"。
 func ClassifyTrace(p Payload, ctx Context) (Risk, *Trigger) {
 	ctx = ctx.normalized()
+	if tooLongToAnalyze(p) {
+		return RiskUnknown, &Trigger{Segment: compactSegment(p.Command), Why: WhyUnknown}
+	}
 	risk, trig := classifyTrace(p, ctx)
 	if ctx.ProjectRoot == "" && risk == RiskWriteInProject {
 		return RiskWriteOutside, &Trigger{Segment: segmentFor(p), Why: WhyWriteOutside}
@@ -62,4 +65,13 @@ func classifyTrace(p Payload, ctx Context) (Risk, *Trigger) {
 	default:
 		return RiskUnknown, &Trigger{Why: WhyUnknown}
 	}
+}
+
+// MaxAnalyzedCommand 是 shell 命令做静态分析的总长度上限：超过的不解析（分词、看穿包装、展开替换都可能在畸形输入上很慢），
+// 直接定为 unknown，规则不匹配；有角色时按“含无法检查的子命令”越界（见 Engine.Evaluate）。正常命令远小于它。
+const MaxAnalyzedCommand = 128 << 10
+
+// tooLongToAnalyze 判断载荷是不是超过分析上限的 shell 命令。
+func tooLongToAnalyze(p Payload) bool {
+	return p.Type == PayloadShell && len(p.Command) > MaxAnalyzedCommand
 }

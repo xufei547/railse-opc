@@ -127,7 +127,7 @@ func TestSetupHooksDryRunWritesNothing(t *testing.T) {
 	if !strings.Contains(out.String(), "PermissionRequest") {
 		t.Fatalf("dry-run 应打印将写入的内容: %s", out.String())
 	}
-	if !strings.Contains(out.String(), `"PreToolUse"`) || !strings.Contains(out.String(), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"`) {
+	if !strings.Contains(out.String(), `"PreToolUse"`) || !strings.Contains(out.String(), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*"`) {
 		t.Fatalf("dry-run 应打印新的 PreToolUse 组: %s", out.String())
 	}
 }
@@ -3049,5 +3049,44 @@ func TestSetupAllLocalHubNoTailscaleEnglish(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.home, ".railse", i18n.FileName)); !os.IsNotExist(err) {
 		t.Fatalf("setup all 失败不该写 lang 文件: %v", err)
+	}
+}
+
+// setup 幂等升级旧（0.2.3）的 PreToolUse、PostToolUse 匹配器：换成新的，不多出一组，别人的组保留。
+func TestSetupHooksUpgradesOldMatcher(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(dir)
+	project := filepath.Join(dir, "proj")
+	os.MkdirAll(filepath.Join(project, ".claude"), 0o755)
+	old := "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"
+	existing := `{"hooks":{"PreToolUse":[{"matcher":"` + old + `","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]},{"matcher":"Bash","hooks":[{"type":"command","command":"echo mine"}]}],` +
+		`"PostToolUse":[{"matcher":"` + old + `","hooks":[{"type":"command","command":"/opt/railse hook claude"}]}]}}`
+	os.WriteFile(filepath.Join(project, ".claude", "settings.local.json"), []byte(existing), 0o644)
+	args := []string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse"}
+	for range 2 {
+		var out, errOut bytes.Buffer
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatal(errOut.String())
+		}
+	}
+	hooks := readJSON(t, filepath.Join(project, ".claude", "settings.local.json"))["hooks"].(map[string]any)
+	for _, ev := range []string{"PreToolUse", "PostToolUse"} {
+		var ours, mine int
+		for _, g := range hooks[ev].([]any) {
+			gm := g.(map[string]any)
+			cmd := gm["hooks"].([]any)[0].(map[string]any)["command"]
+			switch cmd {
+			case "/opt/railse hook claude":
+				ours++
+				if gm["matcher"] != hooksconf.ClaudePreToolUseMatcher {
+					t.Errorf("%s 的匹配器应升级: %v", ev, gm["matcher"])
+				}
+			case "echo mine":
+				mine++
+			}
+		}
+		if ours != 1 || (ev == "PreToolUse" && mine != 1) {
+			t.Errorf("%s: 我们的 %d 组、别人的 %d 组: %+v", ev, ours, mine, hooks[ev])
+		}
 	}
 }

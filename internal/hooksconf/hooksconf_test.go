@@ -74,8 +74,8 @@ func TestSameOurs(t *testing.T) {
 		merge(`{"model":"opus","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"my-guard"}]}]}}`, bin, ""),
 		`{"hooks":{"Stop":[{"hooks":[{"command":"/opt/railse hook claude","type":"command"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}],` +
 			`"Notification":[{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]},{"hooks":[{"type":"command","command":"/opt/railse hook claude"}]}],` +
-			`"PreToolUse":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"}],` +
-			`"PostToolUse":[{"hooks":[{"command":"/opt/railse hook claude","type":"command"}],"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"}],` +
+			`"PreToolUse":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*"}],` +
+			`"PostToolUse":[{"hooks":[{"command":"/opt/railse hook claude","type":"command"}],"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*"}],` +
 			`"PermissionRequest":[{"hooks":[{"timeout":86400,"command":"/opt/railse hook claude","type":"command"}],"matcher":""}]}}`,
 	}
 	for _, b := range same {
@@ -327,7 +327,7 @@ func TestPlan(t *testing.T) {
 func TestPlanClaudePreToolUse(t *testing.T) {
 	// Claude 的 AskUserQuestion 靠 PreToolUse 钩子推到手机：matcher 只匹配这个工具，超时同 PermissionRequest
 	b, _ := json.Marshal(Plan("claude", "/opt/railse", "")["PreToolUse"])
-	want := `[{"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}]`
+	want := `[{"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}]`
 	if string(b) != want {
 		t.Fatalf("PreToolUse 的 JSON: %s", b)
 	}
@@ -348,7 +348,7 @@ func TestPlanClaudePreToolUse(t *testing.T) {
 func TestPlanClaudePostToolUse(t *testing.T) {
 	// PostToolUse 只发事件（工具跑完了，清掉同会话挂着的审批）：匹配器同 PreToolUse，不等，timeout 省略
 	b, _ := json.Marshal(Plan("claude", "/opt/railse", "")["PostToolUse"])
-	want := `[{"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch","hooks":[{"type":"command","command":"/opt/railse hook claude"}]}]`
+	want := `[{"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*","hooks":[{"type":"command","command":"/opt/railse hook claude"}]}]`
 	if string(b) != want {
 		t.Fatalf("PostToolUse 的 JSON: %s", b)
 	}
@@ -389,7 +389,7 @@ func TestMergePreToolUse(t *testing.T) {
 		}
 		return gs
 	}
-	ours := norm(`{"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}`)
+	ours := norm(`{"matcher":"AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]}`)
 	theirsN := norm(theirs)
 	for name, tc := range map[string]struct {
 		existing string
@@ -649,5 +649,26 @@ func TestMatcherCovers(t *testing.T) {
 		if got := MatcherCovers(c.m, "Bash"); got != c.want {
 			t.Errorf("%q: %v", c.m, got)
 		}
+	}
+}
+
+// 0.3 的 PreToolUse 匹配器覆盖 MCP 工具与 WebSearch（角色的禁用与上限才管得到它们），纯读取的工具不进来。
+func TestClaudePreToolUseMatcherCoversMCPAndWebSearch(t *testing.T) {
+	for tool, want := range map[string]bool{
+		"Bash": true, "Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true, "WebFetch": true, "AskUserQuestion": true,
+		"WebSearch": true, "mcp__github__create_issue": true, "mcp__x__y": true,
+		"Read": false, "Glob": false, "Grep": false, "Task": false, "mcpx": false,
+	} {
+		if got := MatcherCovers(ClaudePreToolUseMatcher, tool); got != want {
+			t.Errorf("%s: %v", tool, got)
+		}
+	}
+	// 旧的（0.2.3）匹配器不覆盖 MCP 与 WebSearch
+	old := "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"
+	if MatcherCovers(old, "mcp__x__y") || MatcherCovers(old, "WebSearch") {
+		t.Error("旧匹配器不该覆盖")
+	}
+	if !MatcherCovers(".*", "mcp__x__y") || !MatcherCovers("", "WebSearch") {
+		t.Error("全匹配的写法应覆盖")
 	}
 }

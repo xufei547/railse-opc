@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -46,7 +49,7 @@ type parentGoneError struct{}
 func (parentGoneError) Error() string { return i18n.T("父进程（CLI）已退出") }
 
 // runHook 永远以“不作决定”收场（stdout 为空、退出 0），除非守护进程明确给了 allow、deny 或答题的答案。
-// 这里绝不打印任何环境变量，只读：找守护进程 socket 与 lang 文件用的 RAILSE_HOME、HOME，以及界面语言用的 RAILSE_LANG、LC_ALL、LC_MESSAGES、LANG（见 internal/i18n），以及 Claude 的 PreToolUse 请求原样带给守护进程的 RAILSE_TRUST（见 hookPermission）：CLI 会往钩子环境里注入令牌。
+// 这里绝不打印任何环境变量，只读：找守护进程 socket 与 lang 文件用的 RAILSE_HOME、HOME，以及界面语言用的 RAILSE_LANG、LC_ALL、LC_MESSAGES、LANG（见 internal/i18n），以及 Claude 的 PreToolUse 请求原样带给守护进程的 RAILSE_TRUST（见 hookPermission）与所有请求、事件都带的 RAILSE_ROLE：CLI 会往钩子环境里注入令牌。
 // 从入口起就接管 SIGTERM、SIGINT、SIGHUP：任何阶段收到信号都不作决定并退出 0，进程不会被信号杀掉。
 func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int) {
 	defer func() {
@@ -109,11 +112,19 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 		if err != nil {
 			return passthrough(stderr, err.Error())
 		}
+		if len(raw) >= maxStdin {
+			// 钩子输入超过上限，读不全、解析不了，拿不到策略结论：工具调用前的事件不能就此放过
+			if code, ok := truncatedInput(cli, ad, raw, stdout, stderr); ok {
+				return code
+			}
+		}
 		in, err = ad.Parse(raw)
 		if err != nil {
 			return passthrough(stderr, err.Error())
 		}
 	}
+	// 会话的角色（0.3 起）：RAILSE_ROLE 原样带给守护进程，由它解析成生效的角色（不存在的名字它按目录绑定）。三家 CLI 的所有事件都带。
+	in.Session.Role = os.Getenv("RAILSE_ROLE")
 	// 读输入期间收到信号：审批不发、事件也不发。
 	if ctx.Err() != nil {
 		return passthrough(stderr, context.Cause(ctx).Error())
@@ -173,14 +184,24 @@ func readStdin(ctx context.Context, stdin io.Reader) ([]byte, error) {
 // 让人知道这次是 Claude 自己在把关。
 func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.Client, in adapter.Input, stdout, stderr io.Writer) int {
 	req := proto.Request{Kind: "permission", Session: in.Session, ToolName: in.ToolName, Payload: in.Payload,
-		Source: in.Source, PermissionMode: in.PermissionMode, ToolUseID: in.ToolUseID}
+		Source: in.Source, PermissionMode: in.PermissionMode, ToolUseID: in.ToolUseID,
+		Ancestors: readAncestors()} // 嵌套会话靠它继承上层会话的角色（见 agent 的 inheritRole）
 	if in.Source == proto.SourcePreToolUse {
 		// RAILSE_TRUST=2h claude：原文照带，格式由守护进程判断（不对只记它的日志）；Claude 每次调用先经 PreToolUse，只带这一路
 		req.TrustFor = os.Getenv("RAILSE_TRUST")
 	}
 	resp, err := awaitReply(ctx, ad, client, req)
 	if err != nil {
-		return passthrough(stderr, err.Error())
+		if isDialError(err) {
+			// 守护进程没起、连不上 socket：0.2.3 的现状，交回终端（没装守护进程的人不该被卡住）
+			return passthrough(stderr, err.Error())
+		}
+		return noVerdict(stdout, stderr, ad, in, err.Error())
+	}
+	switch resp.Decision {
+	case "allow", "deny", "ask", "passthrough":
+	default:
+		return noVerdict(stdout, stderr, ad, in, fmt.Sprintf(i18n.T("守护进程回了不认识的决定 %q"), resp.Decision))
 	}
 	if (resp.Decision == "passthrough" || resp.Decision == "ask") && resp.DecidedBy == "hub_unreachable" && in.Source != "" {
 		fmt.Fprintln(stderr, "railse hook: "+i18n.T("连不上 hub，交回 Claude 自己的确认"))
@@ -198,10 +219,57 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 	return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: resp.Decision, Reason: reason}))
 }
 
+// preToolEvent 认出被截断的输入里工具调用前的事件名（Claude 的 PreToolUse、Gemini 的 BeforeTool）。
+var preToolEvent = regexp.MustCompile(`"hook_event_name"\s*:\s*"(PreToolUse|BeforeTool)"`)
+
+// truncatedInput 处理超过 maxStdin 的钩子输入：Claude 的 PreToolUse 回 ask、Gemini 的 BeforeTool 回 deny（见 noVerdict）；
+// 别的事件与 CLI 返回 false，由调用方照旧处理。
+func truncatedInput(cli string, ad adapter.Adapter, raw []byte, stdout, stderr io.Writer) (int, bool) {
+	m := preToolEvent.FindSubmatch(raw)
+	if m == nil {
+		return 0, false
+	}
+	why := fmt.Sprintf(i18n.T("钩子输入超过 %d MiB"), maxStdin>>20)
+	switch {
+	case cli == "claude" && string(m[1]) == "PreToolUse":
+		return noVerdict(stdout, stderr, ad, adapter.Input{Source: proto.SourcePreToolUse}, why), true
+	case cli == "gemini" && string(m[1]) == "BeforeTool":
+		return noVerdict(stdout, stderr, ad, adapter.Input{Session: proto.Session{Tool: "gemini"}}, why), true
+	}
+	return 0, false
+}
+
+// isDialError 判断是不是连不上守护进程（socket 不在、没人监听、没权限）：这一类保持 0.2.3 的交回终端。
+func isDialError(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
+}
+
+// noVerdict 处理审批请求拿不到策略结论（发送失败、超过 1 MiB 发不出去、守护进程回了读不懂的东西、无响应）：
+// Claude 的 PreToolUse 回 ask 并写明原因（终端强制确认），Gemini 回 deny（它的钩子交回终端等于继续执行，问不到人）；
+// Claude 的 PermissionRequest 与 Codex 交回（它们的钩子本来就在 CLI 要问人时才触发，交回去就是 CLI 自己的确认框）。
+// 这是相对 0.2.3 的有意收紧：以前一律交回，在 auto、bypassPermissions、yolo 下等于放行。
+func noVerdict(stdout, stderr io.Writer, ad adapter.Adapter, in adapter.Input, why string) int {
+	fmt.Fprintln(stderr, "railse hook: "+why)
+	switch {
+	case in.Source == proto.SourcePreToolUse:
+		return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: "ask",
+			Reason: fmt.Sprintf(i18n.T("拿不到策略结论（%s），这次要你亲自确认"), why)}))
+	case in.Session.Tool == "gemini":
+		return writeOutput(stdout, ad.Render(adapter.Decision{Action: "deny",
+			Reason: fmt.Sprintf(i18n.T("拿不到策略结论（%s），Gemini 无法在这里问人，这次不执行"), why)}))
+	}
+	return passthrough(stderr, why)
+}
+
 // askReason 把守护进程回的 ask 拼成 Claude 确认框里给人看的一句话（渲染时加 "Railse：" 前缀）：触发段、性质、已发手机。
 // Why 是中文键，按终端语言查英文表（i18n.Lookup，查不到原样）；没有段时性质打头，英文首字母大写。
 func askReason(resp proto.Response) string {
 	tail := i18n.T("已发到手机，也可以在这里直接批")
+	// 越界（角色上限、roles.yaml 有误）的 ask：理由换成角色的那句，比触发点更说明问题。resp.Reason 已由 awaitReply 按终端语言重拼过
+	if isRoleReason(resp.Reason) || resp.Reason == i18n.Lookup(reasonControlPlaneZH) {
+		return fmt.Sprintf(i18n.T("%s。%s"), resp.Reason, tail)
+	}
 	if resp.Trigger == nil {
 		return tail
 	}
@@ -228,7 +296,89 @@ func localizeReason(resp proto.Response) string {
 	if resp.RuleID != "" && strings.HasPrefix(resp.Reason, "命中规则 ") {
 		return fmt.Sprintf(i18n.T("命中规则 %s"), resp.RuleID)
 	}
+	if r, ok := localizeRoleReason(resp.Reason); ok {
+		return r
+	}
 	return i18n.Lookup(resp.Reason)
+}
+
+// reasonControlPlaneZH 是守护进程的 reasonControlPlane（internal/agent/server.go）：限时放行不覆盖 Railse 自己的配置。那边改了这里要一起改。
+const reasonControlPlaneZH = "限时放行不覆盖 Railse 自己的配置"
+
+// 角色（0.3 起）的三种理由，由守护进程的引擎（internal/policy 的 Evaluate）按这几个格式拼出；那边改了这里要一起改。
+const (
+	roleForbidPrefix = "角色「"
+	roleForbidMid    = "」禁用："
+	roleBeyondPrefix = "超出角色「"
+	roleBeyondMid    = "」的边界（上限 "
+	roleBeyondRisk   = "，这次是 "
+	roleBrokenPrefix = "roles.yaml 有误："
+	roleOpaqueSuffix = "」的边界：含无法检查的子命令"
+	roleEnvSuffix    = "」的边界：试图更改 Railse 的角色或放行设置"
+	roleGeminiSuffix = "」的边界，Gemini 无法在这里问人：换个角色，或在别处执行"
+	roleGeminiBroken = "roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行"
+)
+
+// inheritedSuffix 认出理由末尾的“（继承自上层会话的角色「X」）”（policy 的 Role.inheritedSuffix 拼的）。
+var inheritedSuffix = regexp.MustCompile(`（继承自上层会话的角色「(.+)」）$`)
+
+// roleReasonFormats 是角色理由按终端语言重拼用的三个模板（见 localizeRoleReason）。
+var roleReasonFormats = []string{"角色「%s」禁用：%s", "超出角色「%s」的边界（上限 %s，这次是 %s）", "超出角色「%s」的边界：含无法检查的子命令",
+	"超出角色「%s」的边界，Gemini 无法在这里问人：换个角色，或在别处执行", "超出角色「%s」的边界：试图更改 Railse 的角色或放行设置",
+	"roles.yaml 有误：%s", roleGeminiBroken}
+
+// isRoleReason 判断已按终端语言重拼过的理由是不是角色的理由：以某个模板（当前语言）第一个占位符之前的部分开头。
+func isRoleReason(localized string) bool {
+	for _, f := range roleReasonFormats {
+		prefix, _, _ := strings.Cut(i18n.Lookup(f), "%s")
+		if prefix != "" && strings.HasPrefix(localized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// localizeRoleReason 认出角色的理由并按终端语言重拼：禁用（角色名与禁用条目的简述原样）、越界（角色名与两档风险名原样）、
+// roles.yaml 有误（错误原文原样）。不是这三种返回 false。
+func localizeRoleReason(reason string) (string, bool) {
+	// 嵌套会话继承上层角色时理由末尾多一句“（继承自上层会话的角色「X」）”：先拆下来，各自重拼再接上
+	if m := inheritedSuffix.FindStringSubmatchIndex(reason); m != nil {
+		base, ok := localizeRoleReason(reason[:m[0]])
+		if !ok {
+			return "", false
+		}
+		return base + fmt.Sprintf(i18n.T("（继承自上层会话的角色「%s」）"), reason[m[2]:m[3]]), true
+	}
+	switch {
+	case strings.HasPrefix(reason, roleForbidPrefix):
+		name, brief, ok := strings.Cut(strings.TrimPrefix(reason, roleForbidPrefix), roleForbidMid)
+		if ok {
+			return fmt.Sprintf(i18n.T("角色「%s」禁用：%s"), name, brief), true
+		}
+	case strings.HasPrefix(reason, roleBeyondPrefix) && strings.HasSuffix(reason, roleGeminiSuffix):
+		name := strings.TrimSuffix(strings.TrimPrefix(reason, roleBeyondPrefix), roleGeminiSuffix)
+		return fmt.Sprintf(i18n.T("超出角色「%s」的边界，Gemini 无法在这里问人：换个角色，或在别处执行"), name), true
+	case reason == roleGeminiBroken:
+		return i18n.T(roleGeminiBroken), true
+	case strings.HasPrefix(reason, roleBeyondPrefix) && strings.HasSuffix(reason, roleEnvSuffix):
+		name := strings.TrimSuffix(strings.TrimPrefix(reason, roleBeyondPrefix), roleEnvSuffix)
+		return fmt.Sprintf(i18n.T("超出角色「%s」的边界：试图更改 Railse 的角色或放行设置"), name), true
+	case strings.HasPrefix(reason, roleBeyondPrefix) && strings.HasSuffix(reason, roleOpaqueSuffix):
+		name := strings.TrimSuffix(strings.TrimPrefix(reason, roleBeyondPrefix), roleOpaqueSuffix)
+		return fmt.Sprintf(i18n.T("超出角色「%s」的边界：含无法检查的子命令"), name), true
+	case strings.HasPrefix(reason, roleBeyondPrefix):
+		name, rest, ok := strings.Cut(strings.TrimPrefix(reason, roleBeyondPrefix), roleBeyondMid)
+		if !ok {
+			break
+		}
+		ceiling, rest, ok := strings.Cut(rest, roleBeyondRisk)
+		if ok && strings.HasSuffix(rest, "）") {
+			return fmt.Sprintf(i18n.T("超出角色「%s」的边界（上限 %s，这次是 %s）"), name, ceiling, strings.TrimSuffix(rest, "）")), true
+		}
+	case strings.HasPrefix(reason, roleBrokenPrefix):
+		return fmt.Sprintf(i18n.T("roles.yaml 有误：%s"), strings.TrimPrefix(reason, roleBrokenPrefix)), true
+	}
+	return "", false
 }
 
 // hookAsk 把答题请求交给守护进程等答案（见 awaitReply）。只有答复是 answer 才输出：答案合进原 tool_input（questions 等字段

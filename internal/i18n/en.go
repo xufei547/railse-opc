@@ -18,6 +18,7 @@ var en = map[string]string{
   hook      各 CLI 钩子调用的翻译器（claude、codex、codex-notify、gemini）
   agent     守护进程（run、status、pause、resume、reload、enroll）
   trust     限时放行（当前项目或某个 Claude 会话，默认 2 小时）
+  role      角色（list、check、which、init）：每个会话的权限边界
   hub       云端服务（run、password、token、webhook-token）
   setup     一键接入与安装（all）、钩子（hooks）、开机自启（autostart）、Codex notify（codex-notify）
   doctor    检查安装与运行状态（只读）
@@ -29,6 +30,7 @@ Commands:
   hook      translators the CLI hooks call (claude, codex, codex-notify, gemini)
   agent     daemon (run, status, pause, resume, reload, enroll)
   trust     time-limited trust (this project or one Claude session, 2 hours by default)
+  role      roles (list, check, which, init): a permission boundary for each session
   hub       the hub server (run, password, token, webhook-token)
   setup     one-step enroll and install (all), hooks, autostart, Codex notify (codex-notify)
   doctor    check the install and what is running (read-only)
@@ -360,32 +362,34 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	// cmd/railse/hook.go 的 localizeReason：守护进程回传的固定理由，用 i18n.Lookup 查（完整性测试查不到，TestLocalizeReasonFixedSentences 核对）。
 	// 原文逐字抄自 internal/agent/hubdecider.go 的 reason* 常量、internal/agent/server.go 与 requests.go 写进答复的固定句子、
 	// internal/policy/engine.go 的暂停理由；那边改了这里要一起改。只有拒绝理由会显示（接在 "Railse: " 后面，所以大写开头）。
-	"已在手机上批准":                    "Approved on your phone",
-	"已在手机上拒绝":                    "Denied on your phone",
-	"已在手机上回答":                    "Answered on your phone",
-	"在手机上选了在终端回答":                "You chose on your phone to answer in the terminal",
-	"Gemini 只能拒绝不能放行，交回原生确认框":    "Gemini hooks can deny but not approve; handed back to Gemini's own prompt",
-	"没有配置 hub，交回终端处理":            "No hub is set up; handed back to the terminal",
-	"连不上 hub，这类操作要你亲自确认":         "Couldn't reach the hub; confirm this kind of action yourself",
-	"连不上 hub，交回 Claude 自己的确认":    "hub unreachable, falling back to Claude's own prompt",
-	"连不上 hub，交回终端处理":             "Couldn't reach the hub; handed back to the terminal",
-	"hub 拒绝了本机密钥，交回终端处理":         "The hub rejected this machine's key; handed back to the terminal",
-	"无法送往 hub，交回终端处理":            "Couldn't send it to the hub; handed back to the terminal",
-	"与 hub 断线超过宽限，交回终端处理":        "Lost the hub connection for too long; handed back to the terminal",
-	"hub 没有给出有效决定，交回终端处理":        "The hub didn't return a valid decision; handed back to the terminal",
-	"hub 版本太旧，不认识提问，交回终端处理":      "The hub is too old to handle questions; handed back to the terminal",
-	"请求格式错误":                     "Malformed request",
-	"交给 Claude 自己的权限流程":          "Left to Claude's own permission flow",
-	"刚才已交回终端，这次不再问":              "Already handed back to the terminal; not asking again",
-	"自动审批已暂停，交回终端处理":             "Auto-approval is paused; handed back to the terminal",
-	"自动审批已暂停":                    "Auto-approval is paused",
-	"本机没有连接 hub，交回终端处理":          "This machine isn't connected to a hub; handed back to the terminal",
-	"等待过期，交回终端处理":                "Timed out; handed back to the terminal",
-	"守护进程正在停止，交回终端处理":            "The daemon is stopping; handed back to the terminal",
-	"决定来源出错，交回终端处理":              "Something went wrong while deciding; handed back to the terminal",
-	"决定来源给的答案不完整，交回终端处理":         "The answer was incomplete; handed back to the terminal",
-	"脱敏后有题面相同的题，分不清答的是哪道，交回终端处理": "Two questions read the same after redaction, so answers can't be matched; handed back to the terminal",
-	"限时放行中":                      "Within a time-limited trust",
+	"已在手机上批准":                              "Approved on your phone",
+	"已在手机上拒绝":                              "Denied on your phone",
+	"已在手机上回答":                              "Answered on your phone",
+	"在手机上选了在终端回答":                          "You chose on your phone to answer in the terminal",
+	"Gemini 只能拒绝不能放行，交回原生确认框":              "Gemini hooks can deny but not approve; handed back to Gemini's own prompt",
+	"没有配置 hub，交回终端处理":                      "No hub is set up; handed back to the terminal",
+	"连不上 hub，这类操作要你亲自确认":                   "Couldn't reach the hub; confirm this kind of action yourself",
+	"连不上 hub，交回 Claude 自己的确认":              "hub unreachable, falling back to Claude's own prompt",
+	"连不上 hub，交回终端处理":                       "Couldn't reach the hub; handed back to the terminal",
+	"hub 拒绝了本机密钥，交回终端处理":                   "The hub rejected this machine's key; handed back to the terminal",
+	"无法送往 hub，交回终端处理":                      "Couldn't send it to the hub; handed back to the terminal",
+	"与 hub 断线超过宽限，交回终端处理":                  "Lost the hub connection for too long; handed back to the terminal",
+	"hub 没有给出有效决定，交回终端处理":                  "The hub didn't return a valid decision; handed back to the terminal",
+	"hub 版本太旧，不认识提问，交回终端处理":                "The hub is too old to handle questions; handed back to the terminal",
+	"请求格式错误":                               "Malformed request",
+	"交给 Claude 自己的权限流程":                    "Left to Claude's own permission flow",
+	"刚才已交回终端，这次不再问":                        "Already handed back to the terminal; not asking again",
+	"自动审批已暂停，交回终端处理":                       "Auto-approval is paused; handed back to the terminal",
+	"自动审批已暂停":                              "Auto-approval is paused",
+	"本机没有连接 hub，交回终端处理":                    "This machine isn't connected to a hub; handed back to the terminal",
+	"等待过期，交回终端处理":                          "Timed out; handed back to the terminal",
+	"守护进程正在停止，交回终端处理":                      "The daemon is stopping; handed back to the terminal",
+	"决定来源出错，交回终端处理":                        "Something went wrong while deciding; handed back to the terminal",
+	"决定来源给的答案不完整，交回终端处理":                   "The answer was incomplete; handed back to the terminal",
+	"脱敏后有题面相同的题，分不清答的是哪道，交回终端处理":           "Two questions read the same after redaction, so answers can't be matched; handed back to the terminal",
+	"触及 Railse 自己的配置，Gemini 无法在这里问人：在别处执行": "Touches Railse's own config, and Gemini can't ask a human here: run it somewhere else",
+	"限时放行不覆盖 Railse 自己的配置":                 "Time-limited trust doesn't cover Railse's own config",
+	"限时放行中":                                "Within a time-limited trust",
 
 	// internal/agent/trust.go 与 server.go 的限时放行管理命令回给 railse trust 的固定错误（命令行用 i18n.Lookup 显示）；那边改了这里要一起改。
 	"放行范围只能是 session 或 project":                          "The trust scope must be session or project",
@@ -497,6 +501,10 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"没有托管文件 %s":    "no service file %s",
 	" 或 ":          " or ",
 	"railse setup autostart%s：开机自启、退出后自动拉起": "Run railse setup autostart%s (starts at boot, restarts on exit)",
+	"角色文件":      "Roles file",
+	"%s 有误: %v": "%s is broken: %v",
+	"只读之外的审批现在一律问人；改好文件即可恢复（不用重启），railse role check 可以先查": "Everything except reads now asks a human; fix the file to recover (no restart needed). railse role check finds the problem",
+	"%s（%d 个角色）": "%s (%d roles)",
 
 	// 限时放行（agent.trusts）
 	"限时放行": "Time-limited trusts",
@@ -530,8 +538,9 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"修好 JSON 后再 %s":                                    "Fix the JSON, then run %s",
 	"%s（超时 %d，要 ≥ %d）":                                 "%s (timeout %d, needs ≥ %d)",
 	"PreToolUse 只匹配 %s：auto 模式下审批进不了 Railse":           "PreToolUse only matches %s: in auto mode approvals bypass Railse",
-	"缺 PreToolUse：Claude Code 的选择题进不了手机":               "missing PreToolUse: Claude Code's questions can't reach your phone",
-	"缺 PostToolUse：桌面应用里已在本机处理的审批，手机上要等过期才消失":          "missing PostToolUse: in the desktop app, requests already handled on this machine stay on your phone until they expire",
+	"PreToolUse 的匹配器是旧版（不含 MCP 工具与 WebSearch）：角色的禁用与上限管不到它们": "the PreToolUse matcher is outdated (no MCP tools or WebSearch), so role limits and forbidden lists don't reach them",
+	"缺 PreToolUse：Claude Code 的选择题进不了手机":                     "missing PreToolUse: Claude Code's questions can't reach your phone",
+	"缺 PostToolUse：桌面应用里已在本机处理的审批，手机上要等过期才消失":                "missing PostToolUse: in the desktop app, requests already handled on this machine stay on your phone until they expire",
 	"缺 %s":                                                       "missing %s",
 	"超时不够：%s":                                                    "timeout too short: %s",
 	"换过安装路径就重新 %s":                                               "If you moved the install, run %s again",
@@ -845,6 +854,45 @@ While a trust is active, requests in its scope that the engine can't decide are 
 	"%d 小时":      "%dh",
 	"%d 小时 %d 分": "%dh%dm",
 
+	// cmd/railse/role.go
+	`用法:
+  railse role list  [--dir 目录]   列出角色：名字、上限、禁用条数、放行上限、目录、备注
+  railse role check [--dir 目录]   校验 roles.yaml；报错误、目录重叠、指向不存在目录的模式
+  railse role which [--dir 目录]   当前目录（与当前 RAILSE_ROLE）会解析成哪个角色，以及凭什么
+  railse role init  [--dir 目录]   文件不存在时写一份带注释的起步模板
+
+角色是一道权限边界，定义在守护进程目录的 roles.yaml。会话靠环境变量 RAILSE_ROLE（如 RAILSE_ROLE=写作 claude）
+或项目目录（角色的 dirs）绑定角色；超出上限的一律问人，禁用的直接拒。`: `Usage:
+  railse role list  [--dir DIR]   list roles: name, ceiling, forbidden count, trust limit, directories, note
+  railse role check [--dir DIR]   check roles.yaml; report errors, overlapping directories, and patterns pointing at missing directories
+  railse role which [--dir DIR]   which role this directory (and the current RAILSE_ROLE) resolves to, and why
+  railse role init  [--dir DIR]   write a commented starter file if none exists
+
+A role is a permission boundary, defined in roles.yaml in the daemon directory. A session gets its role from the
+RAILSE_ROLE environment variable (e.g. RAILSE_ROLE=writer claude) or from its project directory (the role's dirs);
+anything above the ceiling asks you, anything forbidden is denied outright.`,
+	"守护进程没在运行，直接读文件": "The daemon isn't running; reading the file directly",
+	"守护进程不认角色（升级前启动的旧进程），重启它后角色才生效；下面直接读文件": "The daemon doesn't know about roles (an old process started before the upgrade); roles take effect after you restart it. Reading the file directly",
+	"%s 里没有角色：所有会话都是未分配\n":                  "%s has no roles: every session is unassigned\n",
+	"上限 %s":   "ceiling %s",
+	"禁用 %d 条": "%d forbidden",
+	"不走限时放行":  "no timed trust",
+	"放行最长 %s": "trust up to %s",
+	"目录 %s":   "dirs %s",
+	"没有角色文件 %s：所有会话都是未分配，按规则走（railse role init 写一份起步模板）\n":  "No roles file %s: every session is unassigned and follows the rules (railse role init writes a starter file)\n",
+	"%s 有误: %s\n只读之外的审批一律问人，直到修好（改完不用重启）\n":                 "%s is broken: %s\nEverything except reads asks a human until it's fixed (no restart needed)\n",
+	"提醒：角色「%s」与「%s」的目录模式重叠（%s / %s），两边都命中的目录按文件顺序绑定到「%s」\n": "Note: roles \"%s\" and \"%s\" have overlapping directory patterns (%s / %s); a directory matching both binds to \"%s\", the first in the file\n",
+	"提醒：角色「%s」的目录模式 %s 指向不存在的目录 %s\n":                       "Note: role \"%s\" has directory pattern %s pointing at a missing directory %s\n",
+	"%s 合法（%d 个角色），有 %d 条提醒\n":                              "%s is valid (%d roles), with %d notes\n",
+	"%s 合法（%d 个角色）\n":                             "%s is valid (%d roles)\n",
+	"角色：%s（RAILSE_ROLE=%s）\n":                     "Role: %s (RAILSE_ROLE=%s)\n",
+	"角色：%s（目录 %s 命中 dirs 里的 %s）\n":                "Role: %s (directory %s matches %s in dirs)\n",
+	"未分配：RAILSE_ROLE 与目录都没有指到角色，按规则走":             "Unassigned: neither RAILSE_ROLE nor the directory points at a role, so the rules apply",
+	"注意：RAILSE_ROLE=%s 在 roles.yaml 里没有，改按目录绑定\n": "Note: RAILSE_ROLE=%s isn't in roles.yaml, so the directory decides\n",
+	"注意：这里不在角色「%s」的目录内，没有项目根，写入一律按项目外处理\n":        "Note: this directory is outside role \"%s\"'s dirs, so there's no project root and every write counts as outside the project\n",
+	"%s 已存在，不覆盖\n":                                "%s already exists; not overwriting it\n",
+	"已写入 %s：三个起步角色，dirs 都注释着，写下它不改变任何会话。\n试一下：RAILSE_ROLE=%s claude\n": "Wrote %s: three starter roles, with dirs commented out, so no session changes yet.\nTry it: RAILSE_ROLE=%s claude\n",
+
 	// cmd/railse/hub.go
 	"警告：hub 正以 root 运行。hub 不需要 root：Linux 上用 %s 装成系统服务（以普通用户运行，只给绑定 443/80 的 CAP_NET_BIND_SERVICE）；macOS 绑定 443/80 不需要特权": "Warning: the hub is running as root. It doesn't need root: on Linux, install it as a system service with %s (it runs as a normal user and is only given CAP_NET_BIND_SERVICE to bind 443/80); macOS needs no privilege to bind 443/80",
 	"可信代理地址为空":                    "the trusted proxy address is empty",
@@ -955,11 +1003,26 @@ Switched to a new key and deleted %d push subscriptions. Every phone has to turn
 	// cmd/railse/localhub.go（与 internal/hub/auth.go 的 SetPassword 同步）
 	"密码至少 8 个字符": "The password must be at least 8 characters",
 
+	// cmd/railse/hook.go（noVerdict：审批请求拿不到策略结论）
+	"守护进程回了不认识的决定 %q":                  "the daemon returned a decision it doesn't recognize: %q",
+	"拿不到策略结论（%s），这次要你亲自确认":             "No policy verdict (%s); confirm this one yourself",
+	"拿不到策略结论（%s），Gemini 无法在这里问人，这次不执行": "No policy verdict (%s), and Gemini can't ask a human here; not running it",
+	"钩子输入超过 %d MiB":                    "hook input is over %d MiB",
+
 	// cmd/railse/hook.go（askReason：PreToolUse 回 ask 时确认框里的理由）
 	"已发到手机，也可以在这里直接批": "Sent to your phone; you can also answer here",
 	"%s。%s":          "%s. %s",
 	"命令里的「%s」会%s。%s": `"%s" %s. %s`,
 	"命令里的「%s」%s。%s":  `"%s" %s. %s`,
+	// 角色的理由（localizeRoleReason 按 internal/policy/engine.go 的格式拆开重拼）
+	"角色「%s」禁用：%s":                                 "Forbidden for role \"%s\": %s",
+	"超出角色「%s」的边界（上限 %s，这次是 %s）":                   "Beyond role \"%s\"'s boundary (ceiling %s, this is %s)",
+	"超出角色「%s」的边界：含无法检查的子命令":                       "Beyond role \"%s\"'s boundary: contains a subcommand that can't be checked",
+	"超出角色「%s」的边界，Gemini 无法在这里问人：换个角色，或在别处执行":      "Beyond role \"%s\"'s boundary, and Gemini can't ask a human here: switch roles, or run it somewhere else",
+	"roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行": "roles.yaml is broken, and Gemini can't ask a human here: fix the file and retry, or run it somewhere else",
+	"超出角色「%s」的边界：试图更改 Railse 的角色或放行设置":            "Beyond role \"%s\"'s boundary: tries to change Railse's role or trust settings",
+	"（继承自上层会话的角色「%s」）":                            " (inherited from the outer session's role \"%s\")",
+	"roles.yaml 有误：%s": "roles.yaml is broken: %s",
 
 	// internal/policy/trigger.go 的 Why 短语（经 i18n.Lookup 动态查）。动词短语，接在引号括起的命令段后面；
 	// 与 web/src/format.ts 的 triggerWhysEn 一字不差（web/src/i18n.sync.test.ts 核对）

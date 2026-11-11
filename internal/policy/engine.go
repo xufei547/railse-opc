@@ -19,6 +19,14 @@ type Decision struct {
 	RuleID  string   `json:"rule_id,omitempty"` // 命中的规则，默认决定时为空
 	Reason  string   `json:"reason"`            // 给人看的依据
 	Trigger *Trigger `json:"trigger,omitempty"` // 定级时起决定作用的那一处；read、write_in_project 为 nil
+	// 角色（0.3 起，见 Context.Role）：Role 是会话角色名（未分配、角色文件有误时为空）；Forbidden 为真表示命中角色的禁用清单
+	// （Action 为 deny）；BeyondRole 为真表示风险超出角色的上限（Action 为 ask），规则与限时放行都不适用，必须人来定。
+	Role       string `json:"role,omitempty"`
+	BeyondRole bool   `json:"beyond_role,omitempty"`
+	Forbidden  bool   `json:"forbidden,omitempty"`
+	// ControlPlane 为真表示请求读写 Railse 自己的配置（~/.railse、任何 .railse 目录、Context.ProtectedDirs）：限时放行不覆盖它，
+	// 照常进人工决定路径。与角色无关，没有角色文件时也算（见 touchesControlPlane）。
+	ControlPlane bool `json:"control_plane,omitempty"`
 }
 
 // Engine 持有编译好的规则。规则在 NewEngine 之后不再改动，Evaluate 可并发调用；
@@ -31,6 +39,8 @@ type Engine struct {
 type compiledRule struct {
 	Rule
 	re *regexp.Regexp
+	// bad 只用于角色的禁用清单：条件编不了（绕过校验构造的角色），判定时当作命中，fail closed
+	bad bool
 }
 
 // NewEngine 校验规则集并预编译正则。规则里的指针字段深拷贝，调用方之后改动规则集不影响引擎。
@@ -64,11 +74,31 @@ func (e *Engine) Paused() bool { return e.paused.Load() }
 
 // Evaluate 先定级，再按范围、条件、底线和优先级选出一条规则；没有则 ask。项目根太宽时按没有项目根处理（见 Context.Root），
 // 范围是那个目录的规则也就不匹配。
+//
+// 有角色（Context.Role）时的顺序（设计 §3.2）：用户 deny > 角色的 forbid（deny）> 选中的规则是其余来源的 deny > 含无法检查的子命令
+// （越界 ask）> ceiling（越界 ask）> 暂停 > 规则、底线、默认 ask。角色写了 dirs 而项目根不在其内时项目根按空处理（见 Context.Root），
+// 写入一律 write_outside。
+// 第三步只在按 betterRule 选出的那条规则本身是 deny（builtin、learned）且没暂停时成立：规格只写了“ceiling 压过规则”，但这时 deny
+// 比越界的 ask 更严，不该被放宽。learned deny 输给命中的 user allow 是 0.2 的既定语义（见 betterRule），那时选中的是 allow，
+// 照样按 ceiling 越界。
 func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
+	d := e.evaluate(p, ctx)
+	// 合并了上层会话的角色时，越界与禁用的理由注明继承自谁
+	if (d.BeyondRole || d.Forbidden) && ctx.Role != nil {
+		d.Reason += ctx.Role.inheritedSuffix()
+	}
+	return d
+}
+
+func (e *Engine) evaluate(p Payload, ctx Context) Decision {
 	ctx = ctx.normalized()
 	risk, trig := ClassifyTrace(p, ctx)
+	huge := tooLongToAnalyze(p) // 超过分析上限：不跑规则（匹配也要解析命令），也不看禁用清单，见下
 	var best *compiledRule
 	for i := range e.rules {
+		if huge {
+			break
+		}
 		r := &e.rules[i]
 		if !r.IsEnabled() || !scopeMatches(r.Scope, ctx) || !matchRequest(r, p, risk, ctx) {
 			continue
@@ -80,14 +110,106 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 			best = r
 		}
 	}
-	// 暂停只停自动决定，命中的用户 deny 仍然生效；它压过一切，命中时必是 best。
-	if e.paused.Load() && (best == nil || !best.userDeny()) {
-		return Decision{Action: ActionAsk, Risk: risk, Reason: "自动审批已暂停", Trigger: trig}
+	role := ctx.Role
+	base := Decision{Risk: risk, Trigger: trig, ControlPlane: touchesControlPlane(p, ctx)}
+	if role != nil {
+		base.Role = role.Name
+	}
+	// 用户 deny 压过一切（角色、暂停）；它压过其余规则，命中时必是 best。
+	if best != nil && best.userDeny() {
+		return withRule(base, best)
+	}
+	if role != nil && huge {
+		// 看不了里面有什么：任何角色都必须人来定
+		base.Action, base.BeyondRole = ActionAsk, true
+		base.Reason = "超出角色「" + role.Name + "」的边界：含无法检查的子命令"
+		if msg := role.Broken(); msg != "" {
+			base.Reason = "roles.yaml 有误：" + msg
+		}
+		return base
+	}
+	if role != nil {
+		f, opaque := role.forbidHit(p, risk, ctx)
+		if f != nil {
+			base.Action, base.Forbidden = ActionDeny, true
+			base.Reason = "角色「" + role.Name + "」禁用：" + f.Match.Brief()
+			return base
+		}
+		if best != nil && best.Action == ActionDeny && !e.paused.Load() {
+			return withRule(base, best)
+		}
+		// 改 Railse 的角色或放行设置（嵌套起一个换了 RAILSE_ROLE 的 CLI 等）：任何角色都必须人来定
+		if p.Type == PayloadShell && changesRailseEnv(p.Command) {
+			base.Action, base.BeyondRole = ActionAsk, true
+			if msg := role.Broken(); msg != "" {
+				base.Reason = "roles.yaml 有误：" + msg + "；且试图更改 Railse 的角色或放行设置"
+			} else {
+				base.Reason = "超出角色「" + role.Name + "」的边界：试图更改 Railse 的角色或放行设置"
+			}
+			return base
+		}
+		// 命令里有解析不了的结构、角色又有按命令的禁用：看不见里面是不是禁用的命令，按越界问人（不直接拒，免得误伤）
+		if opaque && role.hasCommandForbid() {
+			base.Action, base.BeyondRole = ActionAsk, true
+			base.Reason = "超出角色「" + role.Name + "」的边界：含无法检查的子命令"
+			return base
+		}
+		if role.Ceiling != nil && risk > *role.Ceiling {
+			base.Action, base.BeyondRole = ActionAsk, true
+			if msg := role.Broken(); msg != "" {
+				base.Reason = "roles.yaml 有误：" + msg
+			} else {
+				base.Reason = "超出角色「" + role.Name + "」的边界（上限 " + role.Ceiling.String() + "，这次是 " + risk.String() + "）"
+			}
+			return base
+		}
+	}
+	// 暂停只停自动决定，命中的用户 deny 与角色的 forbid 仍然生效（上面已返回）。
+	if e.paused.Load() {
+		base.Action, base.Reason = ActionAsk, "自动审批已暂停"
+		return base
 	}
 	if best != nil {
-		return Decision{Action: best.Action, Risk: risk, RuleID: best.ID, Reason: "命中规则 " + best.ID, Trigger: trig}
+		return withRule(base, best)
 	}
-	return Decision{Action: ActionAsk, Risk: risk, Reason: "无规则命中，按 " + risk.String() + " 默认询问", Trigger: trig}
+	base.Action, base.Reason = ActionAsk, "无规则命中，按 "+risk.String()+" 默认询问"
+	return base
+}
+
+// withRule 把命中的规则填进结论。
+func withRule(d Decision, r *compiledRule) Decision {
+	d.Action, d.RuleID, d.Reason = r.Action, r.ID, "命中规则 "+r.ID
+	return d
+}
+
+// forbidHit 返回命中的第一条禁用（deny 语义，见 compileForbid），没有返回 nil。编不了的条件当作命中（fail closed）。
+// shell 命令还逐条看命令替换、进程替换与 eval 里的命令（见 forbidCommands）；opaque 报告命令里有没有解析不了、可能藏着命令的结构。
+func (r *Role) forbidHit(p Payload, risk Risk, ctx Context) (hit *compiledRule, opaque bool) {
+	rules := r.forbidRules()
+	cands := []Payload{p}
+	if p.Type == PayloadShell {
+		var cmds []string
+		cmds, opaque = forbidCommands(p.Command)
+		for _, c := range cmds {
+			if c != p.Command {
+				q := p
+				q.Command = c
+				cands = append(cands, q)
+			}
+		}
+	}
+	for i := range rules {
+		f := &rules[i]
+		if f.bad {
+			return f, opaque
+		}
+		for _, q := range cands {
+			if matchRequest(f, q, risk, ctx) {
+				return f, opaque
+			}
+		}
+	}
+	return nil, opaque
 }
 
 // mayAllow 是底线：outward 只有 user 规则能放行；destructive 还要求规则显式写 risk: destructive。
@@ -172,7 +294,8 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 			if segmentHasPrefix(seg, m.CommandPrefix) {
 				return true
 			}
-			return anySeg && wordsHavePrefix(normalizedArgv(seg, cwd, ctx), m.CommandPrefix)
+			// deny 与 ask 还看穿 sudo、xargs、timeout 这类包装（见 peelWrappers）；allow 不看，sudo git push 不该被 git push 的放行放过
+			return anySeg && (wordsHavePrefix(normalizedArgv(seg, cwd, ctx), m.CommandPrefix) || wordsHavePrefix(deepArgv(seg), m.CommandPrefix))
 		}) {
 			return false
 		}
@@ -183,7 +306,11 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 				return true
 			}
 			norm := normalizedArgv(seg, cwd, ctx)
-			return anySeg && len(norm) > 0 && r.re.MatchString(strings.Join(norm, " "))
+			if anySeg && len(norm) > 0 && r.re.MatchString(strings.Join(norm, " ")) {
+				return true
+			}
+			deep := deepArgv(seg)
+			return anySeg && len(deep) > 0 && r.re.MatchString(strings.Join(deep, " "))
 		}) {
 			return false
 		}

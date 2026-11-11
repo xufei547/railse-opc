@@ -327,10 +327,39 @@ func TestClaudeParsePostToolUse(t *testing.T) {
 	if p, err := a.Parse([]byte(pr)); err != nil || !reflect.DeepEqual(p.Payload, in.Payload) {
 		t.Fatalf("载荷应与 PermissionRequest 一致: %+v %v", p.Payload, err)
 	}
-	for _, tool := range []string{"AskUserQuestion", "mcp__github__get_issue"} {
+	for _, tool := range []string{"AskUserQuestion", "Task"} { // 0.3 起 MCP 工具的 PostToolUse 也认（见 TestClaudePreToolUseMCPAndWebSearch）
 		other := strings.Replace(raw, `"tool_name":"Bash"`, `"tool_name":"`+tool+`"`, 1)
 		if in, err := a.Parse([]byte(other)); err != nil || in.Kind != KindIgnore {
 			t.Fatalf("%s 应忽略: %+v %v", tool, in, err)
+		}
+	}
+}
+
+// PreToolUse 的 MCP 工具与 WebSearch 映射成与 PermissionRequest 相同的载荷（不再忽略）；PostToolUse 同样认它们；纯读取的仍忽略。
+func TestClaudePreToolUseMCPAndWebSearch(t *testing.T) {
+	ad, _ := Get("claude")
+	parse := func(event, tool, input string) Input {
+		t.Helper()
+		in, err := ad.Parse([]byte(`{"session_id":"s","cwd":"/p","hook_event_name":"` + event + `","tool_name":"` + tool + `","tool_input":` + input + `,"tool_use_id":"t1"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return in
+	}
+	in := parse("PreToolUse", "mcp__github__create_issue", `{"title":"x"}`)
+	pr := parse("PermissionRequest", "mcp__github__create_issue", `{"title":"x"}`)
+	if in.Kind != KindPermission || in.Source != SourcePreToolUse || in.Payload.Type != "mcp" || in.Payload.Server != pr.Payload.Server || in.Payload.Tool != pr.Payload.Tool {
+		t.Fatalf("MCP: %+v / %+v", in, pr)
+	}
+	if in := parse("PreToolUse", "WebSearch", `{"query":"x"}`); in.Kind != KindPermission || in.Payload.Type != "network" {
+		t.Fatalf("WebSearch: %+v", in)
+	}
+	if in := parse("PostToolUse", "mcp__github__create_issue", `{"title":"x"}`); in.Kind != KindToolDone {
+		t.Fatalf("PostToolUse MCP: %+v", in)
+	}
+	for _, tool := range []string{"Read", "Glob", "Grep", "Task"} {
+		if in := parse("PreToolUse", tool, `{}`); in.Kind != KindIgnore {
+			t.Fatalf("%s 应忽略: %+v", tool, in)
 		}
 	}
 }
