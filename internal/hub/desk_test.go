@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"slices"
 	"testing"
@@ -237,5 +238,92 @@ func TestDeskOldPendingUnassigned(t *testing.T) {
 	}
 	if len(got.Unassigned) != 1 || got.Unassigned[0].Waiting != 4 {
 		t.Fatalf("超过 24 小时的未分配与已删角色的待批应在未分配一行、等我 4: %+v", got.Unassigned)
+	}
+}
+
+type inboxJSON struct {
+	Pending          []map[string]any `json:"pending"`
+	Questions        []map[string]any `json:"questions"`
+	PendingTruncated bool             `json:"pending_truncated"`
+}
+
+func inboxIDs(rs []map[string]any) []string {
+	var out []string
+	for _, r := range rs {
+		out = append(out, r["id"].(string))
+	}
+	return out
+}
+
+// 一台机器堆出 500 条以上待批，另一台较早的待批在不筛选时被挤出（并标出截断），按机器筛选时在截断之前筛，照样看得到。
+func TestInboxFilterBeforeTruncate(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	a, _ := h.st.CreateMachine("busy", "sa", "")
+	b, _ := h.st.CreateMachine("quiet", "sb", "")
+	deskInsert(t, h, store.Request{ID: "old-b", MachineID: b.ID, Kind: "permission", State: "pending"}, 2*time.Hour)
+	for i := range inboxLimit + 5 {
+		deskInsert(t, h, store.Request{ID: fmt.Sprintf("a%04d", i), MachineID: a.ID, Kind: "permission", State: "pending"}, time.Duration(i)*time.Second)
+	}
+	var all inboxJSON
+	getJSON(t, h, ck, "/api/inbox", &all)
+	if len(all.Pending) != inboxLimit || !all.PendingTruncated || slices.Contains(inboxIDs(all.Pending), "old-b") {
+		t.Fatalf("不筛选：%d 条、截断 %v", len(all.Pending), all.PendingTruncated)
+	}
+	var onlyB inboxJSON
+	getJSON(t, h, ck, "/api/inbox?machine="+b.ID, &onlyB)
+	if !slices.Equal(inboxIDs(onlyB.Pending), []string{"old-b"}) || onlyB.PendingTruncated {
+		t.Fatalf("按机器筛选应看到 B 的旧待批: %v %v", inboxIDs(onlyB.Pending), onlyB.PendingTruncated)
+	}
+}
+
+// 按角色筛选由后端判：具名角色逐字比较；“未分配”（role 为空串）= 角色为空，或不在该机器当前的角色表里（已删的角色）；
+// 别的机器上同名的角色照它那台的角色表判。question 同样筛。webhook 不进角色筛选。
+func TestInboxRoleFilter(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	m1, _ := h.st.CreateMachine("m1", "s1", "")
+	m2, _ := h.st.CreateMachine("m2", "s2", "")
+	if err := h.st.ReplaceMachineRoles(m1.ID, []proto.RoleSummary{{Name: "写作"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.st.ReplaceMachineRoles(m2.ID, []proto.RoleSummary{{Name: "运维"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []store.Request{
+		{ID: "w", MachineID: m1.ID, Kind: "permission", State: "pending", Role: "写作"},
+		{ID: "e", MachineID: m1.ID, Kind: "ask", State: "pending", Role: "", ToolName: proto.AskToolName},
+		{ID: "g", MachineID: m1.ID, Kind: "permission", State: "pending", Role: "已删"},
+		{ID: "x", MachineID: m2.ID, Kind: "permission", State: "pending", Role: "写作"}, // m2 没有“写作”：对 m2 是未分配
+		{ID: "o", MachineID: m2.ID, Kind: "permission", State: "pending", Role: "运维"},
+		{ID: "h", MachineID: webhookMachineID, Kind: "webhook", State: "pending", Title: "部署"},
+		{ID: "q", MachineID: m1.ID, Kind: "question", State: "recorded", Role: "已删", Title: "继续吗？"},
+	} {
+		deskInsert(t, h, r, time.Minute)
+	}
+	get := func(q string) (p, qs []string) {
+		var out inboxJSON
+		getJSON(t, h, ck, "/api/inbox"+q, &out)
+		ids := inboxIDs(out.Pending)
+		slices.Sort(ids)
+		return ids, inboxIDs(out.Questions)
+	}
+	if p, _ := get("?role=%E5%86%99%E4%BD%9C"); !slices.Equal(p, []string{"w", "x"}) {
+		t.Fatalf("role=写作（不限机器）: %v", p)
+	}
+	if p, _ := get("?role=%E5%86%99%E4%BD%9C&machine=" + m1.ID); !slices.Equal(p, []string{"w"}) {
+		t.Fatalf("role=写作&machine=m1: %v", p)
+	}
+	if p, qs := get("?role=&machine=" + m1.ID); !slices.Equal(p, []string{"e", "g"}) || !slices.Equal(qs, []string{"q"}) {
+		t.Fatalf("m1 未分配: %v %v", p, qs)
+	}
+	if p, _ := get("?role="); !slices.Equal(p, []string{"e", "g", "x"}) {
+		t.Fatalf("全部未分配（不含 webhook）: %v", p)
+	}
+	if p, _ := get("?machine=" + m2.ID); !slices.Equal(p, []string{"o", "x"}) {
+		t.Fatalf("只按机器: %v", p)
+	}
+	if p, _ := get(""); len(p) != 6 {
+		t.Fatalf("不筛选照旧: %v", p)
 	}
 }

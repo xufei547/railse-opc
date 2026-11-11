@@ -701,7 +701,7 @@ func TestOpenQuestions(t *testing.T) {
 	since := time.Date(2026, 10, 23, 10, 0, 1, 0, time.UTC)
 	ids := func(limit int) string {
 		t.Helper()
-		got, err := s.OpenQuestions(since, limit)
+		got, err := s.OpenQuestions(since, limit, InboxFilter{})
 		if err != nil {
 			t.Fatal(err)
 		}

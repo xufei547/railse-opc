@@ -288,19 +288,61 @@ func (s *Store) ListRequests(state string, limit int) ([]Request, error) {
 	return s.queryRequests("SELECT "+requestCols+" FROM requests WHERE state = ? ORDER BY created_at DESC LIMIT ?", state, limit)
 }
 
+// InboxFilter 是收件箱的筛选（0.3 起），在截断之前由 SQL 做：Machine 非空只要这台机器的；Role 非空时按角色——
+// 具名角色逐字比较；指向空串表示“未分配”，与总台同口径：角色为空，或不在该机器当前的角色表（machine_roles）里。按角色筛选时不含 webhook。
+type InboxFilter struct {
+	Machine *string
+	Role    *string
+}
+
+// where 返回接在 WHERE 之后的条件（以 " AND " 开头）与参数；alias 是 requests 的别名。零值为空。
+func (f InboxFilter) where(alias string) (string, []any) {
+	var clause string
+	var args []any
+	if f.Machine != nil {
+		clause += " AND " + alias + ".machine_id = ?"
+		args = append(args, *f.Machine)
+	}
+	if f.Role != nil {
+		clause += " AND " + alias + ".kind <> 'webhook'"
+		if *f.Role == "" {
+			clause += " AND (" + alias + ".role = '' OR NOT EXISTS (SELECT 1 FROM machine_roles mr WHERE mr.machine_id = " + alias + ".machine_id AND mr.name = " + alias + ".role))"
+		} else {
+			clause += " AND " + alias + ".role = ?"
+			args = append(args, *f.Role)
+		}
+	}
+	return clause, args
+}
+
+// ListPending 按创建时间倒序列待处理请求（审批、提问、webhook），按 f 筛选后至多 limit 条；truncated 为真表示筛选后还有更多（被截掉了更早的）。
+func (s *Store) ListPending(f InboxFilter, limit int) (out []Request, truncated bool, err error) {
+	clause, args := f.where("r")
+	out, err = s.queryRequests("SELECT "+requestCols+" FROM requests r WHERE r.state = 'pending'"+clause+" ORDER BY r.created_at DESC LIMIT ?", append(args, limit+1)...)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
+}
+
 // OpenQuestions 列还在等回答的 question，按创建时间倒序、至多 limit 条：state 为 recorded、不早于 since，
 // 且同一会话之后没有任何新行。hub 存的会话行只有 question、done（recorded，见 hub 的 recordEvent）与 permission、ask
 // （待决与补的历史行）：之后来了 done、新的 permission、ask 或新的 question，都说明 agent 已经不在等那个问题了。
 // 没有会话 id 的 question 关联不到后续事件，视为仍在等（直到滑出 since）。已吊销机器的 question 不列：那台机器已断开，
 // 不会再有后续事件让它“不再等”。
+// f 非零时按机器、角色筛选（见 InboxFilter），在 LIMIT 之前筛。
 // 会话行属于一台机器，子查询加上 machine_id 走 (machine_id, created_at) 索引，不扫全表。
-func (s *Store) OpenQuestions(since time.Time, limit int) ([]Request, error) {
+func (s *Store) OpenQuestions(since time.Time, limit int, f InboxFilter) ([]Request, error) {
+	clause, args := f.where("q")
 	return s.queryRequests("SELECT "+requestCols+` FROM requests q
 		WHERE q.kind = 'question' AND q.state = 'recorded' AND q.created_at >= ?
 		  AND NOT EXISTS (SELECT 1 FROM requests r
 		    WHERE q.session_id IS NOT NULL AND r.machine_id = q.machine_id AND r.created_at > q.created_at AND r.session_id = q.session_id)
-		  AND NOT EXISTS (SELECT 1 FROM machines m WHERE m.id = q.machine_id AND m.revoked = 1)
-		ORDER BY q.created_at DESC LIMIT ?`, fmtTime(since), limit)
+		  AND NOT EXISTS (SELECT 1 FROM machines m WHERE m.id = q.machine_id AND m.revoked = 1)`+clause+`
+		ORDER BY q.created_at DESC LIMIT ?`, append(append([]any{fmtTime(since)}, args...), limit)...)
 }
 
 // ListPendingForMachine 列出某台机器的待处理请求。

@@ -204,20 +204,32 @@ func (s *Server) handlePause(w http.ResponseWriter, paused bool) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleInbox 返回 {"pending":[…],"questions":[…]}，都是请求视图、按创建时间倒序：pending 是全部待处理的审批与提问（至多 500 条），
-// questions 是最近 24 小时还在等回答的 question（至多 100 条，见 store.OpenQuestions）。没有时是空数组，不是 null。
+// handleInbox 返回 {"pending":[…],"questions":[…],"pending_truncated":bool}，都是请求视图、按创建时间倒序：pending 是待处理的审批与提问
+// （至多 500 条，还有更早的时 pending_truncated 为 true），questions 是最近 24 小时还在等回答的 question（至多 100 条，见 store.OpenQuestions）。
+// 没有时是空数组，不是 null。查询参数（0.3 起，可选）：machine 只要这台机器的；role 按角色，带了但为空表示“未分配”
+// （角色为空，或不在该机器当前的角色表里）。筛选在截断之前做（store.InboxFilter）。
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
-	pending, err := s.store.ListRequests("pending", inboxLimit)
+	q := r.URL.Query()
+	var f store.InboxFilter
+	if q.Has("machine") {
+		m := q.Get("machine")
+		f.Machine = &m
+	}
+	if q.Has("role") {
+		role := q.Get("role")
+		f.Role = &role
+	}
+	pending, truncated, err := s.store.ListPending(f, inboxLimit)
 	if err != nil {
 		s.internalErr(w, "列待审批", err)
 		return
 	}
-	questions, err := s.store.OpenQuestions(time.Now().Add(-questionsWindow), questionsLimit)
+	questions, err := s.store.OpenQuestions(time.Now().Add(-questionsWindow), questionsLimit, f)
 	if err != nil {
 		s.internalErr(w, "列待回答", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"pending": s.views(pending), "questions": s.views(questions)})
+	writeJSON(w, http.StatusOK, map[string]any{"pending": s.views(pending), "questions": s.views(questions), "pending_truncated": truncated})
 }
 
 // handleRequests 按创建时间倒序列请求：state 为空表示全部；limit 默认 50、最大 500，≤0 或不是数字时按默认。
