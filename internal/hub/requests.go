@@ -34,6 +34,8 @@ var (
 	errIsAsk = wrongKind("这是提问，用答题接口")
 	// errNotAsk 表示对不是提问的请求作答。
 	errNotAsk = wrongKind("这不是提问，不能作答")
+	// errBeyondRole 表示对超出角色边界的请求批准时要“记住”或限时放行（0.3 起）：越界的只能单次批准，规则与放行都不适用。
+	errBeyondRole = wrongKind("超出角色的边界：只能单次批准，不能记住，也不能限时放行")
 )
 
 // errBadAnswer 表示答案不合规（缺题、空、超长、多余的键），具体是哪道题包在它后面。
@@ -580,6 +582,7 @@ func (s *Server) sendDecision(r store.Request) bool {
 // Trust 非空时在改状态之前就校验并入库这条放行（reserveTrustLocked），不合规时整个决定不落库、回 errBadTrust；
 // 批准落库失败时收回它；成功后审计 trust_set，并在下发决定之前把放行快照排进同一连接的队列：守护进程先有放行、再收到 allow。
 // 请求已决定不了（不是 pending、机器已吊销、已过期）时不建放行，错误照旧由改状态那一步给出。
+// 超出角色边界的请求（BeyondRole）批准时不能带 Remember 或 Trust，回 errBeyondRole（满足 errors.Is(err, errBadAction)，接口回 400）。
 // 错误：errBadAction（对提问为 errIsAsk）、errBadScope、errBadTrust、store.ErrNotFound、store.ErrNotPending（机器已吊销时为 errRevoked、
 // 已过期时为 errExpired，都满足 errors.Is(err, store.ErrNotPending)）、errLearn；其余是存储错误。
 func (s *Server) Decide(in DecideInput) (store.Request, error) {
@@ -588,6 +591,11 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	}
 	if !validScope(in.Scope) {
 		return store.Request{}, errBadScope
+	}
+	if in.Action == "allow" && (in.Remember || in.Trust != nil) {
+		if err := s.refuseBeyondRole(in.RequestID); err != nil {
+			return store.Request{}, err
+		}
 	}
 	var trust *proto.Trust
 	if in.Trust != nil {
@@ -639,6 +647,16 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 		s.broadcastTrusts()
 	}
 	return r, nil
+}
+
+// refuseBeyondRole 是批准带“记住”或放行时的前置：请求超出了角色的边界就回 errBeyondRole。越界标记登记后不变，
+// 不必和后面的改状态放在同一把锁里。读不出请求时不在这里报错，交给后面的步骤给出该给的错误。
+func (s *Server) refuseBeyondRole(id string) error {
+	r, err := s.store.GetRequest(id)
+	if err == nil && r.BeyondRole {
+		return errBeyondRole
+	}
+	return nil
 }
 
 // reserveTrust 是 Decide 带放行时的前置（调用方持 trustMu）：取请求，提问回 errIsAsk；请求已决定不了（decidable 不过）时
@@ -709,6 +727,9 @@ func (s *Server) propose(id, action, scope string) (policy.Rule, error) {
 	}
 	if err := refuseAsk(r); err != nil {
 		return policy.Rule{}, err
+	}
+	if action == "allow" && r.BeyondRole {
+		return policy.Rule{}, errBeyondRole
 	}
 	if err := s.decidable(r); err != nil {
 		return policy.Rule{}, err

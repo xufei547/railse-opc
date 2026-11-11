@@ -241,3 +241,62 @@ func TestAuditRowsCarryRole(t *testing.T) {
 		t.Fatalf("question 行: %+v %v", qs, err)
 	}
 }
+
+// 越界的请求：批准时带 remember 或 trust 回 400、请求仍待决、不学规则不建放行；propose allow 400；拒绝并记住照常；单纯批准照常下发。
+func TestDecideBeyondRoleRefusesRememberAndTrust(t *testing.T) {
+	h := newTestHub(t)
+	ck := loggedIn(t, h)
+	_, _, c, _ := roleAgent(t, h, "mac", []string{wire.FeatureTrust, wire.FeatureRole}, twoRoles)
+	for _, id := range []string{"r1", "r2"} {
+		p := pendingFrame(id, "s-"+id, "t1", "git push origin "+id)
+		p.Session.Role, p.BeyondRole = "写作", true
+		c.send(p)
+	}
+	waitFor(t, "登记", func() bool { n, _ := h.st.CountPending(); return n == 2 })
+	rulesBefore, _ := h.st.ListRules()
+	for _, body := range []map[string]any{
+		{"action": "allow", "remember": true},
+		{"action": "allow", "trust": map[string]any{"scope": "session", "minutes": 30}},
+		{"action": "allow", "remember": true, "trust": map[string]any{"scope": "project"}},
+	} {
+		resp := apiPost(t, h, ck, "/api/requests/r1/decide", body)
+		if resp.StatusCode != 400 {
+			t.Fatalf("%v 应 400: %d", body, resp.StatusCode)
+		}
+		if msg := errText(t, resp); !strings.Contains(msg, "超出角色的边界") {
+			t.Fatalf("文案: %q", msg)
+		}
+	}
+	if r, _ := h.st.GetRequest("r1"); r.State != "pending" {
+		t.Fatalf("被拒后请求应仍待决: %s", r.State)
+	}
+	if list, _ := h.st.ListTrusts(""); len(list) != 0 {
+		t.Fatalf("不应建放行: %+v", list)
+	}
+	if rules, _ := h.st.ListRules(); len(rules) != len(rulesBefore) {
+		t.Fatalf("不应学规则: %d → %d", len(rulesBefore), len(rules))
+	}
+	if resp := apiPost(t, h, ck, "/api/requests/r1/propose", map[string]any{"action": "allow"}); resp.StatusCode != 400 {
+		t.Fatalf("propose allow 应 400: %d", resp.StatusCode)
+	}
+	c.expectNothing()
+	// 单纯批准：照常下发 allow
+	if resp := apiPost(t, h, ck, "/api/requests/r1/decide", map[string]any{"action": "allow"}); resp.StatusCode != 200 {
+		t.Fatalf("单纯批准应 200: %d %s", resp.StatusCode, errText(t, resp))
+	}
+	var d wire.Decision
+	c.expectFrame(wire.TDecision, &d)
+	if d.RequestID != "r1" || d.Action != "allow" {
+		t.Fatalf("决定: %+v", d)
+	}
+	// 拒绝并记住：学一条拒绝规则只会更严，照常
+	if resp := apiPost(t, h, ck, "/api/requests/r2/propose", map[string]any{"action": "deny"}); resp.StatusCode != 200 {
+		t.Fatalf("propose deny 应 200: %d", resp.StatusCode)
+	}
+	if resp := apiPost(t, h, ck, "/api/requests/r2/decide", map[string]any{"action": "deny", "remember": true}); resp.StatusCode != 200 {
+		t.Fatalf("拒绝并记住应 200: %d %s", resp.StatusCode, errText(t, resp))
+	}
+	if rules, _ := h.st.ListRules(); len(rules) != len(rulesBefore)+1 {
+		t.Fatalf("应学到一条拒绝规则: %d → %d", len(rulesBefore), len(rules))
+	}
+}
