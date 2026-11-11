@@ -174,3 +174,38 @@ func TestBrokenRole(t *testing.T) {
 type errTest string
 
 func (e errTest) Error() string { return string(e) }
+
+func TestPrepareDirs(t *testing.T) {
+	rs, err := ParseRoleSet([]byte("version: 1\nroles:\n  - name: a\n    dirs: [\"~/Link/**\", \"/Data/Docs\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(p string) string {
+		if p == "/Users/u/Link" {
+			return "/Volumes/real"
+		}
+		return ""
+	}
+	rs.PrepareDirs("/Users/u", resolve, true)
+	r := &rs.Roles[0]
+	for dir, want := range map[string]string{
+		"/Volumes/real/x":  "~/Link/**", // 通配前的部分经符号链接解析
+		"/Users/u/link/x":  "~/Link/**", // 原样的写法也算，折叠大小写
+		"/data/docs":       "/Data/Docs",
+		"/Volumes/other/x": "",
+	} {
+		if got := r.CoveringDir(dir, "ignored"); got != want {
+			t.Errorf("CoveringDir(%q) = %q，想要 %q", dir, got, want)
+		}
+	}
+	// 不折叠时大小写敏感
+	rs.PrepareDirs("/Users/u", resolve, false)
+	if rs.Roles[0].Covers("/data/docs", "") {
+		t.Error("不折叠时不该命中")
+	}
+	// 家目录未知：~ 开头的模式什么都不命中
+	rs.PrepareDirs("", resolve, true)
+	if rs.Roles[0].Covers("/Users/u/Link/x", "") {
+		t.Error("家目录未知时 ~ 模式不该命中")
+	}
+}

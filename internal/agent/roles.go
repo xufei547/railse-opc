@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,7 @@ type rolesKey struct {
 // 重读与变更通知在同一把锁里串行进行，通知按代数顺序送达，roles 帧不会把旧摘要发在新摘要之后。
 type Roles struct {
 	path string
+	home string // 展开 dirs 里的 ~ 用（见 policy.RoleSet.PrepareDirs）
 
 	mu     sync.Mutex
 	loaded bool
@@ -46,7 +48,10 @@ type Roles struct {
 }
 
 // NewRoles 只记下路径，第一次 Current 时才读。
-func NewRoles(path string) *Roles { return &Roles{path: path} }
+func NewRoles(path string) *Roles { return &Roles{path: path, home: userHome()} }
+
+// newRolesIn 同 NewRoles，家目录用守护进程配置里的（与判定时的 policy.Context.HomeDir 一致）。
+func newRolesIn(path, home string) *Roles { return &Roles{path: path, home: home} }
 
 // Path 返回 roles.yaml 的路径。
 func (r *Roles) Path() string { return r.path }
@@ -77,7 +82,7 @@ func (r *Roles) refresh(force bool) RolesState {
 	}
 	first := !r.loaded
 	r.loaded, r.key = true, key
-	st := parseRoles(data, key)
+	st := parseRoles(data, key, r.home)
 	st.Gen = r.state.Gen + 1
 	r.state = st
 	if !first && st.Err == nil {
@@ -100,7 +105,7 @@ func readRolesKey(path string) ([]byte, rolesKey) {
 	return data, rolesKey{exists: true, sum: sha256.Sum256(data)}
 }
 
-func parseRoles(data []byte, key rolesKey) RolesState {
+func parseRoles(data []byte, key rolesKey, home string) RolesState {
 	if !key.exists {
 		return RolesState{}
 	}
@@ -111,11 +116,25 @@ func parseRoles(data []byte, key rolesKey) RolesState {
 	if err != nil {
 		return RolesState{Exists: true, Err: err}
 	}
+	// dirs 按与 cwd 相同的口径规范化：cwd 经 CleanCwd 解析过符号链接，macOS 上路径不分大小写
+	set.PrepareDirs(home, resolveDirPrefix, runtime.GOOS == "darwin")
 	return RolesState{Exists: true, Set: set}
 }
 
 // LoadRolesFile 读一次 roles.yaml（命令行在守护进程没起时用）。
-func LoadRolesFile(path string) RolesState { return parseRoles(readRolesKey(path)) }
+func LoadRolesFile(path string) RolesState {
+	data, key := readRolesKey(path)
+	return parseRoles(data, key, userHome())
+}
+
+// resolveDirPrefix 解析目录模式里通配之前那部分的符号链接；解析不了（不存在等）返回空，只按原样比较。
+func resolveDirPrefix(p string) string {
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return ""
+	}
+	return real
+}
 
 // 会话角色是怎么定下来的（RoleWhy.Kind）。
 const (

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -75,14 +76,19 @@ func TestRoleBindingEnvDirUnknown(t *testing.T) {
 	if e := lastAudit(t, env); e.Session.Role != "写作" || e.Role != "写作" {
 		t.Fatalf("按目录应绑到写作: %+v", e)
 	}
+	// 各步用不同的会话：同一会话会钉住角色（见 TestRolePinnedPerSession）
+	inSession := func(r proto.Request, id string) proto.Request {
+		r.Session.CLISessionID = id
+		return r
+	}
 	// RAILSE_ROLE 优先
-	send(t, env, withRole(permission(env.repo, "git status"), "运维"))
+	send(t, env, inSession(withRole(permission(env.repo, "git status"), "运维"), "s2"))
 	if e := lastAudit(t, env); e.Session.Role != "运维" || e.Role != "运维" {
 		t.Fatalf("RAILSE_ROLE 应优先: %+v", e)
 	}
 	// 不存在的名字：按目录走，日志里每个会话只记一次
 	for range 2 {
-		send(t, env, withRole(permission(env.repo, "git status"), "不存在"))
+		send(t, env, inSession(withRole(permission(env.repo, "git status"), "不存在"), "s3"))
 	}
 	if e := lastAudit(t, env); e.Session.Role != "写作" {
 		t.Fatalf("不存在的名字应按目录走: %+v", e)
@@ -93,7 +99,7 @@ func TestRoleBindingEnvDirUnknown(t *testing.T) {
 	// 地盘外、没有 RAILSE_ROLE：未分配
 	other := filepath.Join(filepath.Dir(env.repo), "other")
 	os.MkdirAll(filepath.Join(other, ".git"), 0o755)
-	send(t, env, permission(other, "git status"))
+	send(t, env, inSession(permission(other, "git status"), "s4"))
 	if e := lastAudit(t, env); e.Session.Role != "" || e.Role != "" {
 		t.Fatalf("地盘外应未分配: %+v", e)
 	}
@@ -425,4 +431,69 @@ func TestDaemonDirWritesAreDestructive(t *testing.T) {
 
 func policyFileWrite(path, cwd string) policy.Payload {
 	return policy.Payload{Type: policy.PayloadFileWrite, Path: path, Cwd: cwd}
+}
+
+// dirs 模式经符号链接写的、或大小写不同（macOS），与解析过的 cwd 照样匹配。
+func TestRoleDirsNormalized(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	real := realRepo(t, env)
+	link := filepath.Join(filepath.Dir(real), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	// 只规范化通配之前的部分：通配段本身匹配的是链接名还是真实名，不读目录列不出来，不在此列
+	cases := []string{link, link + "/**", filepath.Dir(link) + "/*"}
+	if runtime.GOOS == "darwin" {
+		cases = append(cases, strings.ToUpper(real[:2])+real[2:]) // /Private/var/... 与 /private/var/... 是同一个目录
+	}
+	for _, pat := range cases {
+		writeRoles(t, env.cfg.RolesPath, "version: 1\nroles:\n  - name: 严\n    dirs: [\""+pat+"\"]\n    ceiling: read\n")
+		send(t, env, permission(env.repo, "git status"))
+		if e := lastAudit(t, env); e.Session.Role != "严" {
+			t.Errorf("模式 %q 应绑定到严: %+v", pat, e.Session)
+		}
+	}
+}
+
+// 角色按会话钉住：解析出非空角色后，cwd 变了也不降为未分配、不换成别的目录角色；只有指向存在角色的 RAILSE_ROLE 能改；
+// 角色从文件里删掉时解除钉住。
+func TestRolePinnedPerSession(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	other := filepath.Join(filepath.Dir(env.repo), "other")
+	os.MkdirAll(filepath.Join(other, ".git"), 0o755)
+	realOther, _ := filepath.EvalSymlinks(other)
+	rolesFor(t, env, "  - name: 别处\n    dirs: [\""+realOther+"\"]\n")
+	role := func(cwd, envRole, session string) string {
+		r := withRole(permission(cwd, "git status"), envRole)
+		r.Session.CLISessionID = session
+		send(t, env, r)
+		return lastAudit(t, env).Session.Role
+	}
+	if got := role(env.repo, "", "s1"); got != "写作" {
+		t.Fatalf("先按目录绑定到写作: %q", got)
+	}
+	if got := role(other, "", "s1"); got != "写作" {
+		t.Fatalf("cwd 换到别的角色的目录也不换: %q", got)
+	}
+	if got := role(t.TempDir(), "", "s1"); got != "写作" {
+		t.Fatalf("cwd 换到没有角色的目录也不降为未分配: %q", got)
+	}
+	if got := role(other, "", "s2"); got != "别处" {
+		t.Fatalf("别的会话不受影响: %q", got)
+	}
+	if got := role(env.repo, "不存在", "s1"); got != "写作" {
+		t.Fatalf("不存在的 RAILSE_ROLE 不能改: %q", got)
+	}
+	if got := role(env.repo, "运维", "s1"); got != "运维" {
+		t.Fatalf("显式 RAILSE_ROLE 能改: %q", got)
+	}
+	if got := role(env.repo, "", "s1"); got != "运维" {
+		t.Fatalf("改过之后钉在运维: %q", got)
+	}
+	// 运维从文件里删掉：解除钉住，回到按目录
+	rolesFor2 := strings.Replace(mustRead(t, env.cfg.RolesPath), "  - name: 运维\n    ceiling: destructive\n", "", 1)
+	writeRoles(t, env.cfg.RolesPath, rolesFor2)
+	if got := role(other, "", "s1"); got != "别处" {
+		t.Fatalf("角色删掉后应解除钉住、按目录: %q", got)
+	}
 }

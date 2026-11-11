@@ -109,6 +109,10 @@ type Role struct {
 	compiled []compiledRule
 	// broken 非空表示这是“角色文件有误”时代替真角色的那个（见 BrokenRole），内容是错误原文。
 	broken string
+	// dirPats 是 PrepareDirs 规范化后的目录模式（与 Dirs 一一对应，每条可有原样与解析后两种写法）；foldDirs 为真时按 foldPath
+	// 折叠大小写比较。没调 PrepareDirs 时为 nil，按原样展开 ~ 比较。
+	dirPats  [][]string
+	foldDirs bool
 }
 
 // RoleSet 是 roles.yaml 的整体。
@@ -231,25 +235,82 @@ func (r *Role) Covers(dir, home string) bool {
 	return r.CoveringDir(dir, home) != ""
 }
 
-// CoveringDir 返回让 dir 命中的第一条 dirs 模式（原文），不命中返回空。
+// CoveringDir 返回让 dir 命中的第一条 dirs 模式（原文），不命中返回空。调过 PrepareDirs 的角色用规范化后的模式（此时忽略 home）。
 func (r *Role) CoveringDir(dir, home string) string {
 	if dir == "" {
 		return ""
 	}
 	clean := filepath.Clean(dir)
-	for _, d := range r.Dirs {
-		if strings.HasPrefix(d, "~") && home == "" {
+	if r.foldDirs {
+		clean = foldPath(clean)
+	}
+	for i, d := range r.Dirs {
+		var pats []string
+		switch {
+		case r.dirPats != nil:
+			pats = r.dirPats[i]
+		case strings.HasPrefix(d, "~") && home == "":
 			continue
+		default:
+			pats = []string{filepath.Clean(expandHome(d, home))}
 		}
-		pat := filepath.Clean(expandHome(d, home))
-		if pat == clean {
-			return d
-		}
-		if ok, _ := doublestar.Match(pat, clean); ok {
-			return d
+		for _, pat := range pats {
+			if r.foldDirs {
+				pat = foldPath(pat)
+			}
+			if pat == clean {
+				return d
+			}
+			if ok, _ := doublestar.Match(pat, clean); ok {
+				return d
+			}
 		}
 	}
 	return ""
+}
+
+// PrepareDirs 按与 cwd 相同的口径规范化各角色的 dirs（守护进程在读入角色文件后调用；本包不做 IO，解析由 resolve 做）：
+// 展开 ~（home 为空时 ~ 开头的模式不展开、什么都不命中），取第一个通配段之前的部分交给 resolve（守护进程传解析符号链接的函数），
+// 原样与解析后的两种写法都算；fold 为真时（macOS）比较按 foldPath 折叠大小写，同敏感路径表的口径。
+// 只规范化通配之前的部分：通配段匹配的是链接名还是真实名，不读目录就分不出。
+func (rs *RoleSet) PrepareDirs(home string, resolve func(string) string, fold bool) {
+	for i := range rs.Roles {
+		r := &rs.Roles[i]
+		r.foldDirs = fold
+		r.dirPats = make([][]string, len(r.Dirs))
+		for j, d := range r.Dirs {
+			if strings.HasPrefix(d, "~") && home == "" {
+				r.dirPats[j] = []string{} // 不命中
+				continue
+			}
+			pat := filepath.Clean(expandHome(d, home))
+			pats := []string{pat}
+			if resolve != nil {
+				prefix, rest := splitStatic(pat)
+				if prefix != "" {
+					if real := resolve(prefix); real != "" && real != prefix {
+						pats = append(pats, filepath.Join(append([]string{real}, rest...)...))
+					}
+				}
+			}
+			r.dirPats[j] = pats
+		}
+	}
+}
+
+// splitStatic 把清理过的模式拆成第一个通配段之前的目录与其余各段。
+func splitStatic(pat string) (string, []string) {
+	parts := strings.Split(pat, "/")
+	for i, seg := range parts {
+		if strings.ContainsAny(seg, "*?[{\\") {
+			prefix := strings.Join(parts[:i], "/")
+			if prefix == "" && strings.HasPrefix(pat, "/") {
+				prefix = "/"
+			}
+			return prefix, parts[i:]
+		}
+	}
+	return pat, nil
 }
 
 // BrokenRole 是 roles.yaml 有误时代替会话角色的那个：上限 read（只读照旧自动放行，其余一律问人），没有名字（未分配），

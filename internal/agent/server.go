@@ -93,6 +93,11 @@ type Server struct {
 	// unknownRoleLogged 是已在日志里说过“RAILSE_ROLE 指的角色不存在”的会话（tool + cli_session_id），每个会话只说一次，
 	// 最多记 maxNonGitLogged 个；由 nonGitMu 保护。
 	unknownRoleLogged map[string]struct{}
+	// pinned 是会话钉住的角色（tool + cli_session_id → 角色名与最近一次用到的时间），由 pinMu 保护：会话解析出非空角色后，
+	// 之后的请求不再因 cwd 变了而降为未分配或换成别的目录角色，只有指向存在角色的 RAILSE_ROLE 能改；角色从文件里删掉时解除。
+	// 只在内存里，守护进程重启后重新解析。
+	pinMu  sync.Mutex
+	pinned map[string]rolePin
 
 	mu      sync.Mutex
 	closed  bool
@@ -103,7 +108,7 @@ type Server struct {
 // New 组装服务。IO 只有读本机设置 settings.yaml 与放行表 trusts.json，读坏了记日志、按默认值（空表）跑。
 // 角色文件 roles.yaml 在第一次判定时才读（见 Roles）。
 func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Logger) *Server {
-	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now(), roles: NewRoles(cfg.RolesPath)}
+	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now(), roles: newRolesIn(cfg.RolesPath, cfg.HomeDir)}
 	s.protected = protectedDirs(cfg.Dir)
 	_ = s.ReloadSettings() // 读坏了它自己记日志
 	tr, err := newTrusts(cfg.TrustsPath, time.Now)
@@ -394,11 +399,64 @@ func (s *Server) sessionRole(sess *proto.Session, root, cwd string) *policy.Role
 		cwd = ""
 	}
 	env := sess.Role
-	role, why := ResolveRole(s.roles.Current(), env, root, cwd, s.cfg.HomeDir)
+	st := s.roles.Current()
+	role, why := ResolveRole(st, env, root, cwd, s.cfg.HomeDir)
 	if why.EnvUnknown {
 		s.noteUnknownRole(*sess, env)
 	}
+	if st.Err == nil && st.Exists {
+		role = s.pinRole(*sess, role, why, st.Set)
+	}
 	sess.Role = roleName(role)
+	return role
+}
+
+// rolePin 是一个会话钉住的角色。
+type rolePin struct {
+	name string
+	at   time.Time
+}
+
+// 钉住表的上限与过期：满了不再钉新会话（照常按目录解析），超过 pinTTL 没用到的在新增时清掉。
+const (
+	maxPinned = 4096
+	pinTTL    = 7 * 24 * time.Hour
+)
+
+// pinRole 按会话钉住角色（见 Server.pinned）：RAILSE_ROLE 指名的（why.Kind 为 env）总是生效并改钉；其余情况下，会话已钉着、
+// 且那个角色还在文件里时用钉着的；否则解析出的非空角色钉上。没有会话 id 的不钉。
+func (s *Server) pinRole(sess proto.Session, role *policy.Role, why RoleWhy, set policy.RoleSet) *policy.Role {
+	if sess.CLISessionID == "" {
+		return role
+	}
+	key := sess.Tool + "\x00" + sess.CLISessionID
+	now := time.Now()
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	if p, ok := s.pinned[key]; ok && why.Kind != RoleByEnv {
+		if r := set.Find(p.name); r != nil {
+			s.pinned[key] = rolePin{name: p.name, at: now}
+			return r
+		}
+		delete(s.pinned, key) // 角色已从文件里删掉：解除钉住
+	}
+	if role == nil {
+		return nil
+	}
+	if _, ok := s.pinned[key]; !ok {
+		for k, p := range s.pinned {
+			if now.Sub(p.at) > pinTTL {
+				delete(s.pinned, k)
+			}
+		}
+		if len(s.pinned) >= maxPinned {
+			return role
+		}
+	}
+	if s.pinned == nil {
+		s.pinned = map[string]rolePin{}
+	}
+	s.pinned[key] = rolePin{name: role.Name, at: now}
 	return role
 }
 
