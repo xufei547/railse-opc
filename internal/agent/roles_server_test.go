@@ -777,6 +777,7 @@ func proc(pid int, start, name string) proto.Proc {
 // 嵌套会话继承上层会话的角色约束（看进程树，不看环境变量）：取更严的一边，角色名显示为自己的，理由注明继承。
 func TestNestedSessionInheritsAncestorRole(t *testing.T) {
 	SetPeerAncestryForTest(t, nil) // 用请求里注入的祖先链
+	SetTrustSelfReportedForTest(t)
 	env := startServer(t, LocalDecider{}, nil)
 	rolesFor(t, env, "")
 	term := []proto.Proc{proc(5, "s5", "zsh"), proc(2, "s2", "Terminal"), proc(1, "s1", "launchd")}
@@ -848,6 +849,7 @@ func TestNestedSessionInheritsAncestorRole(t *testing.T) {
 // 继承来的角色不只进审批：同一会话的答题与事件也带同一个生效角色（hub 不会把它改回未分配）。
 func TestInheritedRoleOnAskAndEvents(t *testing.T) {
 	SetPeerAncestryForTest(t, nil) // 用请求里注入的祖先链
+	SetTrustSelfReportedForTest(t)
 	env := startServer(t, LocalDecider{}, nil)
 	rolesFor(t, env, "")
 	outer := []proto.Proc{proc(100, "a", "sh"), proc(10, "b", "claude"), proc(5, "c", "zsh")}
@@ -898,17 +900,30 @@ func TestPeerAncestryOverridesSelfReported(t *testing.T) {
 	if gotFake || !gotReal {
 		t.Fatalf("应记下真实的 CLI 进程、不记自报的: fake=%v real=%v", gotFake, gotReal)
 	}
+	// 取不到凭据：不信自报的；有角色文件时这条按越界处理，审计标 peer_unverified；已有的钉住保留
 	SetPeerAncestryForTest(t, nil)
-	r.Session.CLISessionID = "self"
-	send(t, env, r)
-	if e := lastAudit(t, env); e.Ancestry != "self_reported" {
-		t.Fatalf("取不到凭据时用自报的并标注: %+v", e)
+	r.Session.CLISessionID = "peer" // 上面钉在写作
+	r.Source = proto.SourcePermissionRequest
+	r.Session.Role = ""
+	resp := send(t, env, r)
+	e := lastAudit(t, env)
+	if e.Ancestry != "peer_unverified" || !e.BeyondRole || resp.Decision == "allow" || !strings.Contains(e.Reason+resp.Reason, "") {
+		t.Fatalf("取不到凭据时按越界、标 peer_unverified: %+v %+v", resp, e)
+	}
+	if e.Session.Role != "写作" {
+		t.Fatalf("已有的钉住保留: %+v", e.Session)
+	}
+	pre := withRole(preToolUse(env.repo, "git status", "bypassPermissions", "toolu_u"), "")
+	pre.Session.CLISessionID = "peer"
+	if resp := send(t, env, pre); resp.Decision != "ask" || !strings.Contains(resp.Reason, "无法核实") {
+		t.Fatalf("PreToolUse 回 ask 并说明: %+v", resp)
 	}
 }
 
 // 伪造上层会话的 session_end 清不掉继承记录；记录只在那个 CLI 进程不在了（进程号加启动时间对不上）时才清。
 func TestInheritanceSurvivesForgedSessionEnd(t *testing.T) {
 	SetPeerAncestryForTest(t, nil)
+	SetTrustSelfReportedForTest(t)
 	env := startServer(t, LocalDecider{}, nil)
 	rolesFor(t, env, "")
 	// 上层会话的 CLI 用测试进程自己（活着），另一个已经不在的进程号当对照
@@ -943,5 +958,43 @@ func TestInheritanceSurvivesForgedSessionEnd(t *testing.T) {
 	env.srv.pinMu.Unlock()
 	if !liveKept || deadKept || pinGone {
 		t.Fatalf("清理应只清不在了的进程: live=%v dead=%v pinOfDead=%v", liveKept, deadKept, pinGone)
+	}
+}
+
+// 认会话的 CLI 时跳过 shell、包装表里的启动器与 railse 自身；按进程退出清理只用于名字确实是已知 CLI 的记录，其余只靠 TTL。
+func TestCLIIndexSkipsLaunchersAndPruneOnlyKnownCLI(t *testing.T) {
+	for _, c := range []struct {
+		chain []proto.Proc
+		want  int
+	}{
+		{[]proto.Proc{proc(1, "", "sh"), proc(2, "", "claude")}, 1},
+		{[]proto.Proc{proc(1, "", "timeout"), proc(2, "", "sh"), proc(3, "", "claude")}, 2},
+		{[]proto.Proc{proc(1, "", "railse"), proc(2, "", "nice"), proc(3, "", "env"), proc(4, "", "node")}, 3},
+		{[]proto.Proc{proc(1, "", "/usr/bin/timeout"), proc(2, "", "codex")}, 1},
+	} {
+		if got := cliIndex(c.chain); got != c.want {
+			t.Errorf("cliIndex(%v) = %d，想要 %d", c.chain, got, c.want)
+		}
+	}
+	SetPeerAncestryForTest(t, nil)
+	SetTrustSelfReportedForTest(t)
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	register := func(session string, cli proto.Proc) {
+		r := withRole(permission(env.repo, "git status"), "写作")
+		r.Session.CLISessionID, r.Ancestors = session, []proto.Proc{proc(900, "x", "sh"), cli, proc(5, "c", "zsh")}
+		send(t, env, r)
+	}
+	deadLauncher := proto.Proc{PID: 99999998, Start: "gone", Name: "uv"} // 认不出的启动器：拿不准，不按进程清
+	deadCLI := proto.Proc{PID: 99999997, Start: "gone", Name: "claude"}
+	register("launcher", deadLauncher)
+	register("cli", deadCLI)
+	env.srv.pruneSessions()
+	env.srv.pinMu.Lock()
+	_, keptLauncher := env.srv.pinned["claude\x00launcher"]
+	_, keptCLI := env.srv.pinned["claude\x00cli"]
+	env.srv.pinMu.Unlock()
+	if !keptLauncher || keptCLI {
+		t.Fatalf("只有已知 CLI 的记录按进程退出清理: launcher=%v cli=%v", keptLauncher, keptCLI)
 	}
 }

@@ -269,6 +269,7 @@ func TestReadAncestorsReal(t *testing.T) {
 // 完整链路：上层会话（RAILSE_ROLE=写作）里起的嵌套 CLI 用 RAILSE_ROLE=运维 换角色，仍受写作的禁用约束，钩子输出拒绝。
 func TestChainNestedCLIInheritsRole(t *testing.T) {
 	agent.SetPeerAncestryForTest(t, nil) // 测试进程里跑钩子：用注入的祖先链（守护进程取到的对端是测试进程自己）
+	agent.SetTrustSelfReportedForTest(t)
 	sock, repo, cfg := startTestAgent(t)
 	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 写作\n    forbid:\n      - {command_prefix: \"git push\"}\n  - name: 运维\n    ceiling: destructive\n"), 0o600)
 	outer := []proto.Proc{{PID: 101, Start: "a", Name: "sh"}, {PID: 11, Start: "b", Name: "claude"}, {PID: 5, Start: "c", Name: "zsh"}}

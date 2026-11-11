@@ -286,3 +286,10 @@ func shellViews(command, cwd string, ctx Context) (views []view, texts []string,
 	walk(command, cwd, false, 0)
 	return views, texts, opaque
 }
+
+// IsWrapperCommand 报告进程名是不是包装表里的启动器（env、timeout、nice、nohup、command、exec、sudo 等，按 basename 认）。
+// 守护进程在祖先链里认会话的 CLI 时跳过它们：钩子经 timeout 10 railse hook … 起来时，最近的非 shell 进程是短命的启动器。
+func IsWrapperCommand(name string) bool {
+	_, ok := wrapperOptions[filepath.Base(name)]
+	return ok
+}
