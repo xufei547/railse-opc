@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
-import { ApiError, hub } from '../api'
+import { hub } from '../api'
 import { Banner } from '../components/Banner'
 import { boundaryLine, deskGroups, inboxHref } from '../desk'
+import { createDeskLoader } from '../deskLoader'
 import { relativeTime, riskLabel, riskTone, stateLabel } from '../format'
 import { splitVars, t } from '../i18n'
 import { useStore } from '../StoreProvider'
@@ -15,44 +16,35 @@ export const deskPollMs = 30_000
 
 /**
  * 总台：按角色看等我、放行中、拦下、自动放行与最近动作（0.3 起）。数据全由 hub 的 GET /api/desk 算好；
- * 收到任何请求或放行的实时变化、重连、回到前台时重取（节流 1 秒），开着时每 30 秒再取一次。
+ * 收到请求的实时变化（tick）、全量重拉（loads：连上、回到前台）、放行条数变化时要求重取，调度见 deskLoader.ts
+ * （合并在途、节流 1 秒、开着时每 30 秒轮询、卸载才丢弃；老 hub 回 404 时说明版本过旧并停止轮询）。
  */
 export function Desk() {
   const { state } = useStore()
   const [desk, setDesk] = useState<DeskData | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const last = useRef(0)
-  const [poll, setPoll] = useState(0)
-
-  // 收到请求变化（tick）、全量重拉（loads：连上、回到前台……）、放行条数变化（status.trusts）、定时器到点（poll）都重取
+  const [unsupported, setUnsupported] = useState(false)
+  const [loader] = useState(() =>
+    createDeskLoader({
+      fetch: hub.desk,
+      onData: (d) => {
+        setDesk(d)
+        setError(null)
+      },
+      onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+      onUnsupported: () => setUnsupported(true),
+      throttleMs: deskThrottleMs,
+      pollMs: deskPollMs,
+    }),
+  )
+  useEffect(() => {
+    loader.start()
+    return () => loader.stop()
+  }, [loader])
   const trusts = state.status?.trusts
   useEffect(() => {
-    let alive = true
-    const wait = Math.max(0, last.current + deskThrottleMs - Date.now())
-    const timer = setTimeout(() => {
-      last.current = Date.now()
-      hub.desk().then(
-        (d) => {
-          if (!alive) return
-          setDesk(d)
-          setError(null)
-        },
-        (e: unknown) => {
-          if (!alive || (e instanceof ApiError && e.status === 401)) return
-          setError(e instanceof Error ? e.message : String(e))
-        },
-      )
-    }, wait)
-    return () => {
-      alive = false
-      clearTimeout(timer)
-    }
-  }, [state.tick, state.loads, trusts, poll])
-
-  useEffect(() => {
-    const id = setInterval(() => setPoll((n) => n + 1), deskPollMs)
-    return () => clearInterval(id)
-  }, [])
+    loader.request()
+  }, [loader, state.tick, state.loads, trusts])
 
   return (
     <>
@@ -60,12 +52,18 @@ export function Desk() {
         <h1>{t('总台')}</h1>
       </header>
       <div className="page">
-        {error && <Banner tone="warn">{error}</Banner>}
-        {!desk && !error && <div className="empty">{t('加载中…')}</div>}
-        {desk && <DeskBody desk={desk} />}
+        {unsupported && <DeskUnsupported />}
+        {error && !unsupported && <Banner tone="warn">{error}</Banner>}
+        {!desk && !error && !unsupported && <div className="empty">{t('加载中…')}</div>}
+        {desk && !unsupported && <DeskBody desk={desk} />}
       </div>
     </>
   )
+}
+
+/** 老 hub（没有 /api/desk）：说一次，不再轮询。 */
+export function DeskUnsupported() {
+  return <Banner tone="info">{t('hub 版本过旧，不支持总台。升级 hub 后再来看。')}</Banner>
 }
 
 export function DeskBody({ desk }: { desk: DeskData }) {
@@ -73,6 +71,7 @@ export function DeskBody({ desk }: { desk: DeskData }) {
   const many = groups.length > 1
   return (
     <>
+      {groups.length > 0 && <p className="sub desk-window">{t('拦下与自动放行只数 {h} 小时内', { h: desk.window_hours })}</p>}
       {desk.roles.length === 0 && (
         <section className="explain">
           <p className="headline">{t('还没有角色')}</p>
@@ -94,7 +93,7 @@ export function DeskBody({ desk }: { desk: DeskData }) {
             </h2>
           )}
           {g.rows.map((r) => (
-            <RoleCard key={r.name ?? ''} row={r} windowHours={desk.window_hours} />
+            <RoleCard key={r.name ?? ''} row={r} />
           ))}
         </section>
       ))}
@@ -103,7 +102,7 @@ export function DeskBody({ desk }: { desk: DeskData }) {
 }
 
 /** 一个角色（或未分配）一张卡：名字与备注、边界一行、四个数字、最近动作。“等我”大于 0 时整张卡可点，进收件箱并按这一行筛选。 */
-export function RoleCard({ row: r, windowHours }: { row: DeskRow; windowHours: number }) {
+export function RoleCard({ row: r }: { row: DeskRow }) {
   const boundary = r.name === undefined ? '' : boundaryLine(r)
   const cls = `card desk-card${r.online ? '' : ' offline'}`
   const body = (
@@ -120,7 +119,6 @@ export function RoleCard({ row: r, windowHours }: { row: DeskRow; windowHours: n
         <Stat n={r.denied} label={t('拦下')} />
         <Stat n={r.auto_allowed} label={t('自动放行')} />
       </div>
-      <div className="sub line">{t('拦下与自动放行只数 {h} 小时内', { h: windowHours })}</div>
       {r.recent.length > 0 && (
         <ul className="recent">
           {r.recent.map((x) => (

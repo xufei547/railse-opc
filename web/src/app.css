@@ -191,6 +191,7 @@ ol.steps { margin: 8px 0 4px; padding-left: 22px; font-size: 14px; }
 ol.steps li { margin: 4px 0; }
 .ask-hint { margin: 0 0 8px; text-align: center; }
 /* 总台（0.3 起）：角色卡、四个数字、最近动作；离线机器的卡片变灰（虚线框、页面底色、次要文字色） */
+.desk-window { margin: 0 0 8px; }
 .desk-card .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 10px 0 2px; text-align: center; }
 .desk-card .stat b { display: block; font-size: 20px; line-height: 1.2; }
 .desk-card .stat span { display: block; font-size: 12px; color: var(--muted); }

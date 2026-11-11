@@ -9,7 +9,7 @@ import type { PushControl } from '../push'
 import type { State } from '../store'
 import { StoreProvider } from '../StoreProvider'
 import type { Desk, DeskRow, RequestView } from '../types'
-import { DeskBody, RoleCard } from './Desk'
+import { DeskBody, DeskUnsupported, RoleCard } from './Desk'
 import { Inbox } from './Inbox'
 
 const store = vi.hoisted(() => ({ over: null as Partial<State> | null }))
@@ -73,7 +73,7 @@ const writer = row({
 
 describe('总台的角色卡', () => {
   it('名字、备注、边界一行、四个数字、最近动作与越界标记；等我 > 0 时整张卡链接到按角色筛选的收件箱', () => {
-    const h = html(<RoleCard row={writer} windowHours={24} />)
+    const h = html(<RoleCard row={writer} />)
     expect(h).toMatch(/^<a class="card desk-card" href="\/inbox\?role=%E5%86%99%E4%BD%9C&amp;machine=m1"/)
     expect(h).toContain('<span class="what">写作</span>')
     expect(h).toContain('<div class="where">只改文档</div>')
@@ -82,13 +82,13 @@ describe('总台的角色卡', () => {
     expect(h).toContain('<b>1</b><span>放行中</span>')
     expect(h).toContain('<b>3</b><span>拦下</span>')
     expect(h).toContain('<b>41</b><span>自动放行</span>')
-    expect(h).toContain('拦下与自动放行只数 24 小时内')
+    expect(h).not.toContain('只数') // 口径只在页面顶部说一次
     expect(h).toContain('<code class="mono">git push origin main</code>')
     expect(h).toContain('已拒绝')
     expect(h).toContain('<span class="tag high">超出边界</span>')
   })
   it('等我为 0 时不是链接；离线的机器卡片变灰；未分配没有边界一行', () => {
-    const h = html(<RoleCard row={row({ online: false })} windowHours={24} />)
+    const h = html(<RoleCard row={row({ online: false })} />)
     expect(h).toMatch(/^<section class="card desk-card offline">/)
     expect(h).toContain('<span class="what">未分配</span>')
     expect(h).toContain('<span class="tag plain">离线</span>')
@@ -113,6 +113,9 @@ describe('总台页', () => {
     expect(h).toContain('<h2 class="group-title">mac</h2>')
     expect(h).toContain('<h2 class="group-title">box<span class="count">离线</span></h2>')
     expect(h.indexOf('写作')).toBeLessThan(h.indexOf('运维'))
+    // 口径只在页面顶部说一次
+    expect(h.match(/拦下与自动放行只数 24 小时内/g)).toHaveLength(1)
+    expect(h.indexOf('拦下与自动放行只数')).toBeLessThan(h.indexOf('写作'))
   })
   it('什么都没有：说没有动静', () => {
     expect(html(<DeskBody desk={{ window_hours: 24, roles: [], unassigned: [] }} />)).toContain('最近 24 小时没有动静')
@@ -123,6 +126,14 @@ describe('总台页', () => {
     expect(h).toContain('Up to Write in project · 2 forbidden · Trust up to 2 hours')
     expect(h).toContain('Unassigned')
     expect(h).not.toMatch(/[　-〿一-鿿＀-￯]/)
+  })
+})
+
+describe('老 hub', () => {
+  it('不支持总台：说明版本过旧（有英文）', () => {
+    expect(html(<DeskUnsupported />)).toContain('hub 版本过旧，不支持总台')
+    setLang('en')
+    expect(html(<DeskUnsupported />)).not.toMatch(/[　-〿一-鿿＀-￯]/)
   })
 })
 

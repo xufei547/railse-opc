@@ -503,4 +503,5 @@ export const en: Record<string, string> = {
   '只看：{what}': 'Showing only: {what}',
   清除筛选: 'Clear filter',
   角色: 'Role',
+  'hub 版本过旧，不支持总台。升级 hub 后再来看。': "This hub is too old for the desk. Upgrade the hub and come back.",
 }
