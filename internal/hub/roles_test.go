@@ -354,7 +354,7 @@ func TestStaleConnectionCannotOverwriteRoles(t *testing.T) {
 // 放行上限只认 -1、0 或 5～1440。
 func TestCleanRolesStrict(t *testing.T) {
 	got := cleanRoles([]proto.RoleSummary{
-		{Name: "a", Note: "第一行\n第二行‮反转\u0007", Ceiling: "network", ForbidCount: 5000, TrustMaxMins: 4, Dirs: []string{"~/a\nb", "~/⁦x⁩", "​"}},
+		{Name: "a", Note: "第一行\n第二行\u202e反转\u0007", Ceiling: "network", ForbidCount: 5000, TrustMaxMins: 4, Dirs: []string{"~/a\nb", "~/\u2066x\u2069", "\u200b"}},
 		{Name: "b", Ceiling: "everything", TrustMaxMins: 1441},
 		{Name: "c", Ceiling: "destructive", TrustMaxMins: 5},
 		{Name: "d", TrustMaxMins: 1440},
