@@ -355,7 +355,7 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 }
 
 // maxBraceScan 是 braceExpands 从一个 { 往后扫的上限（字符数）。
-const maxBraceScan = 1024
+const maxBraceScan = 256
 
 // braceExpands 判断 runes[i] 处引号外的 { 是否开始花括号展开：同一个词里有与之配对的 }，
 // 且其间有引号外的 , 或 ..。引号里的内容整段跳过，反斜杠转义的字符不算。
