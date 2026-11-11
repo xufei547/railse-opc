@@ -131,9 +131,14 @@ describe('总台页', () => {
 
 describe('老 hub', () => {
   it('不支持总台：说明版本过旧（有英文）', () => {
-    expect(html(<DeskUnsupported />)).toContain('hub 版本过旧，不支持总台')
+    const zh = html(<DeskUnsupported />)
+    expect(zh).toContain('hub 版本过旧，不支持总台。升级 hub 后刷新本页。')
+    expect(zh).toMatch(/<button type="button" class="btn">刷新<\/button>/)
     setLang('en')
-    expect(html(<DeskUnsupported />)).not.toMatch(/[　-〿一-鿿＀-￯]/)
+    const en = html(<DeskUnsupported />)
+    expect(en).toContain('This hub is too old for the desk. Upgrade the hub, then refresh this page.')
+    expect(en).toContain('>Refresh</button>')
+    expect(en).not.toMatch(/[　-〿一-鿿＀-￯]/)
   })
 })
 

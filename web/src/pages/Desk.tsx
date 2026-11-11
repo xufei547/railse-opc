@@ -62,9 +62,16 @@ export function Desk() {
   )
 }
 
-/** 老 hub（没有 /api/desk）：说一次，不再轮询。 */
+/** 老 hub（没有 /api/desk）：说一次，不再轮询；升级 hub 后点“刷新”整页重载（换成新 hub 托管的网页）。 */
 export function DeskUnsupported() {
-  return <Banner tone="info">{t('hub 版本过旧，不支持总台。升级 hub 后再来看。')}</Banner>
+  return (
+    <Banner tone="info">
+      {t('hub 版本过旧，不支持总台。升级 hub 后刷新本页。')}
+      <button type="button" className="btn" onClick={() => location.reload()}>
+        {t('刷新')}
+      </button>
+    </Banner>
+  )
 }
 
 export function DeskBody({ desk }: { desk: DeskData }) {
