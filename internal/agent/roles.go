@@ -3,6 +3,8 @@ package agent
 import (
 	"crypto/sha256"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -93,16 +95,56 @@ func (r *Roles) refresh(force bool) RolesState {
 	return st
 }
 
-// readRolesKey 读全文。不存在返回 exists 为假；其余读错误（权限、是目录等）记在 errMsg，按有误处理。
+// maxRolesSize 是 roles.yaml 的大小上限：角色文件很小，超过的多半不是它，按有误处理，不读。
+const maxRolesSize = 256 << 10
+
+// readRolesKey 读全文。不存在返回 exists 为假；其余读错误（权限等）、不是普通文件（FIFO、设备、目录）、超过 256 KiB，
+// 都记在 errMsg，按有误处理。先 stat 判类型与大小再读：FIFO 读了会一直卡着（还持着 Roles 的锁）；打开时带 O_NONBLOCK，
+// 并对打开的句柄再判一次，stat 与打开之间被换成 FIFO 也不会卡住。指向普通文件的符号链接照常读。
 func readRolesKey(path string) ([]byte, rolesKey) {
-	data, err := os.ReadFile(path)
+	fi, err := os.Stat(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return nil, rolesKey{}
 	case err != nil:
 		return nil, rolesKey{exists: true, errMsg: err.Error()}
 	}
+	if msg := rolesFileProblem(fi); msg != "" {
+		return nil, rolesKey{exists: true, errMsg: msg}
+	}
+	f, err := openNoBlock(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, rolesKey{}
+	}
+	if err != nil {
+		return nil, rolesKey{exists: true, errMsg: err.Error()}
+	}
+	defer f.Close()
+	if fi, err = f.Stat(); err != nil {
+		return nil, rolesKey{exists: true, errMsg: err.Error()}
+	}
+	if msg := rolesFileProblem(fi); msg != "" {
+		return nil, rolesKey{exists: true, errMsg: msg}
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxRolesSize+1))
+	if err != nil {
+		return nil, rolesKey{exists: true, errMsg: err.Error()}
+	}
+	if len(data) > maxRolesSize {
+		return nil, rolesKey{exists: true, errMsg: "roles.yaml 超过 256 KiB"}
+	}
 	return data, rolesKey{exists: true, sum: sha256.Sum256(data)}
+}
+
+// rolesFileProblem 说明 fi 为什么不能当角色文件读：不是普通文件，或超过 256 KiB；能读返回空。
+func rolesFileProblem(fi os.FileInfo) string {
+	switch {
+	case !fi.Mode().IsRegular():
+		return fmt.Sprintf("roles.yaml 不是普通文件（%v）", fi.Mode().Type())
+	case fi.Size() > maxRolesSize:
+		return "roles.yaml 超过 256 KiB"
+	}
+	return ""
 }
 
 func parseRoles(data []byte, key rolesKey, home string) RolesState {
