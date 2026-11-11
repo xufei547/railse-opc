@@ -124,6 +124,9 @@ type HubClient struct {
 	// 只留最新一份：hub 整份替换，中间版本不必发。
 	rolesQ    *[]proto.RoleSummary
 	rolesKick chan struct{} // 有新摘要时叫醒发送循环，容量 1
+	// rolesGen 是已交给 hub（hello 带上的，或进了 rolesQ 的）那份摘要的代数（RolesState.Gen），由 mu 保护：更旧的晚到时丢掉，
+	// 不会把新摘要盖掉。
+	rolesGen uint64
 }
 
 // rolesFrameType 是 wire.Roles 的帧类型（wire 里没有对应常量，契约只定了 t 为 "roles"）。
@@ -171,11 +174,11 @@ func (h *HubClient) queueRoles(st RolesState) {
 		sums = []proto.RoleSummary{} // 编成 []：hub 整份替换成空表
 	}
 	h.mu.Lock()
-	if h.conn == nil || !slices.Contains(h.features, wire.FeatureRole) {
+	if h.conn == nil || !slices.Contains(h.features, wire.FeatureRole) || st.Gen <= h.rolesGen {
 		h.mu.Unlock()
 		return
 	}
-	h.rolesQ = &sums
+	h.rolesQ, h.rolesGen = &sums, st.Gen
 	h.mu.Unlock()
 	select {
 	case h.rolesKick <- struct{}{}:
@@ -501,7 +504,11 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 	var helloRoles []proto.RoleSummary
 	if h.rolesSrv != nil {
 		// 坏文件时不带摘要（hub 那边显示的是上一份，或没有）；判定照样 fail closed
-		helloRoles = RoleSummaries(h.rolesSrv.roles.Current().Set)
+		st := h.rolesSrv.roles.Current()
+		helloRoles = RoleSummaries(st.Set)
+		h.mu.Lock()
+		h.rolesGen = st.Gen // 这条连接从 hello 这一代算起
+		h.mu.Unlock()
 		hello.Features = append(hello.Features, wire.FeatureRole)
 		hello.Roles = helloRoles
 	}
@@ -526,6 +533,7 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 	rolesOK := h.rolesSrv != nil && welcome.Has(wire.FeatureRole)
 	if rolesOK {
 		// hello 发出到连上之间文件变了的话，那次变更的通知因为还没连上被丢掉了：连上后比对一次，不一样就补发
+		// （queueRoles 按代数丢掉比已交出的更旧的，这里与别的 goroutine 的通知交错也不会倒序）
 		if st := h.rolesSrv.roles.Current(); st.Err == nil && !slices.EqualFunc(RoleSummaries(st.Set), helloRoles, roleSummaryEqual) {
 			h.queueRoles(st)
 		}

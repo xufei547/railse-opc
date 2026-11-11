@@ -123,3 +123,19 @@ func removeFile(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+// 旧代的摘要晚到（例如连上后补发的那份比别的 goroutine 刚通知的旧）时不发，不会把新摘要盖掉。
+func TestHubRolesStaleGenerationDropped(t *testing.T) {
+	e := newRoleSyncEnv(t, []string{wire.FeatureAsk, wire.FeatureRole})
+	conn := e.connect(t)
+	old := e.env.srv.roles.Current()
+	writeRoles(t, e.env.cfg.RolesPath, "version: 1\nroles:\n  - name: 新\n")
+	e.env.srv.roles.Current()
+	waitFor(t, func() bool { return len(e.rolesFrames(t)) == 1 })
+	e.c.queueRoles(old) // 旧代晚到
+	e.hub.pingAndWaitPong(t, conn)
+	time.Sleep(200 * time.Millisecond)
+	if got := e.rolesFrames(t); len(got) != 1 || got[0].Roles[0].Name != "新" {
+		t.Fatalf("旧代的摘要不该再发: %+v", got)
+	}
+}
