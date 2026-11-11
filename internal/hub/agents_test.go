@@ -195,11 +195,11 @@ func TestAgentWSHelloWelcome(t *testing.T) {
 	if w.RulesVersion != 1 || !strings.Contains(w.RulesYAML, "builtin-readonly") || w.Paused {
 		t.Fatalf("welcome = %+v", w)
 	}
-	// 声明认得提问与限时放行：守护进程据此才把 AskUserQuestion 送来、才发 trust 帧（旧 hub 不发 features，提问交回终端）；
+	// 声明认得提问、限时放行与角色：守护进程据此才把 AskUserQuestion 送来、才发 trust 帧与 roles 帧（旧 hub 不发 features，提问交回终端）；
 	// 没有放行时不带 trusts 键
-	if !reflect.DeepEqual(w.Features, []string{wire.FeatureAsk, wire.FeatureTrust}) || !strings.Contains(string(b), `"features":["ask","trust"]`) ||
+	if !reflect.DeepEqual(w.Features, []string{wire.FeatureAsk, wire.FeatureTrust, wire.FeatureRole}) || !strings.Contains(string(b), `"features":["ask","trust","role"]`) ||
 		strings.Contains(string(b), `"trusts"`) {
-		t.Fatalf("welcome 应声明 features [ask trust]: %s", b)
+		t.Fatalf("welcome 应声明 features [ask trust role]: %s", b)
 	}
 	if !h.srv.agents.connected(id) {
 		t.Fatal("应登记为已连接")

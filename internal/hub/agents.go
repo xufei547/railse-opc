@@ -338,6 +338,8 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		conn.Close(websocket.StatusPolicyViolation, "机器已吊销")
 		return
 	}
+	// 角色表按 hello 整份替换（没声明 role 时清空）：在 welcome 之前写好，之后这条连接上的请求、总台都看得到
+	s.storeHelloRoles(c, hello.Has(wire.FeatureRole), hello.Roles)
 	trustOf := "" // 守护进程声明了 trust 才在 welcome 里带放行快照
 	if hello.Has(wire.FeatureTrust) {
 		trustOf = machine.ID
@@ -434,9 +436,9 @@ type welcomeSource interface {
 	ListTrusts(machineID string) ([]proto.Trust, error)
 }
 
-// hubFeatures 是本 hub 在 welcome 里声明的能力（wire.Welcome.Features），GET /api/version 也回它：认得提问、限时放行。
-// 守护进程只把提问送给声明了 ask 的 hub，只给声明了 trust 的 hub 发放行变更。
-func hubFeatures() []string { return []string{wire.FeatureAsk, wire.FeatureTrust} }
+// hubFeatures 是本 hub 在 welcome 里声明的能力（wire.Welcome.Features），GET /api/version 也回它：认得提问、限时放行、角色。
+// 守护进程只把提问送给声明了 ask 的 hub，只给声明了 trust 的 hub 发放行变更，只给声明了 role 的 hub 发角色摘要。
+func hubFeatures() []string { return []string{wire.FeatureAsk, wire.FeatureTrust, wire.FeatureRole} }
 
 // welcomeFrame 组装 welcome：规则快照（规则与版本号同一事务读出）、全局暂停状态、本 hub 的能力（hubFeatures），以及 trustOf 非空时
 // 那台机器的放行快照。任一读失败都返回错误，握手随之以 InternalError 关闭：宁可不连，也不把读不出的暂停当成未暂停、把读不出的放行当成没有。
@@ -580,9 +582,11 @@ func (s *Server) handleAgentFrame(c *agentConn, b []byte, pongs *pongClock, bad 
 	case wire.TDelivered:
 		dispatchFrame(bad, kind, b, func(f wire.Delivered) { s.onDelivered(m, f) })
 	case wire.TAudit:
-		dispatchFrame(bad, kind, b, func(f wire.Audit) { s.onAudit(m, f) })
+		dispatchFrame(bad, kind, b, func(f wire.Audit) { s.onAudit(c, f) })
 	case wire.TTrust:
 		dispatchFrame(bad, kind, b, func(f wire.TrustChange) { s.onTrustChange(c, f) })
+	case tRoles:
+		dispatchFrame(bad, kind, b, func(f wire.Roles) { s.onRoles(c, f) })
 	default:
 		bad.record(kind, errUnknownKind)
 	}

@@ -474,4 +474,35 @@ export const en: Record<string, string> = {
   手机建: 'From the phone',
   终端建: 'From the terminal',
   启动命令建: 'From the launch command',
+  // 角色与总台（0.3 起）：desk.ts、pages/Desk.tsx、pages/Inbox.tsx、components/RequestCard.tsx、DecideSheet.tsx
+  '{n} 小时': '{n} hr',
+  '上限 {risk}': 'Up to {risk}',
+  '禁用 {n} 项': '{n} forbidden',
+  不许限时放行: 'No time-limited trust',
+  '放行最长 {d}': 'Trust up to {d}',
+  未分配: 'Unassigned',
+  '角色「{role}」': 'Role "{role}"',
+  '超出角色「{role}」的边界': 'Beyond the limits of role "{role}"',
+  超出角色的边界: 'Beyond the limits of its role',
+  '超出角色「{role}」的边界：这次只能单次批准，不能记住，也不能限时放行。':
+    'Beyond the limits of role "{role}": you can only approve this once. It can\'t be remembered or trusted for a while.',
+  '超出角色的边界：这次只能单次批准，不能记住，也不能限时放行。':
+    "Beyond the limits of its role: you can only approve this once. It can't be remembered or trusted for a while.",
+  总台: 'Desk',
+  还没有角色: 'No roles yet',
+  '角色是 agent 会话的权限边界：每个角色有风险上限与禁用的操作，超出的一律问你。角色定义在机器上的 roles.yaml 里，手机只看不改。':
+    "A role is a permission boundary for an agent session: each role has a risk ceiling and forbidden actions, and anything beyond it always asks you. Roles live in roles.yaml on the machine; the phone only shows them.",
+  // {cmd} 是一段 <code>
+  '在机器上运行 {cmd} 生成一份起步的模板。': 'Run {cmd} on the machine to write a starter template.',
+  '最近 24 小时没有动静': 'Nothing in the last 24 hours',
+  等我: 'Waiting',
+  放行中: 'Trusted',
+  拦下: 'Blocked',
+  '拦下与自动放行只数 {h} 小时内': 'Blocked and auto-approved count the last {h} hours',
+  超出边界: 'Beyond limits',
+  '只看：{what}': 'Showing only: {what}',
+  清除筛选: 'Clear filter',
+  角色: 'Role',
+  'hub 版本过旧，不支持总台。升级 hub 后刷新本页。': 'This hub is too old for the desk. Upgrade the hub, then refresh this page.',
+  '还有更早的待批没显示。按机器查看：': "Older pending requests aren't shown. View by machine: ",
 }

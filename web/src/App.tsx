@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { BrowserRouter, NavLink, Route, Routes, useNavigate } from 'react-router'
+import { BrowserRouter, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { ApiError, hub, setUnauthorizedHandler } from './api'
 import { createLoginRedirect } from './auth'
 import { lang, t } from './i18n'
 import { StoreProvider, useStore } from './StoreProvider'
 import { Login } from './pages/Login'
 import { Inbox } from './pages/Inbox'
+import { Desk } from './pages/Desk'
 import { RequestPage } from './pages/Request'
 import { History } from './pages/History'
 import { Rules } from './pages/Rules'
@@ -57,12 +58,16 @@ function Nav() {
   const { state } = useStore()
   const n = state.pending.length + state.questions.length
   const cls = ({ isActive }: { isActive: boolean }) => (isActive ? 'active' : '')
+  // 收件箱在 / 与 /inbox（总台按角色筛选时跳的地址）两个路径上都算当前
+  const { pathname } = useLocation()
+  const inboxCls = ({ isActive }: { isActive: boolean }) => cls({ isActive: isActive || pathname === '/inbox' })
   return (
     <nav className="nav">
-      <NavLink to="/" end className={cls}>
+      <NavLink to="/" end className={inboxCls}>
         {t('收件箱')}
         {n > 0 && <span className="badge" aria-label={t('{n} 条等你处理', { n })}>{n > 99 ? '99+' : n}</span>}
       </NavLink>
+      <NavLink to="/desk" className={cls}>{t('总台')}</NavLink>
       <NavLink to="/history" className={cls}>{t('历史')}</NavLink>
       <NavLink to="/rules" className={cls}>{t('规则')}</NavLink>
       {/* 同一个“机器”在 RequestAttrs 里是单数字段名（en 表里是 Machine），导航里要复数，所以按语言分支 */}
@@ -77,6 +82,8 @@ export function Shell() {
     <div className="app">
       <Routes>
         <Route path="/" element={<Inbox />} />
+        <Route path="/inbox" element={<Inbox />} />
+        <Route path="/desk" element={<Desk />} />
         <Route path="/r/:id" element={<RequestPage />} />
         <Route path="/history" element={<History />} />
         <Route path="/rules" element={<Rules />} />

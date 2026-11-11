@@ -126,10 +126,11 @@ func TestMigrateFailureRollsBack(t *testing.T) {
 func TestFreshDBIsLatest(t *testing.T) {
 	s := openTemp(t)
 	var v int
-	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != 6 || SchemaVersion != 6 {
+	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != 7 || SchemaVersion != 7 {
 		t.Fatalf("新库版本 = %d, %v（程序 %d）", v, err, SchemaVersion)
 	}
-	for _, c := range []struct{ table, col string }{{"push_subscriptions", "failures"}, {"requests", "ask"}, {"requests", "answers"}, {"trusts", "revoke_reason"}} {
+	for _, c := range []struct{ table, col string }{{"push_subscriptions", "failures"}, {"requests", "ask"}, {"requests", "answers"}, {"trusts", "revoke_reason"},
+		{"sessions", "role"}, {"requests", "role"}, {"requests", "beyond_role"}, {"machine_roles", "trust_max_mins"}} {
 		var n int
 		if err := s.db.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?", c.table, c.col).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("新库 %s 应有 %s 列: %d %v", c.table, c.col, n, err)
@@ -365,5 +366,85 @@ func TestMigrateKeepsOldSubscriptionsChinese(t *testing.T) {
 	}
 	if sub.Lang != "zh" {
 		t.Fatalf("旧订阅升级后 lang = %q，想要 zh", sub.Lang)
+	}
+}
+
+// schemaV6 读冻结的版本 6 建表语句（testdata/schema_v6.sql）。
+func schemaV6(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "schema_v6.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// v6PopulateSQL 给 v6 库各表填一行：机器、会话、审批、放行等。
+const v6PopulateSQL = `
+INSERT INTO schema_version(v) VALUES(6);
+INSERT INTO machines VALUES('m1', 'mac', 'sh1', '/Users/u', '0.2.3', '2026-10-20T00:00:00.000000000Z', '2026-11-10T00:00:00.000000000Z', 0);
+INSERT INTO sessions VALUES('s1', 'm1', 'claude', 'cs1', '/p', 'p', '2026-11-10T00:00:00.000000000Z', '2026-11-10T00:01:00.000000000Z');
+INSERT INTO requests(id, machine_id, session_id, kind, tool_name, payload, payload_hash, risk, project_root, state, created_at, trigger)
+  VALUES('r1', 'm1', 's1', 'permission', 'Bash', '{"type":"shell","command":"git push"}', 'h1', 'outward', '/p', 'approved', '2026-11-10T00:00:01.000000000Z', '{"segment":"git push","why":"推送"}');
+INSERT INTO trusts VALUES('t1', 'm1', 'project', '', '', '/p', '2099-11-12T00:00:00.000000000Z', '2026-11-10T00:00:00.000000000Z', 'phone', '', NULL, '');
+INSERT INTO push_subscriptions VALUES('ps1', 'https://p.example/1', '{}', 'Safari', '2026-11-01T00:00:00.000000000Z', NULL, 0, NULL, 'en');
+`
+
+// v6 库升到 v7：旧数据逐字段保留，sessions、requests 的角色为空串，beyond_role 为 0，machine_roles 为空表；读回的请求没有角色。
+func TestMigrateV6ToV7KeepsData(t *testing.T) {
+	path := filepath.Join(tempDir(t), "hub.db")
+	writeRaw(t, path, schemaV6(t)+v6PopulateSQL)
+	raw := openRaw(t, path)
+	before, cols := dumpTables(t, raw, nil)
+	raw.Close()
+	if len(before["requests"]) != 1 || len(before["sessions"]) != 1 {
+		t.Fatalf("v6 库没造好: %v", before)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("打开 v6 库应升级: %v", err)
+	}
+	defer s.Close()
+	var v int
+	if err := s.db.QueryRow("SELECT v FROM schema_version").Scan(&v); err != nil || v != 7 {
+		t.Fatalf("版本 = %d, %v", v, err)
+	}
+	after, _ := dumpTables(t, s.db, cols)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("迁移改动了旧数据:\n前: %v\n后: %v", before, after)
+	}
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM requests WHERE role = '' AND beyond_role = 0").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("requests 新列应默认空: %d, %v", n, err)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM sessions WHERE role = ''").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("sessions.role 应默认空串: %d, %v", n, err)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM machine_roles").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("machine_roles 应为空表: %d, %v", n, err)
+	}
+	if r, err := s.GetRequest("r1"); err != nil || r.Role != "" || r.BeyondRole || r.Trigger == nil {
+		t.Fatalf("旧请求读回: %+v, %v", r, err)
+	}
+	if list, err := s.ListTrusts("m1"); err != nil || len(list) != 1 || list[0].ID != "t1" {
+		t.Fatalf("旧放行读回: %+v, %v", list, err)
+	}
+}
+
+// 迁移 7 与 schema.sql 建出的 sessions、requests、machine_roles 必须一模一样（列序、类型、默认值、索引）。
+func TestMigratedV7SchemaMatchesFresh(t *testing.T) {
+	fresh := openTemp(t)
+	path := filepath.Join(tempDir(t), "hub.db")
+	writeRaw(t, path, schemaV6(t)+"INSERT INTO schema_version(v) VALUES(6);")
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	for _, table := range []string{"sessions", "requests", "machine_roles"} {
+		a, b := tableSchema(t, fresh.db, table), tableSchema(t, migrated.db, table)
+		if len(a) == 0 || !slices.Equal(a, b) {
+			t.Fatalf("%s 新库与迁移后的库不一致:\n新库:\n%s\n迁移:\n%s", table, strings.Join(a, "\n"), strings.Join(b, "\n"))
+		}
 	}
 }

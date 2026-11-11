@@ -1,5 +1,5 @@
 import { t, type Lang } from './i18n'
-import type { AnswerBody, AuditEvent, DecideBody, Draft, Inbox, Machine, RequestView, Rule, Status, TrustView, VapidInfo } from './types'
+import type { AnswerBody, AuditEvent, DecideBody, Desk, Draft, Inbox, Machine, RequestView, Rule, Status, TrustView, VapidInfo } from './types'
 
 /** hub 回了非 2xx（status 为 HTTP 状态码），或根本连不上（status 为 0）。message 是给人看的文案：hub 给的原文照带，网页自己写的按当前语言。 */
 export class ApiError extends Error {
@@ -90,7 +90,8 @@ export const hub = {
   logout: () => post<void>('/api/logout'),
   status: () => get<Status>('/api/status'),
   version: () => get<{ version: string }>('/api/version'),
-  inbox: () => get<Inbox>('/api/inbox'),
+  /** query 是 desk.ts 的 inboxQuery 的结果（有筛选时由 hub 在截断之前筛）。 */
+  inbox: (query = '') => get<Inbox>('/api/inbox' + query),
   requests: (state = '', limit = 50) => get<RequestView[]>(`/api/requests?state=${enc(state)}&limit=${limit}`),
   request: (id: string) => get<{ request: RequestView; audit: AuditEvent[] }>(`/api/requests/${enc(id)}`),
   decide: (id: string, body: DecideBody) => post<RequestView>(`/api/requests/${enc(id)}/decide`, body),
@@ -117,4 +118,6 @@ export const hub = {
   /** 生效中的限时放行，按到期先后排。 */
   trusts: () => get<TrustView[]>('/api/trusts'),
   revokeTrust: (id: string) => del<void>(`/api/trusts/${enc(id)}`),
+  /** 总台：按角色聚合的等我、放行中、拦下、自动放行与最近动作（0.3 起；老 hub 回 404）。 */
+  desk: () => get<Desk>('/api/desk'),
 }
