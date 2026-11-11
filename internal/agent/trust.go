@@ -505,6 +505,7 @@ func (s *Server) sweepTrusts(ctx context.Context) {
 		for _, tr := range s.trusts.sweep() {
 			s.trustEvent("trust_expired", tr)
 		}
+		s.pruneSessions() // 顺带清掉 CLI 进程已退出的会话的钉住与继承记录
 		select {
 		case <-ctx.Done():
 			return

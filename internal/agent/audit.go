@@ -36,6 +36,9 @@ type AuditEntry struct {
 	// 仅审批（0.3 起）：判定时的角色名（同 Session.Role），与是否超出角色的上限。没有角色文件时都为空，不出现在 JSON 里。
 	Role       string `json:"role,omitempty"`
 	BeyondRole bool   `json:"beyond_role,omitempty"`
+	// Ancestry 是这次判定用的祖先链从哪来：peer（守护进程按连接对端的进程凭据重建）、self_reported（取不到凭据，用了请求里自报的）；
+	// 没有祖先链时为空。
+	Ancestry string `json:"ancestry,omitempty"`
 }
 
 // Audit 是只追加的 JSONL 文件。
