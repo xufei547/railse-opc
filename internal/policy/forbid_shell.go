@@ -150,3 +150,51 @@ func (r *Role) hasCommandForbid() bool {
 	}
 	return false
 }
+
+// railseEnvNames 是钩子从环境里读、决定会话角色与放行的变量：RAILSE_ROLE（角色）、RAILSE_TRUST（建会话放行）、RAILSE_HOME
+// （钩子连哪个守护进程）。有角色的会话改它们再起一个 CLI，就换到了别的角色、放行或守护进程。
+var railseEnvNames = []string{"RAILSE_ROLE", "RAILSE_TRUST", "RAILSE_HOME"}
+
+// envSetters 是能设置或删除环境变量的命令：它们的参数里出现变量名本身（export X、unset X）也算改。
+var envSetters = map[string]bool{"export": true, "unset": true, "declare": true, "typeset": true, "readonly": true, "local": true, "env": true}
+
+// changesRailseEnv 判断命令是否给 railseEnvNames 赋值或删除它们：前缀赋值、env、export、declare、typeset、readonly、local、unset、
+// env -u，以及 sh -c、命令替换、进程替换与 eval 里的同样写法。设置类命令的参数含变量展开（export "$V"=x）时看不出改的是谁，也算。
+// 只看赋值，不看读取（echo $RAILSE_ROLE 不算）。
+func changesRailseEnv(cmd string) bool {
+	cmds, _ := forbidCommands(cmd)
+	for _, c := range cmds {
+		for _, seg := range effectiveSegments(c) {
+			if segChangesRailseEnv(seg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func segChangesRailseEnv(seg segment) bool {
+	// 设置类命令可能是命令本身（export X），也可能是被剥掉的包装（env -u X claude 剥成 claude）：两处都看
+	argv := stripWrappers(seg.argv)
+	setter := false
+	for _, w := range seg.argv[:len(seg.argv)-len(argv)] {
+		setter = setter || envSetters[filepath.Base(w)]
+	}
+	if len(argv) > 0 {
+		setter = setter || envSetters[filepath.Base(argv[0])]
+	}
+	for i, w := range seg.argv {
+		for _, n := range railseEnvNames {
+			if strings.HasPrefix(w, n+"=") || strings.HasPrefix(w, n+"+=") || strings.HasPrefix(w, "-u"+n) {
+				return true
+			}
+			if setter && w == n {
+				return true
+			}
+		}
+		if setter && i > 0 && flagAt(seg.argvFlags, i).expand {
+			return true
+		}
+	}
+	return false
+}

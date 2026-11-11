@@ -1011,6 +1011,7 @@ Switched to a new key and deleted %d push subscriptions. Every phone has to turn
 	"超出角色「%s」的边界：含无法检查的子命令":                       "Beyond role \"%s\"'s boundary: contains a subcommand that can't be checked",
 	"超出角色「%s」的边界，Gemini 无法在这里问人：换个角色，或在别处执行":      "Beyond role \"%s\"'s boundary, and Gemini can't ask a human here: switch roles, or run it somewhere else",
 	"roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行": "roles.yaml is broken, and Gemini can't ask a human here: fix the file and retry, or run it somewhere else",
+	"超出角色「%s」的边界：试图更改 Railse 的角色或放行设置":            "Beyond role \"%s\"'s boundary: tries to change Railse's role or trust settings",
 	"roles.yaml 有误：%s": "roles.yaml is broken: %s",
 
 	// internal/policy/trigger.go 的 Why 短语（经 i18n.Lookup 动态查）。动词短语，接在引号括起的命令段后面；

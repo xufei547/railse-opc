@@ -113,6 +113,16 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 		if best != nil && best.Action == ActionDeny && !e.paused.Load() {
 			return withRule(base, best)
 		}
+		// 改 Railse 的角色或放行设置（嵌套起一个换了 RAILSE_ROLE 的 CLI 等）：任何角色都必须人来定
+		if p.Type == PayloadShell && changesRailseEnv(p.Command) {
+			base.Action, base.BeyondRole = ActionAsk, true
+			if msg := role.Broken(); msg != "" {
+				base.Reason = "roles.yaml 有误：" + msg + "；且试图更改 Railse 的角色或放行设置"
+			} else {
+				base.Reason = "超出角色「" + role.Name + "」的边界：试图更改 Railse 的角色或放行设置"
+			}
+			return base
+		}
 		// 命令里有解析不了的结构、角色又有按命令的禁用：看不见里面是不是禁用的命令，按越界问人（不直接拒，免得误伤）
 		if opaque && role.hasCommandForbid() {
 			base.Action, base.BeyondRole = ActionAsk, true

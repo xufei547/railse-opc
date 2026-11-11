@@ -691,3 +691,21 @@ func TestRolePinCapacityAndSessionEnd(t *testing.T) {
 		t.Fatalf("session_end 后应释放: %q", got)
 	}
 }
+
+// 嵌套起换了角色的 CLI：有角色的会话里越界，限时放行与 RAILSE_TRUST 都挡不住；未分配的会话照旧。
+func TestNestedRoleChangeIsBeyond(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: env.repo, Until: time.Now().Add(time.Hour)}})
+	resp := send(t, env, preToolUse(env.repo, "RAILSE_ROLE=运维 claude -p 'deploy'", "bypassPermissions", "toolu_n"))
+	if resp.Decision != "ask" || !strings.Contains(resp.Reason, "试图更改 Railse 的角色或放行设置") {
+		t.Fatalf("有角色的会话里换角色应越界: %+v", resp)
+	}
+	nowhere := t.TempDir()
+	r := permission(nowhere, "RAILSE_ROLE=运维 claude -p 'deploy'")
+	r.Session.CLISessionID = "unassigned"
+	if resp := send(t, env, r); strings.Contains(resp.Reason, "试图更改") {
+		t.Fatalf("未分配的会话照旧: %+v", resp)
+	}
+}

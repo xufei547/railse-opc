@@ -218,7 +218,7 @@ func TestLocalizeOpaqueRoleReason(t *testing.T) {
 func TestLocalizeGeminiBeyondReason(t *testing.T) {
 	i18n.Set(i18n.EN)
 	t.Cleanup(func() { i18n.Set(i18n.ZH) })
-	for _, in := range []string{"超出角色「a」的边界，Gemini 无法在这里问人：换个角色，或在别处执行", "roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行"} {
+	for _, in := range []string{"超出角色「a」的边界：试图更改 Railse 的角色或放行设置", "超出角色「a」的边界，Gemini 无法在这里问人：换个角色，或在别处执行", "roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行"} {
 		if got, ok := localizeRoleReason(in); !ok || hasCJK(got) {
 			t.Errorf("%q → %q %v", in, got, ok)
 		}

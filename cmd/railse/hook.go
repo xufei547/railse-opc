@@ -249,13 +249,15 @@ const (
 	roleBeyondRisk   = "，这次是 "
 	roleBrokenPrefix = "roles.yaml 有误："
 	roleOpaqueSuffix = "」的边界：含无法检查的子命令"
+	roleEnvSuffix    = "」的边界：试图更改 Railse 的角色或放行设置"
 	roleGeminiSuffix = "」的边界，Gemini 无法在这里问人：换个角色，或在别处执行"
 	roleGeminiBroken = "roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行"
 )
 
 // roleReasonFormats 是角色理由按终端语言重拼用的三个模板（见 localizeRoleReason）。
 var roleReasonFormats = []string{"角色「%s」禁用：%s", "超出角色「%s」的边界（上限 %s，这次是 %s）", "超出角色「%s」的边界：含无法检查的子命令",
-	"超出角色「%s」的边界，Gemini 无法在这里问人：换个角色，或在别处执行", "roles.yaml 有误：%s", roleGeminiBroken}
+	"超出角色「%s」的边界，Gemini 无法在这里问人：换个角色，或在别处执行", "超出角色「%s」的边界：试图更改 Railse 的角色或放行设置",
+	"roles.yaml 有误：%s", roleGeminiBroken}
 
 // isRoleReason 判断已按终端语言重拼过的理由是不是角色的理由：以某个模板（当前语言）第一个占位符之前的部分开头。
 func isRoleReason(localized string) bool {
@@ -282,6 +284,9 @@ func localizeRoleReason(reason string) (string, bool) {
 		return fmt.Sprintf(i18n.T("超出角色「%s」的边界，Gemini 无法在这里问人：换个角色，或在别处执行"), name), true
 	case reason == roleGeminiBroken:
 		return i18n.T(roleGeminiBroken), true
+	case strings.HasPrefix(reason, roleBeyondPrefix) && strings.HasSuffix(reason, roleEnvSuffix):
+		name := strings.TrimSuffix(strings.TrimPrefix(reason, roleBeyondPrefix), roleEnvSuffix)
+		return fmt.Sprintf(i18n.T("超出角色「%s」的边界：试图更改 Railse 的角色或放行设置"), name), true
 	case strings.HasPrefix(reason, roleBeyondPrefix) && strings.HasSuffix(reason, roleOpaqueSuffix):
 		name := strings.TrimSuffix(strings.TrimPrefix(reason, roleBeyondPrefix), roleOpaqueSuffix)
 		return fmt.Sprintf(i18n.T("超出角色「%s」的边界：含无法检查的子命令"), name), true

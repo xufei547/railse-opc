@@ -209,6 +209,7 @@ roles:
 | 4 | 风险高于 `ceiling`，或角色有按命令的禁用而命令里有解析不了的结构 | 越界：规则的 allow（含写了 `risk: destructive` 的 user allow）与限时放行都不适用，必须人来定。审计 `beyond_role: true`，理由“超出角色「写作」的边界（上限 write_in_project，这次是 outward）” |
 | 5 | 其余 | 照旧：暂停、规则、底线、限时放行、默认 ask |
 
+- **改 Railse 设置的命令。** 有角色的会话（含 `roles.yaml` 有误时）里，给 `RAILSE_ROLE`、`RAILSE_TRUST`、`RAILSE_HOME` 赋值或删除它们的命令（前缀赋值、`env`、`env -u`、`export`、`declare`、`typeset`、`readonly`、`local`、`unset`，以及 `sh -c`、命令替换与 `eval` 里的同样写法；设置类命令的参数含变量展开时看不出改的是谁，也算）按越界处理，理由“试图更改 Railse 的角色或放行设置”。典型是嵌套起一个换了角色的 CLI（`RAILSE_ROLE=运维 claude …`）。读取（`echo $RAILSE_ROLE`）不算；未分配的会话照旧。
 - **禁用看穿命令替换。** `$(…)`、反引号、进程替换 `<(…)` `>(…)` 与 `eval` 里的命令逐层参与 `forbid` 的匹配（`echo "$(git push)"` 照样拒）。角色带有按命令的禁用（`command_prefix`、`command_regex`）而命令里有解析不了的结构（heredoc、没闭合的引号或括号、裸括号、带转义的 `$'…'`、嵌套过深）时，看不见里面有没有禁用的命令，按越界问人（理由“含无法检查的子命令”），不直接拒、也不走限时放行。
 - **暂停时**第 1、2、3 步照常生效（拒绝不受暂停影响）；越界（第 4 步，含文件有误）也不归暂停管：`PreToolUse` 照旧回 `ask`，其余照旧送人工决定——交回终端在 auto、acceptEdits、bypassPermissions 下等于放行。其余交回终端。
 - **越界的去向。** Claude 的 `PreToolUse` 一律回 `ask`：Claude 在终端弹确认框（理由是角色那句）并触发 `PermissionRequest` 送手机；中间几档（项目内写、联网）也一样，不交 Claude 自己的分类器——它可能自动放行。`PermissionRequest` 与 Codex 的请求送 hub，`pending` 帧带 `beyond_role: true`，手机上不出现“记住”与“接下来一段时间都放行”。越界的请求也不按 `RAILSE_TRUST` 建放行。

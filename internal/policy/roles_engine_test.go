@@ -278,3 +278,39 @@ func TestLearnedDenyLosesToUserAllowUnderCeiling(t *testing.T) {
 		t.Fatalf("选中的是 user allow，应按 ceiling 越界: %+v", d)
 	}
 }
+
+// 有角色的会话里改 RAILSE_ROLE、RAILSE_TRUST、RAILSE_HOME 的命令（典型：嵌套起一个宽松角色的 CLI）按越界问人，任何角色都一样；
+// 没有角色时照旧。
+func TestRailseEnvChangeIsBeyondRole(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	for _, cmd := range []string{
+		"RAILSE_ROLE=运维 claude -p hi",
+		"env RAILSE_ROLE=运维 codex exec x",
+		"export RAILSE_ROLE=运维 && gemini",
+		"declare -x RAILSE_TRUST=24h",
+		"typeset RAILSE_HOME=/tmp/x",
+		"readonly RAILSE_ROLE=x",
+		"unset RAILSE_ROLE; claude",
+		"env -u RAILSE_ROLE claude",
+		`sh -c 'RAILSE_ROLE=x claude'`,
+		`echo "$(RAILSE_TRUST=8h claude -p x)"`,
+		`eval RAILSE_ROLE=x claude`,
+		`export "$V"=x`,
+		"RAILSE_ROLE+=x claude",
+	} {
+		for _, role := range []string{"写作", "运维"} {
+			d := e.Evaluate(shellAt(cmd), roleCtx(t, role))
+			if d.Action != ActionAsk || !d.BeyondRole || !strings.Contains(d.Reason, "试图更改 Railse 的角色或放行设置") {
+				t.Errorf("%s（%s）: 应越界问人: %+v", cmd, role, d)
+			}
+		}
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "")); d.BeyondRole {
+			t.Errorf("%s: 没有角色时不该越界: %+v", cmd, d)
+		}
+	}
+	for _, cmd := range []string{"echo $RAILSE_ROLE", "printenv RAILSE_ROLE", "ls"} {
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "运维")); d.BeyondRole {
+			t.Errorf("%s: 只读不该越界: %+v", cmd, d)
+		}
+	}
+}
