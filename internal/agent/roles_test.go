@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -195,5 +197,83 @@ func TestRoleTemplate(t *testing.T) {
 				t.Errorf("en=%v 模板角色 %s 不该带 dirs", en, r.Name)
 			}
 		}
+	}
+}
+
+// 内容变了而 mtime 与大小都没变：照样重读（按内容比较，不靠 mtime）。
+func TestRolesReloadSameMtimeAndSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "roles.yaml")
+	r := NewRoles(path)
+	a := "version: 1\nroles:\n  - name: aa\n    ceiling: read\n"
+	b := "version: 1\nroles:\n  - name: bb\n    ceiling: read\n"
+	at := time.Now().Add(-time.Hour).Truncate(time.Second)
+	os.WriteFile(path, []byte(a), 0o600)
+	os.Chtimes(path, at, at)
+	if st := r.Current(); st.Set.Find("aa") == nil {
+		t.Fatalf("第一次: %+v", st)
+	}
+	os.WriteFile(path, []byte(b), 0o600)
+	os.Chtimes(path, at, at)
+	if st := r.Current(); st.Set.Find("bb") == nil || st.Set.Find("aa") != nil {
+		t.Fatalf("内容变了应重读: %+v", st)
+	}
+}
+
+// 读得到的好文件变成读不了：进入有误状态，不沿用旧的。
+func TestRolesBecomesUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root 读得了 0000 的文件")
+	}
+	path := filepath.Join(t.TempDir(), "roles.yaml")
+	os.WriteFile(path, []byte("version: 1\nroles:\n  - name: a\n"), 0o600)
+	r := NewRoles(path)
+	if st := r.Current(); st.Err != nil {
+		t.Fatal(st.Err)
+	}
+	os.Chmod(path, 0)
+	t.Cleanup(func() { os.Chmod(path, 0o600) })
+	if st := r.Current(); !st.Exists || st.Err == nil || len(st.Set.Roles) != 0 {
+		t.Fatalf("读不了应按有误: %+v", st)
+	}
+}
+
+// 并发重读时通知按代数递增送达，最后一次通知就是文件的最终内容（roles 帧不会倒序）。
+func TestRolesConcurrentReloadOrdered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "roles.yaml")
+	r := NewRoles(path)
+	r.Current()
+	var mu sync.Mutex
+	var gens []uint64
+	var last RolesState
+	r.SetChanged(func(st RolesState) {
+		mu.Lock()
+		gens = append(gens, st.Gen)
+		last = st
+		mu.Unlock()
+	})
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 30 {
+				if i == 0 {
+					os.WriteFile(path, []byte(fmt.Sprintf("version: 1\nroles:\n  - name: r%d\n", j)), 0o600)
+				}
+				r.Current()
+			}
+		}()
+	}
+	wg.Wait()
+	final := r.Current()
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(gens); i++ {
+		if gens[i] <= gens[i-1] {
+			t.Fatalf("通知的代数应递增: %v", gens)
+		}
+	}
+	if len(gens) == 0 || last.Gen != final.Gen || last.Set.Roles[0].Name != final.Set.Roles[0].Name {
+		t.Fatalf("最后一次通知应是最终内容: last=%+v final=%+v", last, final)
 	}
 }

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -19,23 +20,26 @@ type RolesState struct {
 	Exists bool
 	Set    policy.RoleSet
 	Err    error
+	// Gen 是这份状态的代数：每次内容（或读的结果）变了加一，单调递增。通知按代数顺序送达（见 SetChanged）。
+	Gen uint64
 }
 
-// rolesStamp 是判断文件变没变的依据：存在与否、mtime 与大小（设计 §2：每次判定前比对，文件小，开销可忽略）。
-type rolesStamp struct {
+// rolesKey 是判断文件变没变的依据：存在与否、读的错误与全文的哈希。每次判定都读全文比较（文件很小）：只比 mtime 与大小时，
+// 内容变了而两者不变、或文件变得读不了，都会继续沿用旧的角色。
+type rolesKey struct {
 	exists bool
-	mtime  time.Time
-	size   int64
-	errMsg string // stat 本身失败（权限等）时的错误，变了也算变
+	errMsg string
+	sum    [sha256.Size]byte
 }
 
-// Roles 持有 roles.yaml 的当前状态，并发安全。每次 Current 都先 stat 一次，mtime 或大小变了就重读。
+// Roles 持有 roles.yaml 的当前状态，并发安全。每次 Current 都读一次全文，内容（或读的结果）变了就重新解析。
+// 重读与变更通知在同一把锁里串行进行，通知按代数顺序送达，roles 帧不会把旧摘要发在新摘要之后。
 type Roles struct {
 	path string
 
 	mu     sync.Mutex
 	loaded bool
-	stamp  rolesStamp
+	key    rolesKey
 	state  RolesState
 
 	changed atomic.Pointer[func(RolesState)]
@@ -47,9 +51,9 @@ func NewRoles(path string) *Roles { return &Roles{path: path} }
 // Path 返回 roles.yaml 的路径。
 func (r *Roles) Path() string { return r.path }
 
-// SetChanged 装上重读成功后的回调（hub 客户端发 roles 帧用）；nil 表示不通知。重读成功指文件变了且读出合法内容，
+// SetChanged 装上重读成功后的回调（hub 客户端发 roles 帧用）；nil 表示不通知。重读成功指内容变了且读出合法内容，
 // 包括文件被删掉（变成没有角色）；第一次读、读到坏文件都不通知（坏文件时 hub 那边保留上一份摘要，规格 §2）。
-// fn 在调用 Current 的 goroutine 里同步调用、不持锁，必须不阻塞。
+// fn 在调用 Current 的 goroutine 里、持着 Roles 的锁同步调用（为了按代数顺序送达），必须不阻塞，也不能回调 Roles。
 func (r *Roles) SetChanged(fn func(RolesState)) {
 	if fn == nil {
 		r.changed.Store(nil)
@@ -58,66 +62,50 @@ func (r *Roles) SetChanged(fn func(RolesState)) {
 	r.changed.Store(&fn)
 }
 
-// Current 返回当前状态，文件变了先重读。
-func (r *Roles) Current() RolesState {
-	st, notify := r.refresh(false)
-	if notify {
-		if fn := r.changed.Load(); fn != nil {
-			(*fn)(st)
-		}
-	}
-	return st
-}
+// Current 返回当前状态，文件内容变了先重读。
+func (r *Roles) Current() RolesState { return r.refresh(false) }
 
-// Reload 不看 mtime 强制重读（reload 管理命令用），返回新状态。
-func (r *Roles) Reload() RolesState {
-	st, notify := r.refresh(true)
-	if notify {
-		if fn := r.changed.Load(); fn != nil {
-			(*fn)(st)
-		}
-	}
-	return st
-}
+// Reload 不看内容变没变强制重新解析（reload 管理命令用），返回新状态。
+func (r *Roles) Reload() RolesState { return r.refresh(true) }
 
-func (r *Roles) refresh(force bool) (RolesState, bool) {
-	stamp := statRoles(r.path)
+func (r *Roles) refresh(force bool) RolesState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.loaded && !force && stamp == r.stamp {
-		return r.state, false
+	data, key := readRolesKey(r.path)
+	if r.loaded && !force && key == r.key {
+		return r.state
 	}
 	first := !r.loaded
-	r.loaded, r.stamp = true, stamp
-	st := readRoles(r.path, stamp)
+	r.loaded, r.key = true, key
+	st := parseRoles(data, key)
+	st.Gen = r.state.Gen + 1
 	r.state = st
-	return st, !first && st.Err == nil
+	if !first && st.Err == nil {
+		if fn := r.changed.Load(); fn != nil {
+			(*fn)(st)
+		}
+	}
+	return st
 }
 
-func statRoles(path string) rolesStamp {
-	fi, err := os.Stat(path)
+// readRolesKey 读全文。不存在返回 exists 为假；其余读错误（权限、是目录等）记在 errMsg，按有误处理。
+func readRolesKey(path string) ([]byte, rolesKey) {
+	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return rolesStamp{}
+		return nil, rolesKey{}
 	case err != nil:
-		return rolesStamp{exists: true, errMsg: err.Error()}
+		return nil, rolesKey{exists: true, errMsg: err.Error()}
 	}
-	return rolesStamp{exists: true, mtime: fi.ModTime(), size: fi.Size()}
+	return data, rolesKey{exists: true, sum: sha256.Sum256(data)}
 }
 
-func readRoles(path string, stamp rolesStamp) RolesState {
-	if !stamp.exists {
+func parseRoles(data []byte, key rolesKey) RolesState {
+	if !key.exists {
 		return RolesState{}
 	}
-	if stamp.errMsg != "" {
-		return RolesState{Exists: true, Err: errors.New(stamp.errMsg)}
-	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return RolesState{} // stat 与读之间被删掉了
-	}
-	if err != nil {
-		return RolesState{Exists: true, Err: err}
+	if key.errMsg != "" {
+		return RolesState{Exists: true, Err: errors.New(key.errMsg)}
 	}
 	set, err := policy.ParseRoleSet(data)
 	if err != nil {
@@ -127,7 +115,7 @@ func readRoles(path string, stamp rolesStamp) RolesState {
 }
 
 // LoadRolesFile 读一次 roles.yaml（命令行在守护进程没起时用）。
-func LoadRolesFile(path string) RolesState { return readRoles(path, statRoles(path)) }
+func LoadRolesFile(path string) RolesState { return parseRoles(readRolesKey(path)) }
 
 // 会话角色是怎么定下来的（RoleWhy.Kind）。
 const (
