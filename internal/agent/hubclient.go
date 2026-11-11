@@ -117,7 +117,17 @@ type HubClient struct {
 	// 由重连的 welcome 快照对齐补上（未同步的补发 set，墓碑重发撤销，到期的 hub 自己清）。
 	trustQ    []wire.TrustChange
 	trustKick chan struct{} // 有新变更时叫醒发送循环，容量 1
+
+	// rolesSrv 是本机守护进程（SyncRoles 接上，Run 之前设好、之后只读）：hello 声明 role 并带它的角色摘要；nil 时不声明。
+	rolesSrv *Server
+	// rolesQ 是待发的最新一份角色摘要（由 mu 保护，nil 表示没有待发的），只在连着声明了 role 的 hub 时设；换连接时清空。
+	// 只留最新一份：hub 整份替换，中间版本不必发。
+	rolesQ    *[]proto.RoleSummary
+	rolesKick chan struct{} // 有新摘要时叫醒发送循环，容量 1
 }
+
+// rolesFrameType 是 wire.Roles 的帧类型（wire 里没有对应常量，契约只定了 t 为 "roles"）。
+const rolesFrameType = "roles"
 
 // welcomeTrustsRoom 是一台机器的放行快照编码后的上界：至多 20 条，每条的项目根（4096 字节）、短字段（256 字节）与备注（200 字符）
 // 都按 JSON 最坏的转义膨胀算（约 32 KiB 一条），取整留余量。hub 只在 welcome 带上快照会超过单帧上限时才省掉 trusts、紧跟着单发一帧
@@ -136,7 +146,7 @@ func NewHubClient(cfg Config, m MachineConfig, rules *Rules, pending *Pending, s
 	return &HubClient{cfg: cfg, machine: m, rules: rules, pending: pending, setHubPaused: setHubPaused, log: logger, addr: hubOrigin(m.HubURL),
 		backoff: append([]time.Duration(nil), hubBackoff...), stableAfter: hubStableAfter, idleTimeout: hubIdleTimeout, protoBackoff: hubProtoBackoff,
 		auditInterval: hubAuditInterval, auditMaxBytes: hubAuditMaxBytes,
-		changed: make(chan struct{}), waiters: map[string]chan wire.Decision{}, auditKick: make(chan struct{}, 1), trustKick: make(chan struct{}, 1)}
+		changed: make(chan struct{}), waiters: map[string]chan wire.Decision{}, auditKick: make(chan struct{}, 1), trustKick: make(chan struct{}, 1), rolesKick: make(chan struct{}, 1)}
 }
 
 // SyncTrusts 接上本机的放行表：hello 声明 trust 能力；连着声明了 trust 的 hub 时，收 welcome 与 trusts 帧里的快照合并进本机表，
@@ -144,6 +154,63 @@ func NewHubClient(cfg Config, m MachineConfig, rules *Rules, pending *Pending, s
 func (h *HubClient) SyncTrusts(s *Server) {
 	h.trustSrv = s
 	s.SetTrustChanged(h.queueTrust)
+}
+
+// SyncRoles 接上本机的角色（0.3 起）：hello 声明 role 并带 roles.yaml 的角色摘要；roles.yaml 重读成功后，连着声明了 role 的 hub 时
+// 整份重发 roles 帧。只能在 Run 之前调用。
+func (h *HubClient) SyncRoles(s *Server) {
+	h.rolesSrv = s
+	s.roles.SetChanged(h.queueRoles)
+}
+
+// queueRoles 记下最新一份角色摘要并叫醒发送循环，不阻塞（它是 Roles 的变更回调，在处理连接的 goroutine 里同步调用）。
+// 没连着，或连着的 hub 没声明 role 时丢掉：前者重连时 hello 带上最新的，后者 hub 根本不收。
+func (h *HubClient) queueRoles(st RolesState) {
+	sums := RoleSummaries(st.Set)
+	if sums == nil {
+		sums = []proto.RoleSummary{} // 编成 []：hub 整份替换成空表
+	}
+	h.mu.Lock()
+	if h.conn == nil || !slices.Contains(h.features, wire.FeatureRole) {
+		h.mu.Unlock()
+		return
+	}
+	h.rolesQ = &sums
+	h.mu.Unlock()
+	select {
+	case h.rolesKick <- struct{}{}:
+	default:
+	}
+}
+
+// rolesLoop 把最新一份角色摘要发出去，ctx 结束时返回。写失败时关掉连接并结束（重连时 hello 带上最新的）。
+func (h *HubClient) rolesLoop(ctx context.Context, conn *websocket.Conn) {
+	for {
+		select {
+		case <-h.rolesKick:
+		case <-ctx.Done():
+			return
+		}
+		h.mu.Lock()
+		q := h.rolesQ
+		h.rolesQ = nil
+		h.mu.Unlock()
+		if q == nil {
+			continue
+		}
+		b, err := wire.Marshal(wire.Roles{T: rolesFrameType, Roles: *q})
+		if err != nil {
+			h.log.Printf("角色摘要无法报给 hub，丢弃: %v", err)
+			continue
+		}
+		if err := writeRaw(ctx, conn, b); err != nil {
+			if ctx.Err() == nil {
+				h.log.Printf("报角色摘要失败，断开重连: %q", clipText(err.Error(), hubLogFieldMax))
+				_ = conn.CloseNow()
+			}
+			return
+		}
+	}
 }
 
 // queueTrust 把一条放行变更排进发送队列并叫醒发送循环，不阻塞（它是 Server 的 trustChanged 回调，在处理连接或到期清理的
@@ -319,6 +386,7 @@ func (h *HubClient) setConn(c *websocket.Conn, features []string) {
 	if c != nil {
 		h.features = slices.Clone(features)
 		h.trustQ = nil // 上一条连接没发出去的放行变更由这条连接的快照对齐补上，见 trustQ
+		h.rolesQ = nil // 这条连接的 hello 已带上当时的角色摘要
 	}
 	close(h.changed)
 	h.changed = make(chan struct{})
@@ -430,6 +498,13 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 	if h.trustSrv != nil {
 		hello.Features = []string{wire.FeatureTrust}
 	}
+	var helloRoles []proto.RoleSummary
+	if h.rolesSrv != nil {
+		// 坏文件时不带摘要（hub 那边显示的是上一份，或没有）；判定照样 fail closed
+		helloRoles = RoleSummaries(h.rolesSrv.roles.Current().Set)
+		hello.Features = append(hello.Features, wire.FeatureRole)
+		hello.Roles = helloRoles
+	}
 	if err := writeFrame(ctx, conn, hello); err != nil {
 		return sessionEnd{err: err}
 	}
@@ -447,6 +522,13 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 		// 连上之后才合并：此后本机的变更都会进这条连接的队列，合并时算出的补发与它们不会漏掉。
 		// 不带 trusts 键的 welcome 是否算完整快照，见 welcomeTrustsRoom。
 		h.applyTrusts(welcome.Trusts, welcome.Trusts != nil || welcomeLen+welcomeTrustsRoom <= wire.MaxFrame)
+	}
+	rolesOK := h.rolesSrv != nil && welcome.Has(wire.FeatureRole)
+	if rolesOK {
+		// hello 发出到连上之间文件变了的话，那次变更的通知因为还没连上被丢掉了：连上后比对一次，不一样就补发
+		if st := h.rolesSrv.roles.Current(); st.Err == nil && !slices.EqualFunc(RoleSummaries(st.Set), helloRoles, roleSummaryEqual) {
+			h.queueRoles(st)
+		}
 	}
 	askOK := welcome.Has(wire.FeatureAsk)
 	if !askOK {
@@ -478,7 +560,7 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 	}
 
 	sctx, stop := context.WithCancel(ctx)
-	auditDone, trustDone := make(chan struct{}), make(chan struct{})
+	auditDone, trustDone, rolesDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(auditDone)
 		h.auditLoop(sctx, conn)
@@ -489,10 +571,17 @@ func (h *HubClient) session(ctx context.Context) sessionEnd {
 			h.trustLoop(sctx, conn)
 		}
 	}()
+	go func() {
+		defer close(rolesDone)
+		if rolesOK {
+			h.rolesLoop(sctx, conn)
+		}
+	}()
 	defer func() {
 		stop()
 		<-auditDone
 		<-trustDone
+		<-rolesDone
 	}()
 	return ended(h.readLoop(sctx, conn, &pinged, trustOK))
 }
@@ -973,4 +1062,10 @@ func encodeAuditBatch(batch []auditItem) ([]byte, error) {
 		err = wire.ErrFrameTooLarge
 	}
 	return b, err
+}
+
+// roleSummaryEqual 逐字段比较两份角色摘要。
+func roleSummaryEqual(a, b proto.RoleSummary) bool {
+	return a.Name == b.Name && a.Note == b.Note && a.Ceiling == b.Ceiling && a.ForbidCount == b.ForbidCount &&
+		a.TrustMaxMins == b.TrustMaxMins && slices.Equal(a.Dirs, b.Dirs)
 }
