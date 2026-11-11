@@ -647,6 +647,11 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 	id := NewID()
 	reported, d, pctx, sess := s.evaluate(req)
 	req.Session = sess
+	// 0.3 新接进 PreToolUse 的工具（MCP、WebSearch）只为角色而来：会话没有生效角色（没有角色文件，或未分配且没继承）时
+	// 一律忽略，与 0.2.3 完全相同（那时钩子根本不触发）：不写审计、不送 hub、钩子不输出
+	if pctx.Role == nil && req.Source == proto.SourcePreToolUse && roleOnlyPreToolUse(req.ToolName) {
+		return proto.Response{V: proto.Version, Decision: "passthrough", DecidedBy: "ignored"}
+	}
 	root := pctx.Root() // 生效的项目根：角色地盘外为空，限时放行与上报 hub 都用它
 	redacted := redact.Payload(reported)
 	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "permission", Session: req.Session, ToolName: req.ToolName, Payload: &redacted, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason,
@@ -756,6 +761,9 @@ func reasonGeminiBeyond(d policy.Decision) string {
 	}
 	return "超出角色「" + d.Role + "」的边界，Gemini 无法在这里问人：换个角色，或在别处执行"
 }
+
+// roleOnlyPreToolUse 报告工具是不是 0.3 只为角色接进 Claude PreToolUse 的（WebSearch 与 MCP 工具，见 hooksconf.ClaudePreToolUseMatcher）。
+func roleOnlyPreToolUse(tool string) bool { return tool == "WebSearch" || strings.HasPrefix(tool, "mcp__") }
 
 // redactTrigger 对触发段脱敏（它是命令原文的一部分，可能带凭据），返回副本；nil 原样。
 func redactTrigger(t *policy.Trigger) *policy.Trigger {

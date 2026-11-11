@@ -361,3 +361,39 @@ func TestChainWrapperEffects(t *testing.T) {
 		t.Errorf("command git push 应越界、不被放行放过: %q", out)
 	}
 }
+
+// 没有生效角色时（没有角色文件，或会话未分配且没有继承角色），MCP 与 WebSearch 的 PreToolUse 一律忽略：
+// 与 0.2.3 完全相同（钩子不输出、守护进程不写审计），claude_undecided: phone 与用户 deny 规则都不起作用。
+func TestChainNewPreToolUseToolsIgnoredWithoutRole(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	os.WriteFile(cfg.SettingsPath, []byte("claude_undecided: phone\n"), 0o600)
+	writeRules(t, sock, cfg, "version: 1\nrules:\n  - id: user-deny-mcp\n    source: user\n    scope: global\n    match: {payload: mcp}\n    action: deny\n  - id: user-deny-search\n    source: user\n    scope: global\n    match: {payload: network}\n    action: deny\n")
+	mcp := claudeTool(t, "PreToolUse", repo, "mcp__github__create_issue", `{"title":"x"}`)
+	search := claudeTool(t, "PreToolUse", repo, "WebSearch", `{"query":"x"}`)
+	t.Setenv("RAILSE_ROLE", "")
+	check := func(label string) {
+		t.Helper()
+		before, _ := os.ReadFile(cfg.AuditPath)
+		for name, stdin := range map[string]string{"MCP": mcp, "WebSearch": search} {
+			if out, _, code := runHookWith(t, stdin, "claude", "--socket", sock); code != 0 || out != "" {
+				t.Errorf("%s %s: 应忽略（同 0.2.3）: code=%d %q", label, name, code, out)
+			}
+		}
+		if after, _ := os.ReadFile(cfg.AuditPath); len(after) != len(before) {
+			t.Errorf("%s: 忽略的请求不该写审计: %s", label, after[len(before):])
+		}
+	}
+	check("没有角色文件")
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 写作\n    ceiling: read\n"), 0o600)
+	check("会话未分配")
+	// 对照：同样的配置下 PermissionRequest 照旧受 deny 规则管（0.2.3 也是）
+	pr := claudeTool(t, "PermissionRequest", repo, "mcp__github__create_issue", `{"title":"x"}`)
+	if out, _, _ := runHookWith(t, pr, "claude", "--socket", sock); outcomeOf(out) != "deny" {
+		t.Errorf("PermissionRequest 照旧: %q", out)
+	}
+	// 有生效角色时进判定
+	t.Setenv("RAILSE_ROLE", "写作")
+	if out, _, _ := runHookWith(t, mcp, "claude", "--socket", sock); outcomeOf(out) != "deny" {
+		t.Errorf("有角色时 MCP 进判定（用户 deny 规则）: %q", out)
+	}
+}

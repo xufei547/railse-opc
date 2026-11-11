@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -88,6 +89,7 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 		*socket = cfg.SocketPath
 	}
 	client := hookclient.Client{SocketPath: *socket, ConnectTimeout: 2 * time.Second}
+	currentHookSocket = *socket
 
 	var in adapter.Input
 	var ad adapter.Adapter
@@ -239,6 +241,18 @@ func truncatedInput(cli string, ad adapter.Adapter, raw []byte, stdout, stderr i
 	return 0, false
 }
 
+// currentHookSocket 是这次钩子连的守护进程 socket（runHook 定下后填）；角色文件在它旁边。
+var currentHookSocket string
+
+// rolesFileNear 报告守护进程目录（socket 所在目录）里有没有 roles.yaml；判断不了时按有（偏严）。
+func rolesFileNear(socket string) bool {
+	if socket == "" {
+		return true
+	}
+	_, err := os.Lstat(filepath.Join(filepath.Dir(socket), "roles.yaml"))
+	return !errors.Is(err, os.ErrNotExist)
+}
+
 // isDialError 判断是不是连不上守护进程（socket 不在、没人监听、没权限）：这一类保持 0.2.3 的交回终端。
 func isDialError(err error) bool {
 	var op *net.OpError
@@ -251,6 +265,10 @@ func isDialError(err error) bool {
 // 这是相对 0.2.3 的有意收紧：以前一律交回，在 auto、bypassPermissions、yolo 下等于放行。
 func noVerdict(stdout, stderr io.Writer, ad adapter.Adapter, in adapter.Input, why string) int {
 	fmt.Fprintln(stderr, "railse hook: "+why)
+	// MCP、WebSearch 的 PreToolUse 只为角色而来：守护进程目录里没有 roles.yaml 时按 0.2.3（那时钩子不触发），交回
+	if in.Source == proto.SourcePreToolUse && (in.ToolName == "WebSearch" || strings.HasPrefix(in.ToolName, "mcp__")) && !rolesFileNear(currentHookSocket) {
+		return passthrough(stderr, why)
+	}
 	switch {
 	case in.Source == proto.SourcePreToolUse:
 		return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: "ask",
