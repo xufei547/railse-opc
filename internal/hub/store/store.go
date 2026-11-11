@@ -18,7 +18,7 @@ import (
 var schemaSQL string
 
 // SchemaVersion 是本程序的数据库版本（schema_version 表的 v）。railse doctor 只读地拿库里的版本和它比。
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 // migrations 是逐版本升级的 SQL，键是升级后的版本号。改 schema.sql 时必须同时加一条迁移并提高 SchemaVersion：
 // 已有库只跑迁移，不再执行 schema.sql。
@@ -65,6 +65,24 @@ CREATE TABLE trusts (
   revoke_reason  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX trusts_machine_until ON trusts (machine_id, until_at);
+`,
+	// 7：角色（0.3）。sessions 与 requests 加 role，requests 加 beyond_role，列都加在表尾，旧行为空串、0；新表 machine_roles
+	// 与 schema.sql 的一致（TestMigratedV7SchemaMatchesFresh 核对）。
+	7: `
+ALTER TABLE sessions ADD COLUMN role TEXT NOT NULL DEFAULT '';
+ALTER TABLE requests ADD COLUMN role TEXT NOT NULL DEFAULT '';
+ALTER TABLE requests ADD COLUMN beyond_role INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE machine_roles (
+  machine_id     TEXT NOT NULL REFERENCES machines(id),
+  position       INTEGER NOT NULL,
+  name           TEXT NOT NULL,
+  note           TEXT NOT NULL DEFAULT '',
+  ceiling        TEXT NOT NULL DEFAULT '',
+  forbid_count   INTEGER NOT NULL DEFAULT 0,
+  trust_max_mins INTEGER NOT NULL DEFAULT 0,
+  dirs           TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (machine_id, name)
+);
 `,
 }
 

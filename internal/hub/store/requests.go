@@ -61,6 +61,9 @@ type Request struct {
 	Answers map[string]string `json:"answers,omitempty"`
 	// Trigger 是引擎的触发点（哪一段、什么性质，段已脱敏），只有审批可能有；老守护进程送来的没有，JSON 里省略。
 	Trigger *policy.Trigger `json:"trigger,omitempty"`
+	// Role 是请求所属会话生效的角色名（0.3 起），空串为未分配；BeyondRole 为真表示超出了角色的风险上限（不能记住、不能限时放行）。
+	Role       string `json:"role"`
+	BeyondRole bool   `json:"beyond_role"`
 }
 
 // PayloadHash 是载荷 JSON 的 SHA-256，用于去重，与 InsertRequest 存的哈希一致。
@@ -104,17 +107,19 @@ func checkTime(col, v string) error {
 	return nil
 }
 
-// UpsertSession 登记或刷新会话，返回会话行 id。已存在时刷新 last_event_at，cwd、project 非空才覆盖，started_at 不变。
+// UpsertSession 登记或刷新会话，返回会话行 id。已存在时刷新 last_event_at，cwd、project 非空才覆盖，started_at 不变；
+// role 每次都更新为这次上报的值（空串即未分配，同样覆盖：会话的角色以最新一次为准）。
 func (s *Store) UpsertSession(machineID string, sess proto.Session, project string) (string, error) {
 	now := Now()
 	var id string
-	err := s.db.QueryRow(`INSERT INTO sessions(id, machine_id, tool, cli_session_id, cwd, project, started_at, last_event_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+	err := s.db.QueryRow(`INSERT INTO sessions(id, machine_id, tool, cli_session_id, cwd, project, started_at, last_event_at, role)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(machine_id, tool, cli_session_id) DO UPDATE SET
 			cwd = CASE WHEN excluded.cwd <> '' THEN excluded.cwd ELSE cwd END,
 			project = CASE WHEN excluded.project <> '' THEN excluded.project ELSE project END,
-			last_event_at = excluded.last_event_at
-		RETURNING id`, NewID(), machineID, sess.Tool, sess.CLISessionID, sess.Cwd, project, now, now).Scan(&id)
+			last_event_at = excluded.last_event_at,
+			role = excluded.role
+		RETURNING id`, NewID(), machineID, sess.Tool, sess.CLISessionID, sess.Cwd, project, now, now, sess.Role).Scan(&id)
 	return id, err
 }
 
@@ -131,7 +136,7 @@ func (s *Store) SessionTool(id string) (string, error) {
 	return tool, nil
 }
 
-const requestCols = "id, machine_id, session_id, kind, tool_name, payload, payload_hash, risk, project_root, engine_reason, state, decided_by, decision_note, rule_id, turn_id, cli_session_id, title, callback, created_at, expires_at, decided_at, delivered_at, ask, answers, trigger"
+const requestCols = "id, machine_id, session_id, kind, tool_name, payload, payload_hash, risk, project_root, engine_reason, state, decided_by, decision_note, rule_id, turn_id, cli_session_id, title, callback, created_at, expires_at, decided_at, delivered_at, ask, answers, trigger, role, beyond_role"
 
 // InsertRequest 插入一条请求。PayloadHash 为空时按存下的载荷 JSON 计算（ask 按题目，见 AskHash）；CreatedAt 为空时用 Now()。
 // CreatedAt、ExpiresAt、DecidedAt、DeliveredAt 给了就必须是 FormatTime 的输出，否则返回错误。
@@ -209,10 +214,10 @@ func (s *Store) insertRequest(r Request, suffix string) (sql.Result, error) {
 	if r.SessionID != "" {
 		sessionID = r.SessionID
 	}
-	return s.db.Exec("INSERT INTO requests("+requestCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"+suffix,
+	return s.db.Exec("INSERT INTO requests("+requestCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"+suffix,
 		r.ID, r.MachineID, sessionID, r.Kind, r.ToolName, string(payload), r.PayloadHash, r.Risk, r.ProjectRoot, r.EngineReason,
 		r.State, r.DecidedBy, r.DecisionNote, r.RuleID, r.TurnID, r.CLISessionID, r.Title, r.Callback, r.CreatedAt, r.ExpiresAt, r.DecidedAt, r.DeliveredAt,
-		ask, answers, trigger)
+		ask, answers, trigger, r.Role, r.BeyondRole)
 }
 
 func scanRequest(row interface{ Scan(...any) error }) (Request, error) {
@@ -221,7 +226,7 @@ func scanRequest(row interface{ Scan(...any) error }) (Request, error) {
 	var sessionID sql.NullString
 	err := row.Scan(&r.ID, &r.MachineID, &sessionID, &r.Kind, &r.ToolName, &payload, &r.PayloadHash, &r.Risk, &r.ProjectRoot, &r.EngineReason,
 		&r.State, &r.DecidedBy, &r.DecisionNote, &r.RuleID, &r.TurnID, &r.CLISessionID, &r.Title, &r.Callback, &r.CreatedAt, &r.ExpiresAt, &r.DecidedAt, &r.DeliveredAt,
-		&ask, &answers, &trigger)
+		&ask, &answers, &trigger, &r.Role, &r.BeyondRole)
 	if err != nil {
 		return Request{}, err
 	}
