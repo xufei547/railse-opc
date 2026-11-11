@@ -61,6 +61,8 @@ type Hello struct {
 	Pending      []PendingSummary `json:"pending"`
 	// Features 是守护进程的能力声明（见 Feature*）。旧守护进程不发这个键，hub 按什么都没声明处理；旧 hub 解码时忽略它。
 	Features []string `json:"features,omitempty"`
+	// Roles 是这台机器 roles.yaml 里的角色摘要（同 Roles 帧），只在两边都声明了 FeatureRole 时有意义；没有角色时省略。
+	Roles []proto.RoleSummary `json:"roles,omitempty"`
 }
 
 // Has 报告 hello 是否声明了能力 f。
@@ -74,7 +76,16 @@ const (
 	// FeatureTrust：限时放行。hub 与守护进程都在各自的 features 里声明：hub 声明了，守护进程才发 trust 帧、收 trusts 快照；
 	// 守护进程声明了，hub 才让手机给它的请求建放行（requestView.can_trust）。
 	FeatureTrust = "trust"
+	// FeatureRole：角色（0.3 起）。守护进程声明了，它上报的会话（proto.Session.Role）才带生效的角色名，并在 hello 与 Roles 帧里报角色摘要；
+	// hub 声明了，守护进程才发 Roles 帧。不声明的一边按没有角色处理。
+	FeatureRole = "role"
 )
+
+// Roles 是守护进程发给 hub 的角色摘要快照（t 为 "roles"）：roles.yaml 重新加载后整份重发，hub 整份替换这台机器的角色表。
+type Roles struct {
+	T     string              `json:"t"`
+	Roles []proto.RoleSummary `json:"roles"`
+}
 
 // Welcome 是 hub 的回应。Features 是可选的能力声明（见 Feature*）：旧 hub 不发这个键，守护进程按什么都没声明处理；
 // 旧守护进程不认这个键，解码时忽略。加能力不提协议版本，握手两边互相兼容。
@@ -109,6 +120,9 @@ type PendingRequest struct {
 	Trigger         *policy.Trigger `json:"trigger,omitempty"` // 引擎的触发点（触发段已脱敏），老守护进程没有
 	DeadlineSeconds int             `json:"deadline_seconds"`
 	CreatedAt       time.Time       `json:"created_at"`
+	// BeyondRole 为真表示这条审批超出了会话角色的风险上限（0.3 起）：规则与限时放行都不适用，必须人来定；
+	// hub 对它不提供“记住”和“限时放行”。角色名在 Session.Role。老守护进程没有这个键。
+	BeyondRole bool `json:"beyond_role,omitempty"`
 }
 
 // Cancel 表示钩子在决定前退出。

@@ -31,6 +31,20 @@ type Session struct {
 	CLISessionID string `json:"cli_session_id"`
 	TurnID       string `json:"turn_id,omitempty"` // Claude 的 prompt_id、Codex 的 turn_id
 	Cwd          string `json:"cwd"`
+	// Role 是会话的角色名（0.3 起）。钩子把环境变量 RAILSE_ROLE 原样填在这里（没有为空）；守护进程解析后改写成生效的角色名
+	// （环境变量指的角色存在就用它，否则按项目目录查 roles.yaml，都没有为空，即“未分配”），之后的审计与上报 hub 都带生效值。
+	Role string `json:"role,omitempty"`
+}
+
+// RoleSummary 是守护进程报给 hub 的角色摘要（只展示，hub 不拿它判定）：名字、备注、风险上限（policy.Risk 的名字，空为不设）、
+// 禁用条目数、放行时长上限（分钟，0 为不设）与目录模式。
+type RoleSummary struct {
+	Name         string   `json:"name"`
+	Note         string   `json:"note,omitempty"`
+	Ceiling      string   `json:"ceiling,omitempty"`
+	ForbidCount  int      `json:"forbid_count,omitempty"`
+	TrustMaxMins int      `json:"trust_max_mins,omitempty"`
+	Dirs         []string `json:"dirs,omitempty"`
 }
 
 // Option 是一道题的一个备选项。
