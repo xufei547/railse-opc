@@ -11,6 +11,13 @@ import (
 // maxForbidDepth 是递归展开的层数上限；更深的按解析不了处理（fail closed：越界问人）。
 const maxForbidDepth = 8
 
+// 展开的工作量上限：累计处理的命令文本字节数与收集的命令条数。超了就停下、按解析不了处理（越界问人），
+// 免得 1 MiB 的 eval 链或几十万个反引号把一次判定拖到几十秒。
+const (
+	maxForbidBytes = 2 << 20
+	maxForbidCmds  = 1024
+)
+
 // subPlaceholder 是把命令替换挖掉之后填回外层的占位词：外层仍是能扫描的普通命令，挖出的命令单独匹配。
 const subPlaceholder = "RAILSE_SUBST"
 
@@ -18,9 +25,11 @@ const subPlaceholder = "RAILSE_SUBST"
 // 以及 eval 的参数拼成的命令（递归）。opaque 为真表示有解析不了的结构：heredoc、没闭合的引号或括号、裸括号、带转义的 $'…'、
 // 层数超限等——这些里面可能藏着命令，看不见。sh -c 这类包装由 matchRequest（effectiveSegments）照常看穿。
 func forbidCommands(cmd string) (cmds []string, opaque bool) {
+	work := 0
 	var walk func(c string, depth int)
 	walk = func(c string, depth int) {
-		if depth > maxForbidDepth {
+		work += len(c)
+		if depth > maxForbidDepth || work > maxForbidBytes || len(cmds) >= maxForbidCmds {
 			opaque = true
 			return
 		}
@@ -35,10 +44,37 @@ func forbidCommands(cmd string) (cmds []string, opaque bool) {
 		for _, b := range bodies {
 			walk(b, depth+1)
 		}
-		for _, seg := range effectiveSegments(outer) {
+		segs, truncated := effectiveSegmentsLimited(outer)
+		if truncated {
+			opaque = true
+		}
+		for _, seg := range segs {
 			argv := stripWrappers(seg.argv)
-			if len(argv) > 1 && filepath.Base(argv[0]) == "eval" {
-				walk(strings.Join(argv[1:], " "), depth+1)
+			if len(argv) == 0 {
+				continue
+			}
+			flags := seg.argvFlags
+			if off := len(seg.argv) - len(argv); off >= 0 && off <= len(flags) {
+				flags = flags[off:]
+			}
+			name := filepath.Base(argv[0])
+			// eval 与 sh -c 类的命令参数要是完整的字面量才看得见：含变量展开、通配（eval "git ${OP}"、bash -c "$CMD"）时，
+			// 运行时才知道是什么命令
+			if name == "eval" || isShell(name) {
+				for i := 1; i < len(argv); i++ {
+					if f := flagAt(flags, i); f.expand || f.glob {
+						opaque = true
+					}
+				}
+			}
+			if name == "eval" {
+				args := argv[1:]
+				if len(args) > 0 && args[0] == "--" {
+					args = args[1:]
+				}
+				if len(args) > 0 {
+					walk(strings.Join(args, " "), depth+1)
+				}
 			}
 		}
 	}

@@ -3,6 +3,7 @@ package policy
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const roleEngineRules = `
@@ -311,6 +312,66 @@ func TestRailseEnvChangeIsBeyondRole(t *testing.T) {
 	for _, cmd := range []string{"echo $RAILSE_ROLE", "printenv RAILSE_ROLE", "ls"} {
 		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "运维")); d.BeyondRole {
 			t.Errorf("%s: 只读不该越界: %+v", cmd, d)
+		}
+	}
+}
+
+// eval 与 sh -c 类：剥掉 -- 再递归；参数含变量展开、通配等不能证明是完整字面量的成分时算不透明（带命令类禁用的角色越界问人）。
+func TestForbidEvalOptionsAndDynamicArgs(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	if d := e.Evaluate(shellAt(`eval -- 'git push origin main'`), roleCtx(t, "写作")); !d.Forbidden {
+		t.Errorf("eval -- 应剥掉再匹配: %+v", d)
+	}
+	for _, cmd := range []string{
+		`eval "git ${OP:-push} origin main"`,
+		`eval $X`,
+		`bash -c "$CMD"`,
+		`sh -c "$CMD"`,
+		`eval git pu*`,
+	} {
+		d := e.Evaluate(shellAt(cmd), roleCtx(t, "写作"))
+		if d.Action != ActionAsk || !d.BeyondRole || !strings.Contains(d.Reason, "含无法检查的子命令") {
+			t.Errorf("%s: 动态参数应按不透明越界: %+v", cmd, d)
+		}
+	}
+	// 字面量参数照常检查、不算不透明
+	if d := e.Evaluate(shellAt(`bash -c 'echo hi'`), roleCtx(t, "写作")); strings.Contains(d.Reason, "无法检查") {
+		t.Errorf("字面量参数不该算不透明: %+v", d)
+	}
+}
+
+// 1 MiB 的畸形输入：不 panic、在时间预算内出结论（有角色时多一遍禁用检查）。
+func TestRoleEvaluateHugeMalformedInput(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	const n = 1 << 20
+	inputs := map[string]string{
+		"嵌套命令替换":   strings.Repeat("$(", n/2),
+		"嵌套 sh -c": strings.Repeat("sh -c '", n/7),
+		"反引号":      strings.Repeat("`a` ", n/4),
+		"引号乱序":     strings.Repeat(`"'$(`+"`", n/5),
+		"eval 链":   strings.Repeat("eval ", n/5) + "git push",
+		"长命令":      "git push " + strings.Repeat("x", n),
+		"很多段":      strings.Repeat("ls; ", n/4) + "git push",
+		"括号":       strings.Repeat("<(", n/4) + strings.Repeat(")", n/4),
+		"heredoc":  "cat <<EOF\n" + strings.Repeat("$(git push)\n", n/12) + "EOF",
+		"二进制垃圾": string(func() []byte {
+			b := make([]byte, n)
+			for i := range b {
+				b[i] = byte(i*131 + 7)
+			}
+			return b
+		}()),
+	}
+	for name, cmd := range inputs {
+		start := time.Now()
+		d := e.Evaluate(shellAt(cmd), roleCtx(t, "写作"))
+		el := time.Since(start)
+		t.Logf("%s: %v", name, el)
+		if el > 30*time.Second { // -race 下也要过，预算放宽
+			t.Errorf("%s: 用了 %v，超出预算", name, el)
+		}
+		if d.Action == ActionAllow {
+			t.Errorf("%s: 畸形输入不该放行: %+v", name, d)
 		}
 	}
 }

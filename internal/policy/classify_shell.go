@@ -547,7 +547,20 @@ func hasSQLDrop(text string) bool {
 // （sh -c、bash -lc、fish -C 等，判断与 shellRisk 相同）时，在它后面递归附上命令串拆出的各段。
 // 供 deny 与 ask 规则匹配用：它们要看穿 shell 包装。命令串严格短于外层，递归必然结束。
 func effectiveSegments(command string) []segment {
-	var out []segment
+	out, _ := effectiveSegmentsLimited(command)
+	return out
+}
+
+// maxShellNesting 是 effectiveSegments 看穿 sh -c 包装的层数上限：更深的不再展开（避免畸形输入递归过深），
+// 角色的禁用检查据 truncated 按解析不了处理（见 forbidCommands）。
+const maxShellNesting = 32
+
+// effectiveSegmentsLimited 同 effectiveSegments，truncated 报告是否因层数上限少展开了内层。
+func effectiveSegmentsLimited(command string) (out []segment, truncated bool) {
+	return effectiveSegmentsDepth(command, 0)
+}
+
+func effectiveSegmentsDepth(command string, depth int) (out []segment, truncated bool) {
 	for _, s := range splitSegments(command) {
 		seg := parseSegment(s)
 		out = append(out, seg)
@@ -563,11 +576,17 @@ func effectiveSegments(command string) []segment {
 		if !ok {
 			continue
 		}
+		if depth >= maxShellNesting {
+			truncated = true
+			continue
+		}
 		for _, inner := range call.inline() {
-			out = append(out, effectiveSegments(inner)...)
+			segs, tr := effectiveSegmentsDepth(inner, depth+1)
+			out = append(out, segs...)
+			truncated = truncated || tr
 		}
 	}
-	return out
+	return out, truncated
 }
 
 // scriptInterpreters 是不带脚本参数（或参数是 -）时从标准输入读脚本来执行的解释器（shell 由 isShell 认）。
