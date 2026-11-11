@@ -454,12 +454,12 @@ func TestHookChecks(t *testing.T) {
 	}
 	o.Bin = bin
 	// PreToolUse 超时不够：选择题等不到手机上的回答，照超时不够 fail
-	shortPre := strings.Replace(string(doc), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch",
+	shortPre := strings.Replace(string(doc), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
         "hooks": [
           {
             "type": "command",
             "command": "/usr/local/bin/railse hook claude",
-            "timeout": 86400`, `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch",
+            "timeout": 86400`, `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*",
         "hooks": [
           {
             "type": "command",
@@ -484,6 +484,14 @@ func TestHookChecks(t *testing.T) {
 		!strings.Contains(c.Hint, "setup hooks") || !strings.Contains(c.Hint, "--claude") {
 		t.Fatalf("旧匹配器: %+v", c)
 	}
+	// 0.2.3 的匹配器（覆盖 Bash，但没有 MCP 工具与 WebSearch）：角色管不到它们，warn 并给重装命令
+	om["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)["matcher"] = "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"
+	omb023, _ := json.MarshalIndent(om, "", "  ")
+	writeFile(t, local, omb023)
+	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "PreToolUse 的匹配器是旧版") || !strings.Contains(c.Hint, "setup hooks") {
+		t.Fatalf("0.2.3 的匹配器: %+v", c)
+	}
+	writeFile(t, local, []byte(oldMatcher))
 	// 旧匹配器又换过安装路径：两条都在
 	o.Bin = "/opt/new/railse"
 	if c := find(t, Run(o), "hooks.claude"); c.Status != Warn || !strings.Contains(c.Detail, "/opt/new/railse") || !strings.Contains(c.Detail, "只匹配 AskUserQuestion") {

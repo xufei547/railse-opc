@@ -350,6 +350,9 @@ func hookFileCheck(id, name, cli, path, hint string, o Options) Check {
 	// 0.2.0 及更早只让 PreToolUse 匹配 AskUserQuestion：auto 模式下 Claude 不触发 PermissionRequest，审批全绕过 Railse
 	if pre := ins.Events["PreToolUse"]; cli == "claude" && pre.Present && !hooksconf.MatcherCovers(pre.Matcher, "Bash") {
 		warns = append(warns, fmt.Sprintf(i18n.T("PreToolUse 只匹配 %s：auto 模式下审批进不了 Railse"), pre.Matcher))
+	} else if cli == "claude" && pre.Present && (!hooksconf.MatcherCovers(pre.Matcher, "WebSearch") || !hooksconf.MatcherCovers(pre.Matcher, "mcp__x__y")) {
+		// 0.2.3 及以前的匹配器没有 MCP 工具与 WebSearch：Claude 不需要原生确认时它们进不了 Railse，角色的禁用与上限管不到
+		warns = append(warns, i18n.T("PreToolUse 的匹配器是旧版（不含 MCP 工具与 WebSearch）：角色的禁用与上限管不到它们"))
 	}
 	sort.Strings(missing)
 	sort.Strings(short)

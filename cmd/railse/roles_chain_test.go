@@ -212,3 +212,43 @@ func TestChainTrustDoesNotCoverCdIntoControlPlane(t *testing.T) {
 		}
 	}
 }
+
+// claudeTool 是 Claude 在 cwd 里调用 tool（tool_input 为 input）时某个钩子事件的输入，权限模式 bypassPermissions。
+func claudeTool(t *testing.T, event, cwd, tool, input string) string {
+	t.Helper()
+	var doc map[string]any
+	json.Unmarshal([]byte(sampleWithCwd(t, "claude/2.1.280/PreToolUse.json", cwd)), &doc)
+	doc["hook_event_name"], doc["tool_name"], doc["tool_input"], doc["permission_mode"] = event, tool, json.RawMessage(input), "bypassPermissions"
+	b, _ := json.Marshal(doc)
+	return string(b)
+}
+
+// MCP 工具与 WebSearch 的 PreToolUse 进入角色判定；没有角色时与 0.2.3 等价（定不了的交回 Claude 自己）。
+func TestChainClaudeMCPAndWebSearchPreToolUse(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	mcp := claudeTool(t, "PreToolUse", repo, "mcp__github__create_issue", `{"title":"x"}`)
+	search := claudeTool(t, "PreToolUse", repo, "WebSearch", `{"query":"x"}`)
+	read := claudeTool(t, "PreToolUse", repo, "Read", `{"file_path":"a"}`)
+	t.Setenv("RAILSE_ROLE", "")
+	for name, stdin := range map[string]string{"MCP": mcp, "WebSearch": search, "Read": read} {
+		if out, _, code := runHookWith(t, stdin, "claude", "--socket", sock); code != 0 || out != "" {
+			t.Errorf("没有角色时 %s 应交回 Claude 自己（同 0.2.3）: code=%d %q", name, code, out)
+		}
+	}
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 写作\n    ceiling: write_in_project\n    forbid:\n      - {payload: mcp}\n"), 0o600)
+	for name, stdin := range map[string]string{"MCP": mcp, "WebSearch": search} {
+		if out, _, code := runHookWith(t, stdin, "claude", "--socket", sock); code != 0 || out != "" {
+			t.Errorf("未分配的会话 %s 照旧: code=%d %q", name, code, out)
+		}
+	}
+	t.Setenv("RAILSE_ROLE", "写作")
+	if out, _, code := runHookWith(t, mcp, "claude", "--socket", sock); code != 0 || outcomeOf(out) != "deny" || !strings.Contains(out, "payload mcp") {
+		t.Errorf("禁用 MCP 的角色: code=%d %q", code, out)
+	}
+	if out, _, code := runHookWith(t, search, "claude", "--socket", sock); code != 0 || outcomeOf(out) != "ask" || !strings.Contains(out, "超出角色") {
+		t.Errorf("WebSearch 超出上限: code=%d %q", code, out)
+	}
+	if out, _, code := runHookWith(t, read, "claude", "--socket", sock); code != 0 || out != "" {
+		t.Errorf("Read 不进判定: code=%d %q", code, out)
+	}
+}

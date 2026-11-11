@@ -54,16 +54,23 @@ func HookCommand(bin, cli, socket string) string {
 }
 
 // ClaudePreToolUseMatcher 是 Claude 的 PreToolUse 钩子匹配的工具（正则，| 分隔），与适配器认的工具一致。
-const ClaudePreToolUseMatcher = "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"
+// 0.3 起加上 WebSearch 与全部 MCP 工具（mcp__.*）：Claude 不需要原生确认时（已允许的 MCP 工具、auto、bypassPermissions）
+// PermissionRequest 不触发，角色的禁用与上限只有在这里才管得到它们。纯读取的 Read、Glob、Grep 不加：每次读都过一遍钩子太慢，
+// 读也越不过任何上限。
+const ClaudePreToolUseMatcher = "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*"
 
-// MatcherCovers 报告 Claude 的 matcher 是否匹配工具 tool：空串、* 与 .* 匹配一切，否则按 | 分开逐个比。
-// 只认这几种写法，别人手写的复杂正则当作不匹配（doctor 只会因此多报一条 warn）。
+// MatcherCovers 报告 Claude 的 matcher 是否匹配工具 tool：空串、* 与 .* 匹配一切；否则按 | 分开逐个比，每一项是字面量
+// 或 MCP 式的前缀（xxx__.*，如 mcp__.*）。只认这几种写法，别人手写的复杂正则当作不匹配（doctor 只会因此多报一条 warn）。
 func MatcherCovers(matcher, tool string) bool {
 	if matcher == "" || matcher == "*" || matcher == ".*" {
 		return true
 	}
 	for _, m := range strings.Split(matcher, "|") {
-		if strings.TrimSpace(m) == tool {
+		m = strings.TrimSpace(m)
+		if m == tool {
+			return true
+		}
+		if prefix, ok := strings.CutSuffix(m, "__.*"); ok && prefix != "" && !strings.ContainsAny(prefix, `.*+?()[]{}^$\`) && strings.HasPrefix(tool, prefix+"__") {
 			return true
 		}
 	}
@@ -80,8 +87,8 @@ func Plan(cli, bin, socket string) map[string][]Group {
 	case "claude":
 		return map[string][]Group{
 			"PermissionRequest": {{Matcher: strp(""), Hooks: []Entry{{Type: "command", Command: cmd, Timeout: 86400}}}},
-			// PreToolUse 任何权限模式都触发：选择题（AskUserQuestion）只能在这里代答，Bash、文件写、WebFetch 在这里审批
-			// （auto 模式下 PermissionRequest 根本不触发）；其余工具（MCP、Task 等）留给 PermissionRequest 兜底
+			// PreToolUse 任何权限模式都触发：选择题（AskUserQuestion）只能在这里代答，Bash、文件写、WebFetch、WebSearch、MCP 工具
+			// 在这里审批（auto 模式下 PermissionRequest 根本不触发）；其余工具（Task 等）留给 PermissionRequest 兜底
 			"PreToolUse": {{Matcher: strp(ClaudePreToolUseMatcher), Hooks: []Entry{{Type: "command", Command: cmd, Timeout: 86400}}}},
 			// PostToolUse 只发事件不等：工具跑完了，守护进程清掉同一调用还挂着的审批（桌面应用不结束 PermissionRequest 钩子）
 			"PostToolUse":  {{Matcher: strp(ClaudePreToolUseMatcher), Hooks: []Entry{{Type: "command", Command: cmd}}}},

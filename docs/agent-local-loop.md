@@ -28,14 +28,14 @@ Claude Code 装的钩子有五个事件：
 
 | 事件 | matcher | 用途 | 超时 |
 | --- | --- | --- | --- |
-| `PermissionRequest` | 全部 | 审批的兜底：MCP、Task 等 `PreToolUse` 不管的工具，以及 Claude 自己决定要问人时 | 86400 秒 |
-| `PreToolUse` | `AskUserQuestion\|Bash\|Edit\|Write\|MultiEdit\|NotebookEdit\|WebFetch` | 审批（0.2.1 起，任何权限模式都触发）；手机上答选择题（0.1.5 起） | 86400 秒 |
+| `PermissionRequest` | 全部 | 审批的兜底：Task 等 `PreToolUse` 不管的工具，以及 Claude 自己决定要问人时 | 86400 秒 |
+| `PreToolUse` | `AskUserQuestion\|Bash\|Edit\|Write\|MultiEdit\|NotebookEdit\|WebFetch\|WebSearch\|mcp__.*` | 审批（0.2.1 起，任何权限模式都触发；0.3 起含 WebSearch 与全部 MCP 工具）；手机上答选择题（0.1.5 起） | 86400 秒 |
 | `Notification` | 全部 | 映射为 `question` 事件 | 默认 |
 | `PostToolUse` | 同 `PreToolUse` | 工具已跑完，映射为 `tool_done` 事件：取消同一调用还挂着的审批（0.2.2 起；不写审计，只记它引起的取消） | 默认 |
 | `Stop` | 全部 | 映射为 `done` 事件；同时取消这个会话里还挂着的审批与答题（0.2.2 起） | 默认 |
 | `SessionEnd` | 全部 | 会话结束 | 默认 |
 
-0.1.5 之前装过钩子的，重跑一次 `railse setup hooks --claude` 补上 `PreToolUse`；不补不影响别的功能，`railse doctor` 的 `hooks.claude` 会报 warn“缺 PreToolUse：Claude Code 的选择题进不了手机”。0.2.0 装的 `PreToolUse` 只匹配 `AskUserQuestion`，同样重跑一次换成上表的匹配器；不换的话 auto 模式下审批全绕过 Railse，doctor 报 warn“PreToolUse 只匹配 AskUserQuestion：auto 模式下审批进不了 Railse”。
+0.1.5 之前装过钩子的，重跑一次 `railse setup hooks --claude` 补上 `PreToolUse`；不补不影响别的功能，`railse doctor` 的 `hooks.claude` 会报 warn“缺 PreToolUse：Claude Code 的选择题进不了手机”。0.2.0 装的 `PreToolUse` 只匹配 `AskUserQuestion`，同样重跑一次换成上表的匹配器；不换的话 auto 模式下审批全绕过 Railse，doctor 报 warn“PreToolUse 只匹配 AskUserQuestion：auto 模式下审批进不了 Railse”。0.2.3 及以前装的匹配器不含 `WebSearch` 与 MCP 工具：Claude 不需要原生确认时（已允许的 MCP 工具、auto、bypassPermissions）它们进不了 Railse，角色的禁用（如 `{payload: mcp}`）与上限管不到；重跑一次 `railse setup hooks --claude`（幂等，原地换掉旧匹配器），doctor 报 warn“PreToolUse 的匹配器是旧版”。没有角色时这些新进来的请求结果与 0.2.3 一样：规则定不了、不到硬底线的照旧交回 Claude 自己处理。纯读取的 `Read`、`Glob`、`Grep` 不进 `PreToolUse`（每次读都过一遍钩子太慢，读也越不过任何上限）。
 
 Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（不是 hooks.json），Codex 只认一条，所以另用 `railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]`（`setup all` 装完钩子会自动做这一步，单独跑 `setup hooks` 装 Codex 时会提示）：它在数据目录生成 `codex-notify.sh`，依次调用原来的 `notify`（有的话，原样保留）与 `railse hook codex-notify`（数据目录不是 `~/.railse` 时带 `--socket`），再把 `notify` 换成 `["<数据目录>/codex-notify.sh"]`，改之前备份到 `config.toml.railse-bak-<时间>`。重跑不会重复串接，详见 [setup.md](setup.md) 的 Codex 一条。
 
