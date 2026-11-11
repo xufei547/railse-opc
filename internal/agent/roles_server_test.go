@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xufei547/railse-opc/internal/policy"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -397,4 +398,31 @@ func TestPausedForbidStillDenies(t *testing.T) {
 			t.Fatalf("%s: 暂停时禁用仍应拒: %+v", src, resp)
 		}
 	}
+}
+
+// 守护进程目录在项目里（--dir、RAILSE_HOME 指过去）时，agent 改 roles.yaml、rules.yaml、trusts.json 按 destructive，不当项目内写入放行。
+func TestDaemonDirWritesAreDestructive(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	proj, err := filepath.EvalSymlinks(filepath.Dir(env.cfg.Dir)) // 守护进程目录是 <proj>/h；写入路径用真实路径，同 cwd 的口径
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(proj, ".git"), 0o755)
+	for _, name := range []string{"roles.yaml", "rules.yaml", "trusts.json"} {
+		r := proto.Request{V: proto.Version, Kind: "permission", Session: proto.Session{Tool: "claude", CLISessionID: "s1", Cwd: proj},
+			ToolName: "Write", Payload: policyFileWrite(filepath.Join(proj, "h", name), proj), DeadlineSeconds: 86390}
+		if resp := send(t, env, r); resp.Decision == "allow" || resp.Risk != "destructive" {
+			t.Fatalf("写 %s 应按 destructive: %+v", name, resp)
+		}
+	}
+	// 同一项目里的普通文件照旧按项目内放行
+	r := proto.Request{V: proto.Version, Kind: "permission", Session: proto.Session{Tool: "claude", CLISessionID: "s1", Cwd: proj},
+		ToolName: "Write", Payload: policyFileWrite(filepath.Join(proj, "a.txt"), proj), DeadlineSeconds: 86390}
+	if resp := send(t, env, r); resp.Decision != "allow" || resp.Risk != "write_in_project" {
+		t.Fatalf("普通文件照旧: %+v", resp)
+	}
+}
+
+func policyFileWrite(path, cwd string) policy.Payload {
+	return policy.Payload{Type: policy.PayloadFileWrite, Path: path, Cwd: cwd}
 }

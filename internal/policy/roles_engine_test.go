@@ -204,3 +204,24 @@ func TestRolesFileIsDestructive(t *testing.T) {
 		}
 	}
 }
+
+// 守护进程目录不在 ~/.railse 时（--dir、RAILSE_HOME），由 Context.ProtectedDirs 带进来，里面的写入一律 destructive。
+func TestProtectedDirsAreDestructive(t *testing.T) {
+	ctx := Context{ProjectRoot: roleHome + "/proj", HomeDir: roleHome, ProtectedDirs: []string{roleHome + "/proj/.rs"}}
+	for _, p := range []Payload{
+		{Type: PayloadFileWrite, Path: roleHome + "/proj/.rs/roles.yaml", Cwd: roleHome + "/proj"},
+		{Type: PayloadFileWrite, Path: ".rs/rules.yaml", Cwd: roleHome + "/proj"},
+		{Type: PayloadFileWrite, Path: roleHome + "/proj/.RS/trusts.json", Cwd: roleHome + "/proj"}, // 大小写折叠，同敏感路径表
+		{Type: PayloadShell, Command: "echo x > .rs/roles.yaml", Cwd: roleHome + "/proj"},
+		{Type: PayloadShell, Command: "rm -rf " + roleHome + "/proj/.rs", Cwd: roleHome + "/proj"},
+	} {
+		if r := Classify(p, ctx); r != RiskDestructive {
+			t.Errorf("%+v 定级 %s，想要 destructive", p, r)
+		}
+	}
+	// 不带 ProtectedDirs 时同一写入是项目内（0.2.3 的口径）
+	ctx.ProtectedDirs = nil
+	if r := Classify(Payload{Type: PayloadFileWrite, Path: roleHome + "/proj/.rs/roles.yaml", Cwd: roleHome + "/proj"}, ctx); r != RiskWriteInProject {
+		t.Errorf("没有受保护目录时: %s", r)
+	}
+}

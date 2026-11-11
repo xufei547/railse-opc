@@ -515,7 +515,7 @@ func touchesSensitiveWords(args []string, flags []wordFlags, cwd string, ctx Con
 		if !ok || wordUnresolvable(p, flagAt(flags, i), ctx) {
 			continue
 		}
-		if isSensitive(resolvePath(p, cwd, ctx.HomeDir), ctx.HomeDir) {
+		if ctx.sensitive(resolvePath(p, cwd, ctx.HomeDir)) {
 			return true
 		}
 	}

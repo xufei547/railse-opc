@@ -216,7 +216,9 @@ roles:
 
 守护进程每次判定前比对 `roles.yaml` 的修改时间与大小，变了就重读，改完不用重启（`railse agent reload` 也会重读）。读到坏文件（解析失败、校验不过、读不了、空文件）就 **fail closed**：所有会话按上限 `read` 处理——只读照旧自动放行，其余一律越界问人，理由“roles.yaml 有误：<错误>”；不沿用上一版好文件，免得一次手误悄悄放宽或悄悄失效。修好后下一条请求就恢复。
 
-`roles.yaml` 在 `~/.railse` 下，本来就是敏感路径：agent 改它按 `destructive` 定级，除非角色的上限就是 `destructive`，否则越界问人。数据目录不是 `~/.railse` 时（`--dir`），它不在敏感路径表里，按普通文件定级。
+`roles.yaml` 在 `~/.railse` 下，本来就是敏感路径：agent 改它按 `destructive` 定级，除非角色的上限就是 `destructive`，否则越界问人。数据目录用 `--dir` 或 `RAILSE_HOME` 指到别处时，守护进程把它（原样与解析符号链接后的真实路径）作为受保护目录带进定级，里面的 `roles.yaml`、`rules.yaml`、`trusts.json` 等的读写同样按 `destructive`。
+
+已知限制：写入目标经符号链接指向受保护目录或敏感路径（项目里放一个指向 `~/.railse` 的链接再写它）时，定级只看字面路径、不解析链接。这是所有敏感路径共有的老问题，这一版不修。
 
 ### 命令
 

@@ -88,6 +88,8 @@ type Server struct {
 
 	// roles 是角色文件 roles.yaml（0.3 起），每次判定前看文件变没变（见 Roles）。
 	roles *Roles
+	// protected 是守护进程自己的数据目录（原样与解析符号链接后的两种写法），判定时作为受保护路径带给引擎（见 policy.Context.ProtectedDirs）。
+	protected []string
 	// unknownRoleLogged 是已在日志里说过“RAILSE_ROLE 指的角色不存在”的会话（tool + cli_session_id），每个会话只说一次，
 	// 最多记 maxNonGitLogged 个；由 nonGitMu 保护。
 	unknownRoleLogged map[string]struct{}
@@ -102,6 +104,7 @@ type Server struct {
 // 角色文件 roles.yaml 在第一次判定时才读（见 Roles）。
 func New(cfg Config, rules *Rules, audit *Audit, decider Decider, logger *log.Logger) *Server {
 	s := &Server{cfg: cfg, rules: rules, audit: audit, decider: decider, pending: newPending(), log: logger, start: time.Now(), roles: NewRoles(cfg.RolesPath)}
+	s.protected = protectedDirs(cfg.Dir)
 	_ = s.ReloadSettings() // 读坏了它自己记日志
 	tr, err := newTrusts(cfg.TrustsPath, time.Now)
 	if err != nil {
@@ -361,9 +364,25 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	cwd = clean
 	p.Cwd = cwd
 	root := s.projectRootFor(cwd)
-	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID}
+	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID, ProtectedDirs: s.protected}
 	pctx.Role = s.sessionRole(&req.Session, pctx.Root(), cwd)
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx, req.Session
+}
+
+// protectedDirs 是守护进程数据目录的绝对路径，外加解析符号链接后的真实路径（不同时才加）；dir 为空返回 nil。
+func protectedDirs(dir string) []string {
+	if dir == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil
+	}
+	out := []string{filepath.Clean(abs)}
+	if real, err := filepath.EvalSymlinks(abs); err == nil && real != out[0] {
+		out = append(out, real)
+	}
+	return out
 }
 
 // sessionRole 按设计 §3.1 解析会话的角色（钩子带来的 RAILSE_ROLE 在 sess.Role 里），把 sess.Role 改写成生效的角色名
