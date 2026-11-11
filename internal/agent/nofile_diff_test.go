@@ -11,7 +11,8 @@ import (
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
-// 差分测试：没有 roles.yaml 时，守护进程对审批的答复与 0.3 之前（main 上 fc14b08 的代码）逐条相同。
+// 差分测试：没有 roles.yaml 时，守护进程对审批的答复与 0.3 之前（main 上 fc14b08 的代码）逐条相同，只有一处有意的收紧：
+// 守护进程目录不在 ~/.railse 时，里面的读写按 destructive（见 daemonDirCommand）。
 // 基准 testdata/nofile_responses_main.jsonl 用 main 上的代码跑这同一个文件生成：
 //
 //	RAILSE_WRITE_DIFF_GOLDEN=$PWD/internal/agent/testdata/nofile_responses_main.jsonl go test ./internal/agent -run TestNoRolesServerMatchesMain
@@ -24,7 +25,13 @@ var diffCommands = []string{
 	"curl https://example.com", "npm install left-pad", "git push origin main", "git push --force origin main",
 	"npm publish", "cat ~/.ssh/id_rsa", "echo x > ~/.railse/rules.yaml", "some-unknown-tool --flag", "sudo rm x",
 	"bash -c 'git push origin main'", `echo "$(git push origin main)"`, "cp a /etc/b", "mv a ../outside",
+	// 守护进程目录（测试里是 ../h，不在 ~/.railse）：0.3 有意收紧，这几条与 main 不同，见 daemonDirCommand
+	"cat ../h/rules.yaml", "echo x > ../h/roles.yaml", "cp evil.yaml ../h/rules.yaml", "rm ../h/trusts.json",
 }
+
+// daemonDirCommand 报告命令是否碰守护进程目录：没有 roles.yaml 时唯一有意与 main 不同的地方（守护进程目录不在 ~/.railse 时，
+// 里面的读写按 destructive，见 policy.Context.ProtectedDirs）。
+func daemonDirCommand(cmd string) bool { return strings.Contains(cmd, "../h/") }
 
 func TestNoRolesServerMatchesMain(t *testing.T) {
 	var got []string
@@ -88,6 +95,16 @@ func TestNoRolesServerMatchesMain(t *testing.T) {
 	}
 	diff := 0
 	for i := range want {
+		if cmd := strings.Split(got[i], "\t")[3]; daemonDirCommand(cmd) {
+			// 有意的收紧：0.3 起一律 destructive，规则不放行。限时放行期间照样放（0.2.3 的放行语义：期间完全不把关，
+			// main 上 ~/.railse 里的 destructive 也是这样），这里不改
+			var resp proto.Response
+			json.Unmarshal([]byte(strings.Split(got[i], "\t")[4]), &resp)
+			if resp.Risk != "destructive" || resp.Decision == "allow" && resp.DecidedBy != "trust:*" {
+				t.Errorf("第 %d 条（守护进程目录）应按 destructive: %s", i+1, got[i])
+			}
+			continue
+		}
 		if want[i] != got[i] {
 			if diff < 10 {
 				t.Errorf("第 %d 条不同:\n main: %s\n 现在: %s", i+1, want[i], got[i])

@@ -57,7 +57,7 @@ func agentChecks(o Options) []Check {
 	return out
 }
 
-// rolesCheck 看角色文件 roles.yaml（0.3 起）：不存在时不出这一项（没有角色，与 0.2 一样，体检结果也一样）；合法 ok；有误 fail——
+// rolesCheck 看角色文件 roles.yaml（0.3 起）：不存在时不出这一项（没有角色，体检结果与 0.2.3 一样）；合法 ok；有误 fail——
 // 守护进程这时把只读之外的审批一律交人，修好就恢复，不用重启。
 func rolesCheck(o Options) (Check, bool) {
 	const id = "agent.roles"
