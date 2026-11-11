@@ -72,9 +72,12 @@ func (e *Engine) Paused() bool { return e.paused.Load() }
 // Evaluate 先定级，再按范围、条件、底线和优先级选出一条规则；没有则 ask。项目根太宽时按没有项目根处理（见 Context.Root），
 // 范围是那个目录的规则也就不匹配。
 //
-// 有角色（Context.Role）时的顺序（设计 §3.2）：用户 deny > 角色的 forbid（deny）> 其余来源的 deny 规则 > ceiling（越界 ask）>
-// 暂停 > 规则、底线、默认 ask。角色写了 dirs 而项目根不在其内时项目根按空处理（见 Context.Root），写入一律 write_outside。
-// 其余来源（builtin、learned）的 deny 排在 ceiling 前面：规格只写了“ceiling 压过规则”，但 deny 比越界的 ask 更严，不该被放宽。
+// 有角色（Context.Role）时的顺序（设计 §3.2）：用户 deny > 角色的 forbid（deny）> 选中的规则是其余来源的 deny > 含无法检查的子命令
+// （越界 ask）> ceiling（越界 ask）> 暂停 > 规则、底线、默认 ask。角色写了 dirs 而项目根不在其内时项目根按空处理（见 Context.Root），
+// 写入一律 write_outside。
+// 第三步只在按 betterRule 选出的那条规则本身是 deny（builtin、learned）且没暂停时成立：规格只写了“ceiling 压过规则”，但这时 deny
+// 比越界的 ask 更严，不该被放宽。learned deny 输给命中的 user allow 是 0.2 的既定语义（见 betterRule），那时选中的是 allow，
+// 照样按 ceiling 越界。
 func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 	ctx = ctx.normalized()
 	risk, trig := ClassifyTrace(p, ctx)

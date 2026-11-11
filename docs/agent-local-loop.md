@@ -205,8 +205,8 @@ roles:
 | --- | --- | --- |
 | 1 | 你手写的 deny 规则（`source: user`）命中 | `deny`，压过一切 |
 | 2 | 角色的 `forbid` 命中 | `deny`，审计 `auto_denied`、`decided_by: role:<角色名>`，理由“角色「写作」禁用：command_prefix "git push"”原样给模型看；不进手机 |
-| 3 | 其余来源的 deny 规则命中 | `deny`（比越界的 ask 更严，不被放宽） |
-| 4 | 风险高于 `ceiling` | 越界：规则的 allow（含写了 `risk: destructive` 的 user allow）与限时放行都不适用，必须人来定。审计 `beyond_role: true`，理由“超出角色「写作」的边界（上限 write_in_project，这次是 outward）” |
+| 3 | 按优先级选出的规则是其余来源（内置、学来的）的 deny，且没暂停 | `deny`（比越界的 ask 更严，不被放宽）。学来的 deny 输给命中的用户 allow 是 0.2 的既定语义，那时选中的是 allow，照样走第 4 步 |
+| 4 | 风险高于 `ceiling`，或角色有按命令的禁用而命令里有解析不了的结构 | 越界：规则的 allow（含写了 `risk: destructive` 的 user allow）与限时放行都不适用，必须人来定。审计 `beyond_role: true`，理由“超出角色「写作」的边界（上限 write_in_project，这次是 outward）” |
 | 5 | 其余 | 照旧：暂停、规则、底线、限时放行、默认 ask |
 
 - **禁用看穿命令替换。** `$(…)`、反引号、进程替换 `<(…)` `>(…)` 与 `eval` 里的命令逐层参与 `forbid` 的匹配（`echo "$(git push)"` 照样拒）。角色带有按命令的禁用（`command_prefix`、`command_regex`）而命令里有解析不了的结构（heredoc、没闭合的引号或括号、裸括号、带转义的 `$'…'`、嵌套过深）时，看不见里面有没有禁用的命令，按越界问人（理由“含无法检查的子命令”），不直接拒、也不走限时放行。

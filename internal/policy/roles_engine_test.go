@@ -263,3 +263,18 @@ func TestForbidSeesInsideSubstitutions(t *testing.T) {
 		t.Errorf("运维没有命令类禁用: %+v", d)
 	}
 }
+
+// 第三步的边界：learned deny 输给命中的 user allow（0.2 语义），这时按 ceiling 越界问人，而不是拒。
+func TestLearnedDenyLosesToUserAllowUnderCeiling(t *testing.T) {
+	e := mustEngine(t, roleEngineRules+`
+  - id: user-allow-curl-x
+    source: user
+    scope: global
+    match: {payload: shell, command_prefix: "curl https://x.example"}
+    action: allow
+`)
+	d := e.Evaluate(shellAt("curl https://x.example"), roleCtx(t, "写作"))
+	if d.Action != ActionAsk || !d.BeyondRole {
+		t.Fatalf("选中的是 user allow，应按 ceiling 越界: %+v", d)
+	}
+}
