@@ -793,18 +793,22 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		// 必须人来定而又问不到人：Gemini 的钩子只能拒绝不能放行，交回终端等于继续执行（yolo、headless 下直接跑），也不进 hub。
 		// 越界（含 roles.yaml 有误）与触及 Railse 自己的配置都必须人来定，这里问不到人，只能拒；暂停也不例外。
 		// 其余来源能强制问人，见下与 docs/agent-local-loop.md。
-		if (d.BeyondRole || d.ControlPlane) && strings.EqualFold(req.Session.Tool, "gemini") {
+		// 超过 128 KiB、Railse 不解析的命令（d.Unanalyzed）同样必须人来定。
+		if (d.BeyondRole || d.ControlPlane || d.Unanalyzed) && strings.EqualFold(req.Session.Tool, "gemini") {
 			entry.Action, entry.State = "deny", "auto_denied"
-			if d.BeyondRole {
+			switch {
+			case d.BeyondRole:
 				entry.DecidedBy, entry.Reason = beyondDecidedBy(d), reasonGeminiBeyond(d)
-			} else {
+			case d.ControlPlane:
 				entry.DecidedBy, entry.Reason = "control_plane", reasonGeminiControl
+			default:
+				entry.DecidedBy, entry.Reason = "unanalyzed", reasonGeminiUnanalyzed
 			}
 			resp.Decision, resp.DecidedBy, resp.Reason = "deny", entry.DecidedBy, entry.Reason
 			break
 		}
-		if s.rules.Paused() && !d.BeyondRole && !d.ControlPlane {
-			// 越界与触及 Railse 配置的都不归暂停管（见下）。
+		if s.rules.Paused() && !d.BeyondRole && !d.ControlPlane && !d.Unanalyzed {
+			// 越界、触及 Railse 配置与超长不解析的都不归暂停管（见下）。
 			// 总开关打开：用户 deny 与角色禁用仍由引擎处理，其余一律交回终端，不去打扰 hub。
 			// 越界（含 roles.yaml 有误）不归暂停管：交回终端在 auto、acceptEdits、bypassPermissions 下等于放行，
 			// 它照下面的路走（PreToolUse 回 ask 强制终端确认，其余送人工决定），暂停只停自动决定、不放宽边界。
@@ -818,7 +822,8 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		// 越界的请求不碰放行：既不按 RAILSE_TRUST 建，也不匹配；角色的 trust_max 再限一道（见 trustAllowedFor）。
 		// 读写 Railse 自己的配置（d.ControlPlane）也不走放行：放行期间 agent 改规则、角色、放行表等于改掉管它自己的东西。
 		// 本来会命中放行时，理由换成 reasonControlPlane，审计、终端确认框与手机上都看得到为什么这次没放。
-		if !d.BeyondRole {
+		// 超长不解析的命令（d.Unanalyzed）同样不碰放行：不按 RAILSE_TRUST 建，也不匹配。
+		if !d.BeyondRole && !d.Unanalyzed {
 			if req.TrustFor != "" && req.Source == proto.SourcePreToolUse {
 				s.trustFromEnv(req)
 			}
@@ -839,13 +844,13 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		if req.Source == proto.SourcePreToolUse {
 			// 本来会命中限时放行、因触及 Railse 配置而没放的（d.Reason 为 reasonControlPlane）也回 ask：交给 Claude 自己的流程
 			// 在 auto、bypassPermissions 下等于放行，放行本来要替人做的决定得交回人
-			if d.BeyondRole || d.ControlPlane || d.Risk >= policy.RiskOutward || s.settings.Load().ClaudeUndecided == UndecidedPhone {
+			if d.BeyondRole || d.ControlPlane || d.Unanalyzed || d.Risk >= policy.RiskOutward || s.settings.Load().ClaudeUndecided == UndecidedPhone {
 				// 硬底线、越界（或设置成一律送手机）：不在这里等手机。回 ask 让 Claude 弹终端确认框并触发 PermissionRequest，
 				// 那一条按老路送 hub；终端里同时能看到命令与触发点，谁先答谁算。不看 hub 状态：hub 不可达时
 				// PermissionRequest 交回终端，确认框还在（见 docs/superpowers/specs/2026-11-02-railse-opc-v0.2.2-two-screens-design.md §2.1）。
 				// 越界时理由换成角色的那句（钩子按终端语言重拼后放进确认框）。
 				reason := reasonAsked
-				if d.BeyondRole || d.Reason == reasonControlPlane || d.Reason == "触及 Railse 自己的配置，不接受自动放行" {
+				if d.BeyondRole || d.Unanalyzed || d.Reason == reasonControlPlane || d.Reason == "触及 Railse 自己的配置，不接受自动放行" {
 					reason = d.Reason
 				}
 				entry.Action, entry.State, entry.DecidedBy, entry.Reason, entry.Trigger = "ask", "asked", decidedByAsk, reason, redactTrigger(d.Trigger)
@@ -872,6 +877,9 @@ func beyondDecidedBy(d policy.Decision) string {
 	}
 	return "role:" + d.Role
 }
+
+// reasonGeminiUnanalyzed 是 Gemini 遇到超长、Railse 不解析的命令被拒时的理由（固定句子，钩子 i18n.Lookup）。
+const reasonGeminiUnanalyzed = "命令超过 128 KiB，Railse 不解析这么长的命令，必须你来定；Gemini 无法在这里问人，已拒绝"
 
 // reasonGeminiControl 是 Gemini 触及 Railse 自己的配置被拒时的理由（固定句子，钩子 i18n.Lookup）。
 const reasonGeminiControl = "触及 Railse 自己的配置，Gemini 无法在这里问人：在别处执行"

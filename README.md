@@ -36,7 +36,7 @@ Railse 把这些归成一件事：**每条审批先过一遍规则，规则定�
 3. **定不了的推到手机。** 守护进程把请求送到你自己部署的 hub，hub 推一条通知到手机，点开是一个网页：先用一句人话说谁要做什么、在哪、为什么问你，下面是原样的命令，批准和拒绝各一个按钮。
 4. **批一次，以后不用再批。** 批准或拒绝时勾上「记住」，当场生成一条规则，范围默认是这个项目，也可以改成全局，存之前先给你看草案。规则存在 hub 上，换机器也在。
 5. **底线写死在引擎里。** 对外和不可逆两档永远不能通过「记住」变成放行，只能自己手写规则，而且必须写明风险档。引擎在生成和导入规则时都校验，网页上改不掉。
-6. **Railse 自己出故障不卡 agent，也不误批。** 守护进程没起、hub 连不上超过 30 秒、钩子出任何异常，都回「不作决定」，CLI 弹自己的审批框，最坏就是回到没装 Railse 时的样子。
+6. **判不了的交人处理。** hub 连不上超过 30 秒时交回 CLI 自己的确认；越界与触及 Railse 配置的 Gemini 调用直接拒绝。守护进程启用过却连不上、请求超限等拿不到策略结论时的处理，见“现状与限制”。
 
 各家 CLI 能做到哪一步：
 
@@ -60,7 +60,25 @@ Railse 把这些归成一件事：**每条审批先过一遍规则，规则定�
 - **终端**：在项目目录里 `railse trust 2h`（默认 2 小时）放行这个项目，这台机器上各个 CLI 在里面的请求都算；`railse trust list` 看，`railse trust revoke <id>` 或 `--all` 撤。`--session <会话 id>` 放行一个 Claude Code 会话。
 - **启动命令**：`RAILSE_TRUST=2h claude`，只放行这一个窗口，从它第一次碰上规则定不了的操作时起算。
 
-**放行期间 Railse 对该范围完全不把关，等同于 Claude Code 的 bypassPermissions 加上审计，到期自动失效，最长 24 小时。** 时长截到 5 分钟～24 小时，每台机器同时至多 20 条。不受影响的：拒绝规则照样拒绝，总开关暂停照样交回终端，选择题照样进手机。手机收件箱顶部有横幅提示，设置页「限时放行」一节列出全部、随时撤销；建、撤、到期都记审计。细节见 [docs/agent-local-loop.md](docs/agent-local-loop.md) 的「限时放行」。
+**放行期间，范围内规则定不了的请求自动放行，到期失效，最长 24 小时。** 时长截到 5 分钟～24 小时，每台机器同时至多 20 条。例外：角色边界与 Railse 配置目录保护仍生效，拒绝规则照样拒绝，其余请求在总开关暂停时交回终端，选择题照样进手机。手机收件箱顶部有横幅提示，设置页「限时放行」一节列出全部、随时撤销；建、撤、到期都记审计。细节见 [docs/agent-local-loop.md](docs/agent-local-loop.md) 的「限时放行」。
+
+## 角色
+
+角色给 agent 会话划权限边界，在本机 `~/.railse/roles.yaml`：
+
+```yaml
+version: 1
+roles:
+  - {name: 开发, ceiling: network}
+  - {name: 写作, ceiling: write_in_project, forbid: [{command_prefix: "git push"}]}
+  - {name: 运维, ceiling: destructive}
+```
+
+用 `RAILSE_ROLE=写作 claude` 或 `dirs` 按项目目录绑定；接了钩子的嵌套会话继承上层约束。超过 `ceiling` 必须人定，不能记成放行、不能限时放行；`forbid` 直接拒。总台分角色看等我、放行中、24 小时内拦下与自动放行、最近动作。
+
+`railse role init` 建模板，不覆盖。`railse role list` 列角色。`railse role check` 校验文件。`railse role which` 查当前目录的绑定及依据。
+
+**它不是沙箱。** 它约束正常接入钩子、Railse 能识别的工具调用，挡误操作与明显越权；不保证挡住被注入后刻意规避的 agent。硬隔离请配合系统级沙箱或容器。[限制清单](docs/agent-local-loop.md#角色防什么不防什么)。
 
 ## 怎么工作
 
@@ -125,22 +143,27 @@ railse setup all --local-hub
 ## 文档
 
 - [docs/setup.md](docs/setup.md)：安装、本机 hub（一台机器就够）、hub 部署（Linux 服务、反向代理）、接入、开机自启、`railse doctor` 各检查项、升级
-- [docs/hub.md](docs/hub.md)：hub 的接口、推送、安全、Fly.io、故障排查
+- [docs/hub.md](docs/hub.md)：hub 的接口、总台、推送、安全、Fly.io、故障排查
 - [docs/web.md](docs/web.md)：手机网页
-- [docs/agent-local-loop.md](docs/agent-local-loop.md)：守护进程、钩子、规则、限时放行、审计
+- [docs/agent-local-loop.md](docs/agent-local-loop.md)：守护进程、钩子、规则、角色、限时放行、审计
+- [与 Paperclip 一起用](docs/integrations/paperclip.md)
+- [与 herdr 一起用](docs/integrations/herdr.md)
 - [设计文档](docs/superpowers/specs/2026-10-21-railse-opc-design.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md)
 
 ## 现状与限制
 
-- v0.2.3，作者自用中。
-- Claude Code 的联网、项目外改动、没见过的命令，Railse 不论哪种权限模式都先交给 Claude 自己：你在 Claude 里配的 allow 列表、auto 模式的分类器放行的就直接跑，Claude 要问人时才到手机；对外与不可逆一律到手机，终端同时弹 Claude 自己的确认框（理由以「Railse：」开头，写明命令里哪一段、什么性质），两边任选其一答；连不上 hub 时只剩终端那一个。想让它们也一律到手机，在 `~/.railse/settings.yaml` 写 `claude_undecided: phone`，再 `railse agent reload`。
+- v0.3.0，作者自用中。
+- **从 0.2.3 升级的**：hub 的库升到 v7（会话与请求加角色列、请求加越界标记，新表 `machine_roles`），第一次打开就升、不能降级，先备份 hub 数据目录。守护进程与 hub 都要升、都要重启，手机上才有总台。**必须重跑一次 `railse setup hooks`（不带 CLI 开关会重装三家，也可分别用 `--claude`、`--codex`、`--gemini`）**：钩子命令现在写死守护进程 socket 的绝对路径，Claude 的 `PreToolUse` 匹配器加了 MCP 工具与 WebSearch，不重跑角色就管不到这两类不需要 Claude 原生确认的调用。`railse doctor` 的 `hooks.claude` 会提示“PreToolUse 的匹配器是旧版（不含 MCP 工具与 WebSearch）：角色的禁用与上限管不到它们”；`hooks.claude`、`hooks.codex`、`hooks.gemini` 对旧命令提示“钩子命令没带 --socket：改了 HOME 再起的会话会连不上守护进程”。步骤见 [升级](docs/setup.md#升级)。
+- **相对 0.2.3 的有意收紧，有没有角色都生效**：限时放行不再覆盖 Railse 自己的配置目录（`~/.railse`、任何 `.railse` 目录、实际守护进程目录），识别为读写这些目录的请求不接受任何自动放行。守护进程目录有 `roles.yaml`、`machine.json` 或残留 `agent.sock` 却连不上，或请求超限、答复读不懂等拿不到策略结论时，Claude 的 `PreToolUse` 改为在终端问你、Gemini 改为拒绝，不再静默交回；没有 `roles.yaml` 时 MCP／WebSearch 的 `PreToolUse` 仍交回。恢复守护进程用 `railse agent run` 或 `railse setup autostart`；彻底停用要按 [安装中的卸载说明](docs/setup.md#安装) 卸掉钩子，只停服务不算。超过 128 KiB 的命令不再解析，一律必须你来定（有没有角色都一样，放行规则与限时放行都不适用；不依赖解析的 deny 照常拒）；带包装的命令（`command`、`env`、`sudo`、`xargs` 等）按包装与内层的较高风险定级。
+- 角色管不到 Codex 的免确认模式与 `codex exec`：只接了 `PermissionRequest`。Gemini 经过钩子的调用遇到越界或触及 Railse 配置一律拒绝，它没有可靠的问人通道。
+- 不越界、不触及 Railse 配置且未命中限时放行时，Claude Code 的联网、项目外改动、没见过的命令，Railse 不论哪种权限模式都先交给 Claude 自己：你在 Claude 里配的 allow 列表、auto 模式的分类器放行的就直接跑，Claude 要问人时才到手机；对外与不可逆一律到手机，终端同时弹 Claude 自己的确认框（理由以「Railse：」开头，写明命令里哪一段、什么性质），两边任选其一答；连不上 hub 时只剩终端那一个。想让它们也一律到手机，在 `~/.railse/settings.yaml` 写 `claude_undecided: phone`，再 `railse agent reload`。
 - Railse 在 `PreToolUse` 放行（内置的只读、项目内改动，或你「记住」的放行规则）时，Claude Code 会跳过它自己的权限检查；你在 Claude 的 `settings.json` 里写的 deny 规则仍先生效。
 - 从 0.2.0 升级的：重跑一次 `railse setup hooks --claude`，Claude 的 `PreToolUse` 钩子才会匹配 Bash 等工具（`railse doctor` 的 `hooks.claude` 会提示）；不重跑的话 auto 模式下的审批照旧绕过 Railse。
 - 从 0.2.1 升级的：hub 的库升到 v5（请求多一列触发点），守护进程与 hub 都要升；升级后 `git push`、`rm -rf` 这类操作终端会弹 Claude 自己的确认框，理由以「Railse：」开头，手机上同一条也在，两边任选其一答。重跑一次 `railse setup hooks --claude` 补上 `PostToolUse` 钩子（`railse doctor` 的 `hooks.claude` 会提示）：Claude Code 桌面应用里在本机处理掉的审批，靠它把手机上的卡片收掉，不补的话要等过期。
-- 从 0.2.2 升级的：hub 的库升到 v6（多一张 `trusts` 表放限时放行），第一次打开就升、不能降级，升级前先备份 hub 数据目录。守护进程与 hub 都要升、都要重启，手机上才有限时放行的开关；只升守护进程时 `railse trust` 与 `RAILSE_TRUST` 在本机照样生效，手机上看不到。钩子不用重装。
+- 从 0.2.2 升级的：hub 的库升到 v6（多一张 `trusts` 表放限时放行），第一次打开就升、不能降级，升级前先备份 hub 数据目录。守护进程与 hub 都要升、都要重启，手机上才有限时放行的开关；只升守护进程时 `railse trust` 与 `RAILSE_TRUST` 在本机照样生效，手机上看不到。升级到 0.2.3 时钩子不用重装；升到 0.3.0 仍须按上面的说明重装。
 - `RAILSE_TRUST` 只认 Claude Code，每个会话只建一次放行：到期或被撤后不会再建，要继续放行就换个窗口重开，或用 `railse trust`。
-- Gemini CLI 的钩子只能拒绝不能放行：规则拒绝的照常拒绝，其余交回终端，不进手机。要 0.65.0 以上。
+- Gemini CLI 的钩子只能拒绝不能放行：规则拒绝、越界、触及 Railse 配置与拿不到策略结论时拒绝，其余交回终端，不进手机。要 0.65.0 以上。
 - 手机上只能答 Claude Code 的选择题（`AskUserQuestion`）。Codex、Gemini 的提问，以及 agent 停下来等你说下一句话的，仍只提醒，要回终端。
 - 从 0.2 之前升级的：命令行、手机网页、推送文案都跟系统语言走（`RAILSE_LANG` → 数据目录的 `lang` 文件 → `LANG`，zh 开头算中文，其余英文）。**终端里没有设 `LANG` 的，升级后先跑一次 `railse lang zh`**，不然命令行会变英文；手机网页在设置里可以单独切。hub 的库第一次被 0.2 打开时从 v3 升到 v4（推送订阅加语言列），不能降级，升级前先备份 hub 数据目录。
 - 从 0.1.5 之前升级的：已经装过钩子的机器要重跑一次 `railse setup hooks --claude`，补上选择题用的 `PreToolUse` 钩子（`railse doctor` 的 `hooks.claude` 会提示）；hub 要先于或与守护进程同时升级，hub 还是旧版时选择题直接交回终端。本机 hub 与守护进程是分别托管的两个进程，重跑 `railse setup` 不会重启已在跑的本机 hub，升级后要自己重启它（macOS `launchctl kickstart -k gui/$(id -u)/dev.railse.hub`，Linux `systemctl --user restart railse-hub`），见 [docs/setup.md](docs/setup.md) 的「升级」。

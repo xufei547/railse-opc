@@ -14,7 +14,7 @@ railse agent status              # 另开终端查看：paused、规则条数、
 
 `railse agent status` 的 `hub:` 行：没接入 hub（没有 `machine.json`，或接入后还没重启守护进程）时是 `hub: none`；升级前起的旧守护进程不报这一项，显示 `hub: 未知（守护进程版本较旧？重启它）`；接入后是 `hub: connecting <地址>`（还没连上或等着重连）、`hub: connected <地址>`，或 `hub: disabled <地址>`（连续 3 次被 hub 以 401 拒绝，已停止连接，要 `railse agent enroll --force` 后重启守护进程，见 `docs/hub.md`）。
 
-配置目录取 `$RAILSE_HOME`，没设就是 `~/.railse`（权限 0700），里面有 `agent.sock`、`rules.yaml`、`audit.jsonl`、`state.json`、`agent.log`，以及建过限时放行后的 `trusts.json`，socket、审计与 `trusts.json` 为 0600。`agent` 子命令也接受 `--dir 目录`。钩子不带 `--socket` 时连 `$RAILSE_HOME` 或 `~/.railse` 里的 `agent.sock`，看的是 CLI 起钩子时的环境，那里不一定有 `RAILSE_HOME`。所以守护进程的数据目录（`--dir`，没给时取 `$RAILSE_HOME`）不是 `~/.railse` 时，`railse setup hooks` 在钩子命令里写上 `--socket <目录>/agent.sock`（是 `~/.railse` 时不写，命令不变）；只设了 `RAILSE_HOME` 的也一样。以前手工换过目录、钩子是按 `~/.railse` 装的，重跑一次 `setup hooks --dir <目录>`；`railse doctor --dir <目录>` 会在 `hooks.*` 报出对不上的 socket（它把不带 `--socket` 的钩子当作连 `~/.railse/agent.sock`）。开机自启与退出后自动拉起用 `railse setup autostart`（macOS launchd、Linux systemd 用户单元，见 [setup.md](setup.md)）；`railse doctor` 只读地检查目录与文件权限、守护进程在不在跑、钩子装没装好。
+配置目录取 `$RAILSE_HOME`，没设就是 `~/.railse`（权限 0700），里面有 `agent.sock`、`rules.yaml`、`audit.jsonl`、`state.json`、`agent.log`，以及建过限时放行后的 `trusts.json`，socket、审计与 `trusts.json` 为 0600。`agent` 子命令也接受 `--dir 目录`。0.3 起，`railse setup hooks` 一律在钩子命令里写死守护进程 socket 的绝对路径（`--socket <目录>/agent.sock`），默认 `~/.railse` 也一样，不依赖 CLI 起钩子时的 `HOME`、`RAILSE_HOME`。0.2.x 默认目录的旧条目不带 `--socket`，重跑 `railse setup hooks` 会原地升级（用过 `--dir`、`--bin`、`--project` 的照样带上）；`railse doctor` 会警告旧条目没带 `--socket`，并检查 socket 是否与 `--dir` 对得上。开机自启与退出后自动拉起用 `railse setup autostart`（macOS launchd、Linux systemd 用户单元，见 [setup.md](setup.md)）；`railse doctor` 只读地检查目录与文件权限、守护进程在不在跑、钩子装没装好。
 
 ## 装钩子
 
@@ -22,9 +22,9 @@ railse agent status              # 另开终端查看：paused、规则条数、
 railse setup hooks [--project <目录>] [--claude] [--codex] [--gemini] [--dir 目录] [--bin 路径] [--dry-run]
 ```
 
-不带 CLI 开关时三个都装，默认都是用户级（对所有项目生效）：Claude 写 `~/.claude/settings.json`，Gemini 写 `~/.gemini/settings.json`，Codex 写 `~/.codex/hooks.json`（`--codex-file` 可改）。`~/.claude/settings.json`、`~/.gemini/settings.json` 里多是你自己的设置：第一次改它们之前各备份一次到同目录的 `<文件>.railse-bak-<时间>`（0600，是链接时备份链接指向的内容；原来不存在、是空的、内容没变或已有备份时不备份），打印“已备份 … 到 …”。给了 `--project <目录>` 时 Claude 改写项目级的 `<目录>/.claude/settings.local.json`，Gemini 改写 `<目录>/.gemini/settings.json`（不备份；项目里的文件就是用户级那份时，如 `--project ~` 的 Gemini，照样按用户级备份），Codex 照旧是用户级。用户级与项目级都装了：Gemini 的钩子会触发两次；Claude Code 对写在多个配置文件里的相同处理器只跑一次，两处的命令、超时等完全相同时不重复，不同（如程序路径、`--socket` 不同）时也会触发两次；装用户级时当前目录的项目级文件里有 Railse 的条目，会在 stderr 逐个提醒（见 [setup.md](setup.md)）。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dir` 是守护进程的数据目录（默认 `$RAILSE_HOME` 或 `~/.railse`），不是 `~/.railse` 时钩子命令变成 `<railse> hook <cli> --socket <目录>/agent.sock`；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
+不带 CLI 开关时三个都装，默认都是用户级（对所有项目生效）：Claude 写 `~/.claude/settings.json`，Gemini 写 `~/.gemini/settings.json`，Codex 写 `~/.codex/hooks.json`（`--codex-file` 可改）。`~/.claude/settings.json`、`~/.gemini/settings.json` 里多是你自己的设置：第一次改它们之前各备份一次到同目录的 `<文件>.railse-bak-<时间>`（0600，是链接时备份链接指向的内容；原来不存在、是空的、内容没变或已有备份时不备份），打印“已备份 … 到 …”。给了 `--project <目录>` 时 Claude 改写项目级的 `<目录>/.claude/settings.local.json`，Gemini 改写 `<目录>/.gemini/settings.json`（不备份；项目里的文件就是用户级那份时，如 `--project ~` 的 Gemini，照样按用户级备份），Codex 照旧是用户级。用户级与项目级都装了：Gemini 的钩子会触发两次；Claude Code 对写在多个配置文件里的相同处理器只跑一次，两处的命令、超时等完全相同时不重复，不同（如程序路径、`--socket` 不同）时也会触发两次；装用户级时当前目录的项目级文件里有 Railse 的条目，会在 stderr 逐个提醒（见 [setup.md](setup.md)）。`--bin` 是写进钩子命令的 railse 路径，默认当前程序；`--dir` 是守护进程的数据目录（默认 `$RAILSE_HOME` 或 `~/.railse`），0.3 起钩子命令一律为 `<railse> hook <cli> --socket <目录>/agent.sock`（socket 是绝对路径，含默认目录）；`--dry-run` 只打印不写。重复执行只替换 Railse 自己的条目，别的钩子原样保留。
 
-Claude Code 装的钩子有五个事件：
+Claude Code 装的钩子有六个事件：
 
 | 事件 | matcher | 用途 | 超时 |
 | --- | --- | --- | --- |
@@ -37,7 +37,7 @@ Claude Code 装的钩子有五个事件：
 
 0.1.5 之前装过钩子的，重跑一次 `railse setup hooks --claude` 补上 `PreToolUse`；不补不影响别的功能，`railse doctor` 的 `hooks.claude` 会报 warn“缺 PreToolUse：Claude Code 的选择题进不了手机”。0.2.0 装的 `PreToolUse` 只匹配 `AskUserQuestion`，同样重跑一次换成上表的匹配器；不换的话 auto 模式下审批全绕过 Railse，doctor 报 warn“PreToolUse 只匹配 AskUserQuestion：auto 模式下审批进不了 Railse”。0.2.3 及以前装的匹配器不含 `WebSearch` 与 MCP 工具：Claude 不需要原生确认时（已允许的 MCP 工具、auto、bypassPermissions）它们进不了 Railse，角色的禁用（如 `{payload: mcp}`）与上限管不到；重跑一次 `railse setup hooks --claude`（幂等，原地换掉旧匹配器），doctor 报 warn“PreToolUse 的匹配器是旧版”。这两类只为角色而来：会话没有生效角色（没有 `roles.yaml`，或会话未分配且没有从上层会话继承角色）时一律忽略，与 0.2.3 完全相同——钩子不输出、不写审计、不送手机，`claude_undecided: phone` 与你手写的 deny 规则都不对它们起作用（`PermissionRequest` 来的照旧受规则管）。纯读取的 `Read`、`Glob`、`Grep` 不进 `PreToolUse`（每次读都过一遍钩子太慢，读也越不过任何上限）。
 
-Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（不是 hooks.json），Codex 只认一条，所以另用 `railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]`（`setup all` 装完钩子会自动做这一步，单独跑 `setup hooks` 装 Codex 时会提示）：它在数据目录生成 `codex-notify.sh`，依次调用原来的 `notify`（有的话，原样保留）与 `railse hook codex-notify`（数据目录不是 `~/.railse` 时带 `--socket`），再把 `notify` 换成 `["<数据目录>/codex-notify.sh"]`，改之前备份到 `config.toml.railse-bak-<时间>`。重跑不会重复串接，详见 [setup.md](setup.md) 的 Codex 一条。
+Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（不是 hooks.json），Codex 只认一条，所以另用 `railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]`（`setup all` 装完钩子会自动做这一步，单独跑 `setup hooks` 装 Codex 时会提示）：它在数据目录生成 `codex-notify.sh`，依次调用原来的 `notify`（有的话，原样保留）与 `railse hook codex-notify`（0.3 起一律带 `--socket` 的绝对路径），再把 `notify` 换成 `["<数据目录>/codex-notify.sh"]`，改之前备份到 `config.toml.railse-bak-<时间>`。重跑不会重复串接，详见 [setup.md](setup.md) 的 Codex 一条。
 
 装项目级时 Claude 的钩子放在 `settings.local.json`，因为钩子命令里是本机的 railse 路径，不该随项目入库；按 Claude Code 的约定这个文件不入库，若 `git status` 里看到它，把它加进 `.gitignore`。旧版写在 `.claude/settings.json` 的 Railse 钩子会在装 Claude 钩子时迁走：只删 Railse 自己的条目（`hooks` 删空了连键一起去掉），别人的钩子与其他设置保留，打印“已从 … 迁走 Railse 钩子”；`--dry-run` 两份都打印。`settings.json` 里没有 Railse 条目时不碰它；它（解开链接后）就是用户级的 `~/.claude/settings.json` 时（`--project` 是家目录，或项目的 `settings.json` 链到它）也不迁，只警告：那里的钩子对所有项目生效，要迁请手动删；它不是合法 JSON 时只警告、不迁移，照样装好 `settings.local.json`，这时请手动删掉里面旧的 Railse 钩子，否则同一个事件会触发两次。
 
@@ -101,7 +101,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 
 ## 暂停与恢复
 
-`railse agent pause` 后，除命中用户 deny 规则的请求外一律交回终端（Claude Code 的选择题不受暂停影响）；`railse agent resume` 恢复。暂停状态存在 `state.json`，重启守护进程后保持。
+`railse agent pause` 后，命中的用户 deny 与角色禁用照常拒绝，越界与触及 Railse 自己配置的请求仍走人工决定路径（见“判定顺序”），其余交回终端（Claude Code 的选择题不受暂停影响）；`railse agent resume` 恢复。暂停状态存在 `state.json`，重启守护进程后保持。
 
 ## 限时放行（0.2.3 起）
 
@@ -114,7 +114,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | 引擎结论 | 命中放行 | 结果 |
 | --- | --- | --- |
 | 规则 allow / deny（含你手写的 deny） | 任意 | 照旧：放行不压拒绝规则，也不需要出手 |
-| 定不了，总开关暂停 | 任意 | 照旧交回终端（暂停压过放行） |
+| 定不了，总开关暂停，且不越界、不触及 Railse 自己的配置 | 任意 | 照旧交回终端（暂停压过放行） |
 | 定不了 | 有，且未过期 | `allow`，审计 `state: auto_allowed`、`decided_by: trust:<id>`、`reason` 形如“限时放行（会话 claude，剩 1 小时 5 分）”；钩子看到的理由是固定的“限时放行中” |
 | 定不了 | 无 | 照旧（硬底线回 ask，中间三级交 Claude，`PermissionRequest` 送手机） |
 | 定不了，读写 Railse 自己的配置（0.3 起） | 任意 | 不走放行，照常进人工决定路径（`PreToolUse` 回 ask，其余送手机，Gemini 一律拒）；本来会命中放行时理由写明“限时放行不覆盖 Railse 自己的配置” |
@@ -153,7 +153,7 @@ hello 里声明 `trust` 能力；连着同样声明了 `trust` 的 hub 时才同
 
 角色是一道权限边界：给每个 agent 会话一个角色，角色限定它能自动做到哪一步（风险上限）、哪些事一律不许做（禁用清单）、限时放行最长管多久，以及它的地盘在哪些目录。
 
-**定位：** 角色对“正常接入钩子、Railse 能识别的工具调用”提供约束，用来挡住 agent 的误操作和明显越权。它不是沙箱，不能保证一个被注入、刻意规避的 agent 无法用可见的命令绕过（下面“角色防什么、不防什么”列了已知的绕法）。要硬隔离，请配合操作系统级的沙箱或容器。设计见 [v0.3 角色设计](superpowers/specs/2026-11-11-railse-opc-v0.3-roles-design.md)。**没有 `roles.yaml` 时，除两处对 Railse 自己配置的保护外一切与 0.2.3 一样**：守护进程目录用 `--dir` 或 `RAILSE_HOME` 指到 `~/.railse` 之外时，里面的读写现在按 `destructive`（见“文件有误时”）；限时放行不再覆盖对 `~/.railse` 与守护进程目录的读写（见“限时放行”）。两处都是有意的收紧。差分测试（`internal/policy/nofile_diff_test.go`、`internal/agent/nofile_diff_test.go`）拿 main 上的代码逐条核对。
+**定位：** 角色对“正常接入钩子、Railse 能识别的工具调用”提供约束，用来挡住 agent 的误操作和明显越权。它不是沙箱，不能保证一个被注入、刻意规避的 agent 无法用可见的命令绕过（下面“角色防什么、不防什么”列了已知的绕法）。要硬隔离，请配合操作系统级的沙箱或容器。设计见 [v0.3 角色设计](superpowers/specs/2026-11-11-railse-opc-v0.3-roles-design.md)。**没有 `roles.yaml` 时仍有 0.3 的保护收紧**：守护进程目录用 `--dir` 或 `RAILSE_HOME` 指到 `~/.railse` 之外时，里面的读写按 `destructive`（见“文件有误时”）；触及 Railse 自己配置的请求不接受任何自动放行，暂停也不例外；拿不到策略结论或启用了却连不上守护进程时按来源收紧回退（见“交回终端与故障回退”）；超过 128 KiB 的 shell 命令一律必须你来定（见“超长命令”）。差分测试（`internal/policy/nofile_diff_test.go`、`internal/agent/nofile_diff_test.go`）拿 main 上的代码逐条核对。
 
 ### `roles.yaml`
 
@@ -196,26 +196,26 @@ roles:
 
 1. `RAILSE_ROLE` 是 `roles.yaml` 里有的名字 → 就是它（`RAILSE_ROLE=写作 claude`）。
 2. 否则按项目根（没有项目根时按 cwd）匹配各角色的 `dirs`，文件顺序第一个命中的。
-3. 都没有 → 未分配，按规则走。
+3. 都没有 → 沿用会话钉住的角色；也没有钉住时为未分配（嵌套会话还会合并上层角色，见下文）。
 
 `RAILSE_ROLE` 指了不存在的名字时按第 2 步走，`agent.log` 里每个会话记一行。
 
 - **`dirs` 与 cwd 同一口径。** cwd 是解析过符号链接的真实路径，`dirs` 里通配之前的那部分也解析符号链接（原样的写法照样算）；macOS 上比较不分大小写，同敏感路径表。通配段本身（如 `~/dev/*`）匹配的是链接名还是真实名不读目录分不出，不做这一步。
-- **按会话钉住。** 解析顺序是：`RAILSE_ROLE` 指向存在的角色 → 当前目录命中的角色（哪怕与之前的不同）→ 这个会话（`tool` + `cli_session_id`）钉住的角色。前两步得出角色时把钉住更新成它；当前目录不属于任何角色时沿用钉住的，不降为未分配，所以从严格角色的目录走到无角色的目录仍按严格角色判，走进宽松角色的目录则按那个角色判。钉住只在判定审批时建立与更新，选择题与事件只读取；角色从 `roles.yaml` 里删掉时解除。钉住表只在内存里，至多 4096 个会话（满了淘汰最久没用的）、7 天没用的清掉、`session_end` 时释放；守护进程重启或过期后回来的会话按上面的顺序重新解析。
+- **按会话钉住。** 解析顺序是：`RAILSE_ROLE` 指向存在的角色 → 当前目录命中的角色（哪怕与之前的不同）→ 这个会话（`tool` + `cli_session_id`）钉住的角色。前两步得出角色时把钉住更新成它；当前目录不属于任何角色时沿用钉住的，不降为未分配，所以从严格角色的目录走到无角色的目录仍按严格角色判，走进宽松角色的目录则按那个角色判。钉住只在判定审批时建立与更新，选择题与事件只读取；角色从 `roles.yaml` 里删掉时解除。钉住表只在内存里，至多 4096 个会话（满了淘汰最久没用的）、7 天没用的清掉；`session_end` 一律不释放，另由每分钟一次的清理按已知 CLI（`claude`、`codex`、`gemini`、`node`）的进程存活状态清理，其他名字或取不到进程信息的只靠 7 天 TTL；守护进程重启或过期后回来的会话按上面的顺序重新解析。
 
 ### 判定顺序
 
 | 顺序 | 条件 | 结果 |
 | --- | --- | --- |
-| 1 | 你手写的 deny 规则（`source: user`）命中 | `deny`，压过一切 |
+| 1 | 你手写的 deny 规则（`source: user`）命中（超过 128 KiB 的 shell 命令只做廉价匹配，见下文） | `deny`，压过一切 |
 | 2 | 角色的 `forbid` 命中 | `deny`，审计 `auto_denied`、`decided_by: role:<角色名>`，理由“角色「写作」禁用：command_prefix "git push"”原样给模型看；不进手机 |
 | 3 | 按优先级选出的规则是其余来源（内置、学来的）的 deny，且没暂停 | `deny`（比越界的 ask 更严，不被放宽）。学来的 deny 输给命中的用户 allow 是 0.2 的既定语义，那时选中的是 allow，照样走第 4 步 |
-| 4 | 风险高于 `ceiling`，或角色有按命令的禁用而命令里有解析不了的结构 | 越界：规则的 allow（含写了 `risk: destructive` 的 user allow）与限时放行都不适用，必须人来定。审计 `beyond_role: true`，理由“超出角色「写作」的边界（上限 write_in_project，这次是 outward）” |
+| 4 | 风险高于 `ceiling`、试图更改 Railse 设置，或角色有按命令的禁用而命令里有解析不了的结构（超过 128 KiB 的命令不论有没有角色都必须人来定，见下文） | 越界：规则的 allow（含写了 `risk: destructive` 的 user allow）与限时放行都不适用，必须人来定。审计 `beyond_role: true`，理由“超出角色「写作」的边界（上限 write_in_project，这次是 outward）” |
 | 5 | 其余 | 照旧：暂停、规则、底线、限时放行、默认 ask |
 
 - **改 Railse 设置的命令。** 有角色的会话（含 `roles.yaml` 有误时）里，给 `RAILSE_*`、`HOME`、`XDG_*`、`CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`GEMINI_*` 赋值或删除它们的命令（前缀赋值、`env`、`env -u`、`export`、`declare`、`typeset`、`readonly`、`local`、`unset`，以及 `sh -c`、命令替换与 `eval` 里的同样写法；设置类命令的参数含变量展开时看不出改的是谁，也算）按越界处理，理由“试图更改 Railse 的角色或放行设置”。典型是嵌套起一个换了角色的 CLI（`RAILSE_ROLE=运维 claude …`）。读取（`echo $RAILSE_ROLE`）不算；未分配的会话照旧。
-- **禁用看穿命令替换。** `$(…)`、反引号、进程替换 `<(…)` `>(…)` 与 `eval` 里的命令逐层参与 `forbid` 的匹配（`echo "$(git push)"` 照样拒）。角色带有按命令的禁用（`command_prefix`、`command_regex`）而命令里有解析不了的结构（heredoc、没闭合的引号或括号、裸括号、带转义的 `$'…'`、嵌套过深）时，看不见里面有没有禁用的命令，按越界问人（理由“含无法检查的子命令”），不直接拒、也不走限时放行。`eval` 剥掉 `--` 后再看；`eval` 与 `sh -c` 类的命令参数含变量展开或通配（`eval "git ${OP}"`、`bash -c "$CMD"`）时运行时才知道是什么命令，同样算解析不了。展开有上限（`sh -c` 嵌套 32 层、命令替换 8 层、累计 2 MiB 文本或 1024 条命令），超了也按解析不了处理。超过 128 KiB 的 shell 命令根本不解析：直接定为 `unknown`、规则不匹配（没有角色时问人），有角色时按“含无法检查的子命令”越界；字面上提到 `.railse` 或守护进程目录的照样算触及配置。
-- **暂停时**第 1、2、3 步照常生效（拒绝不受暂停影响）；越界（第 4 步，含文件有误）也不归暂停管：`PreToolUse` 照旧回 `ask`，其余照旧送人工决定——交回终端在 auto、acceptEdits、bypassPermissions 下等于放行。其余交回终端。
+- **禁用看穿命令替换。** `$(…)`、反引号、进程替换 `<(…)` `>(…)` 与 `eval` 里的命令逐层参与 `forbid` 的匹配（`echo "$(git push)"` 照样拒）。角色带有按命令的禁用（`command_prefix`、`command_regex`）而命令里有解析不了的结构（heredoc、没闭合的引号或括号、裸括号、带转义的 `$'…'`、嵌套过深）时，看不见里面有没有禁用的命令，按越界问人（理由“含无法检查的子命令”），不直接拒、也不走限时放行。`eval` 剥掉 `--` 后再看；`eval` 与 `sh -c` 类的命令参数含变量展开或通配（`eval "git ${OP}"`、`bash -c "$CMD"`）时运行时才知道是什么命令，同样算解析不了。展开有上限（`sh -c` 嵌套 32 层、命令替换 8 层、累计 2 MiB 文本或 1024 条命令），超了也按解析不了处理。超过 128 KiB 的 shell 命令见下面“超长命令”。
+- **暂停时**第 1、2 步照常生效；第 3 步不生效；越界（第 4 步，含文件有误）也不归暂停管：`PreToolUse` 照旧回 `ask`，其余照旧送人工决定——交回终端在 auto、acceptEdits、bypassPermissions 下等于放行。触及 Railse 自己配置的请求也不归暂停管（见下）；其余交回终端。
 - **越界的去向。** Claude 的 `PreToolUse` 一律回 `ask`：Claude 在终端弹确认框（理由是角色那句）并触发 `PermissionRequest` 送手机；中间几档（项目内写、联网）也一样，不交 Claude 自己的分类器——它可能自动放行。`PermissionRequest` 与 Codex 的请求送 hub，`pending` 帧带 `beyond_role: true`，手机上不出现“记住”与“接下来一段时间都放行”。越界的请求也不按 `RAILSE_TRUST` 建放行。
 - **越界在各来源上的去向。** 越界必须人来定；问不到人的地方一律拒，绝不交回终端了事：
 
@@ -227,7 +227,7 @@ roles:
 
   Gemini 被拒时 `decided_by` 为 `role:<角色名>`（文件有误时为 `roles_yaml`），理由写明“Gemini 无法在这里问人：换个角色，或在别处执行”。
 
-  触及 Railse 自己的配置（见“限时放行”）同样必须人来定：Gemini 在任何 hub 状态、暂停与否下都 `deny`（`decided_by: control_plane`）；Claude 与 Codex 照越界的路走，只是暂停时按 0.2.3 交回终端。整张表（越界、文件有误、触及配置 × 来源 × hub × 暂停）有走完整钩子链路的测试（`cmd/railse/roles_chain_test.go`）。
+  触及 Railse 自己的配置（见“限时放行”）同样必须人来定：Gemini 在任何 hub 状态、暂停与否下都 `deny`（`decided_by: control_plane`）；Claude 与 Codex 照越界的路走，暂停也不例外：Claude `PreToolUse` 回 `ask`，`PermissionRequest` 与 Codex 送 hub，没接 hub 或 hub 不可达时交回 CLI 自己的确认框；规则与限时放行均不能自动放行。整张表（越界、文件有误、触及配置 × 来源 × hub × 暂停）有走完整钩子链路的测试（`cmd/railse/roles_chain_test.go`）。
 - **`trust_max`。** 限时放行命中时再看会话角色：设了时长的，这条放行只在它建立后 `trust_max` 之内对这个角色有效；`none` 一律不放行。不改放行本身。
 - **地盘。** 角色写了 `dirs`、而项目根不在任何一条 `dirs` 内（典型：用 `RAILSE_ROLE` 在别处启动）时，按没有项目根处理：写入一律 `write_outside`，项目放行也不命中。地盘内项目根不变，不扩大到角色的全部目录。没写 `dirs` 的角色不做这一步。
 - **选择题与事件**（`AskUserQuestion`、question、done、tool_done）不经判定，只带上角色名。
@@ -236,7 +236,7 @@ roles:
 
 守护进程每次判定前读一遍 `roles.yaml` 全文、按内容比较（不靠修改时间），变了就重新解析，改完不用重启（`railse agent reload` 也会重读）。读到坏文件（解析失败、校验不过、读不了、空文件、不是普通文件、超过 256 KiB）就 **fail closed**：所有会话按上限 `read` 处理——只读照旧自动放行，其余一律越界问人，理由“roles.yaml 有误：<错误>”；不沿用上一版好文件，免得一次手误悄悄放宽或悄悄失效。修好后下一条请求就恢复。
 
-`roles.yaml` 在 `~/.railse` 下，本来就是敏感路径：agent 改它按 `destructive` 定级，除非角色的上限就是 `destructive`，否则越界问人。数据目录用 `--dir` 或 `RAILSE_HOME` 指到别处时，守护进程把它（原样与解析符号链接后的真实路径）作为受保护目录带进定级，里面的 `roles.yaml`、`rules.yaml`、`trusts.json` 等的读写同样按 `destructive`。
+`roles.yaml` 在 `~/.railse` 下，本来就是敏感路径：agent 改它按 `destructive` 定级，触及配置的保护不受角色上限影响：即使上限是 `destructive` 或没有角色，也不接受自动放行，照“判定顺序”里的配置路径处理。数据目录用 `--dir` 或 `RAILSE_HOME` 指到别处时，守护进程把它（原样与解析符号链接后的真实路径）作为受保护目录带进定级，里面的 `roles.yaml`、`rules.yaml`、`trusts.json` 等的读写同样按 `destructive`。
 
 已知限制见下一节“角色防什么、不防什么”。
 
@@ -264,13 +264,14 @@ roles:
 - 角色禁用的命令，包括写在 `sh -c`、命令替换、进程替换、`eval`、表里那些包装命令里面的。
 - 有角色的会话里用 Railse 识别得出的写法设置、删除、清空 `RAILSE_*`、`HOME`、`XDG_*` 等变量（命令前赋值、`env NAME=`、`env -u`、`env -i`、`exec -c`、`export`、`unset` 等，包在包装命令、`sh -c`、`eval`、命令替换里的也算），按越界交人；从有角色的 Claude、Gemini 会话里嵌套起的、接了钩子的 CLI 继承上层的约束（看进程树）。
 - 被识别为触及 Railse 自己配置（`~/.railse`、任何 `.railse` 目录、实际的守护进程目录）的请求：不接受任何自动放行（规则、限时放行都不行），暂停也不例外。识别只看字面与能算出的工作目录，见下面“不防的”。
-- 审批请求拿不到策略结论（超长载荷、读不懂的答复），或这台机器启用了 Railse（守护进程目录里有 `roles.yaml`、`machine.json` 或残留的 `agent.sock`）却连不上守护进程：Claude `PreToolUse` 回 ask、Gemini 拒；守护进程目录里这三样都没有时，连不上照 0.2.3 交回。
+- 审批请求拿不到策略结论，或这台机器启用了 Railse 却连不上守护进程时，按来源收紧回退，见“交回终端与故障回退”。
 
-**看不清的，不一定交人：** 只有角色带按命令的禁用（`command_prefix`、`command_regex`）时，解析不了的结构（heredoc、没闭合的引号、`eval "$X"`、`bash -c "$CMD"` 等）才强制越界。其余情况下这类命令定为 `unknown`：带命令匹配条件（`command_prefix`、`command_regex`）的放行规则不认它，但只按 `risk: unknown` 匹配的放行规则照样放行它；上限在 `unknown` 以上的角色、没有角色的会话、限时放行期间，它也都可能被放过。超过 128 KiB 的命令同理：有角色时越界，没有角色时只是 `unknown`。
+**看不清的，不一定交人：** 除了下述超长命令，只有角色带按命令的禁用（`command_prefix`、`command_regex`）时，解析不了的结构（heredoc、没闭合的引号、`eval "$X"`、`bash -c "$CMD"` 等）才强制越界。其余情况下这类命令定为 `unknown`：带命令匹配条件（`command_prefix`、`command_regex`）的放行规则不认它，但只按 `risk: unknown` 匹配的放行规则照样放行它；上限在 `unknown` 以上的角色、没有角色的会话、限时放行期间，它也都可能被放过。**超长命令（相对 0.2.3 的有意收紧）：** 超过 128 KiB 的 shell 命令 Railse 不解析，一律必须你来定，有没有角色都一样：任何放行规则、限时放行（含 `RAILSE_TRUST`）、暂停下的交回都不适用；Claude 的 `PreToolUse` 回 ask、Gemini 拒（`decided_by: unanalyzed`），`PermissionRequest` 与 Codex 送人工决定。理由是固定的“命令超过 128 KiB，Railse 不解析这么长的命令，必须你来定”（有角色时沿用“含无法检查的子命令”的越界理由，行为一样）。不依赖解析的 deny 规则照常拒：只按 `payload`、`risk` 匹配的，以及 `command_prefix` 对去掉前导空白的原始命令做字面前缀比较（按词边界）命中的——于是在 `git push` 后面垫一大段注释躲不开 `deny git push`；带 `command_regex`、`path_glob`、`domain`、MCP 条件的 deny 与角色的禁用清单对超长命令不跑（交给你定）。字面上提到 `.railse` 或守护进程目录的照样算触及配置。
 
 **不防的（已知限制，五轮审查里定为不修的与本轮新确认的都在这里）：**
 
 - **脚本与解释器里的内容。** Railse 看到的是 agent 要跑的那一行命令，看不到 `bash deploy.sh`、`make release`、`npm run x`、`python -c "…"` 里面做了什么；这些里面的 `git push` 不会被 `git push` 的禁用拦下，只按外层那一行定级。
+- **超长命令上的规则只做廉价匹配。** 超过 128 KiB 的 shell 命令不解析：带 `command_regex`、`path_glob`、`domain`、MCP 条件的 deny 与角色的禁用清单对它不跑。它照样一律交你定、不会被自动放行，只是这些规则不会替你直接拒掉它（`command_prefix` 的字面前缀与只按 `payload`、`risk` 的 deny 仍会拒）。
 - **变量拼出来的命令与路径。** `X=git; $X push`、`cat "$D/rules.yaml"` 这类，命令名或路径要运行时才知道：定为 `unknown`，禁用与配置目录检查看不出来（工作目录在 `cd "$X"` 之后算不出时，相对路径一律按触及配置处理，但绝对路径里的变量仍看不出）。
 - **脱离进程树的子进程。** `setsid`、`nohup … &` 后父进程退出、经 launchd / cron / systemd、ssh 到别的主机启动的 CLI，祖先链里没有上层会话，继承不到它的角色。
 - **Codex 的免确认模式与 `codex exec`。** Railse 只接了 Codex 的 `PermissionRequest`，它只在 Codex 本来就要问人时触发；Codex 自己不问的调用，角色管不到，嵌套起的 Codex 也继承不了。
@@ -283,7 +284,7 @@ roles:
 - **符号链接。** 写入目标经项目里的符号链接指向受保护目录或敏感路径时，定级只看字面路径、不解析链接（所有敏感路径共有的老问题）；建这种链接的 `ln -s` 本身因目标是敏感路径而按 `destructive` 定级——但 `destructive` 不等于一定询问：Railse 配置目录之外的敏感路径，仍可被显式写了 `risk: destructive` 的放行规则或限时放行放过。
 - **大小写敏感的卷。** `dirs` 与敏感路径在 macOS 上按不分大小写比较；装在大小写敏感的 APFS 卷上时，大小写不同的两个目录会被当成同一个。`dirs` 里通配段（`~/dev/*`）匹配的是链接名还是真实名不解析。
 - **限时放行期间的别的敏感路径。** 放行期间，除 Railse 自己的配置外，范围内引擎定不了的请求一律放过（0.2.3 的语义）：没有角色、或角色上限是 `destructive` 时，`.env`、ssh 密钥等的读写照样被放过。
-- **暂停与 Gemini 的旧口径。** 暂停时，不越界、不碰 Railse 配置的请求照 0.2.3 交回终端；Gemini 不越界、不碰配置的请求照 0.2.3 交回它自己的确认。
+- **暂停与 Gemini 的旧口径。** 除命中的用户 deny 与角色禁用外，暂停时不越界、不碰 Railse 配置的请求交回终端；Gemini 不越界、不碰配置时保留原来的 allow 渲染为空、deny 照拒、其余交回的行为，交回不保证会弹确认框。
 - **学来的 deny 输给用户 allow。** 学来的 `deny` 输给命中的用户 `allow` 是 0.2 的既定语义，这时按选中的 allow 走（有角色时照样受上限约束）。
 - **换目录换角色、删掉角色。** 会话从严格角色的目录走进宽松角色的目录后按宽松的判（角色约束的是会话在哪干活）；只有走到不属于任何角色的目录时才沿用原来的。角色从 `roles.yaml` 里删掉后，钉住它的会话解除钉住；文件被删等于没有角色。
 - **选择题。** `AskUserQuestion` 不经判定，只带角色名。
@@ -301,7 +302,7 @@ railse role init  [--dir 目录]   # 文件不存在时写起步模板（0600）
 
 ### 与 hub
 
-hello 里声明 `role` 能力并带角色摘要（名字、备注、上限、禁用条数、放行上限分钟数——不设为 0，`none` 为 -1——与目录模式）；文件有误时不带摘要。重读成功、且这条连接的 hub 也声明了 `role` 时，整份重发一帧 `roles`（删掉文件就发空表），hub 整份替换这台机器的角色表。去旧只在守护进程这一侧：重读与通知串行、带单调代数，比已交出的旧的不发；hub 不看代数，按收到的顺序整份替换。老 hub 配新守护进程：角色照样在本机生效，只是手机上看不到；新 hub 配老守护进程：总台只有“未分配”。
+hello 里声明 `role` 能力并带角色摘要（名字、备注、上限、禁用条数、放行上限分钟数——不设为 0，`none` 为 -1——与目录模式）；文件有误时不带摘要。重读成功、且这条连接的 hub 也声明了 `role` 时，整份重发一帧 `roles`（删掉文件就发空表），hub 整份替换这台机器的角色表。去旧只在守护进程这一侧：重读与通知串行，用单调代数丢弃晚到的旧摘要，单一发送循环保序；wire 帧没有代数字段，hub 只确认帧来自当前连接后整份替换。连接期间读到坏文件不重发，hub 保留上一份摘要；重连时 hello 不带摘要才清空。老 hub 配新守护进程：角色照样在本机生效，只是手机上看不到；新 hub 配老守护进程：总台只有“未分配”。
 
 ## 三家 CLI 的差异
 
@@ -339,7 +340,7 @@ hello 里声明 `role` 能力并带角色摘要（名字、备注、上限、禁
   | Claude Code 桌面应用 / SDK 宿主 | `ask` 由宿主的权限回调裁决（auto 模式是宿主的分类器，不一定经人）；`PermissionRequest` 钩子不随之结束，由 `PostToolUse`（工具跑完）与 `Stop`、`SessionEnd`（一轮或会话结束）事件清理：守护进程取消同会话里挂着的请求，hub 记 `cancelled`、`decided_by: terminal`（取消原因“已在终端处理，取消等待”，钩子收到 passthrough 退出） |
 - **不再去重。** 0.2.1 的去重表已删：`PreToolUse` 从此不把任何请求送手机，`PermissionRequest` 来的每一条都该送（硬底线是约好的第二步，中间三级是 Claude 自己升级成要问人）。两条审计靠会话 + 载荷对上（`tool_use_id` 只有 `PreToolUse` 有）。
 - **放行是终局。** `PreToolUse` 回 allow 时 Claude Code 跳过它自己的权限检查（含 auto 的分类器），所以内置放行只覆盖只读与项目内改动两档；`settings.json` 里你写的 deny 规则仍先于钩子生效。
-- **失败即不表态。** 守护进程不在、hub 30 秒不可达、解析失败、超时，钩子都输出空（硬底线例外，见上一条），Claude 照自己的流程走；hub 不可达时 stderr 多一行 `railse hook: 连不上 hub，交回 Claude 自己的确认`。
+- **故障回退。** 按是否启用与请求来源处理，见“交回终端与故障回退”。
 - 审计的 Claude 审批条目多三个字段：`source`（`pretooluse` / `permissionrequest`）、`permission_mode`、`tool_use_id`。0.2.2 起硬底线的 `PreToolUse` 条目为 `action: ask`、`state: asked`、`decided_by: ask`；引擎定级有触发点的审批条目多一个 `trigger`（`{segment, why}`，段已脱敏），随审计上报 hub。
 
 ## 手机上答选择题
@@ -353,11 +354,11 @@ Claude Code 用 `AskUserQuestion` 问你选哪个方案时，`PreToolUse` 钩子
 - **`PermissionRequest` 对 `AskUserQuestion` 一律交回终端**：Claude Code 的文档明示这条路上回 allow 无效，答案只能走 `PreToolUse`。
 - 手机上答了的，本机审计是 `kind: ask`、`action: answer`、`state: answered`、`decided_by: user`。同一会话有选择题在等时，同会话的 `question` 提醒会被压成 `suppressed`。Codex、Gemini 没有这个口子，问题照旧只提醒。
 
-## 交回终端的两种情况
+## 交回终端与故障回退
 
-- **没有 hub 时 ask 一律交回终端。** 引擎答 ask（没有规则命中，如 `git push`、`curl`、`npm install`）时，守护进程立即回“不作决定”，CLI 弹出自己的原生审批框，由你在终端里定；审计记 `passthrough`，`decided_by` 为 `no_hub`。
-- **钩子异常时多数不作决定。** 守护进程没起、socket 连不上、输入损坏、不认识的 CLI、收到 SIGTERM/SIGINT/SIGHUP、内部出错，钩子都是 stdout 为空、退出 0，原因写到 stderr。最坏情况就是回到没装 Railse 时的样子。
-- **拿不到策略结论时不放过（0.3 起，相对 0.2.3 的有意收紧）。** 守护进程在，但审批请求拿不到结论——编码后超过 1 MiB 发不出去（如在 `git push origin main #` 后面垫一大段注释）、发送或等待中出错、守护进程回了读不懂的东西或不认识的决定、无响应，以及钩子输入超过 4 MiB 读不全——时：Claude 的 `PreToolUse` 回 `ask` 并写明“拿不到策略结论（原因）”，Gemini 的 `BeforeTool` 回 `deny`；Claude 的 `PermissionRequest` 与 Codex 照旧交回（它们本来就在问人）。以前这些情况一律交回，在 auto、bypassPermissions、yolo 下等于放行。连不上 socket 时再分两种：守护进程目录里有 `roles.yaml`、`machine.json` 或残留的 `agent.sock`（守护进程正常退出时会删掉它）任一样，就算这台机器启用了 Railse，这时连不上按拿不到结论处理——Claude 的 `PreToolUse` 回 ask、Gemini 回 deny，理由写明守护进程没在运行、用 `railse agent run`（或 `railse setup autostart`）恢复、要彻底停用得删掉各 CLI 配置里的钩子条目（见 [setup.md](setup.md) 的“卸载”），只停服务不算停用；三样都没有（含目录不在）的按没启用，仍然交回，没装守护进程的人不该被卡住。
+- **没有 hub 时。** Claude `PermissionRequest` 与 Codex 的 ask 交回 CLI 自己的确认框，审计 `passthrough`、`decided_by: no_hub`；Claude `PreToolUse` 与 Gemini 仍按各自的判定路径处理（见“判定顺序”与“三家 CLI 的差异”）。
+- **进入审批前失败时。** 输入解析失败、不认识的 CLI、读输入期间收到 SIGTERM/SIGINT/SIGHUP、内部 panic 等仍是 stdout 为空、退出 0，原因写到 stderr；可识别的超长工具调用前输入与进入审批后拿不到结论的情况见下一条。
+- **拿不到策略结论时不放过（0.3 起，相对 0.2.3 的有意收紧）。** 守护进程在，但审批请求拿不到结论——编码后超过 1 MiB 发不出去（如在 `git push origin main #` 后面垫一大段注释）、发送或等待中出错、守护进程回了读不懂的东西或不认识的决定、无响应，以及钩子输入超过 4 MiB 读不全——时：Claude 的 `PreToolUse` 回 `ask` 并写明“拿不到策略结论（原因）”，Gemini 的 `BeforeTool` 回 `deny`；Claude 的 `PermissionRequest` 与 Codex 照旧交回（它们本来就在问人）。以前这些情况一律交回，在 auto、bypassPermissions、yolo 下等于放行。连不上 socket 时再分两种：守护进程目录里有 `roles.yaml`、`machine.json` 或残留的 `agent.sock`（守护进程正常退出时会删掉它）任一样，就算这台机器启用了 Railse，这时连不上按拿不到结论处理——Claude 的 `PreToolUse` 回 ask、Gemini 回 deny，理由写明守护进程没在运行、用 `railse agent run`（或 `railse setup autostart`）恢复、要彻底停用得删掉各 CLI 配置里的钩子条目（见 [setup.md](setup.md) 的“卸载”），只停服务不算停用；三样都没有（含目录不在）的按没启用，仍然交回，没装守护进程的人不该被卡住。Claude `PreToolUse` 的 MCP 工具与 WebSearch 是例外：socket 旁没有 `roles.yaml` 时，连不上或拿不到结论仍交回，保持 0.2.3 不接管它们的行为。
 
 ## 冒烟
 

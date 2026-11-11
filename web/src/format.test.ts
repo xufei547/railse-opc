@@ -451,6 +451,7 @@ describe('角色相关的决定来源', () => {
     expect(decidedByLabel(auto('role:写作'))).toBe('角色「写作」禁用')
     expect(decidedByLabel(auto('roles_yaml'))).toBe('角色文件有误')
     expect(decidedByLabel(auto('control_plane'))).toBe('触及 Railse 自己的配置')
+    expect(decidedByLabel(auto('unanalyzed'))).toBe('命令太长，不解析')
   })
   it('一句人话的结果（历史、请求页）', () => {
     expect(outcomeText(auto('role:写作', '角色「写作」禁用：命令以 git push 开头'))).toBe('角色「写作」禁用了这个操作')
@@ -459,6 +460,7 @@ describe('角色相关的决定来源', () => {
     )
     expect(outcomeText(auto('roles_yaml', 'roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行'))).toBe('角色文件有误，暂按只读把关，已拒绝')
     expect(outcomeText(auto('control_plane'))).toBe('这会改动 Railse 自己的配置，必须你来定；这里问不到你，已拒绝')
+    expect(outcomeText(auto('unanalyzed'))).toBe('命令超过 128 KiB，Railse 不解析，必须你来定；这里问不到你，已拒绝')
   })
   it('英文', () => {
     setLang('en')
@@ -471,6 +473,8 @@ describe('角色相关的决定来源', () => {
     )
     expect(outcomeText(auto('roles_yaml'))).toBe('The roles file is broken, so only reads pass; denied')
     expect(outcomeText(auto('control_plane'))).toBe("This changes Railse's own config and needs you; there was no one to ask here, so it was denied")
+    expect(decidedByLabel(auto('unanalyzed'))).toBe('Command too long to analyze')
+    expect(outcomeText(auto('unanalyzed'))).toBe("The command is over 128 KiB and Railse doesn't analyze it, so it needs you; there was no one to ask here, so it was denied")
   })
 })
 

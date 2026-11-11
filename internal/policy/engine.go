@@ -27,6 +27,9 @@ type Decision struct {
 	// ControlPlane 为真表示请求读写 Railse 自己的配置（~/.railse、任何 .railse 目录、Context.ProtectedDirs）：限时放行不覆盖它，
 	// 照常进人工决定路径。与角色无关，没有角色文件时也算（见 touchesControlPlane）。
 	ControlPlane bool `json:"control_plane,omitempty"`
+	// Unanalyzed 为真表示这是超过 MaxAnalyzedCommand 的 shell 命令，Railse 不解析它：有没有角色都必须人来定，任何放行规则、
+	// 限时放行与暂停下的交回都不适用（守护进程与 ControlPlane 走同一组分支）。不依赖解析的 deny 仍会拒（见 cheapDenyMatch）。
+	Unanalyzed bool `json:"unanalyzed,omitempty"`
 }
 
 // Engine 持有编译好的规则。规则在 NewEngine 之后不再改动，Evaluate 可并发调用；
@@ -93,12 +96,12 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 func (e *Engine) evaluate(p Payload, ctx Context) Decision {
 	ctx = ctx.normalized()
 	risk, trig := ClassifyTrace(p, ctx)
-	huge := tooLongToAnalyze(p) // 超过分析上限：不跑规则（匹配也要解析命令），也不看禁用清单，见下
+	huge := tooLongToAnalyze(p) // 超过分析上限：不做完整的规则匹配（要解析命令），也不看禁用清单，见下
+	if huge {
+		return e.evaluateHuge(p, ctx, risk, trig)
+	}
 	var best *compiledRule
 	for i := range e.rules {
-		if huge {
-			break
-		}
 		r := &e.rules[i]
 		if !r.IsEnabled() || !scopeMatches(r.Scope, ctx) || !matchRequest(r, p, risk, ctx) {
 			continue
@@ -118,15 +121,6 @@ func (e *Engine) evaluate(p Payload, ctx Context) Decision {
 	// 用户 deny 压过一切（角色、暂停）；它压过其余规则，命中时必是 best。
 	if best != nil && best.userDeny() {
 		return withRule(base, best)
-	}
-	if role != nil && huge {
-		// 看不了里面有什么：任何角色都必须人来定
-		base.Action, base.BeyondRole = ActionAsk, true
-		base.Reason = "超出角色「" + role.Name + "」的边界：含无法检查的子命令"
-		if msg := role.Broken(); msg != "" {
-			base.Reason = "roles.yaml 有误：" + msg
-		}
-		return base
 	}
 	if role != nil {
 		f, opaque := role.forbidHit(p, risk, ctx)
@@ -184,6 +178,69 @@ func (e *Engine) evaluate(p Payload, ctx Context) Decision {
 
 // reasonControlPlaneNoAllow 是触及 Railse 自己的配置、规则本会放行却不放时的理由（固定句子，钩子 i18n.Lookup）。
 const reasonControlPlaneNoAllow = "触及 Railse 自己的配置，不接受自动放行"
+
+// ReasonUnanalyzed 是超长命令必须人来定的理由（固定句子，钩子按终端语言 i18n.Lookup）。
+const ReasonUnanalyzed = "命令超过 128 KiB，Railse 不解析这么长的命令，必须你来定"
+
+// evaluateHuge 给超过 MaxAnalyzedCommand 的 shell 命令下结论：不解析，一律必须人来定（Unanalyzed），有没有角色都一样；
+// 但不依赖解析的 deny 规则照常拒（见 cheapDenyMatch），在被拒的命令后面垫一大段注释躲不开 deny git push 这类规则。
+// 用户 deny 压过其余 deny；有角色时理由沿用“含无法检查的子命令”的越界说法，最终行为一样。
+func (e *Engine) evaluateHuge(p Payload, ctx Context, risk Risk, trig *Trigger) Decision {
+	base := Decision{Risk: risk, Trigger: trig, ControlPlane: touchesControlPlane(p, ctx), Unanalyzed: true}
+	var best *compiledRule
+	for i := range e.rules {
+		r := &e.rules[i]
+		if r.Action != ActionDeny || !r.IsEnabled() || !scopeMatches(r.Scope, ctx) || !cheapDenyMatch(r.Match, p, risk) {
+			continue
+		}
+		if best == nil || betterRule(r, best) {
+			best = r
+		}
+	}
+	role := ctx.Role
+	if role != nil {
+		base.Role = role.Name
+	}
+	if best != nil {
+		d := withRule(base, best)
+		d.Unanalyzed = false // 已经拒了，不必再交人
+		return d
+	}
+	base.Action, base.Reason = ActionAsk, ReasonUnanalyzed
+	if role != nil {
+		base.BeyondRole = true
+		base.Reason = "超出角色「" + role.Name + "」的边界：含无法检查的子命令"
+		if msg := role.Broken(); msg != "" {
+			base.Reason = "roles.yaml 有误：" + msg
+		}
+	}
+	return base
+}
+
+// cheapDenyMatch 是超长命令上 deny 规则的廉价匹配：只用不必解析命令的条件。payload、risk 照常比；command_prefix 拿去掉前导空白的
+// 原始命令做字面前缀比较（按词边界）；带 command_regex、path_glob、domain、mcp_server、mcp_tool 的规则不匹配（要解析或要跑正则，
+// 超长命令上不做），这些规则对超长命令不生效，交人去定。
+func cheapDenyMatch(m Match, p Payload, risk Risk) bool {
+	if m.CommandRegex != "" || m.PathGlob != "" || m.Domain != "" || m.MCPServer != "" || m.MCPTool != "" {
+		return false
+	}
+	if m.Payload != "" && m.Payload != p.Type {
+		return false
+	}
+	if m.Risk != nil && *m.Risk != risk {
+		return false
+	}
+	if m.CommandPrefix != "" {
+		cmd := strings.TrimLeft(p.Command, " \t\r\n")
+		if !strings.HasPrefix(cmd, m.CommandPrefix) {
+			return false
+		}
+		if rest := cmd[len(m.CommandPrefix):]; rest != "" && !strings.ContainsRune(" \t\r\n;&|", rune(rest[0])) {
+			return false // 按词边界：git push 不命中 git pushx
+		}
+	}
+	return true
+}
 
 // withRule 把命中的规则填进结论。
 func withRule(d Decision, r *compiledRule) Decision {
