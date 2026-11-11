@@ -233,8 +233,16 @@ func TestAuditRowsCarryRole(t *testing.T) {
 		agent.AuditEntry{TS: now, RequestID: "a1", Kind: "permission", Session: sess, ToolName: "Bash", Payload: &pl, Risk: "read", State: "auto_allowed"},
 		agent.AuditEntry{TS: now, RequestID: "a2", Kind: "permission", Session: proto.Session{Tool: "claude", CLISessionID: "s2", Role: "写作"}, ToolName: "Bash", Payload: &pl, Risk: "outward", State: "auto_denied", DecidedBy: "role:写作"},
 		agent.AuditEntry{TS: now, Kind: "question", Session: sess, State: "recorded", Message: "要继续吗？"},
+		// 越界的请求没来得及登记待决就在本机了结（过期）：补的历史行要带越界标记，总台的最近动作才认得出
+		agent.AuditEntry{TS: now, RequestID: "a3", Kind: "permission", Session: proto.Session{Tool: "claude", CLISessionID: "s2", Role: "写作"}, ToolName: "Bash", Payload: &pl, Risk: "outward", State: "expired", BeyondRole: true},
 	))
 	c.expectNothing()
+	if r, err := h.st.GetRequest("a3"); err != nil || !r.BeyondRole || r.Role != "写作" {
+		t.Fatalf("a3 应带越界标记与角色: %+v %v", r, err)
+	}
+	if r, _ := h.st.GetRequest("a2"); r.BeyondRole {
+		t.Fatal("a2 不是越界，不应带标记")
+	}
 	for id, want := range map[string]string{"a1": "开发", "a2": "写作"} {
 		if r, err := h.st.GetRequest(id); err != nil || r.Role != want {
 			t.Fatalf("%s 的角色 = %q, %v", id, r.Role, err)

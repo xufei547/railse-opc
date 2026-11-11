@@ -1111,7 +1111,7 @@ func (s *Server) applyAgentFinal(m store.Machine, e agent.AuditEntry, ts time.Ti
 	created := store.FormatTime(ts)
 	r := store.Request{ID: e.RequestID, MachineID: m.ID, SessionID: s.upsertSession(m.ID, e.Session, ""), Kind: e.Kind, ToolName: e.ToolName,
 		Risk: e.Risk, EngineReason: e.Reason, Trigger: e.Trigger, State: e.State, DecidedBy: e.DecidedBy, RuleID: e.RuleID, TurnID: e.Session.TurnID,
-		CLISessionID: e.Session.CLISessionID, CreatedAt: created, DecidedAt: &created, Role: e.Session.Role}
+		CLISessionID: e.Session.CLISessionID, CreatedAt: created, DecidedAt: &created, Role: e.Session.Role, BeyondRole: e.BeyondRole}
 	switch {
 	case e.Kind == "ask":
 		r.Ask, r.Risk = e.Ask, ""
