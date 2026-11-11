@@ -304,8 +304,19 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 				return true
 			}
 			// deny 与 ask 还看穿 sudo、xargs、timeout 这类包装（见 peelWrappers）；allow 不看，sudo git push 不该被 git push 的放行放过
-			return anySeg && (wordsHavePrefix(normalizedArgv(seg, cwd, ctx), m.CommandPrefix) || wordsHavePrefix(deepArgv(seg), m.CommandPrefix) ||
-				wordsHavePrefix(deepNormalizedArgv(seg, cwd, ctx), m.CommandPrefix))
+			if !anySeg {
+				return false
+			}
+			if wordsHavePrefix(normalizedArgv(seg, cwd, ctx), m.CommandPrefix) {
+				return true
+			}
+			// 每一层（包装与最内层）原样、归一化后都比一次：sudo、xargs、timeout、command 包着的照样命中（见 walkLayers）
+			for _, l := range walkLayers(seg.argv, seg.argvFlags, cwd, false, ctx) {
+				if wordsHavePrefix(l.argv, m.CommandPrefix) || wordsHavePrefix(normalizeLayer(l, ctx), m.CommandPrefix) {
+					return true
+				}
+			}
+			return false
 		}) {
 			return false
 		}
@@ -319,11 +330,17 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 			if anySeg && len(norm) > 0 && r.re.MatchString(strings.Join(norm, " ")) {
 				return true
 			}
-			if deep := deepArgv(seg); anySeg && len(deep) > 0 && r.re.MatchString(strings.Join(deep, " ")) {
-				return true
+			if !anySeg {
+				return false
 			}
-			dn := deepNormalizedArgv(seg, cwd, ctx)
-			return anySeg && len(dn) > 0 && r.re.MatchString(strings.Join(dn, " "))
+			for _, l := range walkLayers(seg.argv, seg.argvFlags, cwd, false, ctx) {
+				for _, w := range [][]string{l.argv, normalizeLayer(l, ctx)} {
+					if len(w) > 0 && r.re.MatchString(strings.Join(w, " ")) {
+						return true
+					}
+				}
+			}
+			return false
 		}) {
 			return false
 		}
@@ -515,18 +532,17 @@ func normalizedArgv(seg segment, cwd string, ctx Context) []string {
 	return normalizeWords(argv, flags, cwd, ctx)
 }
 
-// deepNormalizedArgv 同 normalizedArgv，但先剥掉全部包装（sudo、xargs、timeout、command 等，见 peel），工作目录按包装改过的算：
-// command /usr/bin/git -C . push 归一成 git push。
-func deepNormalizedArgv(seg segment, cwd string, ctx Context) []string {
-	argv, info := peel(seg.argv, true)
-	flags := make([]wordFlags, len(argv))
-	if !info.split {
-		flags = seg.argvFlags[len(seg.argv)-len(argv):]
+// normalizeLayer 是一层的命令词归一化后的样子（见 normalizeWords），工作目录按这一层的；算不清时按空。
+func normalizeLayer(l layer, ctx Context) []string {
+	flags := l.flags
+	if len(flags) != len(l.argv) {
+		flags = make([]wordFlags, len(l.argv))
 	}
-	if dir, ok := applyChdir(info, cwd, ctx); ok {
-		cwd = dir
+	cwd := l.cwd
+	if l.lost {
+		cwd = ""
 	}
-	return normalizeWords(argv, flags, cwd, ctx)
+	return normalizeWords(l.argv, flags, cwd, ctx)
 }
 
 // normalizeWords 是 normalizedArgv 的主体：argv[0] 取 basename，有全局选项表的命令剥掉子命令前的全局选项，子命令别名换成正式名。

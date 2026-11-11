@@ -23,68 +23,11 @@ const (
 // subPlaceholder 是把命令替换挖掉之后填回外层的占位词：外层仍是能扫描的普通命令，挖出的命令单独匹配。
 const subPlaceholder = "RAILSE_SUBST"
 
-// forbidCommands 返回 shell 命令里要逐条参与禁用匹配的命令文本：外层（命令替换换成占位词）、每个命令替换的内部（递归），
-// 以及 eval 的参数拼成的命令（递归）。opaque 为真表示有解析不了的结构：heredoc、没闭合的引号或括号、裸括号、带转义的 $'…'、
-// 层数超限等——这些里面可能藏着命令，看不见。sh -c 这类包装由 matchRequest（effectiveSegments）照常看穿。
+// forbidCommands 返回 shell 命令里要逐条参与禁用匹配的命令文本（外层、sh -c 的内联、eval 的参数、命令替换的内部，见 shellViews），
+// 以及有没有解析不了、可能藏着命令的结构。工作目录与禁用无关，按空算。
 func forbidCommands(cmd string) (cmds []string, opaque bool) {
-	work := 0
-	var walk func(c string, depth int)
-	walk = func(c string, depth int) {
-		work += len(c)
-		if depth > maxForbidDepth || work > maxForbidBytes || len(cmds) >= maxForbidCmds {
-			opaque = true
-			return
-		}
-		outer, bodies, ok := extractSubstitutions(c)
-		if !ok {
-			opaque = true
-		}
-		cmds = append(cmds, outer)
-		if _, op, heredoc := scanShell([]rune(outer)); op || heredoc {
-			opaque = true
-		}
-		for _, b := range bodies {
-			walk(b, depth+1)
-		}
-		segs, truncated := effectiveSegmentsLimited(outer)
-		if truncated {
-			opaque = true
-		}
-		for _, seg := range segs {
-			argv, split := peelWrappers(seg.argv, true)
-			if len(argv) == 0 {
-				continue
-			}
-			flags := seg.argvFlags
-			if off := len(seg.argv) - len(argv); !split && off >= 0 && off <= len(flags) {
-				flags = flags[off:]
-			} else if split {
-				opaque = true // env -S 拆出来的词没有引号信息，看不出是不是字面量
-				flags = nil
-			}
-			name := filepath.Base(argv[0])
-			// eval 与 sh -c 类的命令参数要是完整的字面量才看得见：含变量展开、通配（eval "git ${OP}"、bash -c "$CMD"）时，
-			// 运行时才知道是什么命令
-			if name == "eval" || isShell(name) {
-				for i := 1; i < len(argv); i++ {
-					if f := flagAt(flags, i); f.expand || f.glob {
-						opaque = true
-					}
-				}
-			}
-			if name == "eval" {
-				args := argv[1:]
-				if len(args) > 0 && args[0] == "--" {
-					args = args[1:]
-				}
-				if len(args) > 0 {
-					walk(strings.Join(args, " "), depth+1)
-				}
-			}
-		}
-	}
-	walk(cmd, 0)
-	return cmds, opaque
+	_, texts, op := shellViews(cmd, "", Context{})
+	return texts, op
 }
 
 // extractSubstitutions 挖出引号外与双引号里的 $(…)、反引号，以及引号外的 <(…)、>(…)，返回换成占位词的外层与各段内部原文。
@@ -216,50 +159,30 @@ func isRailseEnvName(n string) bool {
 // envSetters 是能设置或删除环境变量的命令：它们的参数里出现变量名本身（export X、unset X）也算改。
 var envSetters = map[string]bool{"export": true, "unset": true, "declare": true, "typeset": true, "readonly": true, "local": true, "env": true}
 
-// changesRailseEnv 判断命令是否给 railseEnvNames 赋值或删除它们：前缀赋值、env、export、declare、typeset、readonly、local、unset、
-// env -u，以及 sh -c、命令替换、进程替换与 eval 里的同样写法。设置类命令的参数含变量展开（export "$V"=x）时看不出改的是谁，也算。
-// 只看赋值，不看读取（echo $RAILSE_ROLE 不算）。
+// changesRailseEnv 判断命令是否设置、删除或清空 railseEnvNames 这些变量：每一段的每一层（见 walkLayers）——命令前的赋值、
+// env NAME=、env -u、env --unset=、env -i、env -、exec -c，以及最内层的 export、declare、typeset、readonly、local、unset；
+// sh -c、eval、命令替换里的照样（见 shellViews）。设置类命令的参数含变量展开（export "$V"=x）时看不出改的是谁，也算。
+// 只看写，不看读（echo $RAILSE_ROLE 不算）。
 func changesRailseEnv(cmd string) bool {
-	cmds, _ := forbidCommands(cmd)
-	for _, c := range cmds {
-		for _, seg := range effectiveSegments(c) {
-			if segChangesRailseEnv(seg) {
+	views, _, _ := shellViews(cmd, "", Context{})
+	for _, v := range views {
+		for _, l := range v.layers {
+			if l.envClear {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-func segChangesRailseEnv(seg segment) bool {
-	// 设置类命令可能是命令本身（export X），也可能是被剥掉的包装（env -u X claude 剥成 claude）：两处都看
-	argv := stripWrappers(seg.argv)
-	setter := false
-	for _, w := range seg.argv[:len(seg.argv)-len(argv)] {
-		setter = setter || envSetters[filepath.Base(w)]
-	}
-	if len(argv) > 0 {
-		setter = setter || envSetters[filepath.Base(argv[0])]
-	}
-	for i, w := range seg.argv {
-		name := w
-		if k, _, ok := strings.Cut(w, "="); ok {
-			name = strings.TrimSuffix(k, "+") // NAME=、NAME+=
-			if isRailseEnvName(name) {
-				return true
+			for _, n := range append(append([]string{}, l.envSet...), l.envUnset...) {
+				if isRailseEnvName(n) {
+					return true
+				}
 			}
-		}
-		if strings.HasPrefix(name, "-u") && isRailseEnvName(name[2:]) { // env -uNAME
-			return true
-		}
-		if strings.HasPrefix(w, "--unset=") && isRailseEnvName(strings.TrimPrefix(w, "--unset=")) {
-			return true
-		}
-		if setter && isRailseEnvName(w) { // export NAME、unset NAME、env -u NAME
-			return true
-		}
-		if setter && i > 0 && flagAt(seg.argvFlags, i).expand {
-			return true
+			if l.wrapper == "" && len(l.argv) > 0 && envSetters[filepath.Base(l.argv[0])] {
+				for i, w := range l.argv[1:] {
+					name, _, _ := strings.Cut(w, "=")
+					if isRailseEnvName(strings.TrimSuffix(name, "+")) || flagAt(l.flags, i+1).expand {
+						return true
+					}
+				}
+			}
 		}
 	}
 	return false
@@ -307,12 +230,21 @@ func touchesControlPlane(p Payload, ctx Context) bool {
 			}
 			return false
 		}
-		// 外层按段走、跟踪 cd（与定级同一个 nextCwd）；命令替换、eval 等内层的命令在哪个目录跑不好确定：
-		// 外层有切换目录的段时，内层的相对路径按算不出处理
-		cmds, _ := forbidCommands(p.Command)
-		changes := cdChanges(cmds[0], p.Cwd, ctx)
-		for i, c := range cmds {
-			if controlWalk(c, p.Cwd, i > 0 && changes, ctx, 0) {
+		// 每一段的每一层（见 shellViews、walkLayers）：参数按这一层的工作目录解析（env -C、sudo -D、cd 之后，sh -c 里继承外层的），
+		// 重定向由外层 shell 在这一段开始时的目录做；工作目录算不清之后的相对路径一律算触及
+		views, _, _ := shellViews(p.Command, p.Cwd, ctx)
+		for _, v := range views {
+			for _, w := range v.seg.argv {
+				if mentionsRailseDir(w) {
+					return true
+				}
+			}
+			for _, l := range v.layers {
+				if len(l.argv) > 1 && touchesControlWords(l.argv[1:], l.cwd, l.lost, ctx) {
+					return true
+				}
+			}
+			if touchesControlWords(append(redirectPaths(v.seg.redirects), v.seg.inputs...), v.cwd, v.lost, ctx) {
 				return true
 			}
 		}
@@ -320,73 +252,10 @@ func touchesControlPlane(p Payload, ctx Context) bool {
 	return false
 }
 
-// controlWalk 按段走命令（跟踪 cd、pushd、popd 改变的工作目录，同定级的 classifyShellTrace），看有没有段读写 Railse 自己的配置；
-// sh -c 这类包装按当时的工作目录递归。lost 为真表示工作目录已算不出：之后的相对路径一律算触及（算不出实际目标的不得走放行）。
-func controlWalk(command, cwd string, lost bool, ctx Context, depth int) bool {
-	for _, text := range splitSegments(command) {
-		seg := parseSegment(text)
-		if segTouchesControl(seg, cwd, lost, ctx) {
-			return true
-		}
-		if argv := deepArgv(seg); len(argv) > 0 && isShell(filepath.Base(argv[0])) {
-			if depth >= maxShellNesting {
-				return true // 嵌套过深，看不完，偏严
-			}
-			if call, ok := parseShellCall(filepath.Base(argv[0]), argv); ok {
-				for _, inner := range call.inline() {
-					if controlWalk(inner, cwd, lost, ctx, depth+1) {
-						return true
-					}
-				}
-			}
-		}
-		next, ok := nextCwd(seg, cwd, ctx)
-		if !ok {
-			lost = true
-		}
-		cwd = next
-	}
-	return false
-}
-
-// cdChanges 报告命令的外层有没有改变工作目录的段（cd、pushd、popd）。
-func cdChanges(command, cwd string, ctx Context) bool {
-	for _, text := range splitSegments(command) {
-		if next, ok := nextCwd(parseSegment(text), cwd, ctx); !ok || next != cwd {
-			return true
-		}
-	}
-	return false
-}
-
-// segTouchesControl 看一段的参数（不含命令名）、输出与输入重定向：字面提到 .railse 的、解析后在配置目录里的算；
-// 工作目录算不出（lost）时相对路径也算。URL 不当路径。
-func segTouchesControl(seg segment, cwd string, lost bool, ctx Context) bool {
-	for _, w := range seg.argv {
-		if mentionsRailseDir(w) {
-			return true
-		}
-	}
-	// 参数按包装改过的工作目录解析（env -C、sudo -D）；重定向由外层 shell 在原目录做
-	argv, info := peel(seg.argv, true)
-	argCwd, ok := applyChdir(info, cwd, ctx)
-	argLost := lost || !ok
-	type word struct {
-		w    string
-		cwd  string
-		lost bool
-	}
-	var words []word
-	if len(argv) > 1 {
-		for _, w := range argv[1:] {
-			words = append(words, word{w, argCwd, argLost})
-		}
-	}
-	for _, w := range append(redirectPaths(seg.redirects), seg.inputs...) {
-		words = append(words, word{w, cwd, lost})
-	}
-	for _, it := range words {
-		w, cwd, lost := it.w, it.cwd, it.lost
+// touchesControlWords 看一组参数或重定向目标：字面提到 .railse 的、解析后在配置目录里的算；工作目录算不清（lost）时相对路径也算。
+// URL 不当路径。
+func touchesControlWords(words []string, cwd string, lost bool, ctx Context) bool {
+	for _, w := range words {
 		if mentionsRailseDir(w) {
 			return true
 		}

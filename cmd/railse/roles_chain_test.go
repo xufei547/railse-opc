@@ -445,3 +445,30 @@ func TestHookEnabledButUnreachable(t *testing.T) {
 	os.WriteFile(filepath.Join(stale, "agent.sock"), nil, 0o600) // 残留的 socket 文件（守护进程崩溃后留下的）
 	try("socket 残留", filepath.Join(stale, "agent.sock"), want)
 }
+
+// 完整链路：收尾轮点名的三个复现（统一的包装遍历器）。
+func TestChainWrapperWalkerRepros(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	t.Setenv("RAILSE_ROLE", "")
+	// 一、env -C 到守护进程目录后经 sh -c 覆盖 roles.yaml：触及配置，不接受自动放行
+	for cli, want := range map[string]string{"claude-pre": "ask", "claude-pr": "pass", "codex": "pass", "gemini": "deny"} {
+		stdin, ad := chainInput(t, cli, repo, "env -C ../h sh -c 'cp ../repo/replacement.yaml roles.yaml'")
+		if out, _, code := runHookWith(t, stdin, ad, "--socket", sock); code != 0 || outcomeOf(out) != want {
+			t.Errorf("env -C … sh -c %s: 想要 %s，得到 %q", cli, want, out)
+		}
+	}
+	// 二、command sudo touch：风险含中间 sudo 的 destructive（PreToolUse 回 ask，不交 Claude 自己的分类器）
+	stdin, ad := chainInput(t, "claude-pre", repo, "command sudo touch a.txt")
+	if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "ask" {
+		t.Errorf("command sudo touch: %q", out)
+	}
+	// 三、有角色的会话里经 command、env -i 改环境：越界
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 运维\n    ceiling: destructive\n"), 0o600)
+	t.Setenv("RAILSE_ROLE", "运维")
+	for _, cmd := range []string{"command env -u HOME claude -p hi", "command unset RAILSE_ROLE", "env -i claude -p hi"} {
+		stdin, ad := chainInput(t, "claude-pre", repo, cmd)
+		if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "ask" || !strings.Contains(out, "试图更改 Railse 的角色或放行设置") {
+			t.Errorf("%s: %q", cmd, out)
+		}
+	}
+}
