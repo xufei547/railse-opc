@@ -998,3 +998,29 @@ func TestCLIIndexSkipsLaunchersAndPruneOnlyKnownCLI(t *testing.T) {
 		t.Fatalf("只有已知 CLI 的记录按进程退出清理: launcher=%v cli=%v", keptLauncher, keptCLI)
 	}
 }
+
+// 子会话的第一个调用是答题或事件（还没审批过、没有缓存）时，也从重建的祖先链解析继承来的角色；只读上层记录，不建立钉住。
+func TestAskFirstResolvesInheritance(t *testing.T) {
+	SetPeerAncestryForTest(t, nil)
+	SetTrustSelfReportedForTest(t)
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	outer := []proto.Proc{proc(100, "a", "sh"), proc(10, "b", "claude"), proc(5, "c", "zsh")}
+	r := withRole(permission(env.repo, "git status"), "写作")
+	r.Session.CLISessionID, r.Ancestors = "outer", outer
+	send(t, env, r)
+	nested := append([]proto.Proc{proc(200, "d", "sh"), proc(20, "e", "claude"), proc(150, "f", "bash")}, outer[1:]...)
+	nowhere := t.TempDir()
+	ask := askRequest(nowhere)
+	ask.Session.CLISessionID, ask.Ancestors = "child", nested
+	send(t, env, ask)
+	if e := lastAudit(t, env); e.Kind != "ask" || e.Session.Role != "写作" {
+		t.Fatalf("第一个调用是答题也要带继承来的角色: %+v", e.Session)
+	}
+	env.srv.pinMu.Lock()
+	_, pinned := env.srv.pinned["claude\x00child"]
+	env.srv.pinMu.Unlock()
+	if pinned {
+		t.Fatal("答题不该建立钉住")
+	}
+}
