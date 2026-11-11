@@ -31,6 +31,8 @@ type Engine struct {
 type compiledRule struct {
 	Rule
 	re *regexp.Regexp
+	// bad 只用于角色的禁用清单：条件编不了（绕过校验构造的角色），判定时当作命中，fail closed
+	bad bool
 }
 
 // NewEngine 校验规则集并预编译正则。规则里的指针字段深拷贝，调用方之后改动规则集不影响引擎。
