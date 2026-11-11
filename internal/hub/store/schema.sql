@@ -139,3 +139,8 @@ CREATE TABLE IF NOT EXISTS machine_roles (
   dirs           TEXT NOT NULL DEFAULT '[]',   -- JSON 字符串数组
   PRIMARY KEY (machine_id, name)
 );
+-- 总台（v7）的查询用的索引：24 小时窗口（覆盖索引）、每个角色最近几条、项目最近一条、窗口内的会话。见 desk.go。
+CREATE INDEX IF NOT EXISTS requests_window ON requests (created_at, kind, state, machine_id, role);
+CREATE INDEX IF NOT EXISTS requests_role_recent ON requests (machine_id, role, kind, created_at, id);
+CREATE INDEX IF NOT EXISTS requests_project_recent ON requests (machine_id, project_root, created_at, id);
+CREATE INDEX IF NOT EXISTS sessions_recent ON sessions (last_event_at, machine_id, role);

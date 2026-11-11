@@ -66,7 +66,7 @@ CREATE TABLE trusts (
 );
 CREATE INDEX trusts_machine_until ON trusts (machine_id, until_at);
 `,
-	// 7：角色（0.3）。sessions 与 requests 加 role，requests 加 beyond_role，列都加在表尾，旧行为空串、0；新表 machine_roles
+	// 7：角色（0.3）。sessions 与 requests 加 role，requests 加 beyond_role，列都加在表尾，旧行为空串、0；新表 machine_roles 与总台查询的四个索引
 	// 与 schema.sql 的一致（TestMigratedV7SchemaMatchesFresh 核对）。
 	7: `
 ALTER TABLE sessions ADD COLUMN role TEXT NOT NULL DEFAULT '';
@@ -83,6 +83,10 @@ CREATE TABLE machine_roles (
   dirs           TEXT NOT NULL DEFAULT '[]',
   PRIMARY KEY (machine_id, name)
 );
+CREATE INDEX requests_window ON requests (created_at, kind, state, machine_id, role);
+CREATE INDEX requests_role_recent ON requests (machine_id, role, kind, created_at, id);
+CREATE INDEX requests_project_recent ON requests (machine_id, project_root, created_at, id);
+CREATE INDEX sessions_recent ON sessions (last_event_at, machine_id, role);
 `,
 }
 

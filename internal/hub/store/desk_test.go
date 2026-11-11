@@ -2,6 +2,7 @@ package store
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,25 +72,28 @@ func TestDeskSessions(t *testing.T) {
 	}
 }
 
-// DeskRecent：每个 (机器, 角色) 最近 n 条 permission，新的在前；别的种类不算。
-func TestDeskRecent(t *testing.T) {
+// RecentPermissions：一台机器上某个角色最近 n 条 permission，新的在前；别的角色、别的机器、别的种类不算。
+func TestRecentPermissions(t *testing.T) {
 	s := openTemp(t)
 	for i := range 7 {
 		deskReq(t, s, "r"+string(rune('0'+i)), "m1", "写作", "permission", "approved", time.Duration(7-i)*time.Minute)
 	}
 	deskReq(t, s, "k1", "m1", "写作", "ask", "pending", 0)
 	deskReq(t, s, "u1", "m1", "", "permission", "denied", 0)
-	got, err := s.DeskRecent(5)
-	if err != nil {
-		t.Fatal(err)
+	deskReq(t, s, "x1", "m2", "写作", "permission", "denied", 0)
+	ids := func(rs []Request) []string {
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.ID)
+		}
+		return out
 	}
-	var ids []string
-	for _, r := range got {
-		ids = append(ids, r.MachineID+"/"+r.Role+"/"+r.ID)
+	got, err := s.RecentPermissions("m1", "写作", 5)
+	if err != nil || !slices.Equal(ids(got), []string{"r6", "r5", "r4", "r3", "r2"}) {
+		t.Fatalf("写作: %v %v", ids(got), err)
 	}
-	want := []string{"m1//u1", "m1/写作/r6", "m1/写作/r5", "m1/写作/r4", "m1/写作/r3", "m1/写作/r2"}
-	if !slices.Equal(ids, want) {
-		t.Fatalf("DeskRecent: %v", ids)
+	if got, _ := s.RecentPermissions("m1", "", 5); !slices.Equal(ids(got), []string{"u1"}) {
+		t.Fatalf("未分配: %v", ids(got))
 	}
 }
 
@@ -120,5 +124,82 @@ func TestTrustRoleLookups(t *testing.T) {
 	}
 	if _, ok, err := s.LatestProjectRole(m.ID, "/q"); err != nil || ok {
 		t.Fatalf("没有请求的项目: %v %v", ok, err)
+	}
+}
+
+// 总台的每条查询都要走索引：EXPLAIN QUERY PLAN 里不得出现对 requests、sessions 的全表扫（SCAN requests / SCAN sessions，
+// 含“SCAN … USING … INDEX”这种整个索引扫一遍）。Store 只有一个连接，慢查询会堵住审批登记与决定落库。
+func TestDeskQueriesUseIndexes(t *testing.T) {
+	s := openTemp(t)
+	cut := FormatTime(time.Now().Add(-24 * time.Hour))
+	for _, q := range []struct {
+		name    string
+		sql     string
+		args    []any
+		limited bool
+	}{
+		{"计数", deskCountsSQL, []any{cut}, false},
+		{"会话", deskSessionsSQL, []any{cut}, false},
+		{"最近动作", recentPermissionsSQL, []any{"m1", "写作", 5}, true},
+		{"项目最近的角色", latestProjectRoleSQL, []any{"m1", "/p"}, true},
+		{"会话的角色", sessionRoleByCLISQL, []any{"m1", "claude", "c1"}, false},
+	} {
+		rows, err := s.db.Query("EXPLAIN QUERY PLAN "+q.sql, q.args...)
+		if err != nil {
+			t.Fatalf("%s: %v", q.name, err)
+		}
+		var plan []string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, detail)
+		}
+		rows.Close()
+		for _, d := range plan {
+			if strings.HasPrefix(d, "SCAN requests") || strings.HasPrefix(d, "SCAN sessions") {
+				t.Errorf("%s 有全表扫: %q\n整个计划: %q", q.name, d, plan)
+			}
+			// 带 LIMIT 的“最近”查询要按索引顺序取，不能先把这台机器的全部历史排一遍
+			if q.limited && strings.Contains(d, "TEMP B-TREE") {
+				t.Errorf("%s 要临时排序（会读完这台机器的全部历史）: %q\n整个计划: %q", q.name, d, plan)
+			}
+		}
+	}
+}
+
+// “24 小时内”含恰好 24 小时前那一刻（created_at >= since）：差 1 纳秒的不算。
+func TestDeskWindowBoundary(t *testing.T) {
+	s := openTemp(t)
+	since := time.Now().Add(-24 * time.Hour).UTC().Truncate(time.Second)
+	for _, r := range []Request{
+		{ID: "at", MachineID: "m1", Kind: "permission", State: "denied", CreatedAt: FormatTime(since)},
+		{ID: "before", MachineID: "m1", Kind: "permission", State: "denied", CreatedAt: FormatTime(since.Add(-time.Nanosecond))},
+	} {
+		if err := s.InsertRequest(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.DeskCounts(since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Denied != 1 || got[0].Requests != 1 {
+		t.Fatalf("恰好 24 小时前的算、早 1 纳秒的不算: %+v", got)
+	}
+	m, _ := s.CreateMachine("mac", "sec", "")
+	if _, err := s.UpsertSession(m.ID, proto.Session{Tool: "claude", CLISessionID: "c1"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("UPDATE sessions SET last_event_at = ?", FormatTime(since)); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := s.DeskSessions(since); n[DeskKey{m.ID, ""}] != 1 {
+		t.Fatalf("恰好 24 小时前有事件的会话应算: %v", n)
+	}
+	if n, _ := s.DeskSessions(since.Add(time.Nanosecond)); len(n) != 0 {
+		t.Fatalf("早于窗口的会话不算: %v", n)
 	}
 }

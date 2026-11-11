@@ -17,7 +17,8 @@ import (
 //     auto_allowed：24 小时内 permission 的 auto_allowed。sessions：24 小时内有事件的会话数（按会话当前的角色）。
 //   - trusts_active：生效中的放行。会话放行算到该会话当前的角色；项目放行算到这台机器上该项目根最近一条请求的角色，
 //     没有请求记录的算未分配。hub 不做目录模式匹配。
-//   - recent：最近 5 条 permission，summary 是收件箱卡片那一行摘要（载荷已脱敏）。
+//   - recent：最近 5 条 permission，summary 是收件箱卡片那一行摘要（载荷已脱敏）。未分配一行的最近动作取角色为空的，加上 24 小时内
+//     计数、会话或放行里出现过、文件里已没有的角色名的；更早就不再活动的已删角色不再翻出来（每条都按索引取，不扫全部历史）。
 
 const (
 	deskWindow    = 24 * time.Hour
@@ -125,11 +126,22 @@ func (s *Server) buildDesk(now time.Time) (deskView, error) {
 		}
 		return a
 	}
+	// unknown 记下每台机器上出现过、但文件里已没有的角色名（并进未分配），最近动作要按它们逐个再取
+	unknown := map[string]map[string]bool{}
+	note := func(machineID, role string) {
+		if _, ok := live[machineID]; ok && role != "" && !known[store.DeskKey{MachineID: machineID, Role: role}] {
+			if unknown[machineID] == nil {
+				unknown[machineID] = map[string]bool{}
+			}
+			unknown[machineID][role] = true
+		}
+	}
 	counts, err := s.store.DeskCounts(since)
 	if err != nil {
 		return deskView{}, err
 	}
 	for _, c := range counts {
+		note(c.MachineID, c.Role)
 		if a := at(c.MachineID, c.Role); a != nil {
 			a.Waiting += c.Waiting
 			a.Denied += c.Denied
@@ -142,6 +154,7 @@ func (s *Server) buildDesk(now time.Time) (deskView, error) {
 		return deskView{}, err
 	}
 	for k, n := range sessions {
+		note(k.MachineID, k.Role)
 		if a := at(k.MachineID, k.Role); a != nil {
 			a.Sessions += n
 		}
@@ -155,17 +168,32 @@ func (s *Server) buildDesk(now time.Time) (deskView, error) {
 		if err != nil {
 			return deskView{}, err
 		}
+		note(t.MachineID, role)
 		if a := at(t.MachineID, role); a != nil {
 			a.TrustsActive++
 		}
 	}
-	recent, err := s.store.DeskRecent(deskRecentMax)
-	if err != nil {
-		return deskView{}, err
-	}
-	for _, r := range recent {
-		if a := at(r.MachineID, r.Role); a != nil {
-			a.recent = append(a.recent, r)
+	// 最近动作：每个 (机器, 角色) 走索引取最近 5 条；未分配取空串与那些已删的角色名，合并后再取前 5 条（见 finishStats）
+	for _, m := range machines {
+		if m.Revoked {
+			continue
+		}
+		names := []string{""}
+		for _, r := range byMachine[m.ID] {
+			names = append(names, r.Name)
+		}
+		for name := range unknown[m.ID] {
+			names = append(names, name)
+		}
+		for _, name := range names {
+			recent, err := s.store.RecentPermissions(m.ID, name, deskRecentMax)
+			if err != nil {
+				return deskView{}, err
+			}
+			if len(recent) > 0 {
+				a := at(m.ID, name)
+				a.recent = append(a.recent, recent...)
+			}
 		}
 	}
 
