@@ -202,7 +202,8 @@ func RoleSummaries(set policy.RoleSet) []proto.RoleSummary {
 }
 
 // trustAllowedFor 判断限时放行 tr 能不能用在角色 role 的请求上（设计 §3.2）：trust_max 为 none 时一律不能；设了时长时，
-// 只在 CreatedAt + trust_max 之前能用。没有角色、没设 trust_max 时照旧。CreatedAt 缺失（不该发生）按不能用，偏保守。
+// 只在 min(Until, CreatedAt + trust_max) 之前能用（Until 由放行表自己判，这里判后一半；到点即失效）。CreatedAt 由守护进程填，
+// hub 快照里晚于此刻的已截到此刻（见 trusts.add、applySnapshot），撑不大这个上限。没有角色、没设 trust_max 时照旧。CreatedAt 缺失（不该发生）按不能用，偏保守。
 func trustAllowedFor(role *policy.Role, tr proto.Trust, now time.Time) bool {
 	if role == nil || !role.TrustMax.Set {
 		return true

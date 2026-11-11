@@ -207,43 +207,77 @@ func TestBeyondRolePreToolUseMidTierAsks(t *testing.T) {
 	}
 }
 
+// setTrustClock 把放行表的“此刻”换成 *now（测试推进时钟用）。
+func setTrustClock(env *testEnv, now *time.Time) {
+	env.srv.trusts.mu.Lock()
+	env.srv.trusts.now = func() time.Time { return *now }
+	env.srv.trusts.mu.Unlock()
+}
+
+// trust_max：设了时长的角色，放行只在建立后 trust_max 之内有效（按 min(Until, CreatedAt + trust_max)，到点即失效）；none 一律不放行；
+// 会话与项目两种范围一样。
 func TestRoleTrustMax(t *testing.T) {
 	dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
 		return Outcome{Action: "deny", DecidedBy: "user"}, nil
 	})
-	env := startServer(t, dec, nil)
-	rolesFor(t, env, "  - name: 短\n    trust_max: 2h\n  - name: 不放\n    trust_max: none\n")
-	set := func(created time.Time) string {
+	for _, scope := range []string{proto.TrustScopeProject, proto.TrustScopeSession} {
+		env := startServer(t, dec, nil)
+		rolesFor(t, env, "  - name: 短\n    trust_max: 2h\n  - name: 不放\n    trust_max: none\n")
+		now := time.Now()
+		setTrustClock(env, &now)
+		tr := proto.Trust{Scope: scope, Until: now.Add(20 * time.Hour)}
+		if scope == proto.TrustScopeProject {
+			tr.Project = env.repo
+		} else {
+			tr.Tool, tr.CLISession = "claude", "s1"
+		}
 		var reply proto.ControlReply
-		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
-			Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: env.repo, Until: time.Now().Add(20 * time.Hour), CreatedAt: created}}), &reply)
+		json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set", Trust: &tr}), &reply)
 		if !reply.OK {
 			t.Fatalf("建放行: %+v", reply)
 		}
-		return reply.Trusts[0].ID
+		req := func(role string) proto.Response {
+			r := withRole(permission(env.repo, "curl https://example.com"), role)
+			r.Source = proto.SourcePermissionRequest
+			return send(t, env, r)
+		}
+		if resp := req("短"); resp.Decision != "allow" {
+			t.Fatalf("%s: 刚建的放行应有效: %+v", scope, resp)
+		}
+		if resp := req("不放"); resp.Decision == "allow" {
+			t.Fatalf("%s: trust_max none 不走放行: %+v", scope, resp)
+		}
+		now = now.Add(2*time.Hour - time.Second)
+		if resp := req("短"); resp.Decision != "allow" {
+			t.Fatalf("%s: 边界前一秒应有效: %+v", scope, resp)
+		}
+		now = now.Add(time.Second) // 恰好 CreatedAt + 2h
+		if resp := req("短"); resp.Decision == "allow" {
+			t.Fatalf("%s: 恰好到 trust_max 应失效: %+v", scope, resp)
+		}
+		if resp := req("运维"); resp.Decision != "allow" {
+			t.Fatalf("%s: 没设 trust_max 的角色照旧放行: %+v", scope, resp)
+		}
 	}
-	revokeAll := func() {
-		roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_revoke", TrustID: "all"})
+}
+
+// 本机建放行时 CreatedAt 一律由守护进程填此刻：传一个未来的建立时间撑大 trust_max 不成立。
+func TestTrustCreatedAtSetByDaemon(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "  - name: 短\n    trust_max: 2h\n")
+	future := time.Now().Add(10 * time.Hour)
+	var reply proto.ControlReply
+	json.Unmarshal(roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: env.repo, Until: time.Now().Add(20 * time.Hour), CreatedAt: future}}), &reply)
+	if !reply.OK || reply.Trusts[0].CreatedAt.After(time.Now()) {
+		t.Fatalf("CreatedAt 应是守护进程的此刻: %+v", reply)
 	}
-	req := func(role string) proto.Response {
-		r := withRole(permission(env.repo, "curl https://example.com"), role)
-		r.Source = proto.SourcePermissionRequest
-		return send(t, env, r)
-	}
-	set(time.Now().Add(-3 * time.Hour))
-	if resp := req("短"); resp.Decision == "allow" {
-		t.Fatalf("建了 3 小时的放行对 trust_max 2h 的角色应无效: %+v", resp)
-	}
-	if resp := req("运维"); resp.Decision != "allow" {
-		t.Fatalf("没设 trust_max 的角色照旧放行: %+v", resp)
-	}
-	revokeAll()
-	set(time.Now())
-	if resp := req("短"); resp.Decision != "allow" {
-		t.Fatalf("2 小时内的放行应有效: %+v", resp)
-	}
-	if resp := req("不放"); resp.Decision == "allow" {
-		t.Fatalf("trust_max none 的角色不走放行: %+v", resp)
+	now := time.Now().Add(3 * time.Hour)
+	setTrustClock(env, &now)
+	r := withRole(permission(env.repo, "curl https://example.com"), "短")
+	r.Source = proto.SourcePermissionRequest
+	if resp := send(t, env, r); resp.Decision == "allow" {
+		t.Fatalf("3 小时后对 trust_max 2h 的角色应失效: %+v", resp)
 	}
 }
 
