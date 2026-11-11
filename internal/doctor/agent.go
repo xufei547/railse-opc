@@ -48,10 +48,30 @@ func agentChecks(o Options) []Check {
 	dirCheck := permCheck("agent.dir", i18n.T("守护进程数据目录"), o.AgentDir, 0o700, true, i18n.T("先运行一次 railse agent run，它会建好目录与文件"))
 	out = append(out, dirCheck)
 	out = append(out, agentFilesCheck(o, dirCheck))
+	if c, ok := rolesCheck(o); ok {
+		out = append(out, c)
+	}
 	out = append(out, agentSocketCheck(o))
 	out = append(out, agentRunningChecks(o)...)
 	out = append(out, autostartCheck("agent.autostart", i18n.T("守护进程开机自启"), o, "agent"))
 	return out
+}
+
+// rolesCheck 看角色文件 roles.yaml（0.3 起）：不存在时不出这一项（没有角色，体检结果与 0.2.3 一样）；合法 ok；有误 fail——
+// 守护进程这时把只读之外的审批一律交人，修好就恢复，不用重启。
+func rolesCheck(o Options) (Check, bool) {
+	const id = "agent.roles"
+	name := i18n.T("角色文件")
+	path := filepath.Join(o.AgentDir, "roles.yaml")
+	st := agent.LoadRolesFile(path)
+	switch {
+	case !st.Exists:
+		return Check{}, false
+	case st.Err != nil:
+		return Check{ID: id, Name: name, Status: Fail, Detail: fmt.Sprintf(i18n.T("%s 有误: %v"), path, st.Err),
+			Hint: i18n.T("只读之外的审批现在一律问人；改好文件即可恢复（不用重启），railse role check 可以先查")}, true
+	}
+	return Check{ID: id, Name: name, Status: OK, Detail: fmt.Sprintf(i18n.T("%s（%d 个角色）"), path, len(st.Set.Roles))}, true
 }
 
 // projectRootCheck 看 Project 会被守护进程当成哪个项目根（同一个 agent.ResolveProjectRoot）：git 仓库 ok；

@@ -57,6 +57,7 @@ func (s *Server) apiRoutes() {
 	s.mux.HandleFunc("DELETE /api/machines/{id}", write(s.handleMachineRevoke))
 	s.mux.HandleFunc("GET /api/trusts", read(s.handleTrusts))
 	s.mux.HandleFunc("DELETE /api/trusts/{id}", write(s.handleTrustRevoke))
+	s.mux.HandleFunc("GET /api/desk", read(s.handleDesk))
 	// WebSocket 握手是 GET，但浏览器跨站也能发起（带 cookie），同样查 Origin
 	s.mux.HandleFunc("GET /ws/client", sameOrigin(s.requireClient(s.handleClientWS)))
 }
@@ -82,7 +83,8 @@ func sameOrigin(next http.HandlerFunc) http.HandlerFunc {
 // request_updated 都用它。提问（kind ask）带 ask（题目），作答后带 answers（题面 → 答案原文）。
 // HasRedacted 为 true 表示载荷（或提问的题目）里有被脱敏抹掉的部分：网页展示的不是原文（命令行语境的脱敏可能连带吞掉紧贴的后半截命令），
 // 必须醒目告警，建议去终端核对。
-// CanTrust 为 true 表示批准时可以顺带限时放行：请求是审批（kind permission），所属机器在线且其守护进程声明了 trust 能力。
+// CanTrust 为 true 表示批准时可以顺带限时放行：请求是审批（kind permission）、没有超出角色的边界（beyond_role），
+// 所属机器在线且其守护进程声明了 trust 能力。role 与 beyond_role 来自 store.Request（0.3 起）。
 type requestView struct {
 	store.Request
 	// CLI 是请求所属会话的 sessions.tool 原值（claude、codex、gemini）；没有会话、查不到为空，读库出错记日志也为空；显示名由网页按它算。
@@ -149,7 +151,7 @@ func (s *Server) views(rs []store.Request) []requestView {
 			tools[r.SessionID] = tool
 		}
 		out = append(out, requestView{Request: r, CLI: tool, MachineName: name, Project: projectName(r.ProjectRoot), HasRedacted: requestHasRedacted(r),
-			CanTrust: r.Kind == "permission" && s.trustSupported(r.MachineID)})
+			CanTrust: r.Kind == "permission" && !r.BeyondRole && s.trustSupported(r.MachineID)})
 	}
 	return out
 }
@@ -202,20 +204,32 @@ func (s *Server) handlePause(w http.ResponseWriter, paused bool) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleInbox 返回 {"pending":[…],"questions":[…]}，都是请求视图、按创建时间倒序：pending 是全部待处理的审批与提问（至多 500 条），
-// questions 是最近 24 小时还在等回答的 question（至多 100 条，见 store.OpenQuestions）。没有时是空数组，不是 null。
+// handleInbox 返回 {"pending":[…],"questions":[…],"pending_truncated":bool}，都是请求视图、按创建时间倒序：pending 是待处理的审批与提问
+// （至多 500 条，还有更早的时 pending_truncated 为 true），questions 是最近 24 小时还在等回答的 question（至多 100 条，见 store.OpenQuestions）。
+// 没有时是空数组，不是 null。查询参数（0.3 起，可选）：machine 只要这台机器的；role 按角色，带了但为空表示“未分配”
+// （角色为空，或不在该机器当前的角色表里）。筛选在截断之前做（store.InboxFilter）。
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
-	pending, err := s.store.ListRequests("pending", inboxLimit)
+	q := r.URL.Query()
+	var f store.InboxFilter
+	if q.Has("machine") {
+		m := q.Get("machine")
+		f.Machine = &m
+	}
+	if q.Has("role") {
+		role := q.Get("role")
+		f.Role = &role
+	}
+	pending, truncated, err := s.store.ListPending(f, inboxLimit)
 	if err != nil {
 		s.internalErr(w, "列待审批", err)
 		return
 	}
-	questions, err := s.store.OpenQuestions(time.Now().Add(-questionsWindow), questionsLimit)
+	questions, err := s.store.OpenQuestions(time.Now().Add(-questionsWindow), questionsLimit, f)
 	if err != nil {
 		s.internalErr(w, "列待回答", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"pending": s.views(pending), "questions": s.views(questions)})
+	writeJSON(w, http.StatusOK, map[string]any{"pending": s.views(pending), "questions": s.views(questions), "pending_truncated": truncated})
 }
 
 // handleRequests 按创建时间倒序列请求：state 为空表示全部；limit 默认 50、最大 500，≤0 或不是数字时按默认。

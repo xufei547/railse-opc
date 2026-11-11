@@ -354,12 +354,24 @@ func scanShell(runes []rune) (segs []scanned, opaque, heredoc bool) {
 	return segs, opaque, false
 }
 
+// maxBraceScan 是 braceExpands 从一个 { 往后扫的上限（字符数）。
+const maxBraceScan = 256
+
 // braceExpands 判断 runes[i] 处引号外的 { 是否开始花括号展开：同一个词里有与之配对的 }，
 // 且其间有引号外的 , 或 ..。引号里的内容整段跳过，反斜杠转义的字符不算。
 // 于是 ${HOME}（由调用方排除）、stash@{0}、{0} 都是字面量，{a,b}、x{1..3} 是展开。
 func braceExpands(runes []rune, i int) bool {
 	depth, sep := 0, false
+	// 工作量上限：一长串不配对的 { 会让每个 { 都扫到词尾，变成平方级。扫过 maxBraceScan 还没定论就当它是展开：
+	// 展开的词不是字面量，放行规则不认它，偏严
+	end := len(runes)
+	if i+maxBraceScan < end {
+		end = i + maxBraceScan
+	}
 	for j := i; j < len(runes); j++ {
+		if j >= end {
+			return true
+		}
 		switch c := runes[j]; c {
 		case '\\':
 			j++

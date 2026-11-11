@@ -595,7 +595,7 @@ func TestRequestJSONHidesCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"id", "machine_id", "session_id", "kind", "tool_name", "payload", "risk", "project_root", "engine_reason", "state",
-		"decided_by", "decision_note", "rule_id", "turn_id", "cli_session_id", "title", "created_at", "expires_at", "decided_at", "delivered_at"}
+		"decided_by", "decision_note", "rule_id", "turn_id", "cli_session_id", "title", "created_at", "expires_at", "decided_at", "delivered_at", "role", "beyond_role"}
 	for _, k := range want {
 		if _, ok := m[k]; !ok {
 			t.Fatalf("缺字段 %s: %s", k, b)
@@ -701,7 +701,7 @@ func TestOpenQuestions(t *testing.T) {
 	since := time.Date(2026, 10, 23, 10, 0, 1, 0, time.UTC)
 	ids := func(limit int) string {
 		t.Helper()
-		got, err := s.OpenQuestions(since, limit)
+		got, err := s.OpenQuestions(since, limit, InboxFilter{})
 		if err != nil {
 			t.Fatal(err)
 		}

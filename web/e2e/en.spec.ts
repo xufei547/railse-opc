@@ -75,6 +75,7 @@ test('English end to end', async ({ page, env, hook, ask }) => {
   // 其余各页：先等到页面标题
   for (const [path, title] of [
     ['/history', 'History'],
+    ['/desk', 'Desk'],
     ['/rules', 'Rules'],
     ['/machines', 'Machines'],
     ['/settings', 'Settings'],
@@ -85,6 +86,8 @@ test('English end to end', async ({ page, env, hook, ask }) => {
     // 两条内置规则永远在（与是否先跑过中文用例无关），等到内置卡片即规则列表已加载
     if (path === '/rules') await expect(page.locator('.card.rule', { hasText: 'Built-in' }).first()).toBeVisible()
     if (path === '/machines') await expect(page.locator('.list-item', { hasText: 'e2e-mac' })).toBeVisible()
+    // 总台：e2e-mac 的未分配一栏（真守护进程还没有角色）
+    if (path === '/desk') await expect(page.locator('.desk-card', { hasText: 'Unassigned' }).first()).toBeVisible()
     if (path === '/settings') {
       await expect(page.getByText('Language').first()).toBeVisible()
       // 异步块都加载完：推送状态有文字、hub 规则版本不再是 '-'

@@ -23,6 +23,7 @@ const usage = `用法: railse <子命令> [参数]
   hook      各 CLI 钩子调用的翻译器（claude、codex、codex-notify、gemini）
   agent     守护进程（run、status、pause、resume、reload、enroll）
   trust     限时放行（当前项目或某个 Claude 会话，默认 2 小时）
+  role      角色（list、check、which、init）：每个会话的权限边界
   hub       云端服务（run、password、token、webhook-token）
   setup     一键接入与安装（all）、钩子（hooks）、开机自启（autostart）、Codex notify（codex-notify）
   doctor    检查安装与运行状态（只读）
@@ -53,6 +54,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runAgent(args[1:], stdout, stderr)
 	case "trust":
 		return runTrust(args[1:], stdout, stderr)
+	case "role":
+		return runRole(args[1:], stdout, stderr)
 	case "hub":
 		return runHub(args[1:], stdinReader, stdout, stderr)
 	case "setup":

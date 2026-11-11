@@ -40,7 +40,7 @@ func TestSetupHooksWritesAllThree(t *testing.T) {
 	claude := readJSON(t, filepath.Join(project, ".claude", "settings.local.json"))
 	pr := claude["hooks"].(map[string]any)["PermissionRequest"].([]any)[0].(map[string]any)
 	hook := pr["hooks"].([]any)[0].(map[string]any)
-	if pr["matcher"] != "" || hook["command"] != "/opt/railse hook claude" || hook["timeout"] != float64(86400) || hook["type"] != "command" {
+	if pr["matcher"] != "" || hook["command"] != "/opt/railse hook claude --socket "+hooksconf.ShellQuote(defaultSock(t)) || hook["timeout"] != float64(86400) || hook["type"] != "command" {
 		t.Fatalf("Claude PermissionRequest: %+v", pr)
 	}
 	for _, ev := range []string{"Notification", "Stop", "SessionEnd"} {
@@ -50,18 +50,18 @@ func TestSetupHooksWritesAllThree(t *testing.T) {
 	}
 	ask := claude["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)
 	askHook := ask["hooks"].([]any)[0].(map[string]any)
-	if ask["matcher"] != hooksconf.ClaudePreToolUseMatcher || askHook["command"] != "/opt/railse hook claude" || askHook["timeout"] != float64(86400) {
+	if ask["matcher"] != hooksconf.ClaudePreToolUseMatcher || askHook["command"] != "/opt/railse hook claude --socket "+hooksconf.ShellQuote(defaultSock(t)) || askHook["timeout"] != float64(86400) {
 		t.Fatalf("Claude PreToolUse: %+v", ask)
 	}
 	codex := readJSON(t, codexFile)
 	se := codex["hooks"].(map[string]any)["SessionEnd"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)
-	if se["timeout"] != float64(3) || se["command"] != "/opt/railse hook codex" {
+	if se["timeout"] != float64(3) || se["command"] != "/opt/railse hook codex --socket "+hooksconf.ShellQuote(defaultSock(t)) {
 		t.Fatalf("Codex SessionEnd: %+v", se)
 	}
 	gemini := readJSON(t, filepath.Join(project, ".gemini", "settings.json"))
 	bt := gemini["hooks"].(map[string]any)["BeforeTool"].([]any)[0].(map[string]any)
 	bh := bt["hooks"].([]any)[0].(map[string]any)
-	if bt["matcher"] != ".*" || bh["name"] != "railse-before-tool" || bh["timeout"] != float64(86400000) || bh["command"] != "/opt/railse hook gemini" {
+	if bt["matcher"] != ".*" || bh["name"] != "railse-before-tool" || bh["timeout"] != float64(86400000) || bh["command"] != "/opt/railse hook gemini --socket "+hooksconf.ShellQuote(defaultSock(t)) {
 		t.Fatalf("Gemini BeforeTool: %+v", bt)
 	}
 	if !strings.Contains(out.String(), "Codex") || !strings.Contains(out.String(), "Gemini") || !strings.Contains(out.String(), "yolo") {
@@ -127,7 +127,7 @@ func TestSetupHooksDryRunWritesNothing(t *testing.T) {
 	if !strings.Contains(out.String(), "PermissionRequest") {
 		t.Fatalf("dry-run 应打印将写入的内容: %s", out.String())
 	}
-	if !strings.Contains(out.String(), `"PreToolUse"`) || !strings.Contains(out.String(), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"`) {
+	if !strings.Contains(out.String(), `"PreToolUse"`) || !strings.Contains(out.String(), `"matcher": "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch|mcp__.*"`) {
 		t.Fatalf("dry-run 应打印新的 PreToolUse 组: %s", out.String())
 	}
 }
@@ -259,7 +259,7 @@ func TestSetupHooksReplacesOldBinAndQuotesSpaces(t *testing.T) {
 	needUnixShell(t)
 	cmd := hooks["PermissionRequest"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"].(string)
 	got, err := exec.Command("sh", "-c", cmd).Output()
-	if err != nil || string(got) != "hook claude\n" {
+	if err != nil || string(got) != "hook claude --socket "+defaultSock(t)+"\n" {
 		t.Fatalf("命令 %q 应能被 shell 正确执行, 得到 %q err=%v", cmd, got, err)
 	}
 }
@@ -362,7 +362,7 @@ func TestSetupHooksRecognizesOnlyRailseHookCommands(t *testing.T) {
 			t.Errorf("旧的 Railse 钩子 %q 应被替换", c)
 		}
 	}
-	if !got["/opt/railse hook claude"] || len(got) != len(others)+1 {
+	if !got["/opt/railse hook claude --socket "+hooksconf.ShellQuote(defaultSock(t))] || len(got) != len(others)+1 {
 		t.Errorf("应只剩别人的 %d 组加本次一组, 得到 %v", len(others), got)
 	}
 }
@@ -454,12 +454,13 @@ func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 	if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude --socket "+q {
 		t.Fatalf("相对 --dir 应写成绝对路径的 socket: %q", got)
 	}
-	// 显式给 ~/.railse、不给 --dir（也没有 $RAILSE_HOME）：都不带 --socket，并把上次带 --socket 的条目换掉
+	// 显式给 ~/.railse、不给 --dir（也没有 $RAILSE_HOME）：0.3 起同样带 --socket（默认目录的绝对路径），并把上次的条目换掉
+	defSock := hooksconf.ShellQuote(filepath.Join(home, ".railse", "agent.sock"))
 	for _, extra := range [][]string{{"--dir", filepath.Join(home, ".railse")}, nil} {
 		out = setup(extra...)
 		for _, p := range []string{local, gemini, codexFile} {
-			if b := readFile(t, p); strings.Contains(string(b), "--socket") {
-				t.Fatalf("%v: 默认目录时 %s 不应带 --socket:\n%s", extra, p, b)
+			if b := readFile(t, p); !strings.Contains(string(b), "--socket "+defSock) || strings.Contains(string(b), q) {
+				t.Fatalf("%v: 默认目录时 %s 应带默认目录的 --socket:\n%s", extra, p, b)
 			}
 		}
 		if !strings.Contains(out, "railse setup codex-notify --bin /opt/railse（") {
@@ -481,7 +482,7 @@ func TestSetupHooksNonDefaultDirAddsSocket(t *testing.T) {
 		}
 	}
 	setup("--dir", filepath.Join(home, ".railse"))
-	if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude" {
+	if got := hookCommand(t, local, "Stop"); got != "/opt/railse hook claude --socket "+hooksconf.ShellQuote(defaultSock(t)) {
 		t.Fatalf("--dir 是 ~/.railse 时不带 --socket（不管 $RAILSE_HOME）: %q", got)
 	}
 }
@@ -599,7 +600,7 @@ func TestSetupHooksKeepsOthersEntriesInOurGroup(t *testing.T) {
 	if commands["my-notify-logger"] != 1 {
 		t.Fatalf("我们组里别人的条目应保留: %v", commands)
 	}
-	if commands["/opt/railse hook claude"] != 1 || len(commands) != 2 {
+	if commands["/opt/railse hook claude --socket "+hooksconf.ShellQuote(defaultSock(t))] != 1 || len(commands) != 2 {
 		t.Fatalf("我们的条目应只有一份: %v", commands)
 	}
 	// 只含我们条目的组删空后整组去掉，不留空组
@@ -682,7 +683,7 @@ func TestSetupHooksMigrationDropsEmptiedHooksKey(t *testing.T) {
 	project := t.TempDir()
 	shared := filepath.Join(project, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(shared), 0o755)
-	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
+	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", defaultSock(t)))
 	os.WriteFile(shared, old, 0o644)
 	var out, errOut bytes.Buffer
 	if code := run([]string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
@@ -758,7 +759,7 @@ func TestSetupHooksDryRunShowsMigration(t *testing.T) {
 	project := t.TempDir()
 	shared := filepath.Join(project, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(shared), 0o755)
-	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
+	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", defaultSock(t)))
 	os.WriteFile(shared, old, 0o644)
 	var out, errOut bytes.Buffer
 	if code := run([]string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse", "--dry-run"}, &out, &errOut); code != 0 {
@@ -791,7 +792,7 @@ func TestSetupHooksMigrationWritesThroughSymlinkAndKeepsMode(t *testing.T) {
 	}
 	project := t.TempDir()
 	real := filepath.Join(t.TempDir(), "dotfiles-claude.json")
-	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
+	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", defaultSock(t)))
 	os.WriteFile(real, old, 0o600)
 	os.Chmod(real, 0o600)
 	link := filepath.Join(project, ".claude", "settings.json")
@@ -822,7 +823,7 @@ func TestSetupHooksBadTargetStopsMigration(t *testing.T) {
 	project := t.TempDir()
 	shared := filepath.Join(project, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(shared), 0o755)
-	old, _ := hooksconf.Merge(nil, "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
+	old, _ := hooksconf.Merge(nil, "/opt/railse", hooksconf.Plan("claude", "/opt/railse", defaultSock(t)))
 	os.WriteFile(shared, old, 0o644)
 	os.MkdirAll(filepath.Join(project, ".gemini"), 0o755)
 	os.WriteFile(filepath.Join(project, ".gemini", "settings.json"), []byte("{not json"), 0o644)
@@ -842,7 +843,7 @@ func TestSetupHooksOnlyCodexDoesNotMigrateClaude(t *testing.T) {
 	project := t.TempDir()
 	shared := filepath.Join(project, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(shared), 0o755)
-	old, _ := hooksconf.Merge(nil, "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
+	old, _ := hooksconf.Merge(nil, "/opt/railse", hooksconf.Plan("claude", "/opt/railse", defaultSock(t)))
 	os.WriteFile(shared, old, 0o644)
 	var out, errOut bytes.Buffer
 	if code := run([]string{"setup", "hooks", "--project", project, "--codex", "--codex-file", filepath.Join(t.TempDir(), "hooks.json"), "--bin", "/opt/railse"}, &out, &errOut); code != 0 {
@@ -888,7 +889,7 @@ func TestSetupHooksDoesNotMigrateUserSettings(t *testing.T) {
 	t.Setenv("RAILSE_HOME", "")
 	userSettings := filepath.Join(home, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(userSettings), 0o755)
-	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
+	old, _ := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", defaultSock(t)))
 	os.WriteFile(userSettings, old, 0o644)
 	setup := func(extra ...string) (string, string) {
 		t.Helper()
@@ -994,7 +995,7 @@ func TestSetupHooksDefaultsToUserLevel(t *testing.T) {
 		t.Fatalf("setup hooks: %d %s", code, errOut.String())
 	}
 	for _, tc := range []struct{ cli, path, orig string }{{"claude", claude, origClaude}, {"gemini", gemini, origGemini}, {"codex", codex, ""}} {
-		want, err := hooksconf.Merge([]byte(tc.orig), "/opt/railse", hooksconf.Plan(tc.cli, "/opt/railse", ""))
+		want, err := hooksconf.Merge([]byte(tc.orig), "/opt/railse", hooksconf.Plan(tc.cli, "/opt/railse", defaultSock(t)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1087,7 +1088,7 @@ func TestSetupHooksBacksUpUserSettingsOnce(t *testing.T) {
 func TestSetupHooksNoBackupWhenUnchanged(t *testing.T) {
 	home, _ := userLevelEnv(t)
 	claude := hooksconf.ClaudeUserPath(home)
-	want, err := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", ""))
+	want, err := hooksconf.Merge([]byte(`{"model":"opus"}`), "/opt/railse", hooksconf.Plan("claude", "/opt/railse", defaultSock(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3049,5 +3050,44 @@ func TestSetupAllLocalHubNoTailscaleEnglish(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.home, ".railse", i18n.FileName)); !os.IsNotExist(err) {
 		t.Fatalf("setup all 失败不该写 lang 文件: %v", err)
+	}
+}
+
+// setup 幂等升级旧（0.2.3）的 PreToolUse、PostToolUse 匹配器：换成新的，不多出一组，别人的组保留。
+func TestSetupHooksUpgradesOldMatcher(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "rs")
+	defer os.RemoveAll(dir)
+	project := filepath.Join(dir, "proj")
+	os.MkdirAll(filepath.Join(project, ".claude"), 0o755)
+	old := "AskUserQuestion|Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch"
+	existing := `{"hooks":{"PreToolUse":[{"matcher":"` + old + `","hooks":[{"type":"command","command":"/opt/railse hook claude","timeout":86400}]},{"matcher":"Bash","hooks":[{"type":"command","command":"echo mine"}]}],` +
+		`"PostToolUse":[{"matcher":"` + old + `","hooks":[{"type":"command","command":"/opt/railse hook claude"}]}]}}`
+	os.WriteFile(filepath.Join(project, ".claude", "settings.local.json"), []byte(existing), 0o644)
+	args := []string{"setup", "hooks", "--project", project, "--claude", "--bin", "/opt/railse"}
+	for range 2 {
+		var out, errOut bytes.Buffer
+		if code := run(args, &out, &errOut); code != 0 {
+			t.Fatal(errOut.String())
+		}
+	}
+	hooks := readJSON(t, filepath.Join(project, ".claude", "settings.local.json"))["hooks"].(map[string]any)
+	for _, ev := range []string{"PreToolUse", "PostToolUse"} {
+		var ours, mine int
+		for _, g := range hooks[ev].([]any) {
+			gm := g.(map[string]any)
+			cmd := gm["hooks"].([]any)[0].(map[string]any)["command"]
+			switch cmd {
+			case "/opt/railse hook claude --socket " + hooksconf.ShellQuote(defaultSock(t)):
+				ours++
+				if gm["matcher"] != hooksconf.ClaudePreToolUseMatcher {
+					t.Errorf("%s 的匹配器应升级: %v", ev, gm["matcher"])
+				}
+			case "echo mine":
+				mine++
+			}
+		}
+		if ours != 1 || (ev == "PreToolUse" && mine != 1) {
+			t.Errorf("%s: 我们的 %d 组、别人的 %d 组: %+v", ev, ours, mine, hooks[ev])
+		}
 	}
 }

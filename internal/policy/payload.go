@@ -50,9 +50,30 @@ type Context struct {
 	ProjectRoot string
 	HomeDir     string // 用户家目录绝对路径
 	MachineID   string // 本机 id，用于 machine 范围的规则
+	// Role 是会话的角色（0.3 起），nil 为未分配，按 0.2 的规则走。由守护进程按 RAILSE_ROLE 与项目目录解析（见 agent.ResolveRole）；
+	// roles.yaml 有误时是 BrokenRole（上限 read）。角色写了 dirs 而项目根不在其内时，Root 按没有项目根处理。
+	Role *Role
+	// ProtectedDirs 是守护进程自己的数据目录（roles.yaml、rules.yaml、trusts.json 所在，绝对路径），由守护进程带入：里面的读写与
+	// 敏感路径表一样按 destructive。默认的 ~/.railse 已在敏感路径表里；用 --dir 或 RAILSE_HOME 指到别处时靠它，免得 agent 改角色、
+	// 规则与放行表被当成项目内写入自动放行。比较同敏感路径表（折叠大小写），不解析符号链接（守护进程把真实路径也带上）。
+	ProtectedDirs []string
 }
 
-// Root 返回生效的项目根：ProjectRoot 清理后是根目录、HomeDir 或 HomeDir 的祖先时返回空串（太宽，当它是项目根会让
+// sensitive 判断绝对路径是否命中敏感路径表或在受保护目录内。
+func (c Context) sensitive(abs string) bool {
+	if isSensitive(abs, c.HomeDir) {
+		return true
+	}
+	fa := foldPath(abs)
+	for _, d := range c.ProtectedDirs {
+		if d != "" && isWithin(fa, foldPath(filepath.Clean(d))) {
+			return true
+		}
+	}
+	return false
+}
+
+// Root 返回生效的项目根：ProjectRoot 清理后是根目录、HomeDir 或 HomeDir 的祖先时返回空串，有角色且项目根在角色地盘外时也返回空串（太宽，当它是项目根会让
 // “项目内可写”放行改写整个家目录），否则原样返回 ProjectRoot。HomeDir 为空时只挡根目录。只比较清理后的路径字符串，
 // 不读文件系统。导出入口（Classify、Evaluate、ProposeRule）都先用它规范化 Context；hub 判断有没有项目根也用它，口径一致。
 func (c Context) Root() string {
@@ -62,6 +83,15 @@ func (c Context) Root() string {
 	root := filepath.Clean(c.ProjectRoot)
 	if filepath.Dir(root) == root || (c.HomeDir != "" && isWithin(filepath.Clean(c.HomeDir), root)) {
 		return ""
+	}
+	// 角色的地盘（设计 §3.3）：写了 dirs 的角色在地盘外（典型：用 RAILSE_ROLE 在别处启动）没有项目根，写入一律 write_outside。
+	// 地盘内项目根语义不变，不扩大到角色的全部目录。
+	if c.Role != nil {
+		for _, r := range c.Role.territoryRoles() { // 合并过的角色要同时在每个来源的地盘里（见 CombineRoles）
+			if len(r.Dirs) > 0 && !r.Covers(c.ProjectRoot, c.HomeDir) {
+				return ""
+			}
+		}
 	}
 	return c.ProjectRoot
 }

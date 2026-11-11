@@ -147,18 +147,67 @@ func gitSubcommand(argv []string, flags []wordFlags, cwd string, ctx Context) st
 
 func classifySegment(seg segment, cwd string, ctx Context) Risk {
 	argv, flags := commandWords(seg)
-	risk := RiskUnknown // 没有命令、只有重定向时也要看重定向与输入
-	if len(argv) > 0 {
-		risk = classifyArgv(argv, flags, cwd, ctx)
-		args, argFlags := withoutMessages(argv[1:], flags[1:])
-		// 参数无法静态解析时，不论是否命中命令表，至少为 unknown
-		if hasUnresolvable(args, argFlags, ctx) {
-			risk = maxRisk(risk, RiskUnknown)
-		}
-		if touchesSensitiveWords(args, argFlags, cwd, ctx) {
-			risk = maxRisk(risk, RiskDestructive)
+	risk := classifyWords(seg, argv, flags, cwd, ctx)
+	// 各层包装自身的风险与最内层命令的风险取最大（统一的遍历器，见 walkLayers）：command sudo touch 含 sudo 的 destructive，
+	// command git push 不能只算 command 的 unknown。env -C、sudo -D 改了内层的工作目录，内层按改后的目录算；
+	// 目录算不清时相对路径与“改工作目录”的写一律按项目外，至少 unknown；包装带了算不清后果的选项，至少 unknown
+	ls := walkLayers(seg.argv, seg.argvFlags, cwd, false, ctx)
+	for _, l := range ls {
+		if l.wrapper != "" {
+			risk = maxRisk(risk, wrapperRisk(l, ctx))
 		}
 	}
+	if in := innermost(ls); len(ls) > 1 && len(in.argv) > 0 && in.wrapper == "" {
+		dir := in.cwd
+		if in.lost {
+			risk = maxRisk(risk, RiskUnknown)
+			dir = ""
+		}
+		flags := in.flags
+		if len(flags) != len(in.argv) {
+			flags = make([]wordFlags, len(in.argv))
+		}
+		risk = maxRisk(risk, classifyArgvWords(in.argv, flags, dir, ctx, dir != cwd))
+	}
+	risk = maxRisk(risk, classifyRedirects(seg, argv, cwd, ctx))
+	// 工作目录（跟踪 cd 之后，或载荷的 Cwd）在项目外时，按项目内改动定级的段一律按项目外：
+	// 不做路径分析的写命令（git init、git commit、make）改的就是工作目录。项目根为空时没有目录在项目内
+	if risk == RiskWriteInProject && !isWithin(cwd, ctx.ProjectRoot) {
+		risk = RiskWriteOutside
+	}
+	return risk
+}
+
+// classifyWords 给去掉包装后的命令词定级（命令表、参数的可解析性与敏感路径），再加上这一段的重定向与输入（见 classifyRedirects）。
+func classifyWords(seg segment, argv []string, flags []wordFlags, cwd string, ctx Context) Risk {
+	risk := RiskUnknown // 没有命令、只有重定向时也要看重定向与输入
+	if len(argv) > 0 {
+		risk = classifyArgvWords(argv, flags, cwd, ctx, false)
+	}
+	return risk
+}
+
+// classifyArgvWords 给一条命令的词定级：命令表、参数无法解析时至少 unknown、参数里有敏感路径按 destructive；
+// outside 为真时（内层的工作目录被包装改过），工作目录在项目外时按项目内改动定级的一律按项目外；
+// 否则这一条由调用方在合并之后做（见 classifySegment 末尾）。
+func classifyArgvWords(argv []string, flags []wordFlags, cwd string, ctx Context, outside bool) Risk {
+	risk := classifyArgv(argv, flags, cwd, ctx)
+	args, argFlags := withoutMessages(argv[1:], flags[1:])
+	if hasUnresolvable(args, argFlags, ctx) {
+		risk = maxRisk(risk, RiskUnknown)
+	}
+	if touchesSensitiveWords(args, argFlags, cwd, ctx) {
+		risk = maxRisk(risk, RiskDestructive)
+	}
+	if outside && risk == RiskWriteInProject && !isWithin(cwd, ctx.ProjectRoot) {
+		risk = RiskWriteOutside
+	}
+	return risk
+}
+
+// classifyRedirects 给一段的重定向、输入与注入型环境变量定级：重定向由外层 shell 在原工作目录里做，不受 env -C 影响。
+func classifyRedirects(seg segment, argv []string, cwd string, ctx Context) Risk {
+	risk := RiskRead
 	// 命令前的 VAR=value（含 env 之后的）设置了能注入代码的环境变量
 	if assignsInjectedEnv(seg.argv[:len(seg.argv)-len(argv)]) {
 		risk = maxRisk(risk, RiskUnknown)
@@ -407,21 +456,33 @@ func nextCwd(seg segment, cwd string, ctx Context) (string, bool) {
 	return resolvePath(args[0], cwd, ctx.HomeDir), true
 }
 
-// stripWrappers 去掉开头的环境变量赋值和 env、time、nohup、nice、caffeinate 这类包装。
-// 只剩一个 token 时不再剥，避免把 "env" 本身剥成空。
-func stripWrappers(argv []string) []string {
-	for len(argv) > 1 {
-		a := argv[0]
-		switch {
-		case isEnvAssignment(a):
-			argv = argv[1:]
-		case a == "env" || a == "time" || a == "nohup" || a == "nice" || a == "caffeinate":
-			argv = argv[1:]
-		default:
-			return argv
-		}
-	}
-	return argv
+// deepWrappers 是只在“看穿”时剥掉的包装：定级时它们自身的档位照算（sudo、doas 按 destructive，xargs 不在名单里按 unknown），
+// 内层另算后取较高的（见 classifySegment）；禁用清单、deny 规则、改 Railse 设置、sh -c 识别与配置目录检查要看它们里面跑的是什么。
+var deepWrappers = map[string]bool{"sudo": true, "doas": true, "xargs": true, "timeout": true, "command": true, "exec": true}
+
+// wrapperOpts 是一个包装认得的选项：flags 是不带参数的，args 是带一个参数的（参数是下一个词，或以 = 连写、短选项可连写）；
+// chdir 是改内层工作目录的选项，opaque 是改了别的、这里算不清后果的选项（改根目录、写输出文件、编辑文件、从文件读参数）。
+// 不在这几张表里的选项一律按不透明处理：不知道它干什么，就不假装看懂了内层。
+type wrapperOpts struct {
+	flags, args, chdir, opaque []string
+	numeric                    bool // nice -5 这类数字选项
+	durationArg                bool // timeout：选项之后还有一个时长
+}
+
+var wrapperOptions = map[string]wrapperOpts{
+	"env":        {flags: []string{"-i", "--ignore-environment", "-0", "--null", "-v", "--debug"}, args: []string{"-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-P"}, chdir: []string{"-C", "--chdir"}, opaque: []string{"-P"}},
+	"time":       {flags: []string{"-p", "-l", "-a", "-v", "-q", "--verbose", "--portability", "--quiet", "--append"}, args: []string{"-f", "--format", "-o", "--output"}, opaque: []string{"-o", "--output"}},
+	"nohup":      {},
+	"nice":       {args: []string{"-n", "--adjustment"}, numeric: true},
+	"caffeinate": {flags: []string{"-d", "-i", "-m", "-s", "-u"}, args: []string{"-t", "-w"}},
+	"sudo": {flags: []string{"-A", "--askpass", "-b", "--background", "-E", "--preserve-env", "-H", "--set-home", "-i", "--login", "-K", "-k", "--reset-timestamp", "-n", "--non-interactive", "-P", "--preserve-groups", "-S", "--stdin", "-s", "--shell", "-e", "--edit", "-l", "--list"},
+		args:  []string{"-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host", "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user", "-D", "--chdir", "-R", "--chroot", "-T", "--command-timeout"},
+		chdir: []string{"-D", "--chdir"}, opaque: []string{"-R", "--chroot", "-e", "--edit", "-l", "--list", "-h", "--host"}},
+	"doas":    {flags: []string{"-n", "-s", "-L"}, args: []string{"-u", "-C"}, opaque: []string{"-C"}},
+	"xargs":   {flags: []string{"-0", "-r", "-t", "-p", "-x", "-o", "--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty"}, args: []string{"-I", "-i", "-n", "--max-args", "-P", "--max-procs", "-L", "-l", "--max-lines", "-d", "--delimiter", "-E", "-e", "--eof", "-s", "--max-chars", "-a", "--arg-file", "-J", "-R", "-S"}, opaque: []string{"-a", "--arg-file"}},
+	"timeout": {flags: []string{"--foreground", "-v", "--verbose", "--preserve-status"}, args: []string{"-s", "--signal", "-k", "--kill-after"}, durationArg: true},
+	"command": {flags: []string{"-p", "-v", "-V"}},
+	"exec":    {flags: []string{"-c", "-l"}, args: []string{"-a"}},
 }
 
 func isEnvAssignment(s string) bool {
@@ -515,7 +576,7 @@ func touchesSensitiveWords(args []string, flags []wordFlags, cwd string, ctx Con
 		if !ok || wordUnresolvable(p, flagAt(flags, i), ctx) {
 			continue
 		}
-		if isSensitive(resolvePath(p, cwd, ctx.HomeDir), ctx.HomeDir) {
+		if ctx.sensitive(resolvePath(p, cwd, ctx.HomeDir)) {
 			return true
 		}
 	}
@@ -547,11 +608,24 @@ func hasSQLDrop(text string) bool {
 // （sh -c、bash -lc、fish -C 等，判断与 shellRisk 相同）时，在它后面递归附上命令串拆出的各段。
 // 供 deny 与 ask 规则匹配用：它们要看穿 shell 包装。命令串严格短于外层，递归必然结束。
 func effectiveSegments(command string) []segment {
-	var out []segment
+	out, _ := effectiveSegmentsLimited(command)
+	return out
+}
+
+// maxShellNesting 是 effectiveSegments 看穿 sh -c 包装的层数上限：更深的不再展开（避免畸形输入递归过深），
+// 角色的禁用检查据 truncated 按解析不了处理（见 forbidCommands）。
+const maxShellNesting = 32
+
+// effectiveSegmentsLimited 同 effectiveSegments，truncated 报告是否因层数上限少展开了内层。
+func effectiveSegmentsLimited(command string) (out []segment, truncated bool) {
+	return effectiveSegmentsDepth(command, 0)
+}
+
+func effectiveSegmentsDepth(command string, depth int) (out []segment, truncated bool) {
 	for _, s := range splitSegments(command) {
 		seg := parseSegment(s)
 		out = append(out, seg)
-		argv := stripWrappers(seg.argv)
+		argv := innermost(walkLayers(seg.argv, seg.argvFlags, "", false, Context{})).argv // sudo sh -c、timeout 5 bash -c 也看进去
 		if len(argv) == 0 {
 			continue
 		}
@@ -563,11 +637,17 @@ func effectiveSegments(command string) []segment {
 		if !ok {
 			continue
 		}
+		if depth >= maxShellNesting {
+			truncated = true
+			continue
+		}
 		for _, inner := range call.inline() {
-			out = append(out, effectiveSegments(inner)...)
+			segs, tr := effectiveSegmentsDepth(inner, depth+1)
+			out = append(out, segs...)
+			truncated = truncated || tr
 		}
 	}
-	return out
+	return out, truncated
 }
 
 // scriptInterpreters 是不带脚本参数（或参数是 -）时从标准输入读脚本来执行的解释器（shell 由 isShell 认）。

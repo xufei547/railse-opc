@@ -142,8 +142,20 @@ export async function login(page: Page, env: E2EEnv, lang: 'zh' | 'en' = 'zh') {
   expect(resp?.headers()['content-security-policy']).toContain("script-src 'self'")
   await expect(page).toHaveURL(/\/login/)
   await page.getByLabel(lang === 'en' ? 'Password' : '密码').fill(env.password)
-  await page.getByRole('button', { name: lang === 'en' ? 'Log in' : '登录', exact: true }).click()
-  await expect(page.getByText(lang === 'en' ? 'Nothing waiting for you' : '没有等你处理的事')).toBeVisible()
+  const button = page.getByRole('button', { name: lang === 'en' ? 'Log in' : '登录', exact: true })
+  const empty = page.getByText(lang === 'en' ? 'Nothing waiting for you' : '没有等你处理的事')
+  const limited = page.getByText(/尝试太频繁|Too many attempts/)
+  // hub 的登录限速是每个来源 IP 每分钟 5 次，整套用例（每个用例一个新的浏览器上下文、各登录一次）会超过：
+  // 碰上限速就等一会儿再点，至多等到窗口滑过（70 秒）。不改 hub 的限速。
+  const until = Date.now() + 70_000
+  for (;;) {
+    await button.click()
+    await expect(empty.or(limited)).toBeVisible()
+    if (await empty.isVisible()) return
+    if (Date.now() > until) break
+    await page.waitForTimeout(5_000)
+  }
+  await expect(empty).toBeVisible()
 }
 
 /**

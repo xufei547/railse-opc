@@ -262,3 +262,26 @@ func TestTrustsApplySnapshot(t *testing.T) {
 		t.Fatalf("过期的墓碑应清掉：%v", tr2.tomb)
 	}
 }
+
+// hub 快照里晚于此刻的 CreatedAt 截到此刻（免得撑大角色的 trust_max）。
+func TestApplySnapshotClampsFutureCreatedAt(t *testing.T) {
+	t0 := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
+	tr, _ := newTrusts(filepath.Join(t.TempDir(), "trusts.json"), func() time.Time { return t0 })
+	snap := []proto.Trust{
+		{ID: "f", Scope: proto.TrustScopeSession, Tool: "claude", CLISession: "s1", Until: t0.Add(2 * time.Hour), CreatedAt: t0.Add(5 * time.Hour), CreatedBy: "phone"},
+		{ID: "p", Scope: proto.TrustScopeSession, Tool: "claude", CLISession: "s2", Until: t0.Add(2 * time.Hour), CreatedAt: t0.Add(-time.Hour), CreatedBy: "phone"},
+	}
+	tr.applySnapshot(snap, true)
+	for _, x := range tr.list() {
+		switch x.ID {
+		case "f":
+			if !x.CreatedAt.Equal(t0) {
+				t.Errorf("未来的 CreatedAt 应截到此刻: %v", x.CreatedAt)
+			}
+		case "p":
+			if !x.CreatedAt.Equal(t0.Add(-time.Hour)) {
+				t.Errorf("过去的 CreatedAt 原样保留: %v", x.CreatedAt)
+			}
+		}
+	}
+}

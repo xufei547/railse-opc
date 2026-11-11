@@ -37,6 +37,7 @@ type PendingRequest struct {
 	Redacted     policy.Payload
 	EngineReason string
 	Trigger      *policy.Trigger // 引擎的触发点，触发段已脱敏；答题与没有触发点的为 nil
+	BeyondRole   bool            // 超出会话角色的上限（0.3 起）：hub 对它不提供“记住”与限时放行
 	Created      time.Time
 	Deadline     time.Time
 

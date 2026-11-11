@@ -203,6 +203,8 @@ type Server struct {
 	// decideMu 串行化用户决定（取请求、校验、学规则、改状态）；helloLocks 让同一机器的重连对齐串行执行。
 	decideMu   sync.Mutex
 	helloLocks machineLocks
+	// roleLocks 让同一机器的角色表替换串行执行，并在锁里确认来源仍是当前连接（见 replaceRoles）。
+	roleLocks machineLocks
 	// rulesMu 串行化“读规则现状 → 改 → 记审计”（启停、导入），审计里的“从停用改为启用”与提升规则列表不被并发改动打乱；
 	// pauseMu 让总开关的写库与下发按同一顺序进行，守护进程最后收到的就是库里的值。
 	rulesMu sync.Mutex

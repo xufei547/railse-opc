@@ -95,7 +95,7 @@ func clampTrust(d time.Duration) time.Duration {
 	return d
 }
 
-// add 校验并登记：补 ID 与 CreatedAt，Until 短于 5 分钟（留一分钟余量）报错、长于 24 小时截断，生效中的已满 20 条报错（同 ID 覆盖不算新增）。
+// add 校验并登记：补 ID，CreatedAt 一律填此刻，Until 短于 5 分钟（留一分钟余量）报错、长于 24 小时截断，生效中的已满 20 条报错（同 ID 覆盖不算新增）。
 // 落盘失败返回错误，但条目已在内存里生效。
 func (t *trusts) add(tr proto.Trust) (proto.Trust, error) {
 	t.mu.Lock()
@@ -117,8 +117,10 @@ func (t *trusts) add(tr proto.Trust) (proto.Trust, error) {
 	if tr.ID == "" {
 		tr.ID = newTrustID()
 	}
-	if tr.CreatedAt.IsZero() {
-		tr.CreatedAt = now
+	// 建立时间一律由守护进程填此刻（同 ID 覆盖的沿用原来的）：调用方给的不算，未来的建立时间会撑大角色的 trust_max
+	tr.CreatedAt = now
+	if old, exists := t.items[tr.ID]; exists && old.CreatedAt.Before(now) {
+		tr.CreatedAt = old.CreatedAt
 	}
 	t.items[tr.ID] = tr
 	return tr, t.saveLocked()
@@ -206,6 +208,12 @@ func (t *trusts) hasSession(tool, cliSession string) bool {
 
 // match 找命中的放行：session 范围按 Tool + CLISessionID，project 范围按项目根字符串相等（空项目根不命中）；多条取 Until 最晚。
 func (t *trusts) match(sess proto.Session, projectRoot string) (proto.Trust, bool) {
+	return t.matchFiltered(sess, projectRoot, nil)
+}
+
+// matchFiltered 同 match，只在 ok 认可的放行里挑（ok 为 nil 表示都认可）；角色的 trust_max 用它（见 trustAllowedFor）。
+// ok 在持锁时调用，不能回调放行表。
+func (t *trusts) matchFiltered(sess proto.Session, projectRoot string, ok func(proto.Trust) bool) (proto.Trust, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
@@ -217,6 +225,9 @@ func (t *trusts) match(sess proto.Session, projectRoot string) (proto.Trust, boo
 		}
 		hit := (tr.Scope == proto.TrustScopeSession && sess.CLISessionID != "" && tr.Tool == sess.Tool && tr.CLISession == sess.CLISessionID) ||
 			(tr.Scope == proto.TrustScopeProject && projectRoot != "" && tr.Project == projectRoot)
+		if hit && ok != nil && !ok(tr) {
+			continue
+		}
 		if hit && (!found || tr.Until.After(best.Until)) {
 			best, found = tr, true
 		}
@@ -305,6 +316,9 @@ func (t *trusts) applySnapshot(snap []proto.Trust, complete bool) (revoked []pro
 			continue
 		}
 		tr.MachineID = "" // 机器不言自明，与本机建的一样不存
+		if tr.CreatedAt.After(now) {
+			tr.CreatedAt = now // 晚于此刻的建立时间截到此刻，免得撑大角色的 trust_max
+		}
 		t.items[tr.ID] = tr
 		t.synced[tr.ID] = true
 		changed = true
@@ -491,6 +505,7 @@ func (s *Server) sweepTrusts(ctx context.Context) {
 		for _, tr := range s.trusts.sweep() {
 			s.trustEvent("trust_expired", tr)
 		}
+		s.pruneSessions() // 顺带清掉 CLI 进程已退出的会话的钉住与继承记录
 		select {
 		case <-ctx.Done():
 			return

@@ -66,6 +66,17 @@ export function rememberBlock(r: RequestView): string | null {
   return null
 }
 
+/**
+ * 超出角色边界（beyond_role）的请求批准时不能“记住”、不能限时放行的原因（面板上在这两个开关的位置说明）；不受限时回 null。
+ * 拒绝不受限：学一条拒绝规则只会更严。hub 那边同样拒（decide 带 remember、trust 的批准回 400，can_trust 为假）。
+ */
+export function beyondBlock(r: Pick<RequestView, 'role' | 'beyond_role'>, action: Verdict): string | null {
+  if (action !== 'allow' || !r.beyond_role) return null
+  return r.role
+    ? t('超出角色「{role}」的边界：这次只能单次批准，不能记住，也不能限时放行。', { role: r.role })
+    : t('超出角色的边界：这次只能单次批准，不能记住，也不能限时放行。')
+}
+
 /** 放行的时长按钮（分钟）：30 分钟、2 小时（默认，同 hub 与守护进程）、24 小时（hub 与守护进程的上限）。 */
 export const trustMinutesOptions = [30, 120, 1440] as const
 const trustDefaultMinutes = 120
@@ -110,7 +121,7 @@ export function initSheet(r: RequestView, action: Verdict): SheetState {
   return {
     action,
     hasProject,
-    rememberable: canRemember(r),
+    rememberable: canRemember(r) && beyondBlock(r, action) === null,
     remember: false,
     // 与 hub 缺省时一致：有项目根记成项目，没有记成全局
     scope: hasProject ? 'project' : 'global',
@@ -120,7 +131,7 @@ export function initSheet(r: RequestView, action: Verdict): SheetState {
     draftError: null,
     draftRetryable: false,
     hasSession: r.cli_session_id !== '',
-    trustable: canTrust(r, action),
+    trustable: canTrust(r, action) && beyondBlock(r, action) === null,
     trust: false,
     // 有会话默认只放行这个会话（范围最小），没有才放行项目
     trustScope: r.cli_session_id !== '' ? 'session' : 'project',

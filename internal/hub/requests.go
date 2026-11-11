@@ -34,6 +34,8 @@ var (
 	errIsAsk = wrongKind("这是提问，用答题接口")
 	// errNotAsk 表示对不是提问的请求作答。
 	errNotAsk = wrongKind("这不是提问，不能作答")
+	// errBeyondRole 表示对超出角色边界的请求批准时要“记住”或限时放行（0.3 起）：越界的只能单次批准，规则与放行都不适用。
+	errBeyondRole = wrongKind("超出角色的边界：只能单次批准，不能记住，也不能限时放行")
 )
 
 // errBadAnswer 表示答案不合规（缺题、空、超长、多余的键），具体是哪道题包在它后面。
@@ -150,6 +152,7 @@ func cleanSession(sess proto.Session) proto.Session {
 	sess.CLISessionID = truncate(sess.CLISessionID, maxFieldLen)
 	sess.TurnID = truncate(sess.TurnID, maxFieldLen)
 	sess.Cwd = truncate(sess.Cwd, maxPathLen)
+	sess.Role = truncate(sess.Role, maxFieldLen) // 记进 hub 前还要过 sessionRole
 	return sess
 }
 
@@ -270,6 +273,7 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 		return
 	}
 	sess := cleanSession(p.Session)
+	sess.Role = sessionRole(c, sess)
 	toolName := truncate(p.ToolName, maxFieldLen)
 	if body.Kind == "ask" {
 		toolName = proto.AskToolName // 提问只有这一个工具，不照收帧里的（sameRequest 同口径）
@@ -289,7 +293,7 @@ func (s *Server) onPending(c *agentConn, p wire.PendingRequest) {
 	r := store.Request{ID: p.RequestID, MachineID: m.ID, SessionID: s.upsertSession(m.ID, sess, projectName(root)), Kind: body.Kind,
 		ToolName: toolName, Payload: body.Payload, Ask: body.Ask, PayloadHash: body.Hash, Risk: body.Risk, ProjectRoot: root,
 		EngineReason: body.EngineReason, Trigger: body.Trigger, State: "pending", TurnID: sess.TurnID, CLISessionID: sess.CLISessionID,
-		CreatedAt: store.FormatTime(created), ExpiresAt: &expires}
+		CreatedAt: store.FormatTime(created), ExpiresAt: &expires, Role: sess.Role, BeyondRole: body.BeyondRole}
 	if err := s.store.InsertRequest(r); err != nil {
 		s.log.Printf("登记请求 %q: %v", p.RequestID, err)
 		s.rejectPending(c, p.RequestID, "登记失败")
@@ -374,6 +378,8 @@ type pendingBody struct {
 	Risk         string
 	EngineReason string
 	Trigger      *policy.Trigger
+	// BeyondRole 是守护进程说的“超出角色的边界”，只有审批有。不论守护进程声明没声明 role 都照收：它只会让 hub 少给“记住”与“限时放行”。
+	BeyondRole bool
 }
 
 // readPending 按种类读出守护进程送来的待决请求：没有 kind（旧守护进程）或 permission 是审批，载荷再脱敏（守护进程已脱敏，
@@ -384,7 +390,7 @@ func readPending(p wire.PendingRequest) (pendingBody, error) {
 	case "", "permission":
 		payload := redact.Payload(p.Payload)
 		return pendingBody{Kind: "permission", Payload: payload, Hash: store.PayloadHash(payload), Risk: truncate(p.Risk, maxFieldLen),
-			EngineReason: redactText(p.EngineReason, maxTextLen), Trigger: cleanTrigger(p.Trigger)}, nil
+			EngineReason: redactText(p.EngineReason, maxTextLen), Trigger: cleanTrigger(p.Trigger), BeyondRole: p.BeyondRole}, nil
 	case "ask":
 		if err := checkAsk(p.Ask); err != nil {
 			return pendingBody{}, err
@@ -576,6 +582,7 @@ func (s *Server) sendDecision(r store.Request) bool {
 // Trust 非空时在改状态之前就校验并入库这条放行（reserveTrustLocked），不合规时整个决定不落库、回 errBadTrust；
 // 批准落库失败时收回它；成功后审计 trust_set，并在下发决定之前把放行快照排进同一连接的队列：守护进程先有放行、再收到 allow。
 // 请求已决定不了（不是 pending、机器已吊销、已过期）时不建放行，错误照旧由改状态那一步给出。
+// 超出角色边界的请求（BeyondRole）批准时不能带 Remember 或 Trust，回 errBeyondRole（满足 errors.Is(err, errBadAction)，接口回 400）。
 // 错误：errBadAction（对提问为 errIsAsk）、errBadScope、errBadTrust、store.ErrNotFound、store.ErrNotPending（机器已吊销时为 errRevoked、
 // 已过期时为 errExpired，都满足 errors.Is(err, store.ErrNotPending)）、errLearn；其余是存储错误。
 func (s *Server) Decide(in DecideInput) (store.Request, error) {
@@ -584,6 +591,11 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	}
 	if !validScope(in.Scope) {
 		return store.Request{}, errBadScope
+	}
+	if in.Action == "allow" && (in.Remember || in.Trust != nil) {
+		if err := s.refuseBeyondRole(in.RequestID); err != nil {
+			return store.Request{}, err
+		}
 	}
 	var trust *proto.Trust
 	if in.Trust != nil {
@@ -637,6 +649,25 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	return r, nil
 }
 
+// refuseBeyondRole 是批准带“记住”或放行时的预检：请求超出了角色的边界就回 errBeyondRole；读不出请求（含没有这条）原样返回错误，
+// 不当成通过。它只是早一点给出明确的错误：真正建放行、学规则之前，reserveTrust 与 commitDecision 在各自用的那个请求对象上还会再查一次
+// （预检时还没登记、随后才并发登记的越界请求也挡得住）。
+func (s *Server) refuseBeyondRole(id string) error {
+	r, err := s.store.GetRequest(id)
+	if err != nil {
+		return err
+	}
+	if r.BeyondRole {
+		return errBeyondRole
+	}
+	return nil
+}
+
+// beyondSideEffect 报告对请求 r 的这次决定是不是要给越界的请求建放行或学“放行”规则（不允许）。
+func beyondSideEffect(r store.Request, in DecideInput) bool {
+	return r.BeyondRole && in.Action == "allow" && (in.Remember || in.Trust != nil)
+}
+
 // reserveTrust 是 Decide 带放行时的前置（调用方持 trustMu）：取请求，提问回 errIsAsk；请求已决定不了（decidable 不过）时
 // 返回 nil、不建放行，交给改状态那一步给出该给的错误；否则校验并入库（reserveTrustLocked）。
 func (s *Server) reserveTrust(in DecideInput) (*proto.Trust, error) {
@@ -646,6 +677,9 @@ func (s *Server) reserveTrust(in DecideInput) (*proto.Trust, error) {
 	}
 	if err := refuseAsk(r); err != nil {
 		return nil, err
+	}
+	if beyondSideEffect(r, in) { // 建放行用的就是这个对象：在这里（持 trustMu）再查一次，不依赖预检
+		return nil, errBeyondRole
 	}
 	if s.decidable(r) != nil {
 		return nil, nil
@@ -666,6 +700,9 @@ func (s *Server) commitDecision(in DecideInput, state, note string) (store.Reque
 	r, err := s.takePending(in.RequestID, refuseAsk)
 	if err != nil {
 		return r, "", err
+	}
+	if beyondSideEffect(r, in) { // 学规则、改状态用的就是这个对象：在 decideMu 里再查一次（放行已预留时由 Decide 收回）
+		return store.Request{}, "", errBeyondRole
 	}
 	ruleID := ""
 	if in.Remember {
@@ -705,6 +742,9 @@ func (s *Server) propose(id, action, scope string) (policy.Rule, error) {
 	}
 	if err := refuseAsk(r); err != nil {
 		return policy.Rule{}, err
+	}
+	if action == "allow" && r.BeyondRole {
+		return policy.Rule{}, errBeyondRole
 	}
 	if err := s.decidable(r); err != nil {
 		return policy.Rule{}, err
@@ -943,9 +983,11 @@ func (s *Server) expireLoop(ctx context.Context) {
 	}
 }
 
-// onAudit 收守护进程的审计批次：每条兜底脱敏后入库；question/done 存成 recorded 行；permission、ask 条目按白名单更新 hub。
+// onAudit 收守护进程从连接 c 送来的审计批次：每条兜底脱敏后入库；question/done 存成 recorded 行；permission、ask 条目按白名单更新 hub。
 // 条目指向别的机器的请求时，审计行不挂到那条请求上（request_id 置空，detail 保留原值），也不据它改 hub。
-func (s *Server) onAudit(m store.Machine, a wire.Audit) {
+// 补的行与会话的角色按 sessionRole（守护进程没声明 role 时为未分配）。
+func (s *Server) onAudit(c *agentConn, a wire.Audit) {
+	m := c.machine
 	bad, foreign := 0, 0
 	for _, raw := range a.Entries {
 		var e agent.AuditEntry
@@ -955,6 +997,7 @@ func (s *Server) onAudit(m store.Machine, a wire.Audit) {
 		}
 		idOK := validRequestID(e.RequestID)
 		e = cleanEntry(e)
+		e.Session.Role = sessionRole(c, e.Session)
 		ts := hubTime(e.TS)
 		// detail 用解码后的结构重新编码：未知字段（如钩子进程的环境变量）被丢弃，载荷与文本已再脱敏
 		detail, err := json.Marshal(e)
@@ -1014,7 +1057,8 @@ func eventID(machineID string, e agent.AuditEntry, detail []byte) string {
 // e 已经过 cleanEntry：Message 已脱敏。同一条目再来（批次重发，含两条连接并发处理同一批）时该行已存在，静默跳过。
 func (s *Server) recordEvent(m store.Machine, e agent.AuditEntry, ts time.Time, detail []byte) {
 	r := store.Request{ID: eventID(m.ID, e, detail), MachineID: m.ID, SessionID: s.upsertSession(m.ID, e.Session, ""), Kind: e.Kind, ToolName: e.ToolName,
-		State: "recorded", Title: truncate(e.Message, maxTitleLen), TurnID: e.Session.TurnID, CLISessionID: e.Session.CLISessionID, CreatedAt: store.FormatTime(ts)}
+		State: "recorded", Title: truncate(e.Message, maxTitleLen), TurnID: e.Session.TurnID, CLISessionID: e.Session.CLISessionID, CreatedAt: store.FormatTime(ts),
+		Role: e.Session.Role}
 	inserted, err := s.store.InsertRequestIfAbsent(r)
 	if err != nil {
 		s.log.Printf("记机器 %s 的 %q 事件: %v", m.ID, e.Kind, err)
@@ -1067,7 +1111,7 @@ func (s *Server) applyAgentFinal(m store.Machine, e agent.AuditEntry, ts time.Ti
 	created := store.FormatTime(ts)
 	r := store.Request{ID: e.RequestID, MachineID: m.ID, SessionID: s.upsertSession(m.ID, e.Session, ""), Kind: e.Kind, ToolName: e.ToolName,
 		Risk: e.Risk, EngineReason: e.Reason, Trigger: e.Trigger, State: e.State, DecidedBy: e.DecidedBy, RuleID: e.RuleID, TurnID: e.Session.TurnID,
-		CLISessionID: e.Session.CLISessionID, CreatedAt: created, DecidedAt: &created}
+		CLISessionID: e.Session.CLISessionID, CreatedAt: created, DecidedAt: &created, Role: e.Session.Role, BeyondRole: e.BeyondRole}
 	switch {
 	case e.Kind == "ask":
 		r.Ask, r.Risk = e.Ask, ""

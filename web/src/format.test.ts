@@ -441,3 +441,61 @@ describe('format 的英文', () => {
     expect(lines[1]).toMatch(/^Answer not delivered/)
   })
 })
+
+// 角色（0.3 起）相关的决定来源与理由：文案以机器侧（internal/agent/server.go、internal/policy/engine.go、roles.go）的实现为准。
+describe('角色相关的决定来源', () => {
+  afterEach(() => setLang('zh'))
+  const auto = (decided_by: string, engine_reason = '') =>
+    ({ kind: 'permission', state: 'auto_denied', decided_by, rule_id: '', engine_reason }) as const
+  it('依据（详情）：不露原始值', () => {
+    expect(decidedByLabel(auto('role:写作'))).toBe('角色「写作」禁用')
+    expect(decidedByLabel(auto('roles_yaml'))).toBe('角色文件有误')
+    expect(decidedByLabel(auto('control_plane'))).toBe('触及 Railse 自己的配置')
+  })
+  it('一句人话的结果（历史、请求页）', () => {
+    expect(outcomeText(auto('role:写作', '角色「写作」禁用：命令以 git push 开头'))).toBe('角色「写作」禁用了这个操作')
+    expect(outcomeText(auto('role:写作', '超出角色「写作」的边界，Gemini 无法在这里问人：换个角色，或在别处执行'))).toBe(
+      '超出角色「写作」的边界，这里问不到你，已拒绝',
+    )
+    expect(outcomeText(auto('roles_yaml', 'roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行'))).toBe('角色文件有误，暂按只读把关，已拒绝')
+    expect(outcomeText(auto('control_plane'))).toBe('这会改动 Railse 自己的配置，必须你来定；这里问不到你，已拒绝')
+  })
+  it('英文', () => {
+    setLang('en')
+    expect(decidedByLabel(auto('role:写作'))).toBe('Forbidden by role "写作"')
+    expect(decidedByLabel(auto('roles_yaml'))).toBe('Roles file is broken')
+    expect(decidedByLabel(auto('control_plane'))).toBe("Touches Railse's own config")
+    expect(outcomeText(auto('role:写作', '角色「写作」禁用：x'))).toBe('Role "写作" forbids this')
+    expect(outcomeText(auto('role:写作', '超出角色「写作」的边界，Gemini 无法在这里问人：换个角色，或在别处执行'))).toBe(
+      'Beyond role "写作"\'s boundary and there was no one to ask here, so it was denied',
+    )
+    expect(outcomeText(auto('roles_yaml'))).toBe('The roles file is broken, so only reads pass; denied')
+    expect(outcomeText(auto('control_plane'))).toBe("This changes Railse's own config and needs you; there was no one to ask here, so it was denied")
+  })
+})
+
+describe('角色相关的理由', () => {
+  afterEach(() => setLang('zh'))
+  it('中文：风险名换成中文叫法，其余原样', () => {
+    expect(engineReasonLabel('超出角色「写作」的边界（上限 write_in_project，这次是 outward）')).toBe('超出角色「写作」的边界（上限「项目内改动」，这次是「对外」）')
+    expect(engineReasonLabel('角色「写作」禁用：命令以 git push 开头')).toBe('角色「写作」禁用：命令以 git push 开头')
+  })
+  it('英文：整句换成英文，角色名与命令片段保持原文；继承的后缀与“；”接着的另一句分别处理', () => {
+    setLang('en')
+    const cases: [string, string][] = [
+      ['角色「写作」禁用：命令以 git push 开头', 'Forbidden for role "写作": 命令以 git push 开头'],
+      ['超出角色「写作」的边界（上限 write_in_project，这次是 outward）', 'Beyond role "写作"\'s boundary (ceiling Write in project, this is Outward)'],
+      ['超出角色「写作」的边界：含无法检查的子命令', 'Beyond role "写作"\'s boundary: contains a subcommand that can\'t be checked'],
+      ['超出角色「写作」的边界：试图更改 Railse 的角色或放行设置', 'Beyond role "写作"\'s boundary: tries to change Railse\'s role or trust settings'],
+      ['超出角色「写作」的边界，Gemini 无法在这里问人：换个角色，或在别处执行', 'Beyond role "写作"\'s boundary, and Gemini can\'t ask a human here: switch roles, or run it somewhere else'],
+      ['roles.yaml 有误：yaml: line 3: bad', 'roles.yaml is broken: yaml: line 3: bad'],
+      ['roles.yaml 有误：x；且试图更改 Railse 的角色或放行设置', "roles.yaml is broken: x; and it tries to change Railse's role or trust settings"],
+      ['roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行', "roles.yaml is broken, and Gemini can't ask a human here: fix the file and retry, or run it somewhere else"],
+      ['限时放行不覆盖 Railse 自己的配置', "Time-limited trust doesn't cover Railse's own config"],
+      ['触及 Railse 自己的配置，Gemini 无法在这里问人：在别处执行', "Touches Railse's own config, and Gemini can't ask a human here: run it somewhere else"],
+      ['超出角色「开发」的边界：含无法检查的子命令（继承自上层会话的角色「写作」）', 'Beyond role "开发"\'s boundary: contains a subcommand that can\'t be checked (inherited from the outer session\'s role "写作")'],
+      ['限时放行不覆盖 Railse 自己的配置；无规则命中，按 outward 默认询问', "Time-limited trust doesn't cover Railse's own config; No rule matched; Outward asks by default"],
+    ]
+    for (const [zh, want] of cases) expect(engineReasonLabel(zh), zh).toBe(want)
+  })
+})

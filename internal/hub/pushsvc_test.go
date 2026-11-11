@@ -1421,3 +1421,41 @@ func TestPushMessageEnglishVerbs(t *testing.T) {
 		}
 	}
 }
+
+// 有角色时推送正文带角色名（permission、ask 在摘要与“点开…”之间，question 在问题之后）；越界时说明超出边界；名字先并成一行。
+func TestPushMessageRole(t *testing.T) {
+	decode := decodePush(t)
+	perm := store.Request{ID: "r1", Kind: "permission", ToolName: "Bash", Risk: "outward", Role: "写作",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "git push"}}
+	ask := store.Request{ID: "a1", Kind: "ask", ToolName: proto.AskToolName, Role: "开发",
+		Ask: &proto.Ask{Questions: []proto.Question{{Question: "用哪个？", Options: []proto.Option{{Label: "A"}}}}}}
+	q := store.Request{ID: "q1", Kind: "question", Title: "要继续吗？", Role: "开发"}
+	beyond := perm
+	beyond.BeyondRole = true
+	for _, c := range []struct {
+		r          store.Request
+		lang, want string
+	}{
+		{perm, "zh", "git push\n角色「写作」\n点开批准或拒绝"},
+		{perm, "en", "git push\nRole \"写作\"\nOpen to approve or deny"},
+		{beyond, "zh", "git push\n超出角色「写作」的边界\n点开批准或拒绝"},
+		{beyond, "en", "git push\nBeyond the limits of role \"写作\"\nOpen to approve or deny"},
+		{ask, "zh", "用哪个？\n角色「开发」\n点开回答"},
+		{q, "zh", "要继续吗？\n角色「开发」"},
+		{q, "en", "要继续吗？\nRole \"开发\""},
+	} {
+		if m := decode(pushMessage(c.r, pushWho{Tool: "claude"}, c.lang)); m.Body != c.want {
+			t.Errorf("%s %s：正文 %q，要 %q", c.r.ID, c.lang, m.Body, c.want)
+		}
+	}
+	// 没有角色时与以前一字不差
+	perm.Role = ""
+	if m := decode(pushMessage(perm, pushWho{Tool: "claude"}, "zh")); m.Body != "git push\n点开批准或拒绝" {
+		t.Fatalf("没有角色: %q", m.Body)
+	}
+	// 越界但没有角色名（老守护进程不会这样，兜底）：照样说明
+	perm.BeyondRole = true
+	if m := decode(pushMessage(perm, pushWho{Tool: "claude"}, "zh")); m.Body != "git push\n超出角色的边界\n点开批准或拒绝" {
+		t.Fatalf("越界无名: %q", m.Body)
+	}
+}

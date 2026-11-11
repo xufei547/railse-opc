@@ -200,16 +200,8 @@ func (r Rule) validate() error {
 	default:
 		return fmt.Errorf("action 必须是 allow、deny 或 ask，得到 %q", r.Action)
 	}
-	if r.Match.isEmpty() {
-		return fmt.Errorf("match 不能为空")
-	}
-	switch r.Match.Payload {
-	case "", PayloadShell, PayloadFileWrite, PayloadMCP, PayloadNetwork:
-	default:
-		return fmt.Errorf("match.payload 必须是 shell、file_write、mcp 或 network，得到 %q", r.Match.Payload)
-	}
-	if r.Match.PathGlob != "" && !validGlob(r.Match.PathGlob) {
-		return fmt.Errorf("match.path_glob 不是合法的通配模式: %q", r.Match.PathGlob)
+	if err := r.Match.validate("match"); err != nil {
+		return err
 	}
 	if r.Scope.Machine != "" && r.Scope.Project != "" {
 		return errScopeBoth
@@ -217,17 +209,34 @@ func (r Rule) validate() error {
 	if r.Scope.Project != "" && !validGlob(r.Scope.Project) {
 		return fmt.Errorf("scope.project 不是合法的通配模式: %q", r.Scope.Project)
 	}
-	if r.Match.CommandRegex != "" {
-		if _, err := regexp.Compile(r.Match.CommandRegex); err != nil {
-			return fmt.Errorf("command_regex 无效: %w", err)
-		}
-	}
 	if r.Action == ActionAllow && r.Source != SourceUser {
 		if r.Match.Risk != nil && *r.Match.Risk >= RiskOutward {
 			return fmt.Errorf("只有 user 来源的规则才能放行 %s", *r.Match.Risk)
 		}
 		if r.Source == SourceLearned {
 			return r.Match.validateLearned()
+		}
+	}
+	return nil
+}
+
+// validate 是规则的 match 与角色的 forbid 共用的校验：不能为空，payload 认得，path_glob 是合法通配，command_regex 能编译。
+// label 是报错里的字段名（match 或 forbid 第几条）。
+func (m Match) validate(label string) error {
+	if m.isEmpty() {
+		return fmt.Errorf("%s 不能为空", label)
+	}
+	switch m.Payload {
+	case "", PayloadShell, PayloadFileWrite, PayloadMCP, PayloadNetwork:
+	default:
+		return fmt.Errorf("%s.payload 必须是 shell、file_write、mcp 或 network，得到 %q", label, m.Payload)
+	}
+	if m.PathGlob != "" && !validGlob(m.PathGlob) {
+		return fmt.Errorf("%s.path_glob 不是合法的通配模式: %q", label, m.PathGlob)
+	}
+	if m.CommandRegex != "" {
+		if _, err := regexp.Compile(m.CommandRegex); err != nil {
+			return fmt.Errorf("command_regex 无效: %w", err)
 		}
 	}
 	return nil

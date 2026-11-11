@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/proto"
@@ -34,8 +35,14 @@ type claudeHook struct {
 	ToolUseID        string          `json:"tool_use_id"`
 }
 
-// preToolUseTools 是 PreToolUse 钩子当审批处理的工具；其余工具（MCP、Task 等）PreToolUse 不管，留给 PermissionRequest。
-var preToolUseTools = map[string]bool{"Bash": true, "Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true, "WebFetch": true}
+// preToolUseTools 是 PreToolUse 钩子当审批处理的工具（与 hooksconf.ClaudePreToolUseMatcher 一致），另加全部 MCP 工具
+// （见 isPreToolUseTool）；其余工具（Task 等）PreToolUse 不管，留给 PermissionRequest。
+var preToolUseTools = map[string]bool{"Bash": true, "Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true, "WebFetch": true, "WebSearch": true}
+
+// isPreToolUseTool 报告 PreToolUse、PostToolUse 认不认这个工具：preToolUseTools 与 MCP 工具（mcp__ 开头）。
+func isPreToolUseTool(name string) bool {
+	return preToolUseTools[name] || strings.HasPrefix(name, "mcp__")
+}
 
 func (claude) Parse(stdin []byte) (Input, error) {
 	var h claudeHook
@@ -59,7 +66,7 @@ func (claude) Parse(stdin []byte) (Input, error) {
 		in.Kind, in.ToolName, in.Payload = KindPermission, h.ToolName, p
 		in.Source, in.PermissionMode, in.ToolUseID = SourcePermissionRequest, h.PermissionMode, h.ToolUseID
 	case "PreToolUse":
-		if h.ToolName != proto.AskToolName && !preToolUseTools[h.ToolName] {
+		if h.ToolName != proto.AskToolName && !isPreToolUseTool(h.ToolName) {
 			in.Kind = KindIgnore // 其余工具留给 PermissionRequest 兜底
 			break
 		}
@@ -86,7 +93,7 @@ func (claude) Parse(stdin []byte) (Input, error) {
 	case "PostToolUse":
 		// 工具已经跑完：桌面应用（SDK 宿主）在 PreToolUse 回 ask 后自己裁决，却不结束同一调用的 PermissionRequest 钩子，
 		// 守护进程靠这个事件把它取消。只认审批的那几样工具；载荷与 PermissionRequest 同一算法，守护进程按它对上
-		if !preToolUseTools[h.ToolName] || h.SessionID == "" {
+		if !isPreToolUseTool(h.ToolName) || h.SessionID == "" {
 			in.Kind = KindIgnore
 			break
 		}

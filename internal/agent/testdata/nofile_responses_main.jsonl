@@ -1,0 +1,432 @@
+none	run	pretooluse	git status	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	pretooluse	ls -la	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	pretooluse	go test ./...	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	pretooluse	touch a.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+none	run	pretooluse	echo hi > out.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+none	run	pretooluse	rm -rf build	{"v":1,"decision":"ask","reason":"已交终端确认，同时送手机","risk":"destructive","decided_by":"ask","trigger":{"segment":"rm -rf build","why":"删除文件，删了不可恢复"}}
+none	run	pretooluse	rm -rf /	{"v":1,"decision":"ask","reason":"已交终端确认，同时送手机","risk":"destructive","decided_by":"ask","trigger":{"segment":"rm -rf /","why":"删除文件，删了不可恢复"}}
+none	run	pretooluse	curl https://example.com	{"v":1,"decision":"passthrough","reason":"交给 Claude 自己的权限流程","risk":"network","decided_by":"classifier"}
+none	run	pretooluse	npm install left-pad	{"v":1,"decision":"passthrough","reason":"交给 Claude 自己的权限流程","risk":"network","decided_by":"classifier"}
+none	run	pretooluse	git push origin main	{"v":1,"decision":"ask","reason":"已交终端确认，同时送手机","risk":"outward","decided_by":"ask","trigger":{"segment":"git push origin main","why":"把代码推到远程仓库"}}
+none	run	pretooluse	git push --force origin main	{"v":1,"decision":"ask","reason":"已交终端确认，同时送手机","risk":"destructive","decided_by":"ask","trigger":{"segment":"git push --force origin main","why":"强制推送，会覆盖远程历史"}}
+none	run	pretooluse	npm publish	{"v":1,"decision":"ask","reason":"已交终端确认，同时送手机","risk":"outward","decided_by":"ask","trigger":{"segment":"npm publish","why":"发布或部署到外部"}}
+none	run	pretooluse	cat ~/.ssh/id_rsa	{"v":1,"decision":"ask","reason":"已交终端确认，同时送手机","risk":"destructive","decided_by":"ask","trigger":{"segment":"cat ~/.ssh/id_rsa","why":"读写敏感文件（密钥、配置或开机自启）"}}
+none	run	pretooluse	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"ask","reason":"已交终端确认，同时送手机","risk":"destructive","decided_by":"ask","trigger":{"segment":"echo x \u003e ~/.railse/rules.yaml","why":"读写敏感文件（密钥、配置或开机自启）"}}
+none	run	pretooluse	some-unknown-tool --flag	{"v":1,"decision":"passthrough","reason":"交给 Claude 自己的权限流程","risk":"unknown","decided_by":"classifier"}
+none	run	pretooluse	sudo rm x	{"v":1,"decision":"ask","reason":"已交终端确认，同时送手机","risk":"destructive","decided_by":"ask","trigger":{"segment":"sudo rm x","why":"以管理员权限运行"}}
+none	run	pretooluse	bash -c 'git push origin main'	{"v":1,"decision":"ask","reason":"已交终端确认，同时送手机","risk":"outward","decided_by":"ask","trigger":{"segment":"bash -c 'git push origin main'","why":"影响仓库之外的人和系统"}}
+none	run	pretooluse	echo "$(git push origin main)"	{"v":1,"decision":"passthrough","reason":"交给 Claude 自己的权限流程","risk":"unknown","decided_by":"classifier"}
+none	run	pretooluse	cp a /etc/b	{"v":1,"decision":"passthrough","reason":"交给 Claude 自己的权限流程","risk":"write_outside","decided_by":"classifier"}
+none	run	pretooluse	mv a ../outside	{"v":1,"decision":"passthrough","reason":"交给 Claude 自己的权限流程","risk":"write_outside","decided_by":"classifier"}
+none	run	pretooluse	cat ../h/rules.yaml	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	pretooluse	echo x > ../h/roles.yaml	{"v":1,"decision":"passthrough","reason":"交给 Claude 自己的权限流程","risk":"write_outside","decided_by":"classifier"}
+none	run	pretooluse	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"交给 Claude 自己的权限流程","risk":"write_outside","decided_by":"classifier"}
+none	run	pretooluse	rm ../h/trusts.json	{"v":1,"decision":"passthrough","reason":"交给 Claude 自己的权限流程","risk":"write_outside","decided_by":"classifier"}
+none	run	permissionrequest	git status	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	permissionrequest	ls -la	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	permissionrequest	go test ./...	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	permissionrequest	touch a.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+none	run	permissionrequest	echo hi > out.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+none	run	permissionrequest	rm -rf build	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	permissionrequest	rm -rf /	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	permissionrequest	curl https://example.com	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"network","decided_by":"user"}
+none	run	permissionrequest	npm install left-pad	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"network","decided_by":"user"}
+none	run	permissionrequest	git push origin main	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"outward","decided_by":"user"}
+none	run	permissionrequest	git push --force origin main	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	permissionrequest	npm publish	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"outward","decided_by":"user"}
+none	run	permissionrequest	cat ~/.ssh/id_rsa	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	permissionrequest	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	permissionrequest	some-unknown-tool --flag	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"unknown","decided_by":"user"}
+none	run	permissionrequest	sudo rm x	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	permissionrequest	bash -c 'git push origin main'	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"outward","decided_by":"user"}
+none	run	permissionrequest	echo "$(git push origin main)"	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"unknown","decided_by":"user"}
+none	run	permissionrequest	cp a /etc/b	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+none	run	permissionrequest	mv a ../outside	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+none	run	permissionrequest	cat ../h/rules.yaml	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	permissionrequest	echo x > ../h/roles.yaml	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+none	run	permissionrequest	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+none	run	permissionrequest	rm ../h/trusts.json	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+none	run	codex	git status	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	codex	ls -la	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	codex	go test ./...	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	codex	touch a.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+none	run	codex	echo hi > out.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+none	run	codex	rm -rf build	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	codex	rm -rf /	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	codex	curl https://example.com	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"network","decided_by":"user"}
+none	run	codex	npm install left-pad	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"network","decided_by":"user"}
+none	run	codex	git push origin main	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"outward","decided_by":"user"}
+none	run	codex	git push --force origin main	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	codex	npm publish	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"outward","decided_by":"user"}
+none	run	codex	cat ~/.ssh/id_rsa	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	codex	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	codex	some-unknown-tool --flag	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"unknown","decided_by":"user"}
+none	run	codex	sudo rm x	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+none	run	codex	bash -c 'git push origin main'	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"outward","decided_by":"user"}
+none	run	codex	echo "$(git push origin main)"	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"unknown","decided_by":"user"}
+none	run	codex	cp a /etc/b	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+none	run	codex	mv a ../outside	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+none	run	codex	cat ../h/rules.yaml	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+none	run	codex	echo x > ../h/roles.yaml	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+none	run	codex	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+none	run	codex	rm ../h/trusts.json	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+none	paused	pretooluse	git status	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	pretooluse	ls -la	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	pretooluse	go test ./...	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	pretooluse	touch a.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+none	paused	pretooluse	echo hi > out.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+none	paused	pretooluse	rm -rf build	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	pretooluse	rm -rf /	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	pretooluse	curl https://example.com	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+none	paused	pretooluse	npm install left-pad	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+none	paused	pretooluse	git push origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+none	paused	pretooluse	git push --force origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	pretooluse	npm publish	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+none	paused	pretooluse	cat ~/.ssh/id_rsa	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	pretooluse	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	pretooluse	some-unknown-tool --flag	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+none	paused	pretooluse	sudo rm x	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	pretooluse	bash -c 'git push origin main'	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+none	paused	pretooluse	echo "$(git push origin main)"	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+none	paused	pretooluse	cp a /etc/b	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	pretooluse	mv a ../outside	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	pretooluse	cat ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	pretooluse	echo x > ../h/roles.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	pretooluse	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	pretooluse	rm ../h/trusts.json	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	permissionrequest	git status	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	permissionrequest	ls -la	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	permissionrequest	go test ./...	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	permissionrequest	touch a.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+none	paused	permissionrequest	echo hi > out.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+none	paused	permissionrequest	rm -rf build	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	permissionrequest	rm -rf /	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	permissionrequest	curl https://example.com	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+none	paused	permissionrequest	npm install left-pad	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+none	paused	permissionrequest	git push origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+none	paused	permissionrequest	git push --force origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	permissionrequest	npm publish	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+none	paused	permissionrequest	cat ~/.ssh/id_rsa	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	permissionrequest	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	permissionrequest	some-unknown-tool --flag	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+none	paused	permissionrequest	sudo rm x	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	permissionrequest	bash -c 'git push origin main'	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+none	paused	permissionrequest	echo "$(git push origin main)"	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+none	paused	permissionrequest	cp a /etc/b	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	permissionrequest	mv a ../outside	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	permissionrequest	cat ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	permissionrequest	echo x > ../h/roles.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	permissionrequest	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	permissionrequest	rm ../h/trusts.json	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	codex	git status	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	codex	ls -la	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	codex	go test ./...	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	codex	touch a.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+none	paused	codex	echo hi > out.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+none	paused	codex	rm -rf build	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	codex	rm -rf /	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	codex	curl https://example.com	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+none	paused	codex	npm install left-pad	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+none	paused	codex	git push origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+none	paused	codex	git push --force origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	codex	npm publish	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+none	paused	codex	cat ~/.ssh/id_rsa	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	codex	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	codex	some-unknown-tool --flag	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+none	paused	codex	sudo rm x	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+none	paused	codex	bash -c 'git push origin main'	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+none	paused	codex	echo "$(git push origin main)"	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+none	paused	codex	cp a /etc/b	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	codex	mv a ../outside	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	codex	cat ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+none	paused	codex	echo x > ../h/roles.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	codex	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+none	paused	codex	rm ../h/trusts.json	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	run	pretooluse	git status	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	pretooluse	ls -la	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	pretooluse	go test ./...	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	pretooluse	touch a.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+project	run	pretooluse	echo hi > out.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+project	run	pretooluse	rm -rf build	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	pretooluse	rm -rf /	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	pretooluse	curl https://example.com	{"v":1,"decision":"allow","reason":"限时放行中","risk":"network","decided_by":"trust:*"}
+project	run	pretooluse	npm install left-pad	{"v":1,"decision":"allow","reason":"限时放行中","risk":"network","decided_by":"trust:*"}
+project	run	pretooluse	git push origin main	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+project	run	pretooluse	git push --force origin main	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	pretooluse	npm publish	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+project	run	pretooluse	cat ~/.ssh/id_rsa	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	pretooluse	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	pretooluse	some-unknown-tool --flag	{"v":1,"decision":"allow","reason":"限时放行中","risk":"unknown","decided_by":"trust:*"}
+project	run	pretooluse	sudo rm x	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	pretooluse	bash -c 'git push origin main'	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+project	run	pretooluse	echo "$(git push origin main)"	{"v":1,"decision":"allow","reason":"限时放行中","risk":"unknown","decided_by":"trust:*"}
+project	run	pretooluse	cp a /etc/b	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	pretooluse	mv a ../outside	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	pretooluse	cat ../h/rules.yaml	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	pretooluse	echo x > ../h/roles.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	pretooluse	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	pretooluse	rm ../h/trusts.json	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	permissionrequest	git status	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	permissionrequest	ls -la	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	permissionrequest	go test ./...	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	permissionrequest	touch a.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+project	run	permissionrequest	echo hi > out.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+project	run	permissionrequest	rm -rf build	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	permissionrequest	rm -rf /	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	permissionrequest	curl https://example.com	{"v":1,"decision":"allow","reason":"限时放行中","risk":"network","decided_by":"trust:*"}
+project	run	permissionrequest	npm install left-pad	{"v":1,"decision":"allow","reason":"限时放行中","risk":"network","decided_by":"trust:*"}
+project	run	permissionrequest	git push origin main	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+project	run	permissionrequest	git push --force origin main	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	permissionrequest	npm publish	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+project	run	permissionrequest	cat ~/.ssh/id_rsa	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	permissionrequest	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	permissionrequest	some-unknown-tool --flag	{"v":1,"decision":"allow","reason":"限时放行中","risk":"unknown","decided_by":"trust:*"}
+project	run	permissionrequest	sudo rm x	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	permissionrequest	bash -c 'git push origin main'	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+project	run	permissionrequest	echo "$(git push origin main)"	{"v":1,"decision":"allow","reason":"限时放行中","risk":"unknown","decided_by":"trust:*"}
+project	run	permissionrequest	cp a /etc/b	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	permissionrequest	mv a ../outside	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	permissionrequest	cat ../h/rules.yaml	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	permissionrequest	echo x > ../h/roles.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	permissionrequest	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	permissionrequest	rm ../h/trusts.json	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	codex	git status	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	codex	ls -la	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	codex	go test ./...	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	codex	touch a.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+project	run	codex	echo hi > out.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+project	run	codex	rm -rf build	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	codex	rm -rf /	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	codex	curl https://example.com	{"v":1,"decision":"allow","reason":"限时放行中","risk":"network","decided_by":"trust:*"}
+project	run	codex	npm install left-pad	{"v":1,"decision":"allow","reason":"限时放行中","risk":"network","decided_by":"trust:*"}
+project	run	codex	git push origin main	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+project	run	codex	git push --force origin main	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	codex	npm publish	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+project	run	codex	cat ~/.ssh/id_rsa	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	codex	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	codex	some-unknown-tool --flag	{"v":1,"decision":"allow","reason":"限时放行中","risk":"unknown","decided_by":"trust:*"}
+project	run	codex	sudo rm x	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+project	run	codex	bash -c 'git push origin main'	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+project	run	codex	echo "$(git push origin main)"	{"v":1,"decision":"allow","reason":"限时放行中","risk":"unknown","decided_by":"trust:*"}
+project	run	codex	cp a /etc/b	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	codex	mv a ../outside	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	codex	cat ../h/rules.yaml	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+project	run	codex	echo x > ../h/roles.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	codex	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	run	codex	rm ../h/trusts.json	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+project	paused	pretooluse	git status	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	pretooluse	ls -la	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	pretooluse	go test ./...	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	pretooluse	touch a.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+project	paused	pretooluse	echo hi > out.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+project	paused	pretooluse	rm -rf build	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	pretooluse	rm -rf /	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	pretooluse	curl https://example.com	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+project	paused	pretooluse	npm install left-pad	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+project	paused	pretooluse	git push origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+project	paused	pretooluse	git push --force origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	pretooluse	npm publish	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+project	paused	pretooluse	cat ~/.ssh/id_rsa	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	pretooluse	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	pretooluse	some-unknown-tool --flag	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+project	paused	pretooluse	sudo rm x	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	pretooluse	bash -c 'git push origin main'	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+project	paused	pretooluse	echo "$(git push origin main)"	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+project	paused	pretooluse	cp a /etc/b	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	pretooluse	mv a ../outside	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	pretooluse	cat ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	pretooluse	echo x > ../h/roles.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	pretooluse	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	pretooluse	rm ../h/trusts.json	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	permissionrequest	git status	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	permissionrequest	ls -la	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	permissionrequest	go test ./...	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	permissionrequest	touch a.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+project	paused	permissionrequest	echo hi > out.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+project	paused	permissionrequest	rm -rf build	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	permissionrequest	rm -rf /	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	permissionrequest	curl https://example.com	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+project	paused	permissionrequest	npm install left-pad	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+project	paused	permissionrequest	git push origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+project	paused	permissionrequest	git push --force origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	permissionrequest	npm publish	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+project	paused	permissionrequest	cat ~/.ssh/id_rsa	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	permissionrequest	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	permissionrequest	some-unknown-tool --flag	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+project	paused	permissionrequest	sudo rm x	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	permissionrequest	bash -c 'git push origin main'	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+project	paused	permissionrequest	echo "$(git push origin main)"	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+project	paused	permissionrequest	cp a /etc/b	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	permissionrequest	mv a ../outside	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	permissionrequest	cat ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	permissionrequest	echo x > ../h/roles.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	permissionrequest	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	permissionrequest	rm ../h/trusts.json	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	codex	git status	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	codex	ls -la	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	codex	go test ./...	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	codex	touch a.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+project	paused	codex	echo hi > out.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+project	paused	codex	rm -rf build	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	codex	rm -rf /	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	codex	curl https://example.com	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+project	paused	codex	npm install left-pad	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+project	paused	codex	git push origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+project	paused	codex	git push --force origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	codex	npm publish	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+project	paused	codex	cat ~/.ssh/id_rsa	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	codex	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	codex	some-unknown-tool --flag	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+project	paused	codex	sudo rm x	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+project	paused	codex	bash -c 'git push origin main'	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+project	paused	codex	echo "$(git push origin main)"	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+project	paused	codex	cp a /etc/b	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	codex	mv a ../outside	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	codex	cat ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+project	paused	codex	echo x > ../h/roles.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	codex	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+project	paused	codex	rm ../h/trusts.json	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	run	pretooluse	git status	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	pretooluse	ls -la	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	pretooluse	go test ./...	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	pretooluse	touch a.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+session	run	pretooluse	echo hi > out.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+session	run	pretooluse	rm -rf build	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	pretooluse	rm -rf /	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	pretooluse	curl https://example.com	{"v":1,"decision":"allow","reason":"限时放行中","risk":"network","decided_by":"trust:*"}
+session	run	pretooluse	npm install left-pad	{"v":1,"decision":"allow","reason":"限时放行中","risk":"network","decided_by":"trust:*"}
+session	run	pretooluse	git push origin main	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+session	run	pretooluse	git push --force origin main	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	pretooluse	npm publish	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+session	run	pretooluse	cat ~/.ssh/id_rsa	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	pretooluse	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	pretooluse	some-unknown-tool --flag	{"v":1,"decision":"allow","reason":"限时放行中","risk":"unknown","decided_by":"trust:*"}
+session	run	pretooluse	sudo rm x	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	pretooluse	bash -c 'git push origin main'	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+session	run	pretooluse	echo "$(git push origin main)"	{"v":1,"decision":"allow","reason":"限时放行中","risk":"unknown","decided_by":"trust:*"}
+session	run	pretooluse	cp a /etc/b	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+session	run	pretooluse	mv a ../outside	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+session	run	pretooluse	cat ../h/rules.yaml	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	pretooluse	echo x > ../h/roles.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+session	run	pretooluse	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+session	run	pretooluse	rm ../h/trusts.json	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+session	run	permissionrequest	git status	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	permissionrequest	ls -la	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	permissionrequest	go test ./...	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	permissionrequest	touch a.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+session	run	permissionrequest	echo hi > out.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+session	run	permissionrequest	rm -rf build	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	permissionrequest	rm -rf /	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	permissionrequest	curl https://example.com	{"v":1,"decision":"allow","reason":"限时放行中","risk":"network","decided_by":"trust:*"}
+session	run	permissionrequest	npm install left-pad	{"v":1,"decision":"allow","reason":"限时放行中","risk":"network","decided_by":"trust:*"}
+session	run	permissionrequest	git push origin main	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+session	run	permissionrequest	git push --force origin main	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	permissionrequest	npm publish	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+session	run	permissionrequest	cat ~/.ssh/id_rsa	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	permissionrequest	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	permissionrequest	some-unknown-tool --flag	{"v":1,"decision":"allow","reason":"限时放行中","risk":"unknown","decided_by":"trust:*"}
+session	run	permissionrequest	sudo rm x	{"v":1,"decision":"allow","reason":"限时放行中","risk":"destructive","decided_by":"trust:*"}
+session	run	permissionrequest	bash -c 'git push origin main'	{"v":1,"decision":"allow","reason":"限时放行中","risk":"outward","decided_by":"trust:*"}
+session	run	permissionrequest	echo "$(git push origin main)"	{"v":1,"decision":"allow","reason":"限时放行中","risk":"unknown","decided_by":"trust:*"}
+session	run	permissionrequest	cp a /etc/b	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+session	run	permissionrequest	mv a ../outside	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+session	run	permissionrequest	cat ../h/rules.yaml	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	permissionrequest	echo x > ../h/roles.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+session	run	permissionrequest	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+session	run	permissionrequest	rm ../h/trusts.json	{"v":1,"decision":"allow","reason":"限时放行中","risk":"write_outside","decided_by":"trust:*"}
+session	run	codex	git status	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	codex	ls -la	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	codex	go test ./...	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	codex	touch a.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+session	run	codex	echo hi > out.txt	{"v":1,"decision":"allow","reason":"命中规则 builtin-write-in-project","rule_id":"builtin-write-in-project","risk":"write_in_project","decided_by":"rule:builtin-write-in-project"}
+session	run	codex	rm -rf build	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+session	run	codex	rm -rf /	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+session	run	codex	curl https://example.com	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"network","decided_by":"user"}
+session	run	codex	npm install left-pad	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"network","decided_by":"user"}
+session	run	codex	git push origin main	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"outward","decided_by":"user"}
+session	run	codex	git push --force origin main	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+session	run	codex	npm publish	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"outward","decided_by":"user"}
+session	run	codex	cat ~/.ssh/id_rsa	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+session	run	codex	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+session	run	codex	some-unknown-tool --flag	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"unknown","decided_by":"user"}
+session	run	codex	sudo rm x	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"destructive","decided_by":"user"}
+session	run	codex	bash -c 'git push origin main'	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"outward","decided_by":"user"}
+session	run	codex	echo "$(git push origin main)"	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"unknown","decided_by":"user"}
+session	run	codex	cp a /etc/b	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+session	run	codex	mv a ../outside	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+session	run	codex	cat ../h/rules.yaml	{"v":1,"decision":"allow","reason":"命中规则 builtin-readonly","rule_id":"builtin-readonly","risk":"read","decided_by":"rule:builtin-readonly"}
+session	run	codex	echo x > ../h/roles.yaml	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+session	run	codex	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+session	run	codex	rm ../h/trusts.json	{"v":1,"decision":"deny","reason":"已在手机上拒绝","risk":"write_outside","decided_by":"user"}
+session	paused	pretooluse	git status	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	pretooluse	ls -la	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	pretooluse	go test ./...	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	pretooluse	touch a.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+session	paused	pretooluse	echo hi > out.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+session	paused	pretooluse	rm -rf build	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	pretooluse	rm -rf /	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	pretooluse	curl https://example.com	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+session	paused	pretooluse	npm install left-pad	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+session	paused	pretooluse	git push origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+session	paused	pretooluse	git push --force origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	pretooluse	npm publish	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+session	paused	pretooluse	cat ~/.ssh/id_rsa	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	pretooluse	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	pretooluse	some-unknown-tool --flag	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+session	paused	pretooluse	sudo rm x	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	pretooluse	bash -c 'git push origin main'	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+session	paused	pretooluse	echo "$(git push origin main)"	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+session	paused	pretooluse	cp a /etc/b	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	pretooluse	mv a ../outside	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	pretooluse	cat ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	pretooluse	echo x > ../h/roles.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	pretooluse	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	pretooluse	rm ../h/trusts.json	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	permissionrequest	git status	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	permissionrequest	ls -la	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	permissionrequest	go test ./...	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	permissionrequest	touch a.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+session	paused	permissionrequest	echo hi > out.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+session	paused	permissionrequest	rm -rf build	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	permissionrequest	rm -rf /	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	permissionrequest	curl https://example.com	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+session	paused	permissionrequest	npm install left-pad	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+session	paused	permissionrequest	git push origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+session	paused	permissionrequest	git push --force origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	permissionrequest	npm publish	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+session	paused	permissionrequest	cat ~/.ssh/id_rsa	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	permissionrequest	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	permissionrequest	some-unknown-tool --flag	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+session	paused	permissionrequest	sudo rm x	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	permissionrequest	bash -c 'git push origin main'	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+session	paused	permissionrequest	echo "$(git push origin main)"	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+session	paused	permissionrequest	cp a /etc/b	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	permissionrequest	mv a ../outside	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	permissionrequest	cat ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	permissionrequest	echo x > ../h/roles.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	permissionrequest	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	permissionrequest	rm ../h/trusts.json	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	codex	git status	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	codex	ls -la	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	codex	go test ./...	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	codex	touch a.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+session	paused	codex	echo hi > out.txt	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_in_project","decided_by":"paused"}
+session	paused	codex	rm -rf build	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	codex	rm -rf /	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	codex	curl https://example.com	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+session	paused	codex	npm install left-pad	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"network","decided_by":"paused"}
+session	paused	codex	git push origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+session	paused	codex	git push --force origin main	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	codex	npm publish	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+session	paused	codex	cat ~/.ssh/id_rsa	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	codex	echo x > ~/.railse/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	codex	some-unknown-tool --flag	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+session	paused	codex	sudo rm x	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"destructive","decided_by":"paused"}
+session	paused	codex	bash -c 'git push origin main'	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"outward","decided_by":"paused"}
+session	paused	codex	echo "$(git push origin main)"	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"unknown","decided_by":"paused"}
+session	paused	codex	cp a /etc/b	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	codex	mv a ../outside	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	codex	cat ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"read","decided_by":"paused"}
+session	paused	codex	echo x > ../h/roles.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	codex	cp evil.yaml ../h/rules.yaml	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}
+session	paused	codex	rm ../h/trusts.json	{"v":1,"decision":"passthrough","reason":"自动审批已暂停，交回终端处理","risk":"write_outside","decided_by":"paused"}

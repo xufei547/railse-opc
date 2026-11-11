@@ -1874,7 +1874,7 @@ func TestInboxQuestions(t *testing.T) {
 	h2 := newTestHub(t)
 	resp := doReq(t, "GET", h2.http.URL+"/api/inbox", nil, "", loggedIn(t, h2))
 	raw, _ := io.ReadAll(resp.Body)
-	if got := strings.TrimSpace(string(raw)); got != `{"pending":[],"questions":[]}` {
+	if got := strings.TrimSpace(string(raw)); got != `{"pending":[],"pending_truncated":false,"questions":[]}` {
 		t.Fatalf("空收件箱 = %s", got)
 	}
 }

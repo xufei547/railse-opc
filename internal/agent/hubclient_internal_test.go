@@ -1112,6 +1112,12 @@ type trustSyncEnv struct {
 
 func newTrustSyncEnv(t *testing.T, features []string) *trustSyncEnv {
 	t.Helper()
+	return newTrustSyncEnvWith(t, features, nil)
+}
+
+// newTrustSyncEnvWith 同 newTrustSyncEnv；before 在客户端 Run 之前调用（写 roles.yaml、接 SyncRoles 等）。
+func newTrustSyncEnvWith(t *testing.T, features []string, before func(e *trustSyncEnv)) *trustSyncEnv {
+	t.Helper()
 	setHubTimings(t, []time.Duration{20 * time.Millisecond}, 0, 0, 0)
 	e := &trustSyncEnv{logs: &logBuf{}, admit: make(chan struct{}, 8)}
 	e.hub = newFakeHub(t, 0, func(f *fakeHub, conn *websocket.Conn, _ wire.Hello) {
@@ -1137,6 +1143,9 @@ func newTrustSyncEnv(t *testing.T, features []string) *trustSyncEnv {
 		e.env.srv.Pending(), e.env.srv.SetHubPaused, log.New(e.logs, "", 0))
 	e.c.SyncTrusts(e.env.srv)
 	e.env.srv.SetAuditSink(e.c) // 与 cmd 的接线一致：被快照撤掉的写审计时同步调 Forward，验证这时没持着客户端的锁
+	if before != nil {
+		before(e)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

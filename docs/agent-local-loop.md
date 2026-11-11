@@ -28,14 +28,14 @@ Claude Code 装的钩子有五个事件：
 
 | 事件 | matcher | 用途 | 超时 |
 | --- | --- | --- | --- |
-| `PermissionRequest` | 全部 | 审批的兜底：MCP、Task 等 `PreToolUse` 不管的工具，以及 Claude 自己决定要问人时 | 86400 秒 |
-| `PreToolUse` | `AskUserQuestion\|Bash\|Edit\|Write\|MultiEdit\|NotebookEdit\|WebFetch` | 审批（0.2.1 起，任何权限模式都触发）；手机上答选择题（0.1.5 起） | 86400 秒 |
+| `PermissionRequest` | 全部 | 审批的兜底：Task 等 `PreToolUse` 不管的工具，以及 Claude 自己决定要问人时 | 86400 秒 |
+| `PreToolUse` | `AskUserQuestion\|Bash\|Edit\|Write\|MultiEdit\|NotebookEdit\|WebFetch\|WebSearch\|mcp__.*` | 审批（0.2.1 起，任何权限模式都触发；0.3 起含 WebSearch 与全部 MCP 工具）；手机上答选择题（0.1.5 起） | 86400 秒 |
 | `Notification` | 全部 | 映射为 `question` 事件 | 默认 |
 | `PostToolUse` | 同 `PreToolUse` | 工具已跑完，映射为 `tool_done` 事件：取消同一调用还挂着的审批（0.2.2 起；不写审计，只记它引起的取消） | 默认 |
 | `Stop` | 全部 | 映射为 `done` 事件；同时取消这个会话里还挂着的审批与答题（0.2.2 起） | 默认 |
 | `SessionEnd` | 全部 | 会话结束 | 默认 |
 
-0.1.5 之前装过钩子的，重跑一次 `railse setup hooks --claude` 补上 `PreToolUse`；不补不影响别的功能，`railse doctor` 的 `hooks.claude` 会报 warn“缺 PreToolUse：Claude Code 的选择题进不了手机”。0.2.0 装的 `PreToolUse` 只匹配 `AskUserQuestion`，同样重跑一次换成上表的匹配器；不换的话 auto 模式下审批全绕过 Railse，doctor 报 warn“PreToolUse 只匹配 AskUserQuestion：auto 模式下审批进不了 Railse”。
+0.1.5 之前装过钩子的，重跑一次 `railse setup hooks --claude` 补上 `PreToolUse`；不补不影响别的功能，`railse doctor` 的 `hooks.claude` 会报 warn“缺 PreToolUse：Claude Code 的选择题进不了手机”。0.2.0 装的 `PreToolUse` 只匹配 `AskUserQuestion`，同样重跑一次换成上表的匹配器；不换的话 auto 模式下审批全绕过 Railse，doctor 报 warn“PreToolUse 只匹配 AskUserQuestion：auto 模式下审批进不了 Railse”。0.2.3 及以前装的匹配器不含 `WebSearch` 与 MCP 工具：Claude 不需要原生确认时（已允许的 MCP 工具、auto、bypassPermissions）它们进不了 Railse，角色的禁用（如 `{payload: mcp}`）与上限管不到；重跑一次 `railse setup hooks --claude`（幂等，原地换掉旧匹配器），doctor 报 warn“PreToolUse 的匹配器是旧版”。这两类只为角色而来：会话没有生效角色（没有 `roles.yaml`，或会话未分配且没有从上层会话继承角色）时一律忽略，与 0.2.3 完全相同——钩子不输出、不写审计、不送手机，`claude_undecided: phone` 与你手写的 deny 规则都不对它们起作用（`PermissionRequest` 来的照旧受规则管）。纯读取的 `Read`、`Glob`、`Grep` 不进 `PreToolUse`（每次读都过一遍钩子太慢，读也越不过任何上限）。
 
 Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（不是 hooks.json），Codex 只认一条，所以另用 `railse setup codex-notify [--dir 目录] [--bin 路径] [--dry-run]`（`setup all` 装完钩子会自动做这一步，单独跑 `setup hooks` 装 Codex 时会提示）：它在数据目录生成 `codex-notify.sh`，依次调用原来的 `notify`（有的话，原样保留）与 `railse hook codex-notify`（数据目录不是 `~/.railse` 时带 `--socket`），再把 `notify` 换成 `["<数据目录>/codex-notify.sh"]`，改之前备份到 `config.toml.railse-bak-<时间>`。重跑不会重复串接，详见 [setup.md](setup.md) 的 Codex 一条。
 
@@ -49,13 +49,14 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | --- | --- |
 | `ts`、`request_id` | 时间；审批请求的 ID（事件没有） |
 | `kind` | `permission`、`ask`、`question`、`done`、`session_end`、`control` |
-| `session` | `tool`、`cli_session_id`、`turn_id`、`cwd` |
+| `session` | `tool`、`cli_session_id`、`turn_id`、`cwd`；有角色时还有 `role`（生效的角色名，见“角色”） |
 | `tool_name`、`payload`、`risk` | 工具名；脱敏后的统一载荷；风险档（`read` 到 `destructive`）。`ask` 不适用：它的 `tool_name` 固定是 `AskUserQuestion`，没有 `payload` 与风险档 |
 | `ask`、`answers` | 仅 `ask`：脱敏后的题目；`answers` 仅手机上答了的，脱敏后的题面 → 脱敏后的答案 |
 | `action` | `allow`、`deny`、`passthrough`、`answer`（`ask` 在手机上答了） |
 | `state` | 见下表 |
-| `rule_id`、`reason`、`decided_by` | 命中的规则与理由；谁定的：`rule:<id>`、`trust:<放行 id>`（限时放行命中）、`no_hub`、`paused`、`timeout`、`terminal`、`shutdown`、`error`；管理命令里限时放行的建、撤、到期记建的人 `cli`、`env`、`phone`，被手机撤掉的记 `hub` |
+| `rule_id`、`reason`、`decided_by` | 命中的规则与理由；谁定的：`rule:<id>`、`trust:<放行 id>`（限时放行命中）、`role:<角色名>`（角色禁用）、`no_hub`、`paused`、`timeout`、`terminal`、`shutdown`、`error`；管理命令里限时放行的建、撤、到期记建的人 `cli`、`env`、`phone`，被手机撤掉的记 `hub` |
 | `message` | 事件文本，如最后一条回复 |
+| `role`、`beyond_role` | 仅审批（0.3 起）：判定时的角色名，与是否超出角色的上限。没有 `roles.yaml` 时不出现 |
 
 | `state` | 含义 |
 | --- | --- |
@@ -116,8 +117,10 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | 定不了，总开关暂停 | 任意 | 照旧交回终端（暂停压过放行） |
 | 定不了 | 有，且未过期 | `allow`，审计 `state: auto_allowed`、`decided_by: trust:<id>`、`reason` 形如“限时放行（会话 claude，剩 1 小时 5 分）”；钩子看到的理由是固定的“限时放行中” |
 | 定不了 | 无 | 照旧（硬底线回 ask，中间三级交 Claude，`PermissionRequest` 送手机） |
+| 定不了，读写 Railse 自己的配置（0.3 起） | 任意 | 不走放行，照常进人工决定路径（`PreToolUse` 回 ask，其余送手机，Gemini 一律拒）；本来会命中放行时理由写明“限时放行不覆盖 Railse 自己的配置” |
 
 - **怎么算命中。** 会话范围要请求的 CLI（`tool`）与会话 id（`cli_session_id`）都相同，请求没有会话 id 不命中；项目范围要请求算出的项目根（见“项目根”）与放行的项目根字符串相等，没有项目根不命中。同时命中几条记最晚到期的那条。`PreToolUse`、`PermissionRequest` 与 Codex 的请求都看；Gemini 的钩子不能放行，命中了也只是渲染成不作决定，照旧交回终端。
+- **不覆盖 Railse 自己的配置（0.3 起）。** 请求读写 `~/.railse`、任何 `.railse` 目录或实际的守护进程目录（`--dir`、`RAILSE_HOME`）时，会话放行、项目放行与 `RAILSE_TRUST` 都不适用：放行期间 agent 改规则、角色、放行表，等于改掉管它自己的东西。文件写入看目标路径；shell 命令按段走、跟踪 `cd`、`pushd`、`popd` 改变的工作目录（与定级同一套），看每一段（含 `sh -c`、命令替换与 `eval` 里的）的参数与重定向，`cat`、`cp`、`mv`、`ln` 的目标都在内；字面上提到 `.railse` 的也算；命令名与 URL 不当路径。工作目录算不出之后（`cd "$X"`、`cd -`、`popd`），相对路径一律按触及处理，不走放行。本来会命中放行而因此没放的，Claude 的 `PreToolUse` 一律回 ask（交给 Claude 自己的流程在 bypassPermissions 下等于放行）。有没有 `roles.yaml`、会话有没有角色都一样；别的敏感路径（`.env`、ssh 密钥等）在放行期间的行为与 0.2.3 相同。
 - **后果。** `PreToolUse` 回 allow 时 Claude Code 跳过它自己的权限检查（含 auto 的分类器）；`settings.json` 里你写的 deny 仍先生效。选择题（`AskUserQuestion`）不看放行，照样进手机。
 - **上限。** 时长 5 分钟～24 小时，超界截到边上（`railse trust 1m` 建成 5 分钟，`48h` 建成 24 小时）；每台机器同时生效至多 20 条，超出拒建。
 
@@ -145,6 +148,160 @@ hello 里声明 `trust` 能力；连着同样声明了 `trust` 的 hub 时才同
 
 - **本机 → hub。** 本机建、撤、到期都经 `trust` 帧（`op` 为 `set`、`revoke`、`expired`）报给 hub，走单独的发送队列，不拖慢审批。
 - **hub → 本机。** welcome 与之后的 `trusts` 帧带这台机器的全部放行。合并：快照里有的写入并标已同步；已同步却不在快照里的删掉（被手机撤了，审计 `trust_revoke`、`decided_by: hub`）；未同步的（断线期间或老 hub 时建的）保留并补发 `set`；本机撤掉的有墓碑，快照里还带着时不复活、重发 `revoke`。本机建的条目等 hub 的快照回来才算同步。welcome 不带 `trusts` 键时：welcome 远小于单帧上限就当空快照；否则可能是 hub 带不下、紧跟着单发，按不完整处理，不删任何条目。
+
+## 角色（0.3 起）
+
+角色是一道权限边界：给每个 agent 会话一个角色，角色限定它能自动做到哪一步（风险上限）、哪些事一律不许做（禁用清单）、限时放行最长管多久，以及它的地盘在哪些目录。
+
+**定位：** 角色对“正常接入钩子、Railse 能识别的工具调用”提供约束，用来挡住 agent 的误操作和明显越权。它不是沙箱，不能保证一个被注入、刻意规避的 agent 无法用可见的命令绕过（下面“角色防什么、不防什么”列了已知的绕法）。要硬隔离，请配合操作系统级的沙箱或容器。设计见 [v0.3 角色设计](superpowers/specs/2026-11-11-railse-opc-v0.3-roles-design.md)。**没有 `roles.yaml` 时，除两处对 Railse 自己配置的保护外一切与 0.2.3 一样**：守护进程目录用 `--dir` 或 `RAILSE_HOME` 指到 `~/.railse` 之外时，里面的读写现在按 `destructive`（见“文件有误时”）；限时放行不再覆盖对 `~/.railse` 与守护进程目录的读写（见“限时放行”）。两处都是有意的收紧。差分测试（`internal/policy/nofile_diff_test.go`、`internal/agent/nofile_diff_test.go`）拿 main 上的代码逐条核对。
+
+### `roles.yaml`
+
+在守护进程的数据目录里（随 `--dir` 走，默认 `~/.railse/roles.yaml`），一个文件装全部角色。`railse role init` 写一份带注释的起步模板（开发 / 写作 / 运维；英文界面为 dev / writer / ops），模板里的 `dirs` 都注释着，写下它不改变任何会话。
+
+```yaml
+version: 1
+roles:
+  - name: 开发
+    note: 写代码、跑测试
+    dirs: ["~/RailseWork", "~/我的程序/**"]
+    ceiling: network          # 超过这一档（outward、destructive）一律问人
+    forbid:
+      - {command_prefix: "fly "}
+    trust_max: 24h
+  - name: 写作
+    note: 只改文档
+    dirs: ["~/dev/*/docs"]
+    ceiling: write_in_project
+    forbid:
+      - {command_prefix: "git push"}
+      - {payload: mcp}
+    trust_max: 2h
+```
+
+| 字段 | 必填 | 含义 |
+| --- | --- | --- |
+| `name` | 是 | 1～32 个字符，不含空白与控制字符，文件内唯一；可以是中文 |
+| `note` | 否 | 一行说明（≤120 字符），手机总台上看得到 |
+| `dirs` | 否 | 路径模式（`~` 与 `**` 通配，同规则的 `scope.project`：等于或通配命中项目根）。按目录绑定会话；也划定角色的地盘 |
+| `ceiling` | 否 | 风险上限，`read` 到 `destructive` 之一；风险**高于**它的请求超出边界。不写不设上限 |
+| `forbid` | 否 | 禁用清单，每条的写法与规则的 `match` 相同（同一套匹配：任一段命中即算、看穿 `sh -c`）；不能有空条目 |
+| `trust_max` | 否 | 限时放行最长多久（`30m`、`2h`，5m～24h，超界报错不截断），或 `none`：这个角色的请求从不走限时放行 |
+
+校验与规则文件一样严格：未知字段、拼错的键、重名、坏正则、坏时长都报错。两个角色的 `dirs` 重叠不算错，按文件先后取第一个，`railse role check` 会提醒。
+
+### 会话绑到哪个角色
+
+钩子（三家 CLI 的所有事件）把环境变量 `RAILSE_ROLE` 原样带给守护进程，守护进程按这个顺序定生效的角色，并把它写进审计与上报 hub 的 `session.role`：
+
+1. `RAILSE_ROLE` 是 `roles.yaml` 里有的名字 → 就是它（`RAILSE_ROLE=写作 claude`）。
+2. 否则按项目根（没有项目根时按 cwd）匹配各角色的 `dirs`，文件顺序第一个命中的。
+3. 都没有 → 未分配，按规则走。
+
+`RAILSE_ROLE` 指了不存在的名字时按第 2 步走，`agent.log` 里每个会话记一行。
+
+- **`dirs` 与 cwd 同一口径。** cwd 是解析过符号链接的真实路径，`dirs` 里通配之前的那部分也解析符号链接（原样的写法照样算）；macOS 上比较不分大小写，同敏感路径表。通配段本身（如 `~/dev/*`）匹配的是链接名还是真实名不读目录分不出，不做这一步。
+- **按会话钉住。** 解析顺序是：`RAILSE_ROLE` 指向存在的角色 → 当前目录命中的角色（哪怕与之前的不同）→ 这个会话（`tool` + `cli_session_id`）钉住的角色。前两步得出角色时把钉住更新成它；当前目录不属于任何角色时沿用钉住的，不降为未分配，所以从严格角色的目录走到无角色的目录仍按严格角色判，走进宽松角色的目录则按那个角色判。钉住只在判定审批时建立与更新，选择题与事件只读取；角色从 `roles.yaml` 里删掉时解除。钉住表只在内存里，至多 4096 个会话（满了淘汰最久没用的）、7 天没用的清掉、`session_end` 时释放；守护进程重启或过期后回来的会话按上面的顺序重新解析。
+
+### 判定顺序
+
+| 顺序 | 条件 | 结果 |
+| --- | --- | --- |
+| 1 | 你手写的 deny 规则（`source: user`）命中 | `deny`，压过一切 |
+| 2 | 角色的 `forbid` 命中 | `deny`，审计 `auto_denied`、`decided_by: role:<角色名>`，理由“角色「写作」禁用：command_prefix "git push"”原样给模型看；不进手机 |
+| 3 | 按优先级选出的规则是其余来源（内置、学来的）的 deny，且没暂停 | `deny`（比越界的 ask 更严，不被放宽）。学来的 deny 输给命中的用户 allow 是 0.2 的既定语义，那时选中的是 allow，照样走第 4 步 |
+| 4 | 风险高于 `ceiling`，或角色有按命令的禁用而命令里有解析不了的结构 | 越界：规则的 allow（含写了 `risk: destructive` 的 user allow）与限时放行都不适用，必须人来定。审计 `beyond_role: true`，理由“超出角色「写作」的边界（上限 write_in_project，这次是 outward）” |
+| 5 | 其余 | 照旧：暂停、规则、底线、限时放行、默认 ask |
+
+- **改 Railse 设置的命令。** 有角色的会话（含 `roles.yaml` 有误时）里，给 `RAILSE_*`、`HOME`、`XDG_*`、`CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`GEMINI_*` 赋值或删除它们的命令（前缀赋值、`env`、`env -u`、`export`、`declare`、`typeset`、`readonly`、`local`、`unset`，以及 `sh -c`、命令替换与 `eval` 里的同样写法；设置类命令的参数含变量展开时看不出改的是谁，也算）按越界处理，理由“试图更改 Railse 的角色或放行设置”。典型是嵌套起一个换了角色的 CLI（`RAILSE_ROLE=运维 claude …`）。读取（`echo $RAILSE_ROLE`）不算；未分配的会话照旧。
+- **禁用看穿命令替换。** `$(…)`、反引号、进程替换 `<(…)` `>(…)` 与 `eval` 里的命令逐层参与 `forbid` 的匹配（`echo "$(git push)"` 照样拒）。角色带有按命令的禁用（`command_prefix`、`command_regex`）而命令里有解析不了的结构（heredoc、没闭合的引号或括号、裸括号、带转义的 `$'…'`、嵌套过深）时，看不见里面有没有禁用的命令，按越界问人（理由“含无法检查的子命令”），不直接拒、也不走限时放行。`eval` 剥掉 `--` 后再看；`eval` 与 `sh -c` 类的命令参数含变量展开或通配（`eval "git ${OP}"`、`bash -c "$CMD"`）时运行时才知道是什么命令，同样算解析不了。展开有上限（`sh -c` 嵌套 32 层、命令替换 8 层、累计 2 MiB 文本或 1024 条命令），超了也按解析不了处理。超过 128 KiB 的 shell 命令根本不解析：直接定为 `unknown`、规则不匹配（没有角色时问人），有角色时按“含无法检查的子命令”越界；字面上提到 `.railse` 或守护进程目录的照样算触及配置。
+- **暂停时**第 1、2、3 步照常生效（拒绝不受暂停影响）；越界（第 4 步，含文件有误）也不归暂停管：`PreToolUse` 照旧回 `ask`，其余照旧送人工决定——交回终端在 auto、acceptEdits、bypassPermissions 下等于放行。其余交回终端。
+- **越界的去向。** Claude 的 `PreToolUse` 一律回 `ask`：Claude 在终端弹确认框（理由是角色那句）并触发 `PermissionRequest` 送手机；中间几档（项目内写、联网）也一样，不交 Claude 自己的分类器——它可能自动放行。`PermissionRequest` 与 Codex 的请求送 hub，`pending` 帧带 `beyond_role: true`，手机上不出现“记住”与“接下来一段时间都放行”。越界的请求也不按 `RAILSE_TRUST` 建放行。
+- **越界在各来源上的去向。** 越界必须人来定；问不到人的地方一律拒，绝不交回终端了事：
+
+  | 来源 | 没有 hub / hub 不可达 | hub 可达 | 暂停 |
+  | --- | --- | --- | --- |
+  | Claude `PreToolUse` | `ask`：终端确认框 | `ask`，随后的 `PermissionRequest` 送手机 | 同左，暂停不管越界 |
+  | Claude `PermissionRequest`、Codex | 交回终端：这类钩子只在 CLI 本来就要问人时触发，交回去就是 CLI 自己的确认框 | 送手机，手机定 | 同左 |
+  | Gemini | `deny`：它的钩子只能拒不能放，交回终端等于继续执行（yolo、headless 下直接跑），也不进 hub | `deny`（同左） | `deny` |
+
+  Gemini 被拒时 `decided_by` 为 `role:<角色名>`（文件有误时为 `roles_yaml`），理由写明“Gemini 无法在这里问人：换个角色，或在别处执行”。
+
+  触及 Railse 自己的配置（见“限时放行”）同样必须人来定：Gemini 在任何 hub 状态、暂停与否下都 `deny`（`decided_by: control_plane`）；Claude 与 Codex 照越界的路走，只是暂停时按 0.2.3 交回终端。整张表（越界、文件有误、触及配置 × 来源 × hub × 暂停）有走完整钩子链路的测试（`cmd/railse/roles_chain_test.go`）。
+- **`trust_max`。** 限时放行命中时再看会话角色：设了时长的，这条放行只在它建立后 `trust_max` 之内对这个角色有效；`none` 一律不放行。不改放行本身。
+- **地盘。** 角色写了 `dirs`、而项目根不在任何一条 `dirs` 内（典型：用 `RAILSE_ROLE` 在别处启动）时，按没有项目根处理：写入一律 `write_outside`，项目放行也不命中。地盘内项目根不变，不扩大到角色的全部目录。没写 `dirs` 的角色不做这一步。
+- **选择题与事件**（`AskUserQuestion`、question、done、tool_done）不经判定，只带上角色名。
+
+### 文件有误时
+
+守护进程每次判定前读一遍 `roles.yaml` 全文、按内容比较（不靠修改时间），变了就重新解析，改完不用重启（`railse agent reload` 也会重读）。读到坏文件（解析失败、校验不过、读不了、空文件、不是普通文件、超过 256 KiB）就 **fail closed**：所有会话按上限 `read` 处理——只读照旧自动放行，其余一律越界问人，理由“roles.yaml 有误：<错误>”；不沿用上一版好文件，免得一次手误悄悄放宽或悄悄失效。修好后下一条请求就恢复。
+
+`roles.yaml` 在 `~/.railse` 下，本来就是敏感路径：agent 改它按 `destructive` 定级，除非角色的上限就是 `destructive`，否则越界问人。数据目录用 `--dir` 或 `RAILSE_HOME` 指到别处时，守护进程把它（原样与解析符号链接后的真实路径）作为受保护目录带进定级，里面的 `roles.yaml`、`rules.yaml`、`trusts.json` 等的读写同样按 `destructive`。
+
+已知限制见下一节“角色防什么、不防什么”。
+
+### 嵌套会话
+
+有角色的会话里再起一个接了钩子的 CLI（`claude -p …`、`gemini -p …`），不管有没有改 `RAILSE_ROLE`、在不在别的目录、是不是写在脚本里，新会话的审批请求继承上层会话的角色约束，看的是进程树，不是环境变量。Codex 只接了 `PermissionRequest`：`codex exec` 与免确认模式下钩子根本不触发，嵌套起的 Codex 不受任何角色约束（见“不防什么”）。做法：
+
+- 守护进程用连接对端的进程凭据（macOS `LOCAL_PEERPID`、Linux `SO_PEERCRED`）取钩子的进程号，自己重建祖先进程链（进程号、启动时间、名字，从钩子的父进程往上到 1 号进程，至多 32 层；macOS 用 `sysctl kern.proc.pid`、Linux 读 `/proc`，不跑外部命令），不用请求里自报的（审计 `ancestry` 标 `peer`；取不到凭据时见下一条）。
+- 守护进程把链里第一个不是 shell、不是包装表里的启动器（`timeout`、`env`、`nice`、`nohup`、`command`、`exec`、`sudo` 等）、也不是 `railse` 自己的进程当作这个会话的 CLI（各家 CLI 多经 `sh -c` 起钩子，直接父进程是一次性的 shell），记下约束它的角色。
+- 新请求的祖先链里、在它自己的 CLI 之上，若有另一个有角色的会话的 CLI（进程号与启动时间都对上，防进程号复用），生效约束取两边更严的：上限取低的，禁用取并集，放行时长上限取短的（`none` 最短），地盘要同时在两边的 `dirs` 里。角色名显示为自己的（自己未分配时显示上层的），理由注明“继承自上层会话的角色「写作」”。三层嵌套照样一路传下去。
+- 取不到连接对端的凭据时，不用请求里自报的祖先链：这个会话已有的钉住与继承来的生效角色照旧保留；有 `roles.yaml` 时这条审批按越界处理（理由“取不到钩子进程的凭据，无法核实有没有上层会话的角色”），审计 `ancestry` 标 `peer_unverified`。macOS 与 Linux 上凭据都取得到，这只是兜底。
+- `session_end` 不释放记录（它可以伪造：agent 在一次 Bash 调用里给钩子喂一条）。记下的 CLI 进程名确实是已知 CLI（`claude`、`codex`、`gemini`、`node`）的，在它退出（进程号加启动时间对不上）后由每分钟一次的清理清掉；别的名字拿不准是不是会话本身，只靠 7 天 TTL 清。
+- 答题与事件没有审批那样的缓存时，也从重建的祖先链解析继承来的角色（只读，不建立钉住）。
+- 生效角色（含继承）记在会话上，答题与事件也报同一个角色。
+
+另有尽力而为的字符串一层：有角色的会话里，给 `RAILSE_*`、`HOME`、`XDG_*`、`CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`GEMINI_*` 赋值或删除它们的命令按越界处理（见“改 Railse 设置的命令”）；包装命令按 basename 认（`/usr/bin/env` 等同 `env`），`env`、`sudo`、`doas`、`xargs`、`timeout`、`nohup`、`nice`、`caffeinate`、`time`、`command`、`exec` 的选项按表解析：`env -C`、`sudo -D` 改了目录的，内层按改后的目录定级；`sudo -R`、`sudo -e`、`time -o`、`xargs -a` 这类改根目录、写输出、读参数文件的选项，以及表里没有的选项，整段至少 `unknown`。定级取包装自身与内层两者较高的；`deny` 规则与禁用对内层也做 basename、git 全局选项等归一化。
+
+### 角色防什么、不防什么
+
+一句话：角色对“正常接入钩子、Railse 能识别的工具调用”提供约束，用来挡住 agent 的误操作和明显越权；它不是沙箱，不能保证一个被注入、刻意规避的 agent 无法用可见的命令绕过。要硬隔离，请配合操作系统级的沙箱或容器。
+
+**会拦下的（前提：调用经过了装好的钩子）：**
+
+- 风险高于角色上限的调用，按越界交人（Claude `PreToolUse` 回 ask；`PermissionRequest` 与 Codex 送手机，没接 hub 时交回 CLI 自己的确认框；Gemini 拒）。0.3 起 Claude 的 MCP 工具与 WebSearch 也经过 `PreToolUse`（会话有生效角色时）。
+- 角色禁用的命令，包括写在 `sh -c`、命令替换、进程替换、`eval`、表里那些包装命令里面的。
+- 有角色的会话里用 Railse 识别得出的写法设置、删除、清空 `RAILSE_*`、`HOME`、`XDG_*` 等变量（命令前赋值、`env NAME=`、`env -u`、`env -i`、`exec -c`、`export`、`unset` 等，包在包装命令、`sh -c`、`eval`、命令替换里的也算），按越界交人；从有角色的 Claude、Gemini 会话里嵌套起的、接了钩子的 CLI 继承上层的约束（看进程树）。
+- 被识别为触及 Railse 自己配置（`~/.railse`、任何 `.railse` 目录、实际的守护进程目录）的请求：不接受任何自动放行（规则、限时放行都不行），暂停也不例外。识别只看字面与能算出的工作目录，见下面“不防的”。
+- 审批请求拿不到策略结论（超长载荷、读不懂的答复），或这台机器启用了 Railse（守护进程目录里有 `roles.yaml`、`machine.json` 或残留的 `agent.sock`）却连不上守护进程：Claude `PreToolUse` 回 ask、Gemini 拒；守护进程目录里这三样都没有时，连不上照 0.2.3 交回。
+
+**看不清的，不一定交人：** 只有角色带按命令的禁用（`command_prefix`、`command_regex`）时，解析不了的结构（heredoc、没闭合的引号、`eval "$X"`、`bash -c "$CMD"` 等）才强制越界。其余情况下这类命令定为 `unknown`：带命令匹配条件（`command_prefix`、`command_regex`）的放行规则不认它，但只按 `risk: unknown` 匹配的放行规则照样放行它；上限在 `unknown` 以上的角色、没有角色的会话、限时放行期间，它也都可能被放过。超过 128 KiB 的命令同理：有角色时越界，没有角色时只是 `unknown`。
+
+**不防的（已知限制，五轮审查里定为不修的与本轮新确认的都在这里）：**
+
+- **脚本与解释器里的内容。** Railse 看到的是 agent 要跑的那一行命令，看不到 `bash deploy.sh`、`make release`、`npm run x`、`python -c "…"` 里面做了什么；这些里面的 `git push` 不会被 `git push` 的禁用拦下，只按外层那一行定级。
+- **变量拼出来的命令与路径。** `X=git; $X push`、`cat "$D/rules.yaml"` 这类，命令名或路径要运行时才知道：定为 `unknown`，禁用与配置目录检查看不出来（工作目录在 `cd "$X"` 之后算不出时，相对路径一律按触及配置处理，但绝对路径里的变量仍看不出）。
+- **脱离进程树的子进程。** `setsid`、`nohup … &` 后父进程退出、经 launchd / cron / systemd、ssh 到别的主机启动的 CLI，祖先链里没有上层会话，继承不到它的角色。
+- **Codex 的免确认模式与 `codex exec`。** Railse 只接了 Codex 的 `PermissionRequest`，它只在 Codex 本来就要问人时触发；Codex 自己不问的调用，角色管不到，嵌套起的 Codex 也继承不了。
+- **钩子之外的工具。** Claude 的 `Read`、`Glob`、`Grep` 等纯读取工具不过钩子；MCP 服务器自己在里面跑命令的，只能按 `{payload: mcp}` 整类禁用，看不到它跑了什么。
+- **共享宿主进程。** 一个进程里跑着几个会话时（如桌面应用托管多个会话），它们共用同一个 CLI 进程记录：嵌套在其中任一会话下的 CLI 继承的是最近一次审批写下的那个会话的角色，不一定是真正的上层。
+- **钩子启动器认不出时可能继承不到、钉住可能清得晚。** 守护进程认会话的 CLI 时跳过 shell、包装表里的启动器与 `railse` 自己；CLI 经表外的启动器（如 `npx`、`uv run`）起钩子时，记下的是一次性的启动器进程：嵌套会话对不上它（继承不到），它的记录也只能靠 7 天 TTL 清（不是已知 CLI 名，不按进程退出清）。反过来，认对了 CLI 但 CLI 进程名不在已知名单里的，同样只靠 TTL。
+- **钉住可能丢失。** 钉住、生效角色与继承记录只在内存里：守护进程重启、表满淘汰、7 天没用、记下的已知 CLI 进程退出，都会让会话下一次按目录重新解析（在不属于任何角色的目录里就是未分配）。
+- **表满淘汰。** 钉住、生效角色与继承记录各至多 4096 个会话，满了淘汰最久没用的；被淘汰的上层会话，其下新起的 CLI 继承不到。
+- **伪造 `session_end` 不再有用，但清理有延迟。** 已知 CLI 的记录在进程退出后至多一分钟内清掉；其余与取不到进程信息的平台只靠 7 天 TTL。
+- **符号链接。** 写入目标经项目里的符号链接指向受保护目录或敏感路径时，定级只看字面路径、不解析链接（所有敏感路径共有的老问题）；建这种链接的 `ln -s` 本身因目标是敏感路径而按 `destructive` 定级——但 `destructive` 不等于一定询问：Railse 配置目录之外的敏感路径，仍可被显式写了 `risk: destructive` 的放行规则或限时放行放过。
+- **大小写敏感的卷。** `dirs` 与敏感路径在 macOS 上按不分大小写比较；装在大小写敏感的 APFS 卷上时，大小写不同的两个目录会被当成同一个。`dirs` 里通配段（`~/dev/*`）匹配的是链接名还是真实名不解析。
+- **限时放行期间的别的敏感路径。** 放行期间，除 Railse 自己的配置外，范围内引擎定不了的请求一律放过（0.2.3 的语义）：没有角色、或角色上限是 `destructive` 时，`.env`、ssh 密钥等的读写照样被放过。
+- **暂停与 Gemini 的旧口径。** 暂停时，不越界、不碰 Railse 配置的请求照 0.2.3 交回终端；Gemini 不越界、不碰配置的请求照 0.2.3 交回它自己的确认。
+- **学来的 deny 输给用户 allow。** 学来的 `deny` 输给命中的用户 `allow` 是 0.2 的既定语义，这时按选中的 allow 走（有角色时照样受上限约束）。
+- **换目录换角色、删掉角色。** 会话从严格角色的目录走进宽松角色的目录后按宽松的判（角色约束的是会话在哪干活）；只有走到不属于任何角色的目录时才沿用原来的。角色从 `roles.yaml` 里删掉后，钉住它的会话解除钉住；文件被删等于没有角色。
+- **选择题。** `AskUserQuestion` 不经判定，只带角色名。
+
+### 命令
+
+```sh
+railse role list  [--dir 目录]   # 每个角色一行：名字、上限、禁用条数、放行上限、目录、备注
+railse role check [--dir 目录]   # 校验；提醒目录重叠、指向不存在目录的模式；有误退出 1
+railse role which [--dir 目录]   # 当前目录（与当前终端的 RAILSE_ROLE）会解析成哪个角色、凭什么；地盘外会说明
+railse role init  [--dir 目录]   # 文件不存在时写起步模板（0600），已存在不覆盖
+```
+
+`list`、`which` 经本机 socket 问守护进程（管理命令 `role_list`、`role_which`）；守护进程没在跑、或是升级前启动的旧进程时直接读文件并在 stderr 注明。`railse doctor` 在 `roles.yaml` 存在时多一项 `agent.roles`：合法 ok，有误 fail（不存在时不出这一项）。
+
+### 与 hub
+
+hello 里声明 `role` 能力并带角色摘要（名字、备注、上限、禁用条数、放行上限分钟数——不设为 0，`none` 为 -1——与目录模式）；文件有误时不带摘要。重读成功、且这条连接的 hub 也声明了 `role` 时，整份重发一帧 `roles`（删掉文件就发空表），hub 整份替换这台机器的角色表。去旧只在守护进程这一侧：重读与通知串行、带单调代数，比已交出的旧的不发；hub 不看代数，按收到的顺序整份替换。老 hub 配新守护进程：角色照样在本机生效，只是手机上看不到；新 hub 配老守护进程：总台只有“未分配”。
 
 ## 三家 CLI 的差异
 
@@ -199,7 +356,8 @@ Claude Code 用 `AskUserQuestion` 问你选哪个方案时，`PreToolUse` 钩子
 ## 交回终端的两种情况
 
 - **没有 hub 时 ask 一律交回终端。** 引擎答 ask（没有规则命中，如 `git push`、`curl`、`npm install`）时，守护进程立即回“不作决定”，CLI 弹出自己的原生审批框，由你在终端里定；审计记 `passthrough`，`decided_by` 为 `no_hub`。
-- **钩子任何异常都不作决定。** 守护进程没起、socket 连不上、输入损坏、不认识的 CLI、收到 SIGTERM/SIGINT/SIGHUP、内部出错，钩子都是 stdout 为空、退出 0，原因写到 stderr。最坏情况就是回到没装 Railse 时的样子。
+- **钩子异常时多数不作决定。** 守护进程没起、socket 连不上、输入损坏、不认识的 CLI、收到 SIGTERM/SIGINT/SIGHUP、内部出错，钩子都是 stdout 为空、退出 0，原因写到 stderr。最坏情况就是回到没装 Railse 时的样子。
+- **拿不到策略结论时不放过（0.3 起，相对 0.2.3 的有意收紧）。** 守护进程在，但审批请求拿不到结论——编码后超过 1 MiB 发不出去（如在 `git push origin main #` 后面垫一大段注释）、发送或等待中出错、守护进程回了读不懂的东西或不认识的决定、无响应，以及钩子输入超过 4 MiB 读不全——时：Claude 的 `PreToolUse` 回 `ask` 并写明“拿不到策略结论（原因）”，Gemini 的 `BeforeTool` 回 `deny`；Claude 的 `PermissionRequest` 与 Codex 照旧交回（它们本来就在问人）。以前这些情况一律交回，在 auto、bypassPermissions、yolo 下等于放行。连不上 socket 时再分两种：守护进程目录里有 `roles.yaml`、`machine.json` 或残留的 `agent.sock`（守护进程正常退出时会删掉它）任一样，就算这台机器启用了 Railse，这时连不上按拿不到结论处理——Claude 的 `PreToolUse` 回 ask、Gemini 回 deny，理由写明守护进程没在运行、用 `railse agent run`（或 `railse setup autostart`）恢复、要彻底停用得删掉各 CLI 配置里的钩子条目（见 [setup.md](setup.md) 的“卸载”），只停服务不算停用；三样都没有（含目录不在）的按没启用，仍然交回，没装守护进程的人不该被卡住。
 
 ## 冒烟
 

@@ -78,8 +78,12 @@ export interface RequestView {
   ask?: { questions: Question[] }
   /** 提问作答后的答案：题面 → 用户答的原文；没答时没有这个键。 */
   answers?: Record<string, string>
-  /** 批准时能不能顺带限时放行：审批（kind permission）、机器在线且守护进程支持。老 hub 没有这个键（不显示开关）。 */
+  /** 批准时能不能顺带限时放行：审批（kind permission）、没有超出角色的边界、机器在线且守护进程支持。老 hub 没有这个键（不显示开关）。 */
   can_trust?: boolean
+  /** 会话生效的角色名（0.3 起），空串为未分配；老 hub 没有这个键。 */
+  role?: string
+  /** 超出了角色的风险上限（0.3 起）：只能单次批准，不能记住，也不能限时放行。老 hub 没有这个键。 */
+  beyond_role?: boolean
 }
 
 export interface AuditEvent {
@@ -159,6 +163,8 @@ export interface Inbox {
   pending: RequestView[]
   /** 最近 24 小时还在等回答的 question，按创建时间倒序。 */
   questions: RequestView[]
+  /** pending 被截断（只给了最新的 500 条），还有更早的；老 hub 没有这个键。 */
+  pending_truncated?: boolean
 }
 
 /** POST /api/requests/{id}/propose 的返回：“记住”会生成的规则草案。 */
@@ -189,4 +195,46 @@ export interface VapidInfo {
   enabled: boolean
   public_key: string
   reason: string
+}
+
+/** 总台一行里的一条最近动作（permission）。summary 是收件箱卡片那一行摘要（已脱敏）；at 是创建时间（定宽 UTC）。 */
+export interface DeskRecent {
+  id: string
+  tool_name: string
+  summary: string
+  risk: string
+  state: RequestState
+  /** 决定来源（同请求视图的 decided_by）；老 hub 没有这个键。 */
+  decided_by?: string
+  beyond_role: boolean
+  at: string
+}
+
+/**
+ * GET /api/desk 的一行：一个角色（有 name）或一台机器的“未分配”（没有 name 等角色字段）。
+ * trust_max_mins：0 为不设，-1 为不允许限时放行。denied、auto_allowed、sessions 只数 window_hours 之内的。
+ */
+export interface DeskRow {
+  machine_id: string
+  machine_name: string
+  online: boolean
+  name?: string
+  note?: string
+  ceiling?: string
+  forbid_count?: number
+  trust_max_mins?: number
+  dirs?: string[]
+  waiting: number
+  trusts_active: number
+  denied: number
+  auto_allowed: number
+  sessions: number
+  recent: DeskRecent[]
+}
+
+/** GET /api/desk：角色行按机器、文件里的先后排；未分配每台机器至多一行。 */
+export interface Desk {
+  window_hours: number
+  roles: DeskRow[]
+  unassigned: DeskRow[]
 }
