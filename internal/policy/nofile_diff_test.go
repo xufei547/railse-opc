@@ -107,6 +107,14 @@ func diffDecisions(t *testing.T) (decisions, keys []string) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					// control_plane 是 0.3 新增的标记（守护进程据它不让限时放行覆盖 Railse 自己的配置，相对 0.2.3 的第二处有意收紧）：
+					// 引擎的动作、风险、理由都不受它影响。这里核对它只出现在碰 .railse 的载荷上，比较前去掉。
+					// 在 JSON 层处理而不碰字段，这个文件在 main 上也能编译（基准靠它生成）
+					const cp = `,"control_plane":true`
+					if has := strings.Contains(string(b), cp); has != (strings.Contains(p.Command, ".railse") || strings.Contains(p.Path, ".railse")) {
+						t.Errorf("control_plane 不对: %+v → %s", p, b)
+					}
+					b = []byte(strings.Replace(string(b), cp, "", 1))
 					key, _ := json.Marshal(struct {
 						E string
 						P bool

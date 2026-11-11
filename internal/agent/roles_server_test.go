@@ -709,3 +709,61 @@ func TestNestedRoleChangeIsBeyond(t *testing.T) {
 		t.Fatalf("未分配的会话照旧: %+v", resp)
 	}
 }
+
+// 限时放行不覆盖 Railse 自己的配置（~/.railse 与守护进程目录）：照常进人工决定路径；有没有角色文件、有没有角色都一样；
+// 别的敏感路径在放行期间照旧（0.2.3）。
+func TestTrustNeverCoversControlPlane(t *testing.T) {
+	for _, withRoles := range []string{"none", "unassigned", "运维"} {
+		var mu sync.Mutex
+		sent := 0
+		dec := deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
+			mu.Lock()
+			sent++
+			mu.Unlock()
+			return Outcome{Action: "deny", DecidedBy: "user"}, nil
+		})
+		env := startServer(t, dec, nil)
+		if withRoles != "none" {
+			rolesFor(t, env, "")
+		}
+		role := ""
+		if withRoles == "运维" {
+			role = "运维"
+		}
+		cwd := filepath.Join(filepath.Dir(env.repo), "plain") // 不属于任何角色目录
+		os.MkdirAll(filepath.Join(cwd, ".git"), 0o755)
+		roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+			Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: cwd, Until: time.Now().Add(time.Hour)}})
+		for _, cmd := range []string{"echo x > ../h/rules.yaml", "cat ../h/trusts.json", "cat " + env.cfg.HomeDir + "/.railse/roles.yaml"} {
+			r := withRole(preToolUse(cwd, cmd, "bypassPermissions", "toolu_c"), role)
+			resp := send(t, env, r)
+			if resp.Decision != "ask" || !strings.Contains(resp.Reason, "限时放行不覆盖 Railse 自己的配置") {
+				t.Fatalf("%s %s: PreToolUse 应回 ask 并写明: %+v", withRoles, cmd, resp)
+			}
+			for _, tool := range []string{"claude", "codex"} {
+				pr := withRole(permission(cwd, cmd), role)
+				pr.Session.Tool = tool
+				if tool == "claude" {
+					pr.Source = proto.SourcePermissionRequest
+				}
+				if resp := send(t, env, pr); resp.Decision != "deny" || resp.DecidedBy != "user" {
+					t.Fatalf("%s %s %s: 应送人工决定: %+v", withRoles, tool, cmd, resp)
+				}
+				if e := lastAudit(t, env); !strings.Contains(e.Reason, "限时放行不覆盖 Railse 自己的配置") {
+					t.Fatalf("%s %s: 审计理由应写明: %+v", withRoles, cmd, e)
+				}
+			}
+			g := withRole(permission(cwd, cmd), role)
+			g.Session.Tool = "gemini"
+			if resp := send(t, env, g); resp.Decision == "allow" {
+				t.Fatalf("%s gemini %s: 不该被放行放过: %+v", withRoles, cmd, resp)
+			}
+		}
+		// 别的敏感路径在放行期间照旧放过（0.2.3）
+		pr := withRole(permission(cwd, "cat ~/.ssh/id_rsa"), role)
+		pr.Source = proto.SourcePermissionRequest
+		if resp := send(t, env, pr); resp.Decision != "allow" || !strings.HasPrefix(resp.DecidedBy, "trust:") {
+			t.Fatalf("%s: 别的敏感路径照旧: %+v", withRoles, resp)
+		}
+	}
+}

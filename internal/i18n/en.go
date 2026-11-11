@@ -387,6 +387,7 @@ Resolution order: the RAILSE_LANG environment variable, then the lang file, then
 	"决定来源出错，交回终端处理":              "Something went wrong while deciding; handed back to the terminal",
 	"决定来源给的答案不完整，交回终端处理":         "The answer was incomplete; handed back to the terminal",
 	"脱敏后有题面相同的题，分不清答的是哪道，交回终端处理": "Two questions read the same after redaction, so answers can't be matched; handed back to the terminal",
+	"限时放行不覆盖 Railse 自己的配置":       "Time-limited trust doesn't cover Railse's own config",
 	"限时放行中":                      "Within a time-limited trust",
 
 	// internal/agent/trust.go 与 server.go 的限时放行管理命令回给 railse trust 的固定错误（命令行用 i18n.Lookup 显示）；那边改了这里要一起改。

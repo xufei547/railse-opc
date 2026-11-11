@@ -375,3 +375,42 @@ func TestRoleEvaluateHugeMalformedInput(t *testing.T) {
 		}
 	}
 }
+
+// Decision.ControlPlane：请求触及 Railse 自己的配置目录（~/.railse、任何 .railse 目录、守护进程目录）时为真，限时放行不覆盖它；
+// 别的敏感路径（.env、ssh 密钥）不算。有没有角色都一样。
+func TestControlPlaneDetection(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	ctx := Context{ProjectRoot: roleHome + "/proj", HomeDir: roleHome, ProtectedDirs: []string{roleHome + "/dd"}}
+	for _, p := range []Payload{
+		{Type: PayloadFileWrite, Path: roleHome + "/.railse/rules.yaml", Cwd: roleHome + "/proj"},
+		{Type: PayloadFileWrite, Path: "../dd/roles.yaml", Cwd: roleHome + "/proj"},
+		shellAt("cat ~/.railse/trusts.json"),
+		shellAt("echo x > ../dd/rules.yaml"),
+		shellAt("rm -rf " + roleHome + "/dd"),
+		shellAt("cp evil.yaml /srv/other/.railse/roles.yaml"),
+		shellAt(`sh -c 'cat ~/.railse/rules.yaml'`),
+		shellAt(`echo "$(cat ~/.RAILSE/rules.yaml)"`),
+	} {
+		for _, role := range []string{"", "运维"} {
+			c := ctx
+			if role != "" {
+				c.Role = roleCtx(t, role).Role
+			}
+			if d := e.Evaluate(p, c); !d.ControlPlane {
+				t.Errorf("%+v（角色 %q）应算触及 Railse 的配置: %+v", p, role, d)
+			}
+		}
+	}
+	for _, p := range []Payload{
+		{Type: PayloadFileWrite, Path: roleHome + "/proj/.env", Cwd: roleHome + "/proj"},
+		shellAt("cat ~/.ssh/id_rsa"),
+		shellAt("git push origin main"),
+		shellAt("railse trust list"),
+		{Type: PayloadShell, Command: "curl https://x.y", Cwd: roleHome + "/dd"}, // cwd 在守护进程目录里：命令名与 URL 不当路径
+		{Type: PayloadMCP, Server: "github", Tool: "x"},
+	} {
+		if d := e.Evaluate(p, ctx); d.ControlPlane {
+			t.Errorf("%+v 不该算触及 Railse 的配置: %+v", p, d)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"github.com/bmatcuk/doublestar/v4"
 	"path/filepath"
 	"strings"
 )
@@ -231,6 +232,85 @@ func segChangesRailseEnv(seg segment) bool {
 		if setter && i > 0 && flagAt(seg.argvFlags, i).expand {
 			return true
 		}
+	}
+	return false
+}
+
+// controlPatterns 是 Railse 自己的配置目录在敏感路径表里的那部分（~/.railse 与任何 .railse 目录），比较同 isSensitive（折叠大小写）。
+// 加上 Context.ProtectedDirs（实际的守护进程目录），就是限时放行不覆盖的“控制面”：放行期间 agent 改规则、角色、放行表等于改掉
+// 管它自己的东西。别的敏感路径（.env、ssh 密钥）不在此列，放行期间的行为照旧。
+var controlPatterns = []string{"**/.railse/**", "**/.railse"}
+
+// isControlPath 判断绝对路径是否在 Railse 自己的配置目录里。
+func (c Context) isControlPath(abs string) bool {
+	fa := foldPath(abs)
+	for _, pat := range controlPatterns {
+		if ok, _ := doublestar.Match(pat, fa); ok {
+			return true
+		}
+	}
+	for _, d := range c.ProtectedDirs {
+		if d != "" && isWithin(fa, foldPath(filepath.Clean(d))) {
+			return true
+		}
+	}
+	return false
+}
+
+// touchesControlPlane 判断请求是否读写 Railse 自己的配置（见 controlPatterns）：文件写入看目标路径；shell 命令看每一段
+// （看穿 sh -c、命令替换、进程替换与 eval）的参数与重定向，能解析的按路径判断，任何词里出现 .railse（不分大小写）也算，
+// 偏严：变量拼出来的路径看不出来，至少字面上提到的都拦下。
+func touchesControlPlane(p Payload, ctx Context) bool {
+	switch p.Type {
+	case PayloadFileWrite:
+		return p.Path != "" && (ctx.isControlPath(resolvePath(p.Path, p.Cwd, ctx.HomeDir)) || mentionsRailseDir(p.Path))
+	case PayloadShell:
+		cmds, _ := forbidCommands(p.Command)
+		for _, c := range cmds {
+			for _, seg := range effectiveSegments(c) {
+				// 命令名本身不当路径（cwd 恰在守护进程目录里时，curl 会被拼成 <目录>/curl）；参数里的 URL 也不是路径
+				var words []string
+				if argv := stripWrappers(seg.argv); len(argv) > 1 {
+					words = append(words, argv[1:]...)
+				}
+				words = append(append(words, seg.redirects...), seg.inputs...)
+				for _, w := range seg.argv {
+					if mentionsRailseDir(w) {
+						return true
+					}
+				}
+				for _, w := range words {
+					if mentionsRailseDir(w) {
+						return true
+					}
+					q, ok := pathOperand(w)
+					if !ok || strings.Contains(q, "://") || unresolvable(q, ctx.HomeDir) {
+						continue
+					}
+					if ctx.isControlPath(resolvePath(q, p.Cwd, ctx.HomeDir)) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// mentionsRailseDir 判断词里有没有 .railse 这一段（不分大小写）。
+func mentionsRailseDir(w string) bool {
+	f := foldPath(w)
+	i := strings.Index(f, ".railse")
+	for i >= 0 {
+		end := i + len(".railse")
+		if (i == 0 || f[i-1] == '/' || f[i-1] == '=' || f[i-1] == '~') && (end == len(f) || f[end] == '/') {
+			return true
+		}
+		next := strings.Index(f[end:], ".railse")
+		if next < 0 {
+			break
+		}
+		i = end + next
 	}
 	return false
 }

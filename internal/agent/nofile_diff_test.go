@@ -11,8 +11,11 @@ import (
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
-// 差分测试：没有 roles.yaml 时，守护进程对审批的答复与 0.3 之前（main 上 fc14b08 的代码）逐条相同，只有一处有意的收紧：
-// 守护进程目录不在 ~/.railse 时，里面的读写按 destructive（见 daemonDirCommand）。
+// 差分测试：没有 roles.yaml 时，守护进程对审批的答复与 0.3 之前（main 上 fc14b08 的代码）逐条相同，只有两处有意的收紧，
+// 都落在碰守护进程目录的命令上（见 daemonDirCommand）：
+//  1. 守护进程目录不在 ~/.railse 时，里面的读写按 destructive；
+//  2. 限时放行不覆盖 Railse 自己的配置（~/.railse、守护进程目录）：放行期间这类请求照常进人工决定路径
+//     （语料里的 echo x > ~/.railse/rules.yaml 也因此与 main 不同）。
 // 基准 testdata/nofile_responses_main.jsonl 用 main 上的代码跑这同一个文件生成：
 //
 //	RAILSE_WRITE_DIFF_GOLDEN=$PWD/internal/agent/testdata/nofile_responses_main.jsonl go test ./internal/agent -run TestNoRolesServerMatchesMain
@@ -29,9 +32,11 @@ var diffCommands = []string{
 	"cat ../h/rules.yaml", "echo x > ../h/roles.yaml", "cp evil.yaml ../h/rules.yaml", "rm ../h/trusts.json",
 }
 
-// daemonDirCommand 报告命令是否碰守护进程目录：没有 roles.yaml 时唯一有意与 main 不同的地方（守护进程目录不在 ~/.railse 时，
+// daemonDirCommand 报告命令是否碰守护进程目录或 ~/.railse：没有 roles.yaml 时唯一有意与 main 不同的地方（守护进程目录不在 ~/.railse 时，
 // 里面的读写按 destructive，见 policy.Context.ProtectedDirs）。
-func daemonDirCommand(cmd string) bool { return strings.Contains(cmd, "../h/") }
+func daemonDirCommand(cmd string) bool {
+	return strings.Contains(cmd, "../h/") || strings.Contains(cmd, ".railse/")
+}
 
 func TestNoRolesServerMatchesMain(t *testing.T) {
 	var got []string
@@ -96,11 +101,14 @@ func TestNoRolesServerMatchesMain(t *testing.T) {
 	diff := 0
 	for i := range want {
 		if cmd := strings.Split(got[i], "\t")[3]; daemonDirCommand(cmd) {
-			// 有意的收紧：0.3 起一律 destructive，规则不放行。限时放行期间照样放（0.2.3 的放行语义：期间完全不把关，
-			// main 上 ~/.railse 里的 destructive 也是这样），这里不改
+			// 有意的收紧：一律 destructive，规则与限时放行都不放过（有放行时理由写明不覆盖）
 			var resp proto.Response
 			json.Unmarshal([]byte(strings.Split(got[i], "\t")[4]), &resp)
-			if resp.Risk != "destructive" || resp.Decision == "allow" && resp.DecidedBy != "trust:*" {
+			f := strings.Split(got[i], "\t")
+			if f[0] != "none" && f[1] == "run" && f[2] == "pretooluse" && !strings.Contains(resp.Reason, "限时放行不覆盖 Railse 自己的配置") {
+				t.Errorf("第 %d 条（守护进程目录，有放行）确认框理由应写明不覆盖: %s", i+1, got[i])
+			}
+			if resp.Risk != "destructive" || resp.Decision == "allow" {
 				t.Errorf("第 %d 条（守护进程目录）应按 destructive: %s", i+1, got[i])
 			}
 			continue

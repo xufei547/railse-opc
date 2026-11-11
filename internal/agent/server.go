@@ -593,12 +593,20 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 		// 限时放行：只改引擎定不了的这一档（规则的 allow、deny 在上面已定，用户 deny 压过放行；暂停压过放行），
 		// 命中就本地放行，不弹终端框、不送手机。RAILSE_TRUST 只看 PreToolUse 带来的（Claude 每次调用先经它）。
 		// 越界的请求不碰放行：既不按 RAILSE_TRUST 建，也不匹配；角色的 trust_max 再限一道（见 trustAllowedFor）。
+		// 读写 Railse 自己的配置（d.ControlPlane）也不走放行：放行期间 agent 改规则、角色、放行表等于改掉管它自己的东西。
+		// 本来会命中放行时，理由换成 reasonControlPlane，审计、终端确认框与手机上都看得到为什么这次没放。
 		if !d.BeyondRole {
 			if req.TrustFor != "" && req.Source == proto.SourcePreToolUse {
 				s.trustFromEnv(req)
 			}
 			now := s.trusts.clock()
-			if tr, ok := s.trusts.matchFiltered(req.Session, root, func(tr proto.Trust) bool { return trustAllowedFor(pctx.Role, tr, now) }); ok {
+			tr, ok := s.trusts.matchFiltered(req.Session, root, func(tr proto.Trust) bool { return trustAllowedFor(pctx.Role, tr, now) })
+			if ok && d.ControlPlane {
+				ok = false
+				d.Reason = reasonControlPlane
+				entry.Reason, resp.Reason = reasonControlPlane, reasonControlPlane
+			}
+			if ok {
 				entry.Action, entry.State, entry.DecidedBy = "allow", "auto_allowed", "trust:"+tr.ID
 				entry.Reason = fmt.Sprintf("限时放行（%s，剩 %s）", trustScopeLabel(tr), formatRemain(tr.Until.Sub(now)))
 				resp.Decision, resp.DecidedBy, resp.Reason = "allow", entry.DecidedBy, reasonTrusted
@@ -612,7 +620,7 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 				// PermissionRequest 交回终端，确认框还在（见 docs/superpowers/specs/2026-11-02-railse-opc-v0.2.2-two-screens-design.md §2.1）。
 				// 越界时理由换成角色的那句（钩子按终端语言重拼后放进确认框）。
 				reason := reasonAsked
-				if d.BeyondRole {
+				if d.BeyondRole || d.Reason == reasonControlPlane {
 					reason = d.Reason
 				}
 				entry.Action, entry.State, entry.DecidedBy, entry.Reason, entry.Trigger = "ask", "asked", decidedByAsk, reason, redactTrigger(d.Trigger)
@@ -666,8 +674,22 @@ func (s *Server) waitDecision(ctx context.Context, id string, req proto.Request,
 		return resp
 	}
 	applyOutcome(out, out.Action == "allow" || out.Action == "deny", &resp, &entry)
+	if d.Reason == reasonControlPlane {
+		entry.Reason = joinReason(reasonControlPlane, entry.Reason) // 审计里留下这次为什么没走放行
+	}
 	s.writeAudit(entry)
 	return resp
+}
+
+// reasonControlPlane 是本来会命中限时放行、但请求读写 Railse 自己的配置而没放时的理由。固定句子：钩子按终端语言 i18n.Lookup。
+const reasonControlPlane = "限时放行不覆盖 Railse 自己的配置"
+
+// joinReason 把两句理由用“；”接起来，后一句为空时只留前一句。
+func joinReason(a, b string) string {
+	if b == "" {
+		return a
+	}
+	return a + "；" + b
 }
 
 // handleAsk 是答题主路径：不跑引擎、不看规则与暂停开关（答题不是审批，也不能记住）。题目脱敏后登记、交给 Decider 等手机上作答；

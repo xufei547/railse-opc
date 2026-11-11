@@ -24,6 +24,9 @@ type Decision struct {
 	Role       string `json:"role,omitempty"`
 	BeyondRole bool   `json:"beyond_role,omitempty"`
 	Forbidden  bool   `json:"forbidden,omitempty"`
+	// ControlPlane 为真表示请求读写 Railse 自己的配置（~/.railse、任何 .railse 目录、Context.ProtectedDirs）：限时放行不覆盖它，
+	// 照常进人工决定路径。与角色无关，没有角色文件时也算（见 touchesControlPlane）。
+	ControlPlane bool `json:"control_plane,omitempty"`
 }
 
 // Engine 持有编译好的规则。规则在 NewEngine 之后不再改动，Evaluate 可并发调用；
@@ -95,7 +98,7 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 		}
 	}
 	role := ctx.Role
-	base := Decision{Risk: risk, Trigger: trig}
+	base := Decision{Risk: risk, Trigger: trig, ControlPlane: touchesControlPlane(p, ctx)}
 	if role != nil {
 		base.Role = role.Name
 	}

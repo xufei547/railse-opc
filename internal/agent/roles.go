@@ -17,7 +17,7 @@ import (
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
-// RolesState 是某一刻 roles.yaml 的状态。Exists 为假表示文件不存在（没有角色，除守护进程目录的保护外与 0.2.3 一样）；Err 非空表示文件有误
+// RolesState 是某一刻 roles.yaml 的状态。Exists 为假表示文件不存在（没有角色，除对 Railse 自己配置的两处保护外与 0.2.3 一样）；Err 非空表示文件有误
 // （读不了、解析或校验失败），这时 Set 为空，会话一律按 policy.BrokenRole 判定（fail closed）。
 type RolesState struct {
 	Exists bool

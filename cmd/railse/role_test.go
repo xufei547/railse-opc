@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/xufei547/railse-opc/internal/i18n"
+	"github.com/xufei547/railse-opc/internal/proto"
 )
 
 // runRoleIn 在 cwd 里跑 railse role，返回退出码与两路输出。
@@ -222,5 +223,15 @@ func TestLocalizeGeminiBeyondReason(t *testing.T) {
 		if got, ok := localizeRoleReason(in); !ok || hasCJK(got) {
 			t.Errorf("%q → %q %v", in, got, ok)
 		}
+	}
+}
+
+// 放行不覆盖 Railse 配置时，确认框里写明原因（按终端语言）。
+func TestAskReasonControlPlane(t *testing.T) {
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	resp := proto.Response{Decision: "ask", DecidedBy: "ask", Reason: localizeReason(proto.Response{Reason: "限时放行不覆盖 Railse 自己的配置"})}
+	if got := askReason(resp); !strings.Contains(got, "doesn't cover Railse's own config") || hasCJK(got) {
+		t.Fatalf("确认框理由: %q", got)
 	}
 }

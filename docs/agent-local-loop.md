@@ -117,8 +117,10 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | 定不了，总开关暂停 | 任意 | 照旧交回终端（暂停压过放行） |
 | 定不了 | 有，且未过期 | `allow`，审计 `state: auto_allowed`、`decided_by: trust:<id>`、`reason` 形如“限时放行（会话 claude，剩 1 小时 5 分）”；钩子看到的理由是固定的“限时放行中” |
 | 定不了 | 无 | 照旧（硬底线回 ask，中间三级交 Claude，`PermissionRequest` 送手机） |
+| 定不了，读写 Railse 自己的配置（0.3 起） | 任意 | 不走放行，照常进人工决定路径（`PreToolUse` 回 ask，其余送手机，Gemini 照旧交回它自己的确认）；本来会命中放行时理由写明“限时放行不覆盖 Railse 自己的配置” |
 
 - **怎么算命中。** 会话范围要请求的 CLI（`tool`）与会话 id（`cli_session_id`）都相同，请求没有会话 id 不命中；项目范围要请求算出的项目根（见“项目根”）与放行的项目根字符串相等，没有项目根不命中。同时命中几条记最晚到期的那条。`PreToolUse`、`PermissionRequest` 与 Codex 的请求都看；Gemini 的钩子不能放行，命中了也只是渲染成不作决定，照旧交回终端。
+- **不覆盖 Railse 自己的配置（0.3 起）。** 请求读写 `~/.railse`、任何 `.railse` 目录或实际的守护进程目录（`--dir`、`RAILSE_HOME`）时，会话放行、项目放行与 `RAILSE_TRUST` 都不适用：放行期间 agent 改规则、角色、放行表，等于改掉管它自己的东西。文件写入看目标路径；shell 命令看每一段（看穿 `sh -c`、命令替换与 `eval`）的参数与重定向，字面上提到 `.railse` 的也算；命令名与 URL 不当路径。有没有 `roles.yaml`、会话有没有角色都一样；别的敏感路径（`.env`、ssh 密钥等）在放行期间的行为与 0.2.3 相同。
 - **后果。** `PreToolUse` 回 allow 时 Claude Code 跳过它自己的权限检查（含 auto 的分类器）；`settings.json` 里你写的 deny 仍先生效。选择题（`AskUserQuestion`）不看放行，照样进手机。
 - **上限。** 时长 5 分钟～24 小时，超界截到边上（`railse trust 1m` 建成 5 分钟，`48h` 建成 24 小时）；每台机器同时生效至多 20 条，超出拒建。
 
@@ -149,7 +151,7 @@ hello 里声明 `trust` 能力；连着同样声明了 `trust` 的 hub 时才同
 
 ## 角色（0.3 起）
 
-角色是一道权限边界：给每个 agent 会话一个角色，角色限定它能自动做到哪一步（风险上限）、哪些事一律不许做（禁用清单）、限时放行最长管多久，以及它的地盘在哪些目录。设计见 [v0.3 角色设计](superpowers/specs/2026-11-11-railse-opc-v0.3-roles-design.md)。**没有 `roles.yaml` 时，除守护进程目录的保护外一切与 0.2.3 一样**：守护进程目录用 `--dir` 或 `RAILSE_HOME` 指到 `~/.railse` 之外时，里面的读写现在按 `destructive`（见“文件有误时”），这是有意的收紧。差分测试（`internal/policy/nofile_diff_test.go`、`internal/agent/nofile_diff_test.go`）拿 main 上的代码逐条核对。
+角色是一道权限边界：给每个 agent 会话一个角色，角色限定它能自动做到哪一步（风险上限）、哪些事一律不许做（禁用清单）、限时放行最长管多久，以及它的地盘在哪些目录。设计见 [v0.3 角色设计](superpowers/specs/2026-11-11-railse-opc-v0.3-roles-design.md)。**没有 `roles.yaml` 时，除两处对 Railse 自己配置的保护外一切与 0.2.3 一样**：守护进程目录用 `--dir` 或 `RAILSE_HOME` 指到 `~/.railse` 之外时，里面的读写现在按 `destructive`（见“文件有误时”）；限时放行不再覆盖对 `~/.railse` 与守护进程目录的读写（见“限时放行”）。两处都是有意的收紧。差分测试（`internal/policy/nofile_diff_test.go`、`internal/agent/nofile_diff_test.go`）拿 main 上的代码逐条核对。
 
 ### `roles.yaml`
 
@@ -235,7 +237,7 @@ roles:
 已知限制：
 
 - 写入目标经符号链接指向受保护目录或敏感路径（项目里放一个指向 `~/.railse` 的链接再写它）时，定级只看字面路径、不解析链接。这是所有敏感路径共有的老问题，这一版不修；建这种链接的 `ln -s` 本身因目标是敏感路径而按 `destructive` 定级，会被问到。
-- 限时放行期间放行“完全不把关”（0.2.3 的语义）：没有角色、或角色的上限是 `destructive` 时，放行期间守护进程目录与 `~/.railse` 里的读写照样被放过。
+- 限时放行期间，除 Railse 自己的配置外，范围内引擎定不了的请求一律放过（0.2.3 的语义）：没有角色、或角色的上限是 `destructive` 时，`.env`、ssh 密钥等别的敏感路径的读写照样被放过。判断“碰没碰 Railse 的配置”只看字面：用变量拼出来的路径（`cat "$D/rules.yaml"`）看不出来。
 - `dirs` 与敏感路径在 macOS 上按不分大小写比较；装在大小写敏感的 APFS 卷上时，大小写不同的两个目录会被当成同一个。
 
 ### 命令

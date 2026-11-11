@@ -205,7 +205,7 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 func askReason(resp proto.Response) string {
 	tail := i18n.T("已发到手机，也可以在这里直接批")
 	// 越界（角色上限、roles.yaml 有误）的 ask：理由换成角色的那句，比触发点更说明问题。resp.Reason 已由 awaitReply 按终端语言重拼过
-	if isRoleReason(resp.Reason) {
+	if isRoleReason(resp.Reason) || resp.Reason == i18n.Lookup(reasonControlPlaneZH) {
 		return fmt.Sprintf(i18n.T("%s。%s"), resp.Reason, tail)
 	}
 	if resp.Trigger == nil {
@@ -239,6 +239,9 @@ func localizeReason(resp proto.Response) string {
 	}
 	return i18n.Lookup(resp.Reason)
 }
+
+// reasonControlPlaneZH 是守护进程的 reasonControlPlane（internal/agent/server.go）：限时放行不覆盖 Railse 自己的配置。那边改了这里要一起改。
+const reasonControlPlaneZH = "限时放行不覆盖 Railse 自己的配置"
 
 // 角色（0.3 起）的三种理由，由守护进程的引擎（internal/policy 的 Evaluate）按这几个格式拼出；那边改了这里要一起改。
 const (
