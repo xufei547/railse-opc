@@ -1006,10 +1006,12 @@ Switched to a new key and deleted %d push subscriptions. Every phone has to turn
 	"命令里的「%s」会%s。%s": `"%s" %s. %s`,
 	"命令里的「%s」%s。%s":  `"%s" %s. %s`,
 	// 角色的理由（localizeRoleReason 按 internal/policy/engine.go 的格式拆开重拼）
-	"角色「%s」禁用：%s":               "Forbidden for role \"%s\": %s",
-	"超出角色「%s」的边界（上限 %s，这次是 %s）": "Beyond role \"%s\"'s boundary (ceiling %s, this is %s)",
-	"超出角色「%s」的边界：含无法检查的子命令":     "Beyond role \"%s\"'s boundary: contains a subcommand that can't be checked",
-	"roles.yaml 有误：%s":          "roles.yaml is broken: %s",
+	"角色「%s」禁用：%s":                                 "Forbidden for role \"%s\": %s",
+	"超出角色「%s」的边界（上限 %s，这次是 %s）":                   "Beyond role \"%s\"'s boundary (ceiling %s, this is %s)",
+	"超出角色「%s」的边界：含无法检查的子命令":                       "Beyond role \"%s\"'s boundary: contains a subcommand that can't be checked",
+	"超出角色「%s」的边界，Gemini 无法在这里问人：换个角色，或在别处执行":      "Beyond role \"%s\"'s boundary, and Gemini can't ask a human here: switch roles, or run it somewhere else",
+	"roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行": "roles.yaml is broken, and Gemini can't ask a human here: fix the file and retry, or run it somewhere else",
+	"roles.yaml 有误：%s": "roles.yaml is broken: %s",
 
 	// internal/policy/trigger.go 的 Why 短语（经 i18n.Lookup 动态查）。动词短语，接在引号括起的命令段后面；
 	// 与 web/src/format.ts 的 triggerWhysEn 一字不差（web/src/i18n.sync.test.ts 核对）

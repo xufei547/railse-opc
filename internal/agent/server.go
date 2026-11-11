@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -554,6 +555,14 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 			resp.Decision, resp.DecidedBy, resp.Reason = "passthrough", entry.DecidedBy, entry.Reason
 			break
 		}
+		// 越界而又问不到人：Gemini 的钩子只能拒绝不能放行，交回终端等于继续执行（yolo、headless 下直接跑），也不进 hub。
+		// 越界必须人来定，这里问不到人，只能拒（含 roles.yaml 有误的 fail closed）。其余来源能强制问人，见下与 docs/agent-local-loop.md。
+		if d.BeyondRole && strings.EqualFold(req.Session.Tool, "gemini") {
+			entry.Action, entry.State, entry.DecidedBy = "deny", "auto_denied", beyondDecidedBy(d)
+			entry.Reason = reasonGeminiBeyond(d)
+			resp.Decision, resp.DecidedBy, resp.Reason = "deny", entry.DecidedBy, entry.Reason
+			break
+		}
 		// 限时放行：只改引擎定不了的这一档（规则的 allow、deny 在上面已定，用户 deny 压过放行；暂停压过放行），
 		// 命中就本地放行，不弹终端框、不送手机。RAILSE_TRUST 只看 PreToolUse 带来的（Claude 每次调用先经它）。
 		// 越界的请求不碰放行：既不按 RAILSE_TRUST 建，也不匹配；角色的 trust_max 再限一道（见 trustAllowedFor）。
@@ -594,6 +603,22 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 	}
 	s.writeAudit(entry)
 	return resp
+}
+
+// beyondDecidedBy 是越界被拒时的 decided_by：role:<角色名>；roles.yaml 有误（没有角色名）时为 roles_yaml。
+func beyondDecidedBy(d policy.Decision) string {
+	if d.Role == "" {
+		return "roles_yaml"
+	}
+	return "role:" + d.Role
+}
+
+// reasonGeminiBeyond 是 Gemini 越界被拒时给模型看的理由。格式固定：钩子按终端语言重拼（见 cmd/railse 的 localizeRoleReason）。
+func reasonGeminiBeyond(d policy.Decision) string {
+	if d.Role == "" {
+		return "roles.yaml 有误，Gemini 无法在这里问人：修好文件后重试，或在别处执行"
+	}
+	return "超出角色「" + d.Role + "」的边界，Gemini 无法在这里问人：换个角色，或在别处执行"
 }
 
 // redactTrigger 对触发段脱敏（它是命令原文的一部分，可能带凭据），返回副本；nil 原样。

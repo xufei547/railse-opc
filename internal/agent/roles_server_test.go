@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -555,5 +556,76 @@ func TestForbidInsideSubstitutionBeatsTrust(t *testing.T) {
 	resp := send(t, env, preToolUse(env.repo, "bash <<EOF\ngit push origin main\nEOF", "bypassPermissions", "toolu_h"))
 	if resp.Decision != "ask" || !strings.Contains(resp.Reason, "含无法检查的子命令") {
 		t.Fatalf("PreToolUse 应回 ask: %+v", resp)
+	}
+}
+
+// 越界（含 roles.yaml 有误）的去向，逐格核对：来源 × hub（没有 / 不可达 / 可达）× 暂停与否。
+// 能强制问人的：Claude PreToolUse 回 ask（终端确认框）；Claude PermissionRequest 与 Codex 的钩子只在 CLI 本来就要问人时触发，
+// 交回终端就是 CLI 自己的确认框，hub 可达时由手机定。Gemini 的钩子交回终端等于继续执行（yolo、headless 下直接跑），
+// 所以一律 deny。任何格都不许 allow。
+func TestBeyondRoleRoutingTable(t *testing.T) {
+	type hubMode string
+	const (
+		noHub       hubMode = "none"
+		unreachable hubMode = "unreachable"
+		reachable   hubMode = "reachable"
+	)
+	decider := map[hubMode]Decider{
+		noHub: LocalDecider{},
+		unreachable: deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
+			return Outcome{Action: "passthrough", DecidedBy: hubUnreachable, Reason: "连不上 hub，交回终端处理"}, nil
+		}),
+		reachable: deciderFunc(func(ctx context.Context, pr PendingRequest) (Outcome, error) {
+			return Outcome{Action: "deny", DecidedBy: "user"}, nil
+		}),
+	}
+	for _, broken := range []bool{false, true} {
+		for _, hm := range []hubMode{noHub, unreachable, reachable} {
+			for _, paused := range []bool{false, true} {
+				env := startServer(t, decider[hm], nil)
+				role, cmd := "开发", "git push origin main"
+				if broken {
+					writeRoles(t, env.cfg.RolesPath, "version: 1\nroles:\n  - name: a\n    ceiling: hgih\n")
+					role, cmd = "", "touch a"
+				} else {
+					rolesFor(t, env, "")
+				}
+				if paused {
+					roundTrip(t, env.cfg.SocketPath, control("pause"))
+				}
+				for _, src := range []string{"claude-pre", "claude-pr", "codex", "gemini"} {
+					var r proto.Request
+					switch src {
+					case "claude-pre":
+						r = preToolUse(env.repo, cmd, "bypassPermissions", "toolu_x")
+					case "claude-pr":
+						r = permission(env.repo, cmd)
+						r.Source = proto.SourcePermissionRequest
+					default:
+						r = permission(env.repo, cmd)
+						r.Session.Tool = src
+					}
+					resp := send(t, env, withRole(r, role))
+					cell := fmt.Sprintf("broken=%v hub=%s paused=%v %s", broken, hm, paused, src)
+					var want string
+					switch {
+					case src == "gemini":
+						want = "deny"
+					case src == "claude-pre":
+						want = "ask"
+					case hm == reachable:
+						want = "deny" // 手机上拒了
+					default:
+						want = "passthrough" // CLI 自己的确认框
+					}
+					if resp.Decision != want {
+						t.Errorf("%s: 想要 %s，得到 %+v", cell, want, resp)
+					}
+					if src == "gemini" && !strings.Contains(resp.Reason, "Gemini 无法在这里问人") {
+						t.Errorf("%s: Gemini 的拒绝理由要写明: %q", cell, resp.Reason)
+					}
+				}
+			}
+		}
 	}
 }
