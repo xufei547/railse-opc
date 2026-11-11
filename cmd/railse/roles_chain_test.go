@@ -14,6 +14,7 @@ import (
 
 	"github.com/xufei547/railse-opc/internal/agent"
 	"github.com/xufei547/railse-opc/internal/hookclient"
+	"github.com/xufei547/railse-opc/internal/i18n"
 	"github.com/xufei547/railse-opc/internal/proto"
 )
 
@@ -441,6 +442,28 @@ func TestHookEnabledButUnreachable(t *testing.T) {
 	os.MkdirAll(enrolled, 0o700)
 	os.WriteFile(filepath.Join(enrolled, "machine.json"), []byte("{}"), 0o600)
 	try("接入过 hub 的", filepath.Join(enrolled, "agent.sock"), want)
+	// 纯本地用户正常停掉守护进程：socket 没了，但留着 roles.yaml，照样算启用
+	local := filepath.Join(base, "local")
+	os.MkdirAll(local, 0o700)
+	os.WriteFile(filepath.Join(local, "roles.yaml"), []byte("version: 1\nroles: []\n"), 0o600)
+	try("只留着 roles.yaml", filepath.Join(local, "agent.sock"), want)
+	// 理由写清三件事：守护进程没在运行；恢复用 railse agent run 或 railse setup autostart；彻底停用要卸掉钩子
+	for _, cli := range []string{"claude-pre", "gemini"} {
+		stdin, ad := chainInput(t, cli, repo, "git push origin main")
+		out, _, _ := runHookWith(t, stdin, ad, "--socket", filepath.Join(local, "agent.sock"))
+		for _, part := range []string{"守护进程没在运行", "railse agent run", "railse setup autostart", "railse hook", "只停服务不算停用"} {
+			if !strings.Contains(out, part) {
+				t.Errorf("%s 的理由应提到 %q: %q", cli, part, out)
+			}
+		}
+	}
+	i18n.Set(i18n.EN)
+	stdin, ad := chainInput(t, "claude-pre", repo, "git push origin main")
+	out, _, _ := runHookWith(t, stdin, ad, "--socket", filepath.Join(local, "agent.sock"))
+	i18n.Set(i18n.ZH)
+	if hasCJK(out) || !strings.Contains(out, "railse agent run") {
+		t.Errorf("英文理由: %q", out)
+	}
 	stale := filepath.Join(base, "stale")
 	os.MkdirAll(stale, 0o700)
 	os.WriteFile(filepath.Join(stale, "agent.sock"), nil, 0o600) // 残留的 socket 文件（守护进程崩溃后留下的）

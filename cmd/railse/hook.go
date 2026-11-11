@@ -198,7 +198,10 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 			// 这台机器没启用 Railse（守护进程目录不在，或从没运行过）：0.2.3 的现状，交回终端（没装守护进程的人不该被卡住）
 			return passthrough(stderr, err.Error())
 		}
-		// 启用了却连不上（接入过 hub、或 socket 残留着）：可能是守护进程挂了，也可能是有人让钩子连不上，同样拿不到结论
+		if isDialError(err) {
+			// 启用了却连不上（有角色文件、接入过 hub、或 socket 残留着）：守护进程停了或挂了，也可能是有人让钩子连不上
+			return daemonDown(stdout, stderr, ad, in, err.Error())
+		}
 		return noVerdict(stdout, stderr, ad, in, err.Error())
 	}
 	switch resp.Decision {
@@ -254,18 +257,40 @@ func rolesFileNear(socket string) bool {
 	return !errors.Is(err, os.ErrNotExist)
 }
 
-// enabledHere 报告 socket 所在的守护进程目录像是启用过的：有 machine.json（接入过 hub），或 socket 文件还在（守护进程正常退出时
-// 会删掉它，留着多半是崩溃或被杀）。目录不在、或只有别的文件时按没启用。
+// enabledHere 报告 socket 所在的守护进程目录像是启用过的：有 roles.yaml（配过角色）、machine.json（接入过 hub），或 socket 文件
+// 还在（守护进程正常退出时会删掉它，留着多半是崩溃或被杀）。目录不在、或只有别的文件时按没启用。
 func enabledHere(socket string) bool {
 	if socket == "" {
 		return false
 	}
-	for _, p := range []string{filepath.Join(filepath.Dir(socket), "machine.json"), socket} {
+	dir := filepath.Dir(socket)
+	for _, p := range []string{filepath.Join(dir, "roles.yaml"), filepath.Join(dir, "machine.json"), socket} {
 		if _, err := os.Lstat(p); err == nil {
 			return true
 		}
 	}
 	return false
+}
+
+// daemonDownTail 是守护进程连不上时理由的后半句：怎么恢复、怎么彻底停用。
+const daemonDownTail = "要恢复，运行 railse agent run，或 railse setup autostart 开机自启；要彻底停用 Railse，删掉各 CLI 配置里命令是 railse hook … 的钩子条目（见 docs/setup.md 的“卸载”），只停服务不算停用"
+
+// daemonDown 处理启用了 Railse、守护进程却连不上的审批：理由写清守护进程没在运行、怎么恢复、怎么彻底停用（只停服务不算停用：
+// 钩子还在，就当作有人让它连不上）。Claude PreToolUse 回 ask，Gemini 拒，其余交回（同 noVerdict）。
+func daemonDown(stdout, stderr io.Writer, ad adapter.Adapter, in adapter.Input, why string) int {
+	fmt.Fprintln(stderr, "railse hook: "+why)
+	if in.Source == proto.SourcePreToolUse && (in.ToolName == "WebSearch" || strings.HasPrefix(in.ToolName, "mcp__")) && !rolesFileNear(currentHookSocket) {
+		return passthrough(stderr, why)
+	}
+	switch {
+	case in.Source == proto.SourcePreToolUse:
+		return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: "ask",
+			Reason: i18n.T("Railse 守护进程没在运行，这次要你亲自确认。") + i18n.T(daemonDownTail)}))
+	case in.Session.Tool == "gemini":
+		return writeOutput(stdout, ad.Render(adapter.Decision{Action: "deny",
+			Reason: i18n.T("Railse 守护进程没在运行，Gemini 无法在这里问人，这次不执行。") + i18n.T(daemonDownTail)}))
+	}
+	return passthrough(stderr, why)
 }
 
 // isDialError 判断是不是连不上守护进程（socket 不在、没人监听、没权限）：这一类保持 0.2.3 的交回终端。
