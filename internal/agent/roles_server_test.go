@@ -769,7 +769,9 @@ func TestTrustNeverCoversControlPlane(t *testing.T) {
 }
 
 // proc 是测试里的一个进程。
-func proc(pid int, start, name string) proto.Proc { return proto.Proc{PID: pid, Start: start, Name: name} }
+func proc(pid int, start, name string) proto.Proc {
+	return proto.Proc{PID: pid, Start: start, Name: name}
+}
 
 // 嵌套会话继承上层会话的角色约束（看进程树，不看环境变量）：取更严的一边，角色名显示为自己的，理由注明继承。
 func TestNestedSessionInheritsAncestorRole(t *testing.T) {

@@ -122,7 +122,6 @@ func TestRolesChainRoutingTable(t *testing.T) {
 	}
 }
 
-
 // fakeReplyDaemon 在 sock 上监听，对每个连接读一行后回 reply（原样字节）。
 func fakeReplyDaemon(t *testing.T, reply string) string {
 	t.Helper()
