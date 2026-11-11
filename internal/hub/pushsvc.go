@@ -491,6 +491,9 @@ type pushCopy struct {
 	verbs                                   map[string]string
 	fallbackVerb                            string
 	more                                    func(n int) string // 多题时第一行的后缀，n 是总题数
+	// 正文里的角色行（0.3 起）：role 是有角色时，beyond 是超出角色的边界时（name 为空时用 beyondNoName）。name 已并成一行。
+	role, beyond func(name string) string
+	beyondNoName string
 }
 
 // pushCopies 的 zh 一栏与改造前的字面量一字不差；en 是 README.en.md 语气的短句。
@@ -502,6 +505,9 @@ var pushCopies = map[string]pushCopy{
 			"unknown": "跑一个没见过的命令", "write_in_project": "改项目里的文件", "read": "读文件"},
 		fallbackVerb: "做一件事",
 		more:         func(n int) string { return fmt.Sprintf(" 等 %d 题", n) },
+		role:         func(name string) string { return "角色「" + name + "」" },
+		beyond:       func(name string) string { return "超出角色「" + name + "」的边界" },
+		beyondNoName: "超出角色的边界",
 	},
 	"en": {
 		wants: " wants to ", asking: " is asking you", waitingTerminal: " is waiting for you in the terminal", webhook: "A workflow is waiting for your approval",
@@ -510,6 +516,9 @@ var pushCopies = map[string]pushCopy{
 			"unknown": "run an unfamiliar command", "write_in_project": "edit files in the project", "read": "read files"},
 		fallbackVerb: "do something",
 		more:         func(n int) string { return fmt.Sprintf(" (+%d more)", n-1) },
+		role:         func(name string) string { return `Role "` + name + `"` },
+		beyond:       func(name string) string { return `Beyond the limits of role "` + name + `"` },
+		beyondNoName: "Beyond the limits of its role",
 	},
 }
 
@@ -581,6 +590,7 @@ func (p *pushService) manyMachines() bool {
 //   - permission：标题“<CLI> 要<动词>”（动词按风险，见 pushCopies 的 verbs），正文两行：载荷摘要、“点开批准或拒绝”（摘要为空，如不带网址的搜索时，第一行写工具名）；
 //   - ask：标题“<CLI> 在问你”，正文两行：第一道题的题面（题数大于 1 时加“ 等 N 题”）、“点开回答”；
 //   - question：标题“<CLI> 在终端等你回答”，正文是问题；
+//   - 有角色时（0.3 起）permission、ask 正文在两行之间、question 在问题之后多一行角色（见 roleLine），没有角色时与以前一字不差；
 //   - webhook：标题“工作流等你批准”，正文是来源给的标题。
 //
 // permission、ask、question 的标题有项目时追加“ · 项目”，w.Many 时再追加“ · 机器名”（去掉 .local），超长的砍法见 pushTitle。
@@ -600,19 +610,39 @@ func pushMessage(r store.Request, w pushWho, lang string) ([]byte, error) {
 		if summary == "" {
 			summary = clean(r.ToolName, pushSummaryLen)
 		}
-		body = joinNonEmpty("\n", summary, c.tapApprove)
+		body = joinNonEmpty("\n", summary, roleLine(r, c), c.tapApprove)
 	case "ask":
 		title = pushTitle(cliName(w.Tool)+c.asking, w.Project, machine)
-		body = joinNonEmpty("\n", askSummary(r.Ask, lang), c.tapAnswer)
+		body = joinNonEmpty("\n", askSummary(r.Ask, lang), roleLine(r, c), c.tapAnswer)
 	case "question":
 		title = pushTitle(cliName(w.Tool)+c.waitingTerminal, w.Project, machine)
-		body = clean(r.Title, pushBodyLen)
+		// 角色行放在问题之后；问题先截短，给角色行留出位置（编码超限时 encodePushPayload 再从尾部缩）
+		role, n := roleLine(r, c), pushBodyLen
+		if role != "" {
+			n -= utf8.RuneCountInString(role) + 1
+		}
+		body = joinNonEmpty("\n", clean(r.Title, n), role)
 	default:
 		title = c.webhook
 		body = clean(r.Title, pushBodyLen)
 	}
 	m := pushPayload{ID: r.ID, Kind: r.Kind, Title: truncate(title, pushTitleLen), Body: truncate(body, pushBodyLen), URL: "/r/" + url.PathEscape(r.ID)}
 	return encodePushPayload(m, push.MaxPlaintext)
+}
+
+// roleLine 是推送正文里的角色行（0.3 起）：越界时“超出角色「写作」的边界”，有角色时“角色「写作」”，都没有为空（正文与以前一字不差）。
+// 角色名先并成一行、截到 maxRoleNameLen 个字符。
+func roleLine(r store.Request, c pushCopy) string {
+	name := clean(r.Role, maxRoleNameLen)
+	switch {
+	case r.BeyondRole && name == "":
+		return c.beyondNoName
+	case r.BeyondRole:
+		return c.beyond(name)
+	case name != "":
+		return c.role(name)
+	}
+	return ""
 }
 
 // pushTitle 拼“head · 项目 · 机器名”（空的段连同分隔符省掉），至多 pushTitleLen 个字符：超了先把机器名从尾部截短到放得下
