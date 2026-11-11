@@ -505,4 +505,12 @@ export const en: Record<string, string> = {
   角色: 'Role',
   'hub 版本过旧，不支持总台。升级 hub 后刷新本页。': 'This hub is too old for the desk. Upgrade the hub, then refresh this page.',
   '还有更早的待批没显示。按机器查看：': "Older pending requests aren't shown. View by machine: ",
+  // format.ts：角色相关的决定来源（0.3 起）
+  '角色「{role}」禁用': 'Forbidden by role "{role}"',
+  角色文件有误: 'Roles file is broken',
+  '触及 Railse 自己的配置': "Touches Railse's own config",
+  '超出角色「{role}」的边界，这里问不到你，已拒绝': 'Beyond role "{role}"\'s boundary and there was no one to ask here, so it was denied',
+  '角色「{role}」禁用了这个操作': 'Role "{role}" forbids this',
+  '角色文件有误，暂按只读把关，已拒绝': 'The roles file is broken, so only reads pass; denied',
+  '这会改动 Railse 自己的配置，必须你来定；这里问不到你，已拒绝': "This changes Railse's own config and needs you; there was no one to ask here, so it was denied",
 }

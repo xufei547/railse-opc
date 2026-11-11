@@ -69,7 +69,10 @@ const html = (node: React.ReactNode, url = '/') => renderToStaticMarkup(<MemoryR
 const writer = row({
   name: '写作', note: '只改文档', ceiling: 'write_in_project', forbid_count: 2, trust_max_mins: 120, dirs: ['~/dev/*/docs'],
   waiting: 1, trusts_active: 1, denied: 3, auto_allowed: 41, sessions: 2,
-  recent: [{ id: 'r9', tool_name: 'Bash', summary: 'git push origin main', risk: 'outward', state: 'denied', beyond_role: true, at: '2026-10-23T10:00:00.000000000Z' }],
+  recent: [
+    { id: 'r9', tool_name: 'Bash', summary: 'git push origin main', risk: 'outward', state: 'denied', decided_by: 'user', beyond_role: true, at: '2026-10-23T10:00:00.000000000Z' },
+    { id: 'r8', tool_name: 'Bash', summary: 'fly deploy', risk: 'outward', state: 'auto_denied', decided_by: 'role:写作', beyond_role: false, at: '2026-10-23T09:00:00.000000000Z' },
+  ],
 })
 
 describe('总台的角色卡', () => {
@@ -87,6 +90,9 @@ describe('总台的角色卡', () => {
     expect(h).toContain('<code class="mono">git push origin main</code>')
     expect(h).toContain('已拒绝')
     expect(h).toContain('<span class="tag high">超出边界</span>')
+    // 角色来源的说法与历史、请求页一致，不露 role:写作
+    expect(h).toContain('角色「写作」禁用 · ')
+    expect(h).not.toContain('role:')
   })
   it('等我为 0 时不是链接；离线的机器卡片变灰；未分配没有边界一行', () => {
     const h = html(<RoleCard row={row({ online: false })} />)
@@ -123,9 +129,10 @@ describe('总台页', () => {
   })
   it('英文没有中文', () => {
     setLang('en')
-    const h = html(<DeskBody desk={{ window_hours: 24, roles: [{ ...writer, name: 'writer', note: 'docs only' }], unassigned: [row()] }} />)
+    const h = html(<DeskBody desk={{ window_hours: 24, roles: [{ ...writer, name: 'writer', note: 'docs only', recent: writer.recent.map((x) => ({ ...x, decided_by: x.decided_by === 'role:写作' ? 'role:writer' : x.decided_by })) }], unassigned: [row()] }} />)
     expect(h).toContain('Up to Write in project · 2 forbidden · Trust up to 2 hours')
     expect(h).toContain('Unassigned')
+    expect(h).toContain('Forbidden by role &quot;writer&quot; · ')
     expect(h).not.toMatch(/[　-〿一-鿿＀-￯]/)
   })
 })

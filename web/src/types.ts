@@ -204,6 +204,8 @@ export interface DeskRecent {
   summary: string
   risk: string
   state: RequestState
+  /** 决定来源（同请求视图的 decided_by）；老 hub 没有这个键。 */
+  decided_by?: string
   beyond_role: boolean
   at: string
 }
