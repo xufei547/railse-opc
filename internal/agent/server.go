@@ -319,10 +319,14 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			cancel(errHookGone)
 		}()
 		// 祖先链用连接对端的进程凭据自己重建，不信请求里自报的；取不到凭据时才退回用自报的，并在审计里标注
-		if chain, ok := peerAncestry(conn); ok {
+		switch chain, ok := peerAncestry(conn); {
+		case ok:
 			req.Ancestors, req.AncestrySource = chain, ancestryPeer
-		} else if len(req.Ancestors) > 0 {
+		case trustSelfReported && len(req.Ancestors) > 0:
 			req.AncestrySource = ancestrySelfReported
+		default:
+			// 取不到凭据：不信自报的（自报一条没有上层的链就能放宽），该会话已有的约束照旧保留，见 handlePermission
+			req.Ancestors, req.AncestrySource = nil, ancestryUnverified
 		}
 		handle := s.handlePermission
 		if kind == "ask" {
@@ -339,7 +343,8 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			s.reply(conn, kind, proto.EventAck{V: proto.Version, OK: false, Error: err.Error()})
 			return
 		}
-		s.reply(conn, kind, s.handleEvent(ev))
+		chain, _ := peerAncestry(conn) // 事件也按对端凭据重建祖先链，解析继承来的角色（取不到就不带）
+		s.reply(conn, kind, s.handleEvent(ev, chain))
 	case "control":
 		var c proto.Control
 		if err := proto.Decode(line, &c); err != nil {
@@ -388,7 +393,11 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID, ProtectedDirs: s.protected}
 	pctx.Role = s.sessionRole(&req.Session, pctx.Root(), cwd, true)
 	pctx.Role = s.inheritRole(&req, pctx.Role)
-	s.recordEffective(req.Session, pctx.Role)
+	if req.AncestrySource != ancestryUnverified {
+		s.recordEffective(req.Session, pctx.Role) // 核实不了祖先链时不动已记下的（含继承的）生效角色
+	} else if name, ok := s.effectiveName(req.Session); ok {
+		req.Session.Role = name
+	}
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx, req.Session
 }
 
@@ -427,12 +436,6 @@ func (s *Server) sessionRole(sess *proto.Session, root, cwd string, pin bool) *p
 		role = s.pinRole(*sess, role, st.Set, pin)
 	}
 	sess.Role = roleName(role)
-	// 答题与事件（pin 为假）没有祖先链：这个会话审批时继承过上层角色的，显示同一个生效角色
-	if !pin && st.Err == nil && st.Exists {
-		if name, ok := s.effectiveName(*sess); ok {
-			sess.Role = name
-		}
-	}
 	return role
 }
 
@@ -516,21 +519,21 @@ func (s *Server) effectiveName(sess proto.Session) (string, bool) {
 	return p.name, ok
 }
 
-// pruneSessions 清掉不在了的会话：会话的 CLI 进程（进程号加启动时间对不上）已经退出的，连同它的钉住、生效角色与继承记录；
+// pruneSessions 清掉不在了的会话：会话的 CLI 进程是已知 CLI（见 knownCLI）且已经退出（进程号加启动时间对不上）的，连同它的钉住、生效角色与继承记录；
 // 不知道 CLI 进程的条目与取不到进程信息的，超过 pinTTL 没用到才清。到期清理循环每分钟调一次。
 func (s *Server) pruneSessions() {
 	now := time.Now()
 	s.pinMu.Lock()
 	defer s.pinMu.Unlock()
 	for key, p := range s.sessionProc {
-		if !procAlive(p) {
+		if knownCLI(p) && !procAlive(p) {
 			delete(s.sessionProc, key)
 			delete(s.pinned, key)
 			delete(s.effective, key)
 		}
 	}
 	for k, rec := range s.procRoles {
-		if !procAlive(rec.proc) || now.Sub(rec.at) > pinTTL {
+		if (knownCLI(rec.proc) && !procAlive(rec.proc)) || now.Sub(rec.at) > pinTTL {
 			delete(s.procRoles, k)
 		}
 	}
@@ -557,18 +560,61 @@ type procRole struct {
 // hookShells 是钩子与 CLI 之间常见的中间进程：CLI 多经 sh -c 起钩子，直接父进程是一次性的 shell，不是 CLI 本身。
 var hookShells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "fish": true, "ksh": true, "tcsh": true, "csh": true, "env": true}
 
-// cliIndex 是祖先链里会话的 CLI 进程：第一个不是 shell 的；名字都取不到时按直接父进程。
+// ancestorRolesLocked 是祖先链里、在会话自己的 CLI（chain[idx]）之上记下的角色（仍在文件里的）。调用方持 pinMu。
+func (s *Server) ancestorRolesLocked(chain []proto.Proc, idx int, set policy.RoleSet) []*policy.Role {
+	var ups []*policy.Role
+	for _, p := range chain[idx+1:] {
+		rec, ok := s.procRoles[procKey(p)]
+		if !ok {
+			continue
+		}
+		for _, n := range rec.names {
+			if r := set.Find(n); r != nil {
+				ups = append(ups, r)
+			}
+		}
+	}
+	return ups
+}
+
+// inheritedName 只读地解析会话含继承的生效角色名（答题与事件用：不建立钉住、不记录）。会话审批时已记下生效角色的读那份；
+// 否则从这次重建的祖先链里找上层记录；都没有返回 own 的名字。
+func (s *Server) inheritedName(sess proto.Session, chain []proto.Proc, own *policy.Role) string {
+	if name, ok := s.effectiveName(sess); ok {
+		return name
+	}
+	st := s.roles.Current()
+	if len(chain) == 0 || st.Err != nil || !st.Exists {
+		return roleName(own)
+	}
+	s.pinMu.Lock()
+	ups := s.ancestorRolesLocked(chain, cliIndex(chain), st.Set)
+	s.pinMu.Unlock()
+	return roleName(policy.CombineRoles(own, ups))
+}
+
+// cliIndex 是祖先链里会话的 CLI 进程：第一个不是 shell、不是包装表里的启动器（timeout、env、nice、nohup、command、exec 等，
+// 见 policy.IsWrapperCommand）、也不是 railse 自己的进程；名字都取不到时按直接父进程。钩子经 timeout 10 railse hook … 起来时，
+// 最近的非 shell 进程是短命的启动器，拿它当 CLI 会让嵌套会话对不上、清理时误删真正 CLI 的记录。
 func cliIndex(chain []proto.Proc) int {
 	for i, p := range chain {
 		if p.Name == "" {
 			return i
 		}
-		if !hookShells[filepath.Base(p.Name)] {
+		n := filepath.Base(p.Name)
+		if !hookShells[n] && !policy.IsWrapperCommand(n) && n != "railse" {
 			return i
 		}
 	}
 	return 0
 }
+
+// knownCLINames 是能按进程退出清理记录的进程名：各家 CLI 本身与它们的 node 宿主。别的名字（认不出的启动器等）拿不准是不是
+// 会话本身，只靠 TTL 清，免得一个短命进程退出就删掉活着的会话的钉住。
+var knownCLINames = map[string]bool{"claude": true, "codex": true, "gemini": true, "node": true}
+
+// knownCLI 报告进程是不是已知的 CLI（见 knownCLINames）。
+func knownCLI(p proto.Proc) bool { return knownCLINames[strings.ToLower(filepath.Base(p.Name))] }
 
 func procKey(p proto.Proc) string { return fmt.Sprintf("%d@%s", p.PID, p.Start) }
 
@@ -590,19 +636,7 @@ func (s *Server) inheritRole(req *proto.Request, role *policy.Role) *policy.Role
 	now := time.Now()
 	s.pinMu.Lock()
 	defer s.pinMu.Unlock()
-	var ups []*policy.Role
-	for _, p := range chain[idx+1:] {
-		rec, ok := s.procRoles[procKey(p)]
-		if !ok {
-			continue
-		}
-		for _, n := range rec.names {
-			if r := st.Set.Find(n); r != nil {
-				ups = append(ups, r)
-			}
-		}
-	}
-	eff := policy.CombineRoles(role, ups)
+	eff := policy.CombineRoles(role, s.ancestorRolesLocked(chain, idx, st.Set))
 	if eff != nil && self.Start != "" {
 		names := append([]string{}, eff.Inherited()...)
 		if role != nil {
@@ -728,6 +762,10 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 	id := NewID()
 	reported, d, pctx, sess := s.evaluate(req)
 	req.Session = sess
+	// 取不到对端凭据、又有角色文件：判断不了有没有上层会话的角色，这条按越界处理（拒绝照旧拒绝）
+	if req.AncestrySource == ancestryUnverified && d.Action != policy.ActionDeny && s.roles.Current().Exists {
+		d.Action, d.BeyondRole, d.Reason = policy.ActionAsk, true, unverifiedReason
+	}
 	// 0.3 新接进 PreToolUse 的工具（MCP、WebSearch）只为角色而来：会话没有生效角色（没有角色文件，或未分配且没继承）时
 	// 一律忽略，与 0.2.3 完全相同（那时钩子根本不触发）：不写审计、不送 hub、钩子不输出
 	if pctx.Role == nil && req.Source == proto.SourcePreToolUse && roleOnlyPreToolUse(req.ToolName) {
@@ -737,6 +775,9 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 	redacted := redact.Payload(reported)
 	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "permission", Session: req.Session, ToolName: req.ToolName, Payload: &redacted, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason,
 		Source: req.Source, PermissionMode: req.PermissionMode, ToolUseID: req.ToolUseID, Role: d.Role, BeyondRole: d.BeyondRole, Ancestry: req.AncestrySource}
+	if len(req.Ancestors) == 0 && req.AncestrySource != ancestryUnverified {
+		entry.Ancestry = ""
+	}
 	resp := proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason}
 	switch d.Action {
 	case policy.ActionAllow:
@@ -895,7 +936,10 @@ func (s *Server) handleAsk(ctx context.Context, req proto.Request) proto.Respons
 	// 答题不经判定，只带上生效的角色名（设计 §3.4）；项目根随上报帧带给 hub，推送标题与收件箱靠它显示项目名
 	cwd := CleanCwd(req.Session.Cwd)
 	root := s.projectRootFor(cwd)
-	s.sessionRole(&req.Session, policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir}.Root(), cwd, false)
+	own := s.sessionRole(&req.Session, policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir}.Root(), cwd, false)
+	if s.roles.Current().Exists {
+		req.Session.Role = s.inheritedName(req.Session, req.Ancestors, own) // 含继承（子会话的第一个调用可能就是答题）
+	}
 	red := redactAsk(req.Ask)
 	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "ask", Session: req.Session, ToolName: proto.AskToolName, Ask: red}
 	resp := proto.Response{V: proto.Version, RequestID: id}
@@ -1017,7 +1061,7 @@ func (s *Server) writeAudit(e AuditEntry) {
 // handleEvent 记录只展示的事件。同一会话有未完成的审批或答题时压掉 question，避免一件事进两条。
 // 消息先按文本语境脱敏再写审计：Gemini 的 ToolPermission 通知会拼进完整命令，
 // last_assistant_message、prompt_response 也可能原样带出凭据。
-func (s *Server) handleEvent(ev proto.Event) proto.EventAck {
+func (s *Server) handleEvent(ev proto.Event, chain []proto.Proc) proto.EventAck {
 	switch ev.Kind {
 	case "tool_done":
 		// 工具已经跑完：同一调用还挂着的审批不用等了。按会话 + 工具 + 载荷对上（PermissionRequest 没有 tool_use_id）。
@@ -1038,10 +1082,14 @@ func (s *Server) handleEvent(ev proto.Event) proto.EventAck {
 	}
 	// 事件只带上生效的角色名（设计 §3.4）
 	cwd := CleanCwd(ev.Session.Cwd)
+	var own *policy.Role
 	if filepath.IsAbs(cwd) {
-		s.sessionRole(&ev.Session, policy.Context{ProjectRoot: s.projectRootFor(cwd), HomeDir: s.cfg.HomeDir}.Root(), cwd, false)
+		own = s.sessionRole(&ev.Session, policy.Context{ProjectRoot: s.projectRootFor(cwd), HomeDir: s.cfg.HomeDir}.Root(), cwd, false)
 	} else {
-		s.sessionRole(&ev.Session, "", "", false)
+		own = s.sessionRole(&ev.Session, "", "", false)
+	}
+	if s.roles.Current().Exists {
+		ev.Session.Role = s.inheritedName(ev.Session, chain, own)
 	}
 	state := "recorded"
 	if ev.Kind == "question" && s.pending.HasSession(ev.Session.CLISessionID) {

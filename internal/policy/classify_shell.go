@@ -2,7 +2,6 @@ package policy
 
 import (
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -149,31 +148,26 @@ func gitSubcommand(argv []string, flags []wordFlags, cwd string, ctx Context) st
 func classifySegment(seg segment, cwd string, ctx Context) Risk {
 	argv, flags := commandWords(seg)
 	risk := classifyWords(seg, argv, flags, cwd, ctx)
-	// 包装（sudo、xargs、timeout、command、exec 等）里跑的命令另算一遍，取较高的：包装自身的档位不能把内层的盖住
-	// （command git push 不能只算 command 的 unknown）。env -C、sudo -D 改了内层的工作目录，内层按改后的目录算；
-	// 包装带了算不清后果的选项，整段至少 unknown
-	for _, deep := range []bool{false, true} {
-		inner, info := peel(seg.argv, deep)
-		if info.opaque || info.split {
+	// 各层包装自身的风险与最内层命令的风险取最大（统一的遍历器，见 walkLayers）：command sudo touch 含 sudo 的 destructive，
+	// command git push 不能只算 command 的 unknown。env -C、sudo -D 改了内层的工作目录，内层按改后的目录算；
+	// 目录算不清时相对路径与“改工作目录”的写一律按项目外，至少 unknown；包装带了算不清后果的选项，至少 unknown
+	ls := walkLayers(seg.argv, seg.argvFlags, cwd, false, ctx)
+	for _, l := range ls {
+		if l.wrapper != "" {
+			risk = maxRisk(risk, wrapperRisk(l, ctx))
+		}
+	}
+	if in := innermost(ls); len(ls) > 1 && len(in.argv) > 0 && in.wrapper == "" {
+		dir := in.cwd
+		if in.lost {
 			risk = maxRisk(risk, RiskUnknown)
+			dir = ""
 		}
-		dir, ok := applyChdir(info, cwd, ctx)
-		if !ok {
-			risk = maxRisk(risk, RiskUnknown)
-			dir = "" // 不知道在哪：相对路径与“改工作目录”的写一律按项目外
+		flags := in.flags
+		if len(flags) != len(in.argv) {
+			flags = make([]wordFlags, len(in.argv))
 		}
-		if len(info.chdir) == 0 && (!deep || len(inner) == len(argv) && !info.split) {
-			continue // 没剥出新东西、也没改目录：上面已按原目录算过
-		}
-		var innerFlags []wordFlags
-		if !info.split {
-			innerFlags = seg.argvFlags[len(seg.argv)-len(inner):]
-		} else {
-			innerFlags = make([]wordFlags, len(inner))
-		}
-		if len(inner) > 0 {
-			risk = maxRisk(risk, classifyArgvWords(inner, innerFlags, dir, ctx, len(info.chdir) > 0))
-		}
+		risk = maxRisk(risk, classifyArgvWords(in.argv, flags, dir, ctx, dir != cwd))
 	}
 	risk = maxRisk(risk, classifyRedirects(seg, argv, cwd, ctx))
 	// 工作目录（跟踪 cd 之后，或载荷的 Cwd）在项目外时，按项目内改动定级的段一律按项目外：
@@ -462,13 +456,6 @@ func nextCwd(seg segment, cwd string, ctx Context) (string, bool) {
 	return resolvePath(args[0], cwd, ctx.HomeDir), true
 }
 
-// stripWrappers 去掉开头的环境变量赋值和 env、time、nohup、nice、caffeinate 这类包装（按 basename 认，/usr/bin/env 等同 env），
-// 连同它们的选项。只剩一个 token 时不再剥，避免把 "env" 本身剥成空。包装的副作用（env -C 改目录等）见 peel。
-func stripWrappers(argv []string) []string {
-	out, _ := peel(argv, false)
-	return out
-}
-
 // deepWrappers 是只在“看穿”时剥掉的包装：定级时它们自身的档位照算（sudo、doas 按 destructive，xargs 不在名单里按 unknown），
 // 内层另算后取较高的（见 classifySegment）；禁用清单、deny 规则、改 Railse 设置、sh -c 识别与配置目录检查要看它们里面跑的是什么。
 var deepWrappers = map[string]bool{"sudo": true, "doas": true, "xargs": true, "timeout": true, "command": true, "exec": true}
@@ -496,98 +483,6 @@ var wrapperOptions = map[string]wrapperOpts{
 	"timeout": {flags: []string{"--foreground", "-v", "--verbose", "--preserve-status"}, args: []string{"-s", "--signal", "-k", "--kill-after"}, durationArg: true},
 	"command": {flags: []string{"-p", "-v", "-V"}},
 	"exec":    {flags: []string{"-c", "-l"}, args: []string{"-a"}},
-}
-
-// peelInfo 是剥包装时看到的副作用：split 表示 env -S 拆出了新词（剩下的不再是 argv 的后缀）；chdir 是依次改过的工作目录
-// （原文，相对的按当时的目录解析）；opaque 表示有认不出、或改了根目录、输出文件之类后果算不清的选项。
-type peelInfo struct {
-	split  bool
-	chdir  []string
-	opaque bool
-}
-
-// deepArgv 是一段剥掉全部包装（含 sudo、xargs、timeout 等，见 deepWrappers）之后的命令词，供 deny、ask 匹配与“看穿”用。
-func deepArgv(seg segment) []string {
-	out, _ := peel(seg.argv, true)
-	return out
-}
-
-// peelWrappers 同 peel，只报告是否拆过词（老调用方用）。
-func peelWrappers(argv []string, deep bool) ([]string, bool) {
-	out, info := peel(argv, deep)
-	return out, info.split
-}
-
-// peel 剥掉开头的赋值与包装（deep 为真时连 deepWrappers 一起）及包装的选项，返回剩下的命令词与看到的副作用。
-// env -S（--split-string）的串按 shell 规则拆成词接在前面。timeout 剥掉选项后还要跳过时长。
-func peel(argv []string, deep bool) (out []string, info peelInfo) {
-	for len(argv) > 1 {
-		a := argv[0]
-		if isEnvAssignment(a) {
-			argv = argv[1:]
-			continue
-		}
-		name := filepath.Base(a)
-		spec, known := wrapperOptions[name]
-		if !known || (deepWrappers[name] && !deep) {
-			return argv, info
-		}
-		rest := argv[1:]
-		for len(rest) > 0 && strings.HasPrefix(rest[0], "-") && rest[0] != "-" {
-			opt := rest[0]
-			rest = rest[1:]
-			if opt == "--" {
-				break
-			}
-			key, val, hasVal := strings.Cut(opt, "=")
-			takes := slices.Contains(spec.args, key)
-			if !takes && len(key) > 2 && key[1] != '-' && slices.Contains(spec.args, key[:2]) {
-				key, val, hasVal, takes = key[:2], key[2:], true, true // -uNAME、-n5 这类连写
-			}
-			switch {
-			case takes:
-				if !hasVal && len(rest) > 0 {
-					val, rest = rest[0], rest[1:]
-				}
-			case slices.Contains(spec.flags, key) && !hasVal:
-			case spec.numeric && len(key) > 1 && strings.Trim(key[1:], "0123456789") == "":
-			default:
-				info.opaque = true // 认不出的选项：不知道它对内层做了什么
-				continue
-			}
-			if slices.Contains(spec.opaque, key) {
-				info.opaque = true
-			}
-			if slices.Contains(spec.chdir, key) {
-				info.chdir = append(info.chdir, val)
-			}
-			if name == "env" && (key == "-S" || key == "--split-string") {
-				// 串里是命令（可带赋值）：拆成词，接在剩下的前面再接着剥
-				rest = append(append([]string(nil), parseSegment(val).argv...), rest...)
-				info.split = true
-				break
-			}
-		}
-		if spec.durationArg && len(rest) > 0 {
-			rest = rest[1:] // 时长
-		}
-		if len(rest) == 0 {
-			return argv, info
-		}
-		argv = rest
-	}
-	return argv, info
-}
-
-// applyChdir 按 peel 看到的改目录选项算出内层命令的工作目录；目录算不出（含变量、通配，或家目录未知时的 ~）时 ok 为假。
-func applyChdir(info peelInfo, cwd string, ctx Context) (string, bool) {
-	for _, d := range info.chdir {
-		if d == "" || unresolvable(d, ctx.HomeDir) {
-			return cwd, false
-		}
-		cwd = resolvePath(d, cwd, ctx.HomeDir)
-	}
-	return cwd, true
 }
 
 func isEnvAssignment(s string) bool {
@@ -730,7 +625,7 @@ func effectiveSegmentsDepth(command string, depth int) (out []segment, truncated
 	for _, s := range splitSegments(command) {
 		seg := parseSegment(s)
 		out = append(out, seg)
-		argv := deepArgv(seg) // sudo sh -c、timeout 5 bash -c 也看进去
+		argv := innermost(walkLayers(seg.argv, seg.argvFlags, "", false, Context{})).argv // sudo sh -c、timeout 5 bash -c 也看进去
 		if len(argv) == 0 {
 			continue
 		}

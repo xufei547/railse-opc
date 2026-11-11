@@ -21,3 +21,10 @@ func SetPeerAncestryForTest(t interface{ Cleanup(func()) }, fn func(net.Conn) ([
 	peerAncestry = fn
 	t.Cleanup(func() { peerAncestry = old })
 }
+
+// SetTrustSelfReportedForTest 仅供测试用：取不到对端凭据时用请求里自报的祖先链（测试靠它注入祖先链），测试结束时还原。
+func SetTrustSelfReportedForTest(t interface{ Cleanup(func()) }) {
+	old := trustSelfReported
+	trustSelfReported = true
+	t.Cleanup(func() { trustSelfReported = old })
+}
