@@ -1002,6 +1002,12 @@ Switched to a new key and deleted %d push subscriptions. Every phone has to turn
 	// cmd/railse/localhub.go（与 internal/hub/auth.go 的 SetPassword 同步）
 	"密码至少 8 个字符": "The password must be at least 8 characters",
 
+	// cmd/railse/hook.go（noVerdict：审批请求拿不到策略结论）
+	"守护进程回了不认识的决定 %q":                  "the daemon returned a decision it doesn't recognize: %q",
+	"拿不到策略结论（%s），这次要你亲自确认":             "No policy verdict (%s); confirm this one yourself",
+	"拿不到策略结论（%s），Gemini 无法在这里问人，这次不执行": "No policy verdict (%s), and Gemini can't ask a human here; not running it",
+	"钩子输入超过 %d MiB":                    "hook input is over %d MiB",
+
 	// cmd/railse/hook.go（askReason：PreToolUse 回 ask 时确认框里的理由）
 	"已发到手机，也可以在这里直接批": "Sent to your phone; you can also answer here",
 	"%s。%s":          "%s. %s",

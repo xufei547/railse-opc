@@ -310,7 +310,8 @@ Claude Code 用 `AskUserQuestion` 问你选哪个方案时，`PreToolUse` 钩子
 ## 交回终端的两种情况
 
 - **没有 hub 时 ask 一律交回终端。** 引擎答 ask（没有规则命中，如 `git push`、`curl`、`npm install`）时，守护进程立即回“不作决定”，CLI 弹出自己的原生审批框，由你在终端里定；审计记 `passthrough`，`decided_by` 为 `no_hub`。
-- **钩子任何异常都不作决定。** 守护进程没起、socket 连不上、输入损坏、不认识的 CLI、收到 SIGTERM/SIGINT/SIGHUP、内部出错，钩子都是 stdout 为空、退出 0，原因写到 stderr。最坏情况就是回到没装 Railse 时的样子。
+- **钩子异常时多数不作决定。** 守护进程没起、socket 连不上、输入损坏、不认识的 CLI、收到 SIGTERM/SIGINT/SIGHUP、内部出错，钩子都是 stdout 为空、退出 0，原因写到 stderr。最坏情况就是回到没装 Railse 时的样子。
+- **拿不到策略结论时不放过（0.3 起，相对 0.2.3 的有意收紧）。** 守护进程在，但审批请求拿不到结论——编码后超过 1 MiB 发不出去（如在 `git push origin main #` 后面垫一大段注释）、发送或等待中出错、守护进程回了读不懂的东西或不认识的决定、无响应，以及钩子输入超过 4 MiB 读不全——时：Claude 的 `PreToolUse` 回 `ask` 并写明“拿不到策略结论（原因）”，Gemini 的 `BeforeTool` 回 `deny`；Claude 的 `PermissionRequest` 与 Codex 照旧交回（它们本来就在问人）。以前这些情况一律交回，在 auto、bypassPermissions、yolo 下等于放行。守护进程没起、连不上 socket 这一类不变，仍然交回：没装守护进程的人不该被卡住。
 
 ## 冒烟
 

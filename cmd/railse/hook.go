@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -109,6 +112,12 @@ func runHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (code int
 		if err != nil {
 			return passthrough(stderr, err.Error())
 		}
+		if len(raw) >= maxStdin {
+			// 钩子输入超过上限，读不全、解析不了，拿不到策略结论：工具调用前的事件不能就此放过
+			if code, ok := truncatedInput(cli, ad, raw, stdout, stderr); ok {
+				return code
+			}
+		}
 		in, err = ad.Parse(raw)
 		if err != nil {
 			return passthrough(stderr, err.Error())
@@ -182,7 +191,16 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 	}
 	resp, err := awaitReply(ctx, ad, client, req)
 	if err != nil {
-		return passthrough(stderr, err.Error())
+		if isDialError(err) {
+			// 守护进程没起、连不上 socket：0.2.3 的现状，交回终端（没装守护进程的人不该被卡住）
+			return passthrough(stderr, err.Error())
+		}
+		return noVerdict(stdout, stderr, ad, in, err.Error())
+	}
+	switch resp.Decision {
+	case "allow", "deny", "ask", "passthrough":
+	default:
+		return noVerdict(stdout, stderr, ad, in, fmt.Sprintf(i18n.T("守护进程回了不认识的决定 %q"), resp.Decision))
 	}
 	if (resp.Decision == "passthrough" || resp.Decision == "ask") && resp.DecidedBy == "hub_unreachable" && in.Source != "" {
 		fmt.Fprintln(stderr, "railse hook: "+i18n.T("连不上 hub，交回 Claude 自己的确认"))
@@ -198,6 +216,49 @@ func hookPermission(ctx context.Context, ad adapter.Adapter, client hookclient.C
 		}
 	}
 	return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: resp.Decision, Reason: reason}))
+}
+
+// preToolEvent 认出被截断的输入里工具调用前的事件名（Claude 的 PreToolUse、Gemini 的 BeforeTool）。
+var preToolEvent = regexp.MustCompile(`"hook_event_name"\s*:\s*"(PreToolUse|BeforeTool)"`)
+
+// truncatedInput 处理超过 maxStdin 的钩子输入：Claude 的 PreToolUse 回 ask、Gemini 的 BeforeTool 回 deny（见 noVerdict）；
+// 别的事件与 CLI 返回 false，由调用方照旧处理。
+func truncatedInput(cli string, ad adapter.Adapter, raw []byte, stdout, stderr io.Writer) (int, bool) {
+	m := preToolEvent.FindSubmatch(raw)
+	if m == nil {
+		return 0, false
+	}
+	why := fmt.Sprintf(i18n.T("钩子输入超过 %d MiB"), maxStdin>>20)
+	switch {
+	case cli == "claude" && string(m[1]) == "PreToolUse":
+		return noVerdict(stdout, stderr, ad, adapter.Input{Source: proto.SourcePreToolUse}, why), true
+	case cli == "gemini" && string(m[1]) == "BeforeTool":
+		return noVerdict(stdout, stderr, ad, adapter.Input{Session: proto.Session{Tool: "gemini"}}, why), true
+	}
+	return 0, false
+}
+
+// isDialError 判断是不是连不上守护进程（socket 不在、没人监听、没权限）：这一类保持 0.2.3 的交回终端。
+func isDialError(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
+}
+
+// noVerdict 处理审批请求拿不到策略结论（发送失败、超过 1 MiB 发不出去、守护进程回了读不懂的东西、无响应）：
+// Claude 的 PreToolUse 回 ask 并写明原因（终端强制确认），Gemini 回 deny（它的钩子交回终端等于继续执行，问不到人）；
+// Claude 的 PermissionRequest 与 Codex 交回（它们的钩子本来就在 CLI 要问人时才触发，交回去就是 CLI 自己的确认框）。
+// 这是相对 0.2.3 的有意收紧：以前一律交回，在 auto、bypassPermissions、yolo 下等于放行。
+func noVerdict(stdout, stderr io.Writer, ad adapter.Adapter, in adapter.Input, why string) int {
+	fmt.Fprintln(stderr, "railse hook: "+why)
+	switch {
+	case in.Source == proto.SourcePreToolUse:
+		return writeOutput(stdout, ad.Render(adapter.Decision{Source: in.Source, Action: "ask",
+			Reason: fmt.Sprintf(i18n.T("拿不到策略结论（%s），这次要你亲自确认"), why)}))
+	case in.Session.Tool == "gemini":
+		return writeOutput(stdout, ad.Render(adapter.Decision{Action: "deny",
+			Reason: fmt.Sprintf(i18n.T("拿不到策略结论（%s），Gemini 无法在这里问人，这次不执行"), why)}))
+	}
+	return passthrough(stderr, why)
 }
 
 // askReason 把守护进程回的 ask 拼成 Claude 确认框里给人看的一句话（渲染时加 "Railse：" 前缀）：触发段、性质、已发手机。

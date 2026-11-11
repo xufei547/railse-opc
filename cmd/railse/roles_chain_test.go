@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,4 +116,69 @@ func TestRolesChainRoutingTable(t *testing.T) {
 	}
 }
 
-var _ = filepath.Join
+
+// fakeReplyDaemon 在 sock 上监听，对每个连接读一行后回 reply（原样字节）。
+func fakeReplyDaemon(t *testing.T, reply string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "rs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "a.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				bufio.NewReader(c).ReadBytes('\n')
+				c.Write([]byte(reply))
+			}()
+		}
+	}()
+	return sock
+}
+
+// 审批请求拿不到策略结论（超长发不出去、守护进程回了读不懂的东西）：Claude PreToolUse 回 ask 并写明原因，Gemini 拒，
+// Claude PermissionRequest 与 Codex 交回（它们本来就在问人）。守护进程没起、连不上 socket 的保持 0.2.3：一律交回。
+func TestHookNoVerdictFailsClosed(t *testing.T) {
+	sock, repo, _ := startTestAgent(t)
+	huge := "git push origin main #" + strings.Repeat("x", 1<<20+100)
+	want := map[string]string{"claude-pre": "ask", "gemini": "deny", "claude-pr": "pass", "codex": "pass"}
+	check := func(name, sock, cmd string, want map[string]string) {
+		t.Helper()
+		for cli, w := range want {
+			stdin, ad := chainInput(t, cli, repo, cmd)
+			out, _, code := runHookWith(t, stdin, ad, "--socket", sock)
+			if code != 0 || outcomeOf(out) != w {
+				t.Errorf("%s %s: 想要 %s，得到 code=%d %.300q", name, cli, w, code, out)
+			}
+			if w != "pass" && !strings.Contains(out, "拿不到策略结论") {
+				t.Errorf("%s %s: 要写明原因: %.300q", name, cli, out)
+			}
+		}
+	}
+	check("超长载荷", sock, huge, want)
+	check("读不懂的答复", fakeReplyDaemon(t, "{bad json\n"), "git push origin main", want)
+	check("不认识的决定", fakeReplyDaemon(t, `{"v":1,"decision":"maybe"}`+"\n"), "git push origin main", want)
+	// 守护进程没起：0.2.3 的现状，一律交回、什么都不输出
+	none := filepath.Join(t.TempDir(), "none.sock")
+	check("守护进程没起", none, huge, map[string]string{"claude-pre": "pass", "gemini": "pass", "claude-pr": "pass", "codex": "pass"})
+	// 钩子输入超过 4 MiB（读不全、解析不了）：Claude 的 PreToolUse 与 Gemini 照样不放过
+	big := "git push origin main #" + strings.Repeat("y", 5<<20)
+	for cli, w := range map[string]string{"claude-pre": "ask", "gemini": "deny"} {
+		stdin, ad := chainInput(t, cli, repo, big)
+		out, _, code := runHookWith(t, stdin, ad, "--socket", sock)
+		if code != 0 || outcomeOf(out) != w {
+			t.Errorf("超过 4 MiB 的输入 %s: 想要 %s，得到 code=%d %.300q", cli, w, code, out)
+		}
+	}
+}
