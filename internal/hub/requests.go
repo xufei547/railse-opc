@@ -649,14 +649,23 @@ func (s *Server) Decide(in DecideInput) (store.Request, error) {
 	return r, nil
 }
 
-// refuseBeyondRole 是批准带“记住”或放行时的前置：请求超出了角色的边界就回 errBeyondRole。越界标记登记后不变，
-// 不必和后面的改状态放在同一把锁里。读不出请求时不在这里报错，交给后面的步骤给出该给的错误。
+// refuseBeyondRole 是批准带“记住”或放行时的预检：请求超出了角色的边界就回 errBeyondRole；读不出请求（含没有这条）原样返回错误，
+// 不当成通过。它只是早一点给出明确的错误：真正建放行、学规则之前，reserveTrust 与 commitDecision 在各自用的那个请求对象上还会再查一次
+// （预检时还没登记、随后才并发登记的越界请求也挡得住）。
 func (s *Server) refuseBeyondRole(id string) error {
 	r, err := s.store.GetRequest(id)
-	if err == nil && r.BeyondRole {
+	if err != nil {
+		return err
+	}
+	if r.BeyondRole {
 		return errBeyondRole
 	}
 	return nil
+}
+
+// beyondSideEffect 报告对请求 r 的这次决定是不是要给越界的请求建放行或学“放行”规则（不允许）。
+func beyondSideEffect(r store.Request, in DecideInput) bool {
+	return r.BeyondRole && in.Action == "allow" && (in.Remember || in.Trust != nil)
 }
 
 // reserveTrust 是 Decide 带放行时的前置（调用方持 trustMu）：取请求，提问回 errIsAsk；请求已决定不了（decidable 不过）时
@@ -668,6 +677,9 @@ func (s *Server) reserveTrust(in DecideInput) (*proto.Trust, error) {
 	}
 	if err := refuseAsk(r); err != nil {
 		return nil, err
+	}
+	if beyondSideEffect(r, in) { // 建放行用的就是这个对象：在这里（持 trustMu）再查一次，不依赖预检
+		return nil, errBeyondRole
 	}
 	if s.decidable(r) != nil {
 		return nil, nil
@@ -688,6 +700,9 @@ func (s *Server) commitDecision(in DecideInput, state, note string) (store.Reque
 	r, err := s.takePending(in.RequestID, refuseAsk)
 	if err != nil {
 		return r, "", err
+	}
+	if beyondSideEffect(r, in) { // 学规则、改状态用的就是这个对象：在 decideMu 里再查一次（放行已预留时由 Decide 收回）
+		return store.Request{}, "", errBeyondRole
 	}
 	ruleID := ""
 	if in.Remember {

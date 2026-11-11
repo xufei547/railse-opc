@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/xufei547/railse-opc/internal/agent"
+	"github.com/xufei547/railse-opc/internal/hub/store"
 	"github.com/xufei547/railse-opc/internal/hub/wire"
 	"github.com/xufei547/railse-opc/internal/policy"
 	"github.com/xufei547/railse-opc/internal/proto"
@@ -370,5 +372,48 @@ func TestCleanRolesStrict(t *testing.T) {
 	}
 	if got[2].Ceiling != "destructive" || got[2].TrustMaxMins != 5 || got[3].TrustMaxMins != 1440 || got[4].TrustMaxMins != -1 || got[4].ForbidCount != maxRoleForbid {
 		t.Fatalf("合规的照留: %+v", got[2:])
+	}
+}
+
+// 越界预检读库失败时不能当成通过：错误原样返回，decide 回 500，不建放行。
+func TestRefuseBeyondRoleReadError(t *testing.T) {
+	h := newTestHub(t)
+	if err := h.srv.refuseBeyondRole("nope"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("没有这条请求应返回 ErrNotFound: %v", err)
+	}
+	h.st.Close()
+	if err := h.srv.refuseBeyondRole("r1"); err == nil {
+		t.Fatal("读库失败应返回错误，不能当成通过")
+	}
+}
+
+// 预检之后才登记的越界请求（并发登记同 id）：真正建放行、学规则的那一步还要看 BeyondRole，不依赖预检。
+func TestBeyondRoleCheckedAtSideEffect(t *testing.T) {
+	h := newTestHub(t)
+	id, _, _, _ := roleAgent(t, h, "mac", []string{wire.FeatureTrust, wire.FeatureRole}, twoRoles)
+	if err := h.st.InsertRequest(store.Request{ID: "r1", MachineID: id, Kind: "permission", ToolName: "Bash", State: "pending", BeyondRole: true,
+		Role: "写作", ProjectRoot: "/p", CLISessionID: "s1",
+		Payload: policy.Payload{Type: policy.PayloadShell, Command: "git push"}}); err != nil {
+		t.Fatal(err)
+	}
+	// 绕过预检，直接走建放行与学规则的那两步
+	h.srv.trustMu.Lock()
+	_, err := h.srv.reserveTrust(DecideInput{RequestID: "r1", Action: "allow", Trust: &TrustInput{Scope: "project", Minutes: 30}})
+	h.srv.trustMu.Unlock()
+	if !errors.Is(err, errBeyondRole) {
+		t.Fatalf("reserveTrust 应拒越界: %v", err)
+	}
+	if list, _ := h.st.ListTrusts(""); len(list) != 0 {
+		t.Fatalf("不应建放行: %+v", list)
+	}
+	before, _ := h.st.ListRules()
+	if _, _, err := h.srv.commitDecision(DecideInput{RequestID: "r1", Action: "allow", Remember: true}, "approved", ""); !errors.Is(err, errBeyondRole) {
+		t.Fatalf("commitDecision 应拒越界的记住: %v", err)
+	}
+	if after, _ := h.st.ListRules(); len(after) != len(before) {
+		t.Fatalf("不应学规则: %d → %d", len(before), len(after))
+	}
+	if r, _ := h.st.GetRequest("r1"); r.State != "pending" {
+		t.Fatalf("请求应仍待决: %s", r.State)
 	}
 }
