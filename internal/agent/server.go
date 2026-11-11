@@ -419,11 +419,11 @@ type rolePin struct {
 	at   time.Time
 }
 
-// 钉住表的上限与过期：满了不再钉新会话（照常按目录解析），超过 pinTTL 没用到的在新增时清掉。
-const (
-	maxPinned = 4096
-	pinTTL    = 7 * 24 * time.Hour
-)
+// 钉住表的上限与过期：满了淘汰最久没用的再存（不放弃钉住：放弃等于让新会话在无角色目录里降为未分配），超过 pinTTL 没用到的
+// 在新增时清掉。maxPinned 是变量只为测试能调。
+var maxPinned = 4096
+
+const pinTTL = 7 * 24 * time.Hour
 
 // pinRole 按会话钉住角色（见 Server.pinned）。解析顺序：RAILSE_ROLE 指向存在的角色、当前目录命中的角色（role 非空，二者由
 // ResolveRole 定）优先，并把钉住更新为它；都没有（当前目录不属于任何角色）时沿用钉住的、仍在文件里的角色，不降为未分配。
@@ -457,7 +457,14 @@ func (s *Server) pinRole(sess proto.Session, role *policy.Role, set policy.RoleS
 	return r
 }
 
-// storePinLocked 记下会话钉住的角色。新会话进表前清掉过期的；满了不再钉新会话。调用方持 pinMu。
+// unpin 释放会话钉住的角色（session_end）。
+func (s *Server) unpin(sess proto.Session) {
+	s.pinMu.Lock()
+	delete(s.pinned, sess.Tool+"\x00"+sess.CLISessionID)
+	s.pinMu.Unlock()
+}
+
+// storePinLocked 记下会话钉住的角色。新会话进表前清掉过期的；还是满的就淘汰最久没用的那个。调用方持 pinMu。
 func (s *Server) storePinLocked(key, name string, now time.Time) {
 	if _, ok := s.pinned[key]; !ok {
 		for k, p := range s.pinned {
@@ -465,8 +472,14 @@ func (s *Server) storePinLocked(key, name string, now time.Time) {
 				delete(s.pinned, k)
 			}
 		}
-		if len(s.pinned) >= maxPinned {
-			return
+		for len(s.pinned) >= maxPinned && len(s.pinned) > 0 {
+			oldest, first := "", true
+			for k, p := range s.pinned {
+				if first || p.at.Before(s.pinned[oldest].at) {
+					oldest, first = k, false
+				}
+			}
+			delete(s.pinned, oldest)
 		}
 	}
 	if s.pinned == nil {
@@ -805,6 +818,10 @@ func (s *Server) handleEvent(ev proto.Event) proto.EventAck {
 		// 这一轮或会话已经结束：这个会话里挂着的审批与答题都不会再有人等，取消掉
 		if n := s.pending.CancelSession(ev.Session.CLISessionID, errSettledElsewhere); n > 0 {
 			s.log.Printf("会话 %q 的这一轮已结束，取消 %d 条挂着的请求", clipText(ev.Session.CLISessionID, hubLogFieldMax), n)
+		}
+		if ev.Kind == "session_end" {
+			// 会话结束，释放它钉住的角色：放在返回前，下面写审计时还能读到角色名
+			defer s.unpin(ev.Session)
 		}
 	}
 	// 事件只带上生效的角色名（设计 §3.4）

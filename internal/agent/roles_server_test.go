@@ -657,3 +657,37 @@ func TestBeyondRoleRoutingTable(t *testing.T) {
 		}
 	}
 }
+
+// 钉住表满了：淘汰最久没用的再存，不放弃钉住；session_end 释放这个会话的条目。
+func TestRolePinCapacityAndSessionEnd(t *testing.T) {
+	setVar(t, &maxPinned, 3)
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	nowhere := t.TempDir()
+	role := func(cwd, session string) string {
+		r := permission(cwd, "git status")
+		r.Session.CLISessionID = session
+		send(t, env, r)
+		return lastAudit(t, env).Session.Role
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		role(env.repo, id)
+	}
+	role(nowhere, "a") // a 刚用过，b 最久没用
+	if got := role(env.repo, "d"); got != "写作" {
+		t.Fatalf("d: %q", got)
+	}
+	if got := role(nowhere, "d"); got != "写作" {
+		t.Fatalf("表满时新会话也要钉住（淘汰最旧的）: %q", got)
+	}
+	if got := role(nowhere, "b"); got != "" {
+		t.Fatalf("最久没用的 b 应被淘汰: %q", got)
+	}
+	if got := role(nowhere, "a"); got != "写作" {
+		t.Fatalf("a 不该被淘汰: %q", got)
+	}
+	roundTrip(t, env.cfg.SocketPath, proto.Event{V: proto.Version, Kind: "session_end", Session: proto.Session{Tool: "claude", CLISessionID: "a", Cwd: nowhere}})
+	if got := role(nowhere, "a"); got != "" {
+		t.Fatalf("session_end 后应释放: %q", got)
+	}
+}
