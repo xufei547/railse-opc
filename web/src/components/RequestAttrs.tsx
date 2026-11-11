@@ -51,6 +51,12 @@ export function RequestAttrs({ request: r, audit }: { request: RequestView; audi
           {r.project_root}
         </Row>
       )}
+      {(r.role || r.beyond_role) && (
+        <Row label={t('角色')}>
+          {r.role || t('未分配')}
+          {r.beyond_role && <span className="tag high attr-tag">{t('超出边界')}</span>}
+        </Row>
+      )}
       {r.tool_name && r.kind !== 'webhook' && <Row label={t('工具')}>{r.tool_name}</Row>}
       {r.kind === 'permission' && (
         <Row label={t('风险')}>

@@ -190,3 +190,20 @@ code.mono { word-break: break-all; }
 ol.steps { margin: 8px 0 4px; padding-left: 22px; font-size: 14px; }
 ol.steps li { margin: 4px 0; }
 .ask-hint { margin: 0 0 8px; text-align: center; }
+/* 总台（0.3 起）：角色卡、四个数字、最近动作；离线机器的卡片变灰（虚线框、页面底色、次要文字色） */
+.desk-card .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 10px 0 2px; text-align: center; }
+.desk-card .stat b { display: block; font-size: 20px; line-height: 1.2; }
+.desk-card .stat span { display: block; font-size: 12px; color: var(--muted); }
+.desk-card .stat.hot b { color: var(--high-fg); }
+.desk-card ul.recent { list-style: none; margin: 8px 0 0; padding: 0; }
+.desk-card ul.recent li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.desk-card ul.recent code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-card.offline { background: var(--bg); color: var(--muted); border-style: dashed; }
+/* 收件箱的筛选条（从总台跳来时） */
+.filter-bar { display: flex; align-items: center; gap: 8px; padding: 6px 0 10px; font-size: 14px; }
+.filter-bar .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.filter-bar .btn.small { margin-left: 0; }
+/* 超出角色边界：卡片上的红色标签行、详情属性里的标签、批准面板里代替“记住”“放行”两个开关的说明 */
+.card .role-line { margin-top: 6px; }
+.tag.attr-tag { margin-left: 6px; }
+.sheet .beyond-note { margin: 10px 0; padding: 10px 12px; border-radius: 10px; background: var(--high-bg); color: var(--high-fg); font-size: 14px; }

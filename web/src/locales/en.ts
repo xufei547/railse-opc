@@ -488,4 +488,19 @@ export const en: Record<string, string> = {
     'Beyond the limits of role "{role}": you can only approve this once. It can\'t be remembered or trusted for a while.',
   '超出角色的边界：这次只能单次批准，不能记住，也不能限时放行。':
     "Beyond the limits of its role: you can only approve this once. It can't be remembered or trusted for a while.",
+  总台: 'Desk',
+  还没有角色: 'No roles yet',
+  '角色是 agent 会话的权限边界：每个角色有风险上限与禁用的操作，超出的一律问你。角色定义在机器上的 roles.yaml 里，手机只看不改。':
+    "A role is a permission boundary for an agent session: each role has a risk ceiling and forbidden actions, and anything beyond it always asks you. Roles live in roles.yaml on the machine; the phone only shows them.",
+  // {cmd} 是一段 <code>
+  '在机器上运行 {cmd} 生成一份起步的模板。': 'Run {cmd} on the machine to write a starter template.',
+  '最近 24 小时没有动静': 'Nothing in the last 24 hours',
+  等我: 'Waiting',
+  放行中: 'Trusted',
+  拦下: 'Blocked',
+  '拦下与自动放行只数 {h} 小时内': 'Blocked and auto-approved count the last {h} hours',
+  超出边界: 'Beyond limits',
+  '只看：{what}': 'Showing only: {what}',
+  清除筛选: 'Clear filter',
+  角色: 'Role',
 }

@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
 import { hub } from '../api'
 import {
+  beyondBlock,
   canConfirm,
   classifyError,
   decideBody,
@@ -110,6 +111,8 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
 
   const allow = action === 'allow'
   const block = rememberBlock(request)
+  // 超出角色边界的批准：不出现“记住”与“接下来一段时间都放行”，在它们的位置说明原因
+  const beyond = beyondBlock(request, action)
   const shown = draftShown(s)
   const close = () => {
     if (!s.busy) onClose()
@@ -134,18 +137,25 @@ export function DecideSheet({ request, action, onClose, onDone }: Props) {
           <span>{noteHint(request)}</span>
           <textarea className="input" value={note} maxLength={1000} disabled={s.busy} onChange={(e) => setNote(e.target.value)} />
         </label>
-        <label className="switch">
-          <span>
-            {allow ? t('记住：以后同类的自动放行') : t('记住：以后同类的自动拒绝')}
-            {block && <span className="sub line">{block}</span>}
-          </span>
-          <input
-            type="checkbox"
-            checked={s.remember}
-            disabled={!s.rememberable || s.busy}
-            onChange={(e) => dispatch({ type: 'remember', on: e.target.checked })}
-          />
-        </label>
+        {beyond && (
+          <p className="beyond-note" data-testid="beyond-note">
+            {beyond}
+          </p>
+        )}
+        {!beyond && (
+          <label className="switch">
+            <span>
+              {allow ? t('记住：以后同类的自动放行') : t('记住：以后同类的自动拒绝')}
+              {block && <span className="sub line">{block}</span>}
+            </span>
+            <input
+              type="checkbox"
+              checked={s.remember}
+              disabled={!s.rememberable || s.busy}
+              onChange={(e) => dispatch({ type: 'remember', on: e.target.checked })}
+            />
+          </label>
+        )}
         {s.remember && (
           <div className="draft">
             <div className="row">

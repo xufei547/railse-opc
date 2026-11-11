@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { Link } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 import { Banner } from '../components/Banner'
 import { RequestCard } from '../components/RequestCard'
+import { applyFilter, filterLabel, parseFilter } from '../desk'
 import { lang, splitVars, t } from '../i18n'
 import { pauseCopy } from '../manage'
 import { usePush } from '../push'
@@ -23,8 +24,19 @@ export function Inbox() {
     }
   })
   const showGuide = isIOS() && !isStandalone() && !hideGuide
-  const groups = groupByProject(state.pending)
-  const empty = state.loaded && state.pending.length === 0 && state.questions.length === 0
+  // 总台跳来时按角色与机器筛选（/inbox?role=…&machine=…）；筛选条可清除
+  const [params, setParams] = useSearchParams()
+  const filter = parseFilter(params)
+  const pending = applyFilter(state.pending, filter)
+  const questions = applyFilter(state.questions, filter)
+  const machineName =
+    filter?.machine == null
+      ? ''
+      : ([...state.pending, ...state.questions].find((r) => r.machine_id === filter.machine)?.machine_name ??
+        state.status?.machines.find((m) => m.id === filter.machine)?.name ??
+        '')
+  const groups = groupByProject(pending)
+  const empty = state.loaded && pending.length === 0 && questions.length === 0
   const trustCount = state.status?.trusts ?? 0
 
   function dismissGuide() {
@@ -98,10 +110,18 @@ export function Inbox() {
             </button>
           </Banner>
         )}
-        {state.questions.length > 0 && (
+        {filter && (
+          <div className="filter-bar" role="status">
+            <span className="grow">{t('只看：{what}', { what: filterLabel(filter, machineName) })}</span>
+            <button type="button" className="btn small" onClick={() => setParams({}, { replace: true })}>
+              {t('清除筛选')}
+            </button>
+          </div>
+        )}
+        {questions.length > 0 && (
           <section>
             <h2 className="section-title">{t('等你回答')}</h2>
-            {state.questions.map((q) => (
+            {questions.map((q) => (
               <RequestCard key={q.id} request={q} />
             ))}
           </section>

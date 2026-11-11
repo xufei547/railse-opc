@@ -1,5 +1,6 @@
 import { Link } from 'react-router'
 import { askQuestions, questionOptions } from '../ask'
+import { roleText } from '../desk'
 import { explainRequest, cliLabel, machineLabel } from '../explain'
 import { absoluteTime, clip, isRedacted, kindLabel, payloadSummary, relativeTime, riskLabel, riskTone } from '../format'
 import { t } from '../i18n'
@@ -20,14 +21,15 @@ function cardMain(r: RequestView): string {
 
 /**
  * 收件箱里的一条，三行：做什么（不带 CLI 名）+ 风险或种类标签 + 相对时间；等宽的命令、路径、问题或提问的选项；
- * CLI · 机器 · 项目（webhook 写 webhook；cli 为空时不写 Agent）。整张卡链接到详情。
+ * CLI · 机器 · 项目 · 角色（webhook 写 webhook；cli 为空时不写 Agent；没有角色不写）。超出角色边界的再加一行红色标签。整张卡链接到详情。
  */
 export function RequestCard({ request: r }: { request: RequestView }) {
   const what = explainRequest(r).what
+  const role = roleText(r)
   const where =
     r.kind === 'webhook'
       ? 'webhook'
-      : [r.cli && cliLabel(r.cli), machineLabel(r.machine_name), r.project].filter(Boolean).join(' · ')
+      : [r.cli && cliLabel(r.cli), machineLabel(r.machine_name), r.project, role && !role.beyond && role.text].filter(Boolean).join(' · ')
   const main = cardMain(r)
   return (
     <Link className="card" to={`/r/${encodeURIComponent(r.id)}`}>
@@ -45,6 +47,11 @@ export function RequestCard({ request: r }: { request: RequestView }) {
       </div>
       <pre className="cmd">{clip(main, summaryMax)}</pre>
       <div className="where">{where}</div>
+      {role?.beyond && (
+        <div className="role-line">
+          <span className="tag high">{role.text}</span>
+        </div>
+      )}
     </Link>
   )
 }
