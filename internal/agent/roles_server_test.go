@@ -497,3 +497,29 @@ func TestRolePinnedPerSession(t *testing.T) {
 		t.Fatalf("角色删掉后应解除钉住、按目录: %q", got)
 	}
 }
+
+// 命令替换里的禁用命令照样拒，限时放行挡不住；含解析不了的结构的按越界，放行也挡不住。
+func TestForbidInsideSubstitutionBeatsTrust(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	roundTrip(t, env.cfg.SocketPath, proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: env.repo, Until: time.Now().Add(time.Hour)}})
+	pr := permission(env.repo, `echo "$(git push origin main)"`)
+	pr.Source = proto.SourcePermissionRequest
+	if resp := send(t, env, pr); resp.Decision != "deny" || resp.DecidedBy != "role:写作" {
+		t.Fatalf("命令替换里的禁用应拒: %+v", resp)
+	}
+	pr = permission(env.repo, "bash <<EOF\ngit push origin main\nEOF")
+	pr.Source = proto.SourcePermissionRequest
+	if resp := send(t, env, pr); resp.Decision == "allow" || strings.HasPrefix(resp.DecidedBy, "trust:") {
+		t.Fatalf("含解析不了的结构不该被放行放过: %+v", resp)
+	}
+	if e := lastAudit(t, env); !e.BeyondRole || e.DecidedBy != "no_hub" {
+		t.Fatalf("应按越界、送人工决定（没有 hub 时交回终端）: %+v", e)
+	}
+	// PreToolUse 来的回 ask，理由写明含无法检查的子命令
+	resp := send(t, env, preToolUse(env.repo, "bash <<EOF\ngit push origin main\nEOF", "bypassPermissions", "toolu_h"))
+	if resp.Decision != "ask" || !strings.Contains(resp.Reason, "含无法检查的子命令") {
+		t.Fatalf("PreToolUse 应回 ask: %+v", resp)
+	}
+}

@@ -209,7 +209,8 @@ roles:
 | 4 | 风险高于 `ceiling` | 越界：规则的 allow（含写了 `risk: destructive` 的 user allow）与限时放行都不适用，必须人来定。审计 `beyond_role: true`，理由“超出角色「写作」的边界（上限 write_in_project，这次是 outward）” |
 | 5 | 其余 | 照旧：暂停、规则、底线、限时放行、默认 ask |
 
-- **暂停时**第 1、2、3 步照常生效（拒绝不受暂停影响），其余交回终端。
+- **禁用看穿命令替换。** `$(…)`、反引号、进程替换 `<(…)` `>(…)` 与 `eval` 里的命令逐层参与 `forbid` 的匹配（`echo "$(git push)"` 照样拒）。角色带有按命令的禁用（`command_prefix`、`command_regex`）而命令里有解析不了的结构（heredoc、没闭合的引号或括号、裸括号、带转义的 `$'…'`、嵌套过深）时，看不见里面有没有禁用的命令，按越界问人（理由“含无法检查的子命令”），不直接拒、也不走限时放行。
+- **暂停时**第 1、2、3 步照常生效（拒绝不受暂停影响）；越界（第 4 步，含文件有误）也不归暂停管：`PreToolUse` 照旧回 `ask`，其余照旧送人工决定——交回终端在 auto、acceptEdits、bypassPermissions 下等于放行。其余交回终端。
 - **越界的去向。** Claude 的 `PreToolUse` 一律回 `ask`：Claude 在终端弹确认框（理由是角色那句）并触发 `PermissionRequest` 送手机；中间几档（项目内写、联网）也一样，不交 Claude 自己的分类器——它可能自动放行。`PermissionRequest` 与 Codex 的请求送 hub，`pending` 帧带 `beyond_role: true`，手机上不出现“记住”与“接下来一段时间都放行”。越界的请求也不按 `RAILSE_TRUST` 建放行。
 - **`trust_max`。** 限时放行命中时再看会话角色：设了时长的，这条放行只在它建立后 `trust_max` 之内对这个角色有效；`none` 一律不放行。不改放行本身。
 - **地盘。** 角色写了 `dirs`、而项目根不在任何一条 `dirs` 内（典型：用 `RAILSE_ROLE` 在别处启动）时，按没有项目根处理：写入一律 `write_outside`，项目放行也不命中。地盘内项目根不变，不扩大到角色的全部目录。没写 `dirs` 的角色不做这一步。

@@ -202,3 +202,15 @@ func TestLocalizeRoleReason(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalizeOpaqueRoleReason(t *testing.T) {
+	const in = "超出角色「a」的边界：含无法检查的子命令"
+	if got, ok := localizeRoleReason(in); !ok || got != in || !isRoleReason(got) {
+		t.Fatalf("中文: %q %v", got, ok)
+	}
+	i18n.Set(i18n.EN)
+	t.Cleanup(func() { i18n.Set(i18n.ZH) })
+	if got, ok := localizeRoleReason(in); !ok || hasCJK(got) || !isRoleReason(got) {
+		t.Fatalf("英文: %q %v", got, ok)
+	}
+}

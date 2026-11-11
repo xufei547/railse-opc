@@ -101,13 +101,20 @@ func (e *Engine) Evaluate(p Payload, ctx Context) Decision {
 		return withRule(base, best)
 	}
 	if role != nil {
-		if f := role.forbidHit(p, risk, ctx); f != nil {
+		f, opaque := role.forbidHit(p, risk, ctx)
+		if f != nil {
 			base.Action, base.Forbidden = ActionDeny, true
 			base.Reason = "角色「" + role.Name + "」禁用：" + f.Match.Brief()
 			return base
 		}
 		if best != nil && best.Action == ActionDeny && !e.paused.Load() {
 			return withRule(base, best)
+		}
+		// 命令里有解析不了的结构、角色又有按命令的禁用：看不见里面是不是禁用的命令，按越界问人（不直接拒，免得误伤）
+		if opaque && role.hasCommandForbid() {
+			base.Action, base.BeyondRole = ActionAsk, true
+			base.Reason = "超出角色「" + role.Name + "」的边界：含无法检查的子命令"
+			return base
 		}
 		if role.Ceiling != nil && risk > *role.Ceiling {
 			base.Action, base.BeyondRole = ActionAsk, true
@@ -138,15 +145,33 @@ func withRule(d Decision, r *compiledRule) Decision {
 }
 
 // forbidHit 返回命中的第一条禁用（deny 语义，见 compileForbid），没有返回 nil。编不了的条件当作命中（fail closed）。
-func (r *Role) forbidHit(p Payload, risk Risk, ctx Context) *compiledRule {
+// shell 命令还逐条看命令替换、进程替换与 eval 里的命令（见 forbidCommands）；opaque 报告命令里有没有解析不了、可能藏着命令的结构。
+func (r *Role) forbidHit(p Payload, risk Risk, ctx Context) (hit *compiledRule, opaque bool) {
 	rules := r.forbidRules()
-	for i := range rules {
-		f := &rules[i]
-		if f.bad || matchRequest(f, p, risk, ctx) {
-			return f
+	cands := []Payload{p}
+	if p.Type == PayloadShell {
+		var cmds []string
+		cmds, opaque = forbidCommands(p.Command)
+		for _, c := range cmds {
+			if c != p.Command {
+				q := p
+				q.Command = c
+				cands = append(cands, q)
+			}
 		}
 	}
-	return nil
+	for i := range rules {
+		f := &rules[i]
+		if f.bad {
+			return f, opaque
+		}
+		for _, q := range cands {
+			if matchRequest(f, q, risk, ctx) {
+				return f, opaque
+			}
+		}
+	}
+	return nil, opaque
 }
 
 // mayAllow 是底线：outward 只有 user 规则能放行；destructive 还要求规则显式写 risk: destructive。

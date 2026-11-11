@@ -248,10 +248,11 @@ const (
 	roleBeyondMid    = "」的边界（上限 "
 	roleBeyondRisk   = "，这次是 "
 	roleBrokenPrefix = "roles.yaml 有误："
+	roleOpaqueSuffix = "」的边界：含无法检查的子命令"
 )
 
 // roleReasonFormats 是角色理由按终端语言重拼用的三个模板（见 localizeRoleReason）。
-var roleReasonFormats = []string{"角色「%s」禁用：%s", "超出角色「%s」的边界（上限 %s，这次是 %s）", "roles.yaml 有误：%s"}
+var roleReasonFormats = []string{"角色「%s」禁用：%s", "超出角色「%s」的边界（上限 %s，这次是 %s）", "超出角色「%s」的边界：含无法检查的子命令", "roles.yaml 有误：%s"}
 
 // isRoleReason 判断已按终端语言重拼过的理由是不是角色的理由：以某个模板（当前语言）第一个占位符之前的部分开头。
 func isRoleReason(localized string) bool {
@@ -273,6 +274,9 @@ func localizeRoleReason(reason string) (string, bool) {
 		if ok {
 			return fmt.Sprintf(i18n.T("角色「%s」禁用：%s"), name, brief), true
 		}
+	case strings.HasPrefix(reason, roleBeyondPrefix) && strings.HasSuffix(reason, roleOpaqueSuffix):
+		name := strings.TrimSuffix(strings.TrimPrefix(reason, roleBeyondPrefix), roleOpaqueSuffix)
+		return fmt.Sprintf(i18n.T("超出角色「%s」的边界：含无法检查的子命令"), name), true
 	case strings.HasPrefix(reason, roleBeyondPrefix):
 		name, rest, ok := strings.Cut(strings.TrimPrefix(reason, roleBeyondPrefix), roleBeyondMid)
 		if !ok {

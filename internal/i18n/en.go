@@ -1008,6 +1008,7 @@ Switched to a new key and deleted %d push subscriptions. Every phone has to turn
 	// 角色的理由（localizeRoleReason 按 internal/policy/engine.go 的格式拆开重拼）
 	"角色「%s」禁用：%s":               "Forbidden for role \"%s\": %s",
 	"超出角色「%s」的边界（上限 %s，这次是 %s）": "Beyond role \"%s\"'s boundary (ceiling %s, this is %s)",
+	"超出角色「%s」的边界：含无法检查的子命令":     "Beyond role \"%s\"'s boundary: contains a subcommand that can't be checked",
 	"roles.yaml 有误：%s":          "roles.yaml is broken: %s",
 
 	// internal/policy/trigger.go 的 Why 短语（经 i18n.Lookup 动态查）。动词短语，接在引号括起的命令段后面；

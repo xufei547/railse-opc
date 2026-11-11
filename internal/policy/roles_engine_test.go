@@ -225,3 +225,41 @@ func TestProtectedDirsAreDestructive(t *testing.T) {
 		t.Errorf("没有受保护目录时: %s", r)
 	}
 }
+
+// forbid 看穿命令替换、反引号、进程替换与 eval；带命令类 forbid 的角色碰上解析不了的结构（heredoc 等）按越界问人，不直接拒。
+func TestForbidSeesInsideSubstitutions(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	for _, cmd := range []string{
+		`echo "$(git push origin main)"`,
+		"echo `git push origin main`",
+		`cat <(git push origin main)`,
+		`echo $(echo $(git push origin main))`,
+		`eval git push origin main`,
+		`eval "git push origin main"`,
+		`x=$(eval 'git push origin main')`,
+		`ls && echo "$(sh -c 'git push origin main')"`,
+	} {
+		d := e.Evaluate(shellAt(cmd), roleCtx(t, "写作"))
+		if d.Action != ActionDeny || !d.Forbidden {
+			t.Errorf("%s: 应按禁用拒: %+v", cmd, d)
+		}
+	}
+	for _, cmd := range []string{
+		"bash <<EOF\ngit push origin main\nEOF",
+		`echo "$(git push origin main"`, // 没闭合
+		`echo $'\x67it' push`,
+	} {
+		d := e.Evaluate(shellAt(cmd), roleCtx(t, "写作"))
+		if d.Action != ActionAsk || !d.BeyondRole || !strings.Contains(d.Reason, "含无法检查的子命令") {
+			t.Errorf("%q: 含解析不了的结构应越界问人: %+v", cmd, d)
+		}
+	}
+	// 能检查、没命中的照旧
+	if d := e.Evaluate(shellAt(`echo "$(ls)"`), roleCtx(t, "写作")); d.Forbidden || strings.Contains(d.Reason, "无法检查") {
+		t.Errorf("能检查且没命中的不该拒或越界: %+v", d)
+	}
+	// 没有命令类 forbid 的角色不因不透明结构越界
+	if d := e.Evaluate(shellAt("cat <<EOF\nhi\nEOF"), roleCtx(t, "运维")); d.BeyondRole {
+		t.Errorf("运维没有命令类禁用: %+v", d)
+	}
+}
