@@ -329,3 +329,35 @@ func TestChainControlPlaneNeverAutoAllowed(t *testing.T) {
 		}
 	}
 }
+
+// 包装改目录后覆盖配置、包装藏起推送：完整链路上不被内置规则或限时放行放过。
+func TestChainWrapperEffects(t *testing.T) {
+	sock, repo, cfg := startTestAgent(t)
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 开发\n    ceiling: network\n    forbid:\n      - {command_prefix: \"git push\"}\n"), 0o600)
+	c := hookclient.Client{SocketPath: sock, ConnectTimeout: 2 * time.Second}
+	if r, err := c.ControlMsg(proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: agent.CleanCwd(repo), Until: time.Now().Add(time.Hour)}}); err != nil || !r.OK {
+		t.Fatalf("建放行: %v %+v", err, r)
+	}
+	t.Setenv("RAILSE_ROLE", "")
+	// 没有角色：env -C 到守护进程目录里覆盖 roles.yaml
+	for cli, want := range map[string]string{"claude-pre": "ask", "claude-pr": "pass", "codex": "pass", "gemini": "deny"} {
+		stdin, ad := chainInput(t, cli, repo, "env -C ../h cp ../repo/replacement.yaml roles.yaml")
+		if out, _, code := runHookWith(t, stdin, ad, "--socket", sock); code != 0 || outcomeOf(out) != want {
+			t.Errorf("env -C %s: 想要 %s，得到 code=%d %q", cli, want, code, out)
+		}
+	}
+	// 有角色：command 包着的 git push（深剥后归一化）照样命中禁用；command git push 的定级是 outward，超出 network 上限、不被放行放过
+	t.Setenv("RAILSE_ROLE", "开发")
+	for _, cmd := range []string{"command /usr/bin/git -C . push origin main", "timeout 5 git push origin main"} {
+		stdin, ad := chainInput(t, "claude-pre", repo, cmd)
+		if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "deny" {
+			t.Errorf("%s: 应按禁用拒: %q", cmd, out)
+		}
+	}
+	os.WriteFile(cfg.RolesPath, []byte("version: 1\nroles:\n  - name: 开发\n    ceiling: network\n"), 0o600)
+	stdin, ad := chainInput(t, "claude-pr", repo, "command git push origin main")
+	if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) == "allow" {
+		t.Errorf("command git push 应越界、不被放行放过: %q", out)
+	}
+}

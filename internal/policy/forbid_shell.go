@@ -341,12 +341,26 @@ func segTouchesControl(seg segment, cwd string, lost bool, ctx Context) bool {
 			return true
 		}
 	}
-	var words []string
-	if argv := stripWrappers(seg.argv); len(argv) > 1 {
-		words = append(words, argv[1:]...)
+	// 参数按包装改过的工作目录解析（env -C、sudo -D）；重定向由外层 shell 在原目录做
+	argv, info := peel(seg.argv, true)
+	argCwd, ok := applyChdir(info, cwd, ctx)
+	argLost := lost || !ok
+	type word struct {
+		w    string
+		cwd  string
+		lost bool
 	}
-	words = append(append(words, redirectPaths(seg.redirects)...), seg.inputs...)
-	for _, w := range words {
+	var words []word
+	if len(argv) > 1 {
+		for _, w := range argv[1:] {
+			words = append(words, word{w, argCwd, argLost})
+		}
+	}
+	for _, w := range append(redirectPaths(seg.redirects), seg.inputs...) {
+		words = append(words, word{w, cwd, lost})
+	}
+	for _, it := range words {
+		w, cwd, lost := it.w, it.cwd, it.lost
 		if mentionsRailseDir(w) {
 			return true
 		}

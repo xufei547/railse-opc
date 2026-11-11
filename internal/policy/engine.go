@@ -304,7 +304,8 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 				return true
 			}
 			// deny 与 ask 还看穿 sudo、xargs、timeout 这类包装（见 peelWrappers）；allow 不看，sudo git push 不该被 git push 的放行放过
-			return anySeg && (wordsHavePrefix(normalizedArgv(seg, cwd, ctx), m.CommandPrefix) || wordsHavePrefix(deepArgv(seg), m.CommandPrefix))
+			return anySeg && (wordsHavePrefix(normalizedArgv(seg, cwd, ctx), m.CommandPrefix) || wordsHavePrefix(deepArgv(seg), m.CommandPrefix) ||
+				wordsHavePrefix(deepNormalizedArgv(seg, cwd, ctx), m.CommandPrefix))
 		}) {
 			return false
 		}
@@ -318,8 +319,11 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 			if anySeg && len(norm) > 0 && r.re.MatchString(strings.Join(norm, " ")) {
 				return true
 			}
-			deep := deepArgv(seg)
-			return anySeg && len(deep) > 0 && r.re.MatchString(strings.Join(deep, " "))
+			if deep := deepArgv(seg); anySeg && len(deep) > 0 && r.re.MatchString(strings.Join(deep, " ")) {
+				return true
+			}
+			dn := deepNormalizedArgv(seg, cwd, ctx)
+			return anySeg && len(dn) > 0 && r.re.MatchString(strings.Join(dn, " "))
 		}) {
 			return false
 		}
@@ -508,6 +512,25 @@ func wordsHavePrefix(words []string, prefix string) bool {
 // 有全局选项表的命令（git、npm 等）再剥掉子命令前的全局选项，包管理器的子命令别名换成正式名。没有命令时返回 nil。
 func normalizedArgv(seg segment, cwd string, ctx Context) []string {
 	argv, flags := commandWords(seg)
+	return normalizeWords(argv, flags, cwd, ctx)
+}
+
+// deepNormalizedArgv 同 normalizedArgv，但先剥掉全部包装（sudo、xargs、timeout、command 等，见 peel），工作目录按包装改过的算：
+// command /usr/bin/git -C . push 归一成 git push。
+func deepNormalizedArgv(seg segment, cwd string, ctx Context) []string {
+	argv, info := peel(seg.argv, true)
+	flags := make([]wordFlags, len(argv))
+	if !info.split {
+		flags = seg.argvFlags[len(seg.argv)-len(argv):]
+	}
+	if dir, ok := applyChdir(info, cwd, ctx); ok {
+		cwd = dir
+	}
+	return normalizeWords(argv, flags, cwd, ctx)
+}
+
+// normalizeWords 是 normalizedArgv 的主体：argv[0] 取 basename，有全局选项表的命令剥掉子命令前的全局选项，子命令别名换成正式名。
+func normalizeWords(argv []string, flags []wordFlags, cwd string, ctx Context) []string {
 	if len(argv) == 0 {
 		return nil
 	}

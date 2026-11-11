@@ -148,18 +148,72 @@ func gitSubcommand(argv []string, flags []wordFlags, cwd string, ctx Context) st
 
 func classifySegment(seg segment, cwd string, ctx Context) Risk {
 	argv, flags := commandWords(seg)
-	risk := RiskUnknown // 没有命令、只有重定向时也要看重定向与输入
-	if len(argv) > 0 {
-		risk = classifyArgv(argv, flags, cwd, ctx)
-		args, argFlags := withoutMessages(argv[1:], flags[1:])
-		// 参数无法静态解析时，不论是否命中命令表，至少为 unknown
-		if hasUnresolvable(args, argFlags, ctx) {
+	risk := classifyWords(seg, argv, flags, cwd, ctx)
+	// 包装（sudo、xargs、timeout、command、exec 等）里跑的命令另算一遍，取较高的：包装自身的档位不能把内层的盖住
+	// （command git push 不能只算 command 的 unknown）。env -C、sudo -D 改了内层的工作目录，内层按改后的目录算；
+	// 包装带了算不清后果的选项，整段至少 unknown
+	for _, deep := range []bool{false, true} {
+		inner, info := peel(seg.argv, deep)
+		if info.opaque || info.split {
 			risk = maxRisk(risk, RiskUnknown)
 		}
-		if touchesSensitiveWords(args, argFlags, cwd, ctx) {
-			risk = maxRisk(risk, RiskDestructive)
+		dir, ok := applyChdir(info, cwd, ctx)
+		if !ok {
+			risk = maxRisk(risk, RiskUnknown)
+			dir = "" // 不知道在哪：相对路径与“改工作目录”的写一律按项目外
+		}
+		if len(info.chdir) == 0 && (!deep || len(inner) == len(argv) && !info.split) {
+			continue // 没剥出新东西、也没改目录：上面已按原目录算过
+		}
+		var innerFlags []wordFlags
+		if !info.split {
+			innerFlags = seg.argvFlags[len(seg.argv)-len(inner):]
+		} else {
+			innerFlags = make([]wordFlags, len(inner))
+		}
+		if len(inner) > 0 {
+			risk = maxRisk(risk, classifyArgvWords(inner, innerFlags, dir, ctx, len(info.chdir) > 0))
 		}
 	}
+	risk = maxRisk(risk, classifyRedirects(seg, argv, cwd, ctx))
+	// 工作目录（跟踪 cd 之后，或载荷的 Cwd）在项目外时，按项目内改动定级的段一律按项目外：
+	// 不做路径分析的写命令（git init、git commit、make）改的就是工作目录。项目根为空时没有目录在项目内
+	if risk == RiskWriteInProject && !isWithin(cwd, ctx.ProjectRoot) {
+		risk = RiskWriteOutside
+	}
+	return risk
+}
+
+// classifyWords 给去掉包装后的命令词定级（命令表、参数的可解析性与敏感路径），再加上这一段的重定向与输入（见 classifyRedirects）。
+func classifyWords(seg segment, argv []string, flags []wordFlags, cwd string, ctx Context) Risk {
+	risk := RiskUnknown // 没有命令、只有重定向时也要看重定向与输入
+	if len(argv) > 0 {
+		risk = classifyArgvWords(argv, flags, cwd, ctx, false)
+	}
+	return risk
+}
+
+// classifyArgvWords 给一条命令的词定级：命令表、参数无法解析时至少 unknown、参数里有敏感路径按 destructive；
+// outside 为真时（内层的工作目录被包装改过），工作目录在项目外时按项目内改动定级的一律按项目外；
+// 否则这一条由调用方在合并之后做（见 classifySegment 末尾）。
+func classifyArgvWords(argv []string, flags []wordFlags, cwd string, ctx Context, outside bool) Risk {
+	risk := classifyArgv(argv, flags, cwd, ctx)
+	args, argFlags := withoutMessages(argv[1:], flags[1:])
+	if hasUnresolvable(args, argFlags, ctx) {
+		risk = maxRisk(risk, RiskUnknown)
+	}
+	if touchesSensitiveWords(args, argFlags, cwd, ctx) {
+		risk = maxRisk(risk, RiskDestructive)
+	}
+	if outside && risk == RiskWriteInProject && !isWithin(cwd, ctx.ProjectRoot) {
+		risk = RiskWriteOutside
+	}
+	return risk
+}
+
+// classifyRedirects 给一段的重定向、输入与注入型环境变量定级：重定向由外层 shell 在原工作目录里做，不受 env -C 影响。
+func classifyRedirects(seg segment, argv []string, cwd string, ctx Context) Risk {
+	risk := RiskRead
 	// 命令前的 VAR=value（含 env 之后的）设置了能注入代码的环境变量
 	if assignsInjectedEnv(seg.argv[:len(seg.argv)-len(argv)]) {
 		risk = maxRisk(risk, RiskUnknown)
@@ -409,39 +463,64 @@ func nextCwd(seg segment, cwd string, ctx Context) (string, bool) {
 }
 
 // stripWrappers 去掉开头的环境变量赋值和 env、time、nohup、nice、caffeinate 这类包装（按 basename 认，/usr/bin/env 等同 env），
-// 连同它们的选项（env 的 -i、-u 名字、--unset=名字、-C 目录、-S 串等，nice 的 -n 数，time 的 -p）。
-// 只剩一个 token 时不再剥，避免把 "env" 本身剥成空。总是返回 argv 的后缀（commandWords 靠这一点对齐标志）；
-// env -S 的串要拆成新的词，不是后缀，由 peelWrappers 处理。
+// 连同它们的选项。只剩一个 token 时不再剥，避免把 "env" 本身剥成空。包装的副作用（env -C 改目录等）见 peel。
 func stripWrappers(argv []string) []string {
-	out, _ := peelWrappers(argv, false)
+	out, _ := peel(argv, false)
 	return out
 }
 
-// deepWrappers 是只在“看穿”时剥掉的包装：定级时它们自有档位（sudo、doas 按 destructive，xargs 不在名单里按 unknown），
-// 不能剥；禁用清单、改 Railse 设置、sh -c 识别与配置目录检查要看它们里面跑的是什么。
+// deepWrappers 是只在“看穿”时剥掉的包装：定级时它们自身的档位照算（sudo、doas 按 destructive，xargs 不在名单里按 unknown），
+// 内层另算后取较高的（见 classifySegment）；禁用清单、deny 规则、改 Railse 设置、sh -c 识别与配置目录检查要看它们里面跑的是什么。
 var deepWrappers = map[string]bool{"sudo": true, "doas": true, "xargs": true, "timeout": true, "command": true, "exec": true}
 
-// wrapperArgOptions 是各包装带一个参数的选项（参数是下一个词，或以 = 连写）：剥选项时连参数一起跳过。
-var wrapperArgOptions = map[string][]string{
-	"env":     {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
-	"nice":    {"-n", "--adjustment"},
-	"time":    {"-f", "--format", "-o", "--output"},
-	"sudo":    {"-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host", "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user", "-D", "--chdir", "-R", "--chroot", "-T", "--command-timeout"},
-	"doas":    {"-u", "-C"},
-	"xargs":   {"-I", "-i", "-n", "--max-args", "-P", "--max-procs", "-L", "--max-lines", "-d", "--delimiter", "-E", "-e", "--eof", "-s", "--max-chars", "-a", "--arg-file"},
-	"timeout": {"-s", "--signal", "-k", "--kill-after"},
-	"exec":    {"-a"},
+// wrapperOpts 是一个包装认得的选项：flags 是不带参数的，args 是带一个参数的（参数是下一个词，或以 = 连写、短选项可连写）；
+// chdir 是改内层工作目录的选项，opaque 是改了别的、这里算不清后果的选项（改根目录、写输出文件、编辑文件、从文件读参数）。
+// 不在这几张表里的选项一律按不透明处理：不知道它干什么，就不假装看懂了内层。
+type wrapperOpts struct {
+	flags, args, chdir, opaque []string
+	numeric                    bool // nice -5 这类数字选项
+	durationArg                bool // timeout：选项之后还有一个时长
+}
+
+var wrapperOptions = map[string]wrapperOpts{
+	"env":        {flags: []string{"-i", "--ignore-environment", "-0", "--null", "-v", "--debug"}, args: []string{"-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-P"}, chdir: []string{"-C", "--chdir"}, opaque: []string{"-P"}},
+	"time":       {flags: []string{"-p", "-l", "-a", "-v", "-q", "--verbose", "--portability", "--quiet", "--append"}, args: []string{"-f", "--format", "-o", "--output"}, opaque: []string{"-o", "--output"}},
+	"nohup":      {},
+	"nice":       {args: []string{"-n", "--adjustment"}, numeric: true},
+	"caffeinate": {flags: []string{"-d", "-i", "-m", "-s", "-u"}, args: []string{"-t", "-w"}},
+	"sudo": {flags: []string{"-A", "--askpass", "-b", "--background", "-E", "--preserve-env", "-H", "--set-home", "-i", "--login", "-K", "-k", "--reset-timestamp", "-n", "--non-interactive", "-P", "--preserve-groups", "-S", "--stdin", "-s", "--shell", "-e", "--edit", "-l", "--list"},
+		args:  []string{"-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host", "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user", "-D", "--chdir", "-R", "--chroot", "-T", "--command-timeout"},
+		chdir: []string{"-D", "--chdir"}, opaque: []string{"-R", "--chroot", "-e", "--edit", "-l", "--list", "-h", "--host"}},
+	"doas":    {flags: []string{"-n", "-s", "-L"}, args: []string{"-u", "-C"}, opaque: []string{"-C"}},
+	"xargs":   {flags: []string{"-0", "-r", "-t", "-p", "-x", "-o", "--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty"}, args: []string{"-I", "-i", "-n", "--max-args", "-P", "--max-procs", "-L", "-l", "--max-lines", "-d", "--delimiter", "-E", "-e", "--eof", "-s", "--max-chars", "-a", "--arg-file", "-J", "-R", "-S"}, opaque: []string{"-a", "--arg-file"}},
+	"timeout": {flags: []string{"--foreground", "-v", "--verbose", "--preserve-status"}, args: []string{"-s", "--signal", "-k", "--kill-after"}, durationArg: true},
+	"command": {flags: []string{"-p", "-v", "-V"}},
+	"exec":    {flags: []string{"-c", "-l"}, args: []string{"-a"}},
+}
+
+// peelInfo 是剥包装时看到的副作用：split 表示 env -S 拆出了新词（剩下的不再是 argv 的后缀）；chdir 是依次改过的工作目录
+// （原文，相对的按当时的目录解析）；opaque 表示有认不出、或改了根目录、输出文件之类后果算不清的选项。
+type peelInfo struct {
+	split  bool
+	chdir  []string
+	opaque bool
 }
 
 // deepArgv 是一段剥掉全部包装（含 sudo、xargs、timeout 等，见 deepWrappers）之后的命令词，供 deny、ask 匹配与“看穿”用。
 func deepArgv(seg segment) []string {
-	out, _ := peelWrappers(seg.argv, true)
+	out, _ := peel(seg.argv, true)
 	return out
 }
 
-// peelWrappers 剥掉开头的赋值与包装（deep 为真时连 deepWrappers 一起），返回剩下的命令词；env -S（--split-string）的串按
-// shell 规则拆成词接在前面（于是不再是 argv 的后缀，split 为真）。timeout 剥掉选项后还要跳过时长。
-func peelWrappers(argv []string, deep bool) (out []string, split bool) {
+// peelWrappers 同 peel，只报告是否拆过词（老调用方用）。
+func peelWrappers(argv []string, deep bool) ([]string, bool) {
+	out, info := peel(argv, deep)
+	return out, info.split
+}
+
+// peel 剥掉开头的赋值与包装（deep 为真时连 deepWrappers 一起）及包装的选项，返回剩下的命令词与看到的副作用。
+// env -S（--split-string）的串按 shell 规则拆成词接在前面。timeout 剥掉选项后还要跳过时长。
+func peel(argv []string, deep bool) (out []string, info peelInfo) {
 	for len(argv) > 1 {
 		a := argv[0]
 		if isEnvAssignment(a) {
@@ -449,11 +528,9 @@ func peelWrappers(argv []string, deep bool) (out []string, split bool) {
 			continue
 		}
 		name := filepath.Base(a)
-		switch {
-		case name == "env" || name == "time" || name == "nohup" || name == "nice" || name == "caffeinate":
-		case deep && deepWrappers[name]:
-		default:
-			return argv, split
+		spec, known := wrapperOptions[name]
+		if !known || (deepWrappers[name] && !deep) {
+			return argv, info
 		}
 		rest := argv[1:]
 		for len(rest) > 0 && strings.HasPrefix(rest[0], "-") && rest[0] != "-" {
@@ -463,33 +540,54 @@ func peelWrappers(argv []string, deep bool) (out []string, split bool) {
 				break
 			}
 			key, val, hasVal := strings.Cut(opt, "=")
-			takes := slices.Contains(wrapperArgOptions[name], key)
-			if !takes && len(key) > 2 && key[1] != '-' && slices.Contains(wrapperArgOptions[name], key[:2]) {
+			takes := slices.Contains(spec.args, key)
+			if !takes && len(key) > 2 && key[1] != '-' && slices.Contains(spec.args, key[:2]) {
 				key, val, hasVal, takes = key[:2], key[2:], true, true // -uNAME、-n5 这类连写
 			}
-			if !takes {
+			switch {
+			case takes:
+				if !hasVal && len(rest) > 0 {
+					val, rest = rest[0], rest[1:]
+				}
+			case slices.Contains(spec.flags, key) && !hasVal:
+			case spec.numeric && len(key) > 1 && strings.Trim(key[1:], "0123456789") == "":
+			default:
+				info.opaque = true // 认不出的选项：不知道它对内层做了什么
 				continue
 			}
-			if !hasVal && len(rest) > 0 {
-				val, rest = rest[0], rest[1:]
+			if slices.Contains(spec.opaque, key) {
+				info.opaque = true
+			}
+			if slices.Contains(spec.chdir, key) {
+				info.chdir = append(info.chdir, val)
 			}
 			if name == "env" && (key == "-S" || key == "--split-string") {
 				// 串里是命令（可带赋值）：拆成词，接在剩下的前面再接着剥
-				words := parseSegment(val).argv
-				rest = append(append([]string(nil), words...), rest...)
-				split = true
+				rest = append(append([]string(nil), parseSegment(val).argv...), rest...)
+				info.split = true
 				break
 			}
 		}
-		if name == "timeout" && len(rest) > 0 {
+		if spec.durationArg && len(rest) > 0 {
 			rest = rest[1:] // 时长
 		}
 		if len(rest) == 0 {
-			return argv, split
+			return argv, info
 		}
 		argv = rest
 	}
-	return argv, split
+	return argv, info
+}
+
+// applyChdir 按 peel 看到的改目录选项算出内层命令的工作目录；目录算不出（含变量、通配，或家目录未知时的 ~）时 ok 为假。
+func applyChdir(info peelInfo, cwd string, ctx Context) (string, bool) {
+	for _, d := range info.chdir {
+		if d == "" || unresolvable(d, ctx.HomeDir) {
+			return cwd, false
+		}
+		cwd = resolvePath(d, cwd, ctx.HomeDir)
+	}
+	return cwd, true
 }
 
 func isEnvAssignment(s string) bool {

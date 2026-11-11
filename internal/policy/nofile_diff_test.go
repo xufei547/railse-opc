@@ -13,6 +13,9 @@ import (
 //
 //	RAILSE_WRITE_DIFF_GOLDEN=$PWD/internal/policy/testdata/nofile_decisions_main.jsonl go test ./internal/policy -run TestNoRolesMatchesMain
 //
+// 包装命令定级取“包装自身”与“深剥后的内层”两者较高的（0.3 起，相对 0.2.3 的有意收紧，如 command git push 从 unknown 变 outward）：
+// 语料里的样本都没有受影响（以 command、exec、xargs、timeout 开头而内层更高的，语料里没有），基准不变。
+//
 // 语料：testdata/shell_corpus.tsv 的全部命令，加上文件写入、MCP、联网几类载荷；每条在“有项目根 / 没有项目根”与“暂停 / 不暂停”下，
 // 分别用内置规则包与一组带用户 allow、deny 的规则评估。
 
