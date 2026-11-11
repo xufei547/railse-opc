@@ -842,3 +842,33 @@ func TestNestedSessionInheritsAncestorRole(t *testing.T) {
 		t.Errorf("没有祖先链不该继承: %+v", resp)
 	}
 }
+
+// 继承来的角色不只进审批：同一会话的答题与事件也带同一个生效角色（hub 不会把它改回未分配）。
+func TestInheritedRoleOnAskAndEvents(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	outer := []proto.Proc{proc(100, "a", "sh"), proc(10, "b", "claude"), proc(5, "c", "zsh")}
+	nested := append([]proto.Proc{proc(200, "d", "sh"), proc(20, "e", "claude"), proc(150, "f", "bash")}, outer[1:]...)
+	nowhere := t.TempDir()
+	r := withRole(permission(env.repo, "git status"), "写作")
+	r.Session.CLISessionID, r.Ancestors = "outer", outer
+	send(t, env, r)
+	r = permission(nowhere, "git status")
+	r.Session.CLISessionID, r.Ancestors = "nested", nested
+	send(t, env, r)
+	if e := lastAudit(t, env); e.Session.Role != "写作" {
+		t.Fatalf("审批: %+v", e.Session)
+	}
+	ask := askRequest(nowhere)
+	ask.Session.CLISessionID = "nested"
+	send(t, env, ask)
+	if e := lastAudit(t, env); e.Kind != "ask" || e.Session.Role != "写作" {
+		t.Fatalf("答题应带同一个生效角色: %+v", e.Session)
+	}
+	for _, kind := range []string{"question", "done"} {
+		roundTrip(t, env.cfg.SocketPath, proto.Event{V: proto.Version, Kind: kind, Session: proto.Session{Tool: "claude", CLISessionID: "nested", Cwd: nowhere}, Message: "x"})
+		if e := lastAudit(t, env); e.Kind != kind || e.Session.Role != "写作" {
+			t.Fatalf("%s 事件应带同一个生效角色: %+v", kind, e.Session)
+		}
+	}
+}

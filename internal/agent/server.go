@@ -102,6 +102,9 @@ type Server struct {
 	// procRoles 是有角色的会话的 CLI 进程（进程号@启动时间）→ 约束它的角色名（自己的与继承的），由 pinMu 保护：嵌套会话的祖先链里
 	// 有这些进程时继承它们（见 inheritRole）。随钉住表一起有上限、session_end 时释放。
 	procRoles map[string]procRole
+	// effective 是每个会话最近一次审批时的生效角色名（含从上层会话继承的），由 pinMu 保护：答题与事件没有祖先链，
+	// 统一读这里，免得把继承来的角色报成未分配。随钉住表一起有上限、session_end 时释放。
+	effective map[string]rolePin
 
 	mu      sync.Mutex
 	closed  bool
@@ -376,6 +379,7 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID, ProtectedDirs: s.protected}
 	pctx.Role = s.sessionRole(&req.Session, pctx.Root(), cwd, true)
 	pctx.Role = s.inheritRole(&req, pctx.Role)
+	s.recordEffective(req.Session, pctx.Role)
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx, req.Session
 }
 
@@ -414,6 +418,12 @@ func (s *Server) sessionRole(sess *proto.Session, root, cwd string, pin bool) *p
 		role = s.pinRole(*sess, role, st.Set, pin)
 	}
 	sess.Role = roleName(role)
+	// 答题与事件（pin 为假）没有祖先链：这个会话审批时继承过上层角色的，显示同一个生效角色
+	if !pin && st.Err == nil && st.Exists {
+		if name, ok := s.effectiveName(*sess); ok {
+			sess.Role = name
+		}
+	}
 	return role
 }
 
@@ -461,11 +471,48 @@ func (s *Server) pinRole(sess proto.Session, role *policy.Role, set policy.RoleS
 	return r
 }
 
+// recordEffective 记下会话这次审批的生效角色（含继承）；没有会话 id 的不记。满了淘汰最久没用的。
+func (s *Server) recordEffective(sess proto.Session, role *policy.Role) {
+	if sess.CLISessionID == "" {
+		return
+	}
+	key := sess.Tool + "\x00" + sess.CLISessionID
+	now := time.Now()
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	if role == nil || len(role.Inherited()) == 0 {
+		delete(s.effective, key) // 没有继承时答题与事件自己解析，结果与审批一致
+		return
+	}
+	if _, ok := s.effective[key]; !ok && len(s.effective) >= maxPinned {
+		oldest, first := "", true
+		for k, p := range s.effective {
+			if first || p.at.Before(s.effective[oldest].at) {
+				oldest, first = k, false
+			}
+		}
+		delete(s.effective, oldest)
+	}
+	if s.effective == nil {
+		s.effective = map[string]rolePin{}
+	}
+	s.effective[key] = rolePin{name: role.Name, at: now}
+}
+
+// effectiveName 返回会话记下的、含继承的生效角色名；没有时 ok 为假。
+func (s *Server) effectiveName(sess proto.Session) (string, bool) {
+	s.pinMu.Lock()
+	defer s.pinMu.Unlock()
+	p, ok := s.effective[sess.Tool+"\x00"+sess.CLISessionID]
+	return p.name, ok
+}
+
 // unpin 释放会话钉住的角色与它的 CLI 进程上记的角色（session_end）。
 func (s *Server) unpin(sess proto.Session) {
 	key := sess.Tool + "\x00" + sess.CLISessionID
 	s.pinMu.Lock()
 	delete(s.pinned, key)
+	delete(s.effective, key)
 	for k, p := range s.procRoles {
 		if p.session == key {
 			delete(s.procRoles, k)
