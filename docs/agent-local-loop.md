@@ -120,7 +120,7 @@ Codex 的完成与提问事件走 `~/.codex/config.toml` 顶层的 `notify`（�
 | 定不了，读写 Railse 自己的配置（0.3 起） | 任意 | 不走放行，照常进人工决定路径（`PreToolUse` 回 ask，其余送手机，Gemini 一律拒）；本来会命中放行时理由写明“限时放行不覆盖 Railse 自己的配置” |
 
 - **怎么算命中。** 会话范围要请求的 CLI（`tool`）与会话 id（`cli_session_id`）都相同，请求没有会话 id 不命中；项目范围要请求算出的项目根（见“项目根”）与放行的项目根字符串相等，没有项目根不命中。同时命中几条记最晚到期的那条。`PreToolUse`、`PermissionRequest` 与 Codex 的请求都看；Gemini 的钩子不能放行，命中了也只是渲染成不作决定，照旧交回终端。
-- **不覆盖 Railse 自己的配置（0.3 起）。** 请求读写 `~/.railse`、任何 `.railse` 目录或实际的守护进程目录（`--dir`、`RAILSE_HOME`）时，会话放行、项目放行与 `RAILSE_TRUST` 都不适用：放行期间 agent 改规则、角色、放行表，等于改掉管它自己的东西。文件写入看目标路径；shell 命令看每一段（看穿 `sh -c`、命令替换与 `eval`）的参数与重定向，字面上提到 `.railse` 的也算；命令名与 URL 不当路径。有没有 `roles.yaml`、会话有没有角色都一样；别的敏感路径（`.env`、ssh 密钥等）在放行期间的行为与 0.2.3 相同。
+- **不覆盖 Railse 自己的配置（0.3 起）。** 请求读写 `~/.railse`、任何 `.railse` 目录或实际的守护进程目录（`--dir`、`RAILSE_HOME`）时，会话放行、项目放行与 `RAILSE_TRUST` 都不适用：放行期间 agent 改规则、角色、放行表，等于改掉管它自己的东西。文件写入看目标路径；shell 命令按段走、跟踪 `cd`、`pushd`、`popd` 改变的工作目录（与定级同一套），看每一段（含 `sh -c`、命令替换与 `eval` 里的）的参数与重定向，`cat`、`cp`、`mv`、`ln` 的目标都在内；字面上提到 `.railse` 的也算；命令名与 URL 不当路径。工作目录算不出之后（`cd "$X"`、`cd -`、`popd`），相对路径一律按触及处理，不走放行。本来会命中放行而因此没放的，Claude 的 `PreToolUse` 一律回 ask（交给 Claude 自己的流程在 bypassPermissions 下等于放行）。有没有 `roles.yaml`、会话有没有角色都一样；别的敏感路径（`.env`、ssh 密钥等）在放行期间的行为与 0.2.3 相同。
 - **后果。** `PreToolUse` 回 allow 时 Claude Code 跳过它自己的权限检查（含 auto 的分类器）；`settings.json` 里你写的 deny 仍先生效。选择题（`AskUserQuestion`）不看放行，照样进手机。
 - **上限。** 时长 5 分钟～24 小时，超界截到边上（`railse trust 1m` 建成 5 分钟，`48h` 建成 24 小时）；每台机器同时生效至多 20 条，超出拒建。
 

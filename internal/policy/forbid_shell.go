@@ -278,33 +278,84 @@ func touchesControlPlane(p Payload, ctx Context) bool {
 			}
 			return false
 		}
+		// 外层按段走、跟踪 cd（与定级同一个 nextCwd）；命令替换、eval 等内层的命令在哪个目录跑不好确定：
+		// 外层有切换目录的段时，内层的相对路径按算不出处理
 		cmds, _ := forbidCommands(p.Command)
-		for _, c := range cmds {
-			for _, seg := range effectiveSegments(c) {
-				// 命令名本身不当路径（cwd 恰在守护进程目录里时，curl 会被拼成 <目录>/curl）；参数里的 URL 也不是路径
-				var words []string
-				if argv := stripWrappers(seg.argv); len(argv) > 1 {
-					words = append(words, argv[1:]...)
-				}
-				words = append(append(words, seg.redirects...), seg.inputs...)
-				for _, w := range seg.argv {
-					if mentionsRailseDir(w) {
-						return true
-					}
-				}
-				for _, w := range words {
-					if mentionsRailseDir(w) {
-						return true
-					}
-					q, ok := pathOperand(w)
-					if !ok || strings.Contains(q, "://") || unresolvable(q, ctx.HomeDir) {
-						continue
-					}
-					if ctx.isControlPath(resolvePath(q, p.Cwd, ctx.HomeDir)) {
+		changes := cdChanges(cmds[0], p.Cwd, ctx)
+		for i, c := range cmds {
+			if controlWalk(c, p.Cwd, i > 0 && changes, ctx, 0) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// controlWalk 按段走命令（跟踪 cd、pushd、popd 改变的工作目录，同定级的 classifyShellTrace），看有没有段读写 Railse 自己的配置；
+// sh -c 这类包装按当时的工作目录递归。lost 为真表示工作目录已算不出：之后的相对路径一律算触及（算不出实际目标的不得走放行）。
+func controlWalk(command, cwd string, lost bool, ctx Context, depth int) bool {
+	for _, text := range splitSegments(command) {
+		seg := parseSegment(text)
+		if segTouchesControl(seg, cwd, lost, ctx) {
+			return true
+		}
+		if argv := stripWrappers(seg.argv); len(argv) > 0 && isShell(filepath.Base(argv[0])) {
+			if depth >= maxShellNesting {
+				return true // 嵌套过深，看不完，偏严
+			}
+			if call, ok := parseShellCall(filepath.Base(argv[0]), argv); ok {
+				for _, inner := range call.inline() {
+					if controlWalk(inner, cwd, lost, ctx, depth+1) {
 						return true
 					}
 				}
 			}
+		}
+		next, ok := nextCwd(seg, cwd, ctx)
+		if !ok {
+			lost = true
+		}
+		cwd = next
+	}
+	return false
+}
+
+// cdChanges 报告命令的外层有没有改变工作目录的段（cd、pushd、popd）。
+func cdChanges(command, cwd string, ctx Context) bool {
+	for _, text := range splitSegments(command) {
+		if next, ok := nextCwd(parseSegment(text), cwd, ctx); !ok || next != cwd {
+			return true
+		}
+	}
+	return false
+}
+
+// segTouchesControl 看一段的参数（不含命令名）、输出与输入重定向：字面提到 .railse 的、解析后在配置目录里的算；
+// 工作目录算不出（lost）时相对路径也算。URL 不当路径。
+func segTouchesControl(seg segment, cwd string, lost bool, ctx Context) bool {
+	for _, w := range seg.argv {
+		if mentionsRailseDir(w) {
+			return true
+		}
+	}
+	var words []string
+	if argv := stripWrappers(seg.argv); len(argv) > 1 {
+		words = append(words, argv[1:]...)
+	}
+	words = append(append(words, redirectPaths(seg.redirects)...), seg.inputs...)
+	for _, w := range words {
+		if mentionsRailseDir(w) {
+			return true
+		}
+		q, ok := pathOperand(w)
+		if !ok || strings.Contains(q, "://") || unresolvable(q, ctx.HomeDir) {
+			continue
+		}
+		if lost && !filepath.IsAbs(expandHome(q, ctx.HomeDir)) {
+			return true
+		}
+		if ctx.isControlPath(resolvePath(q, cwd, ctx.HomeDir)) {
+			return true
 		}
 	}
 	return false

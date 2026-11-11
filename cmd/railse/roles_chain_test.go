@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -22,9 +23,13 @@ func chainInput(t *testing.T, cli, cwd, cmd string) (stdin, adapterName string) 
 	t.Helper()
 	switch cli {
 	case "claude-pre":
-		return claudePreToolUse(cwd, cmd, "bypassPermissions"), "claude"
+		var doc map[string]any
+		json.Unmarshal([]byte(sampleWithCommand(t, "claude/2.1.280/PreToolUse.json", cwd, cmd)), &doc)
+		doc["permission_mode"] = "bypassPermissions"
+		b, _ := json.Marshal(doc)
+		return string(b), "claude"
 	case "claude-pr":
-		return claudePermission(cwd, cmd), "claude"
+		return sampleWithCommand(t, "claude/2.1.280/PermissionRequest.json", cwd, cmd), "claude"
 	case "codex":
 		return sampleWithCommand(t, "codex/0.145.0/PermissionRequest.json", cwd, cmd), "codex"
 	case "gemini":
@@ -179,6 +184,31 @@ func TestHookNoVerdictFailsClosed(t *testing.T) {
 		out, _, code := runHookWith(t, stdin, ad, "--socket", sock)
 		if code != 0 || outcomeOf(out) != w {
 			t.Errorf("超过 4 MiB 的输入 %s: 想要 %s，得到 code=%d %.300q", cli, w, code, out)
+		}
+	}
+}
+
+// 放行期间经 cd 之后改守护进程目录：完整链路上不被放行放过。
+func TestChainTrustDoesNotCoverCdIntoControlPlane(t *testing.T) {
+	sock, repo, _ := startTestAgent(t)
+	t.Setenv("RAILSE_ROLE", "")
+	c := hookclient.Client{SocketPath: sock, ConnectTimeout: 2 * time.Second}
+	if r, err := c.ControlMsg(proto.Control{V: proto.Version, Kind: "control", Op: "trust_set",
+		Trust: &proto.Trust{Scope: proto.TrustScopeProject, Project: agent.CleanCwd(repo), Until: time.Now().Add(time.Hour)}}); err != nil || !r.OK {
+		t.Fatalf("建放行: %v %+v", err, r)
+	}
+	// 对照：同一放行下普通的联网命令照样放行
+	stdin, ad := chainInput(t, "claude-pr", repo, "curl https://example.com")
+	if out, _, _ := runHookWith(t, stdin, ad, "--socket", sock); outcomeOf(out) != "allow" {
+		t.Fatalf("对照应放行: %q", out)
+	}
+	for cli, want := range map[string]string{"claude-pre": "ask", "claude-pr": "pass", "codex": "pass", "gemini": "deny"} {
+		for _, cmd := range []string{"cd sub && cp replacement.yaml ../../h/roles.yaml", `cd "$X" && cp a roles.yaml`} {
+			stdin, ad := chainInput(t, cli, repo, cmd)
+			out, _, code := runHookWith(t, stdin, ad, "--socket", sock)
+			if code != 0 || outcomeOf(out) != want {
+				t.Errorf("%s %s: 想要 %s，得到 code=%d %q", cli, cmd, want, code, out)
+			}
 		}
 	}
 }

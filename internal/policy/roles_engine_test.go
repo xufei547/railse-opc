@@ -449,3 +449,28 @@ func TestBraceScanLinear(t *testing.T) {
 		t.Errorf("120 KiB 的 { 用了 %v", el)
 	}
 }
+
+// 配置目录保护跟着 cd 走（与定级同一套带工作目录状态的分析）；cd 到算不出的目录之后的相对路径一律算触及，不走放行。
+func TestControlPlaneFollowsCd(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	ctx := Context{ProjectRoot: roleHome + "/proj", HomeDir: roleHome, ProtectedDirs: []string{roleHome + "/proj/state"}}
+	for _, cmd := range []string{
+		"cd sub && cp replacement.yaml ../state/roles.yaml",
+		"cd sub && cat ../state/rules.yaml",
+		"cd sub; echo x > ../state/trusts.json",
+		"pushd sub && mv a ../state/roles.yaml",
+		"cd sub && ln -sf /tmp/x ../state/roles.yaml",
+		`cd "$X" && cp a roles.yaml`,
+		`sh -c 'cd sub && cp a ../state/roles.yaml'`,
+		`cd sub && echo "$(cat ../state/rules.yaml)"`,
+	} {
+		if d := e.Evaluate(Payload{Type: PayloadShell, Command: cmd, Cwd: roleHome + "/proj"}, ctx); !d.ControlPlane {
+			t.Errorf("%s: 应算触及配置: %+v", cmd, d)
+		}
+	}
+	for _, cmd := range []string{"cd sub && make build", "cd sub && cp a ../b.txt", "cd /tmp && ls"} {
+		if d := e.Evaluate(Payload{Type: PayloadShell, Command: cmd, Cwd: roleHome + "/proj"}, ctx); d.ControlPlane {
+			t.Errorf("%s: 不该算: %+v", cmd, d)
+		}
+	}
+}
