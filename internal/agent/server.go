@@ -371,7 +371,7 @@ func (s *Server) evaluate(req proto.Request) (policy.Payload, policy.Decision, p
 	p.Cwd = cwd
 	root := s.projectRootFor(cwd)
 	pctx := policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir, MachineID: s.cfg.MachineID, ProtectedDirs: s.protected}
-	pctx.Role = s.sessionRole(&req.Session, pctx.Root(), cwd)
+	pctx.Role = s.sessionRole(&req.Session, pctx.Root(), cwd, true)
 	return reported, s.rules.Engine().Evaluate(p, pctx), pctx, req.Session
 }
 
@@ -395,7 +395,8 @@ func protectedDirs(dir string) []string {
 // （未分配、角色文件有误时为空），返回给引擎的角色（未分配为 nil，有误时是 policy.BrokenRole）。
 // root 是规范化后的项目根（不含地盘那一步），为空时按 cwd 匹配；cwd 不是绝对路径（钩子没给）时不按目录匹配。
 // RAILSE_ROLE 指了不存在的角色时，每个会话在日志里记一行。
-func (s *Server) sessionRole(sess *proto.Session, root, cwd string) *policy.Role {
+// pin 为真（判定审批时）才建立、更新会话的钉住；答题与事件只读取。
+func (s *Server) sessionRole(sess *proto.Session, root, cwd string, pin bool) *policy.Role {
 	if !filepath.IsAbs(cwd) {
 		cwd = ""
 	}
@@ -406,7 +407,7 @@ func (s *Server) sessionRole(sess *proto.Session, root, cwd string) *policy.Role
 		s.noteUnknownRole(*sess, env)
 	}
 	if st.Err == nil && st.Exists {
-		role = s.pinRole(*sess, role, why, st.Set)
+		role = s.pinRole(*sess, role, st.Set, pin)
 	}
 	sess.Role = roleName(role)
 	return role
@@ -424,9 +425,10 @@ const (
 	pinTTL    = 7 * 24 * time.Hour
 )
 
-// pinRole 按会话钉住角色（见 Server.pinned）：RAILSE_ROLE 指名的（why.Kind 为 env）总是生效并改钉；其余情况下，会话已钉着、
-// 且那个角色还在文件里时用钉着的；否则解析出的非空角色钉上。没有会话 id 的不钉。
-func (s *Server) pinRole(sess proto.Session, role *policy.Role, why RoleWhy, set policy.RoleSet) *policy.Role {
+// pinRole 按会话钉住角色（见 Server.pinned）。解析顺序：RAILSE_ROLE 指向存在的角色、当前目录命中的角色（role 非空，二者由
+// ResolveRole 定）优先，并把钉住更新为它；都没有（当前目录不属于任何角色）时沿用钉住的、仍在文件里的角色，不降为未分配。
+// 钉住的角色已从文件里删掉时解除。establish 为假时只读取，不建立、不更新。没有会话 id 的不钉。
+func (s *Server) pinRole(sess proto.Session, role *policy.Role, set policy.RoleSet, establish bool) *policy.Role {
 	if sess.CLISessionID == "" {
 		return role
 	}
@@ -434,16 +436,29 @@ func (s *Server) pinRole(sess proto.Session, role *policy.Role, why RoleWhy, set
 	now := time.Now()
 	s.pinMu.Lock()
 	defer s.pinMu.Unlock()
-	if p, ok := s.pinned[key]; ok && why.Kind != RoleByEnv {
-		if r := set.Find(p.name); r != nil {
-			s.pinned[key] = rolePin{name: p.name, at: now}
-			return r
+	if role != nil {
+		if establish {
+			s.storePinLocked(key, role.Name, now)
 		}
-		delete(s.pinned, key) // 角色已从文件里删掉：解除钉住
+		return role
 	}
-	if role == nil {
+	p, ok := s.pinned[key]
+	if !ok {
 		return nil
 	}
+	r := set.Find(p.name)
+	if r == nil {
+		delete(s.pinned, key) // 角色已从文件里删掉：解除钉住
+		return nil
+	}
+	if establish {
+		s.pinned[key] = rolePin{name: p.name, at: now}
+	}
+	return r
+}
+
+// storePinLocked 记下会话钉住的角色。新会话进表前清掉过期的；满了不再钉新会话。调用方持 pinMu。
+func (s *Server) storePinLocked(key, name string, now time.Time) {
 	if _, ok := s.pinned[key]; !ok {
 		for k, p := range s.pinned {
 			if now.Sub(p.at) > pinTTL {
@@ -451,14 +466,13 @@ func (s *Server) pinRole(sess proto.Session, role *policy.Role, why RoleWhy, set
 			}
 		}
 		if len(s.pinned) >= maxPinned {
-			return role
+			return
 		}
 	}
 	if s.pinned == nil {
 		s.pinned = map[string]rolePin{}
 	}
-	s.pinned[key] = rolePin{name: role.Name, at: now}
-	return role
+	s.pinned[key] = rolePin{name: name, at: now}
 }
 
 // noteUnknownRole 在日志里说一次：这个会话的 RAILSE_ROLE 指的角色不存在，按目录绑定。来自钩子的字段截断后按 %q 记。
@@ -654,7 +668,7 @@ func (s *Server) handleAsk(ctx context.Context, req proto.Request) proto.Respons
 	// 答题不经判定，只带上生效的角色名（设计 §3.4）；项目根随上报帧带给 hub，推送标题与收件箱靠它显示项目名
 	cwd := CleanCwd(req.Session.Cwd)
 	root := s.projectRootFor(cwd)
-	s.sessionRole(&req.Session, policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir}.Root(), cwd)
+	s.sessionRole(&req.Session, policy.Context{ProjectRoot: root, HomeDir: s.cfg.HomeDir}.Root(), cwd, false)
 	red := redactAsk(req.Ask)
 	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "ask", Session: req.Session, ToolName: proto.AskToolName, Ask: red}
 	resp := proto.Response{V: proto.Version, RequestID: id}
@@ -796,9 +810,9 @@ func (s *Server) handleEvent(ev proto.Event) proto.EventAck {
 	// 事件只带上生效的角色名（设计 §3.4）
 	cwd := CleanCwd(ev.Session.Cwd)
 	if filepath.IsAbs(cwd) {
-		s.sessionRole(&ev.Session, policy.Context{ProjectRoot: s.projectRootFor(cwd), HomeDir: s.cfg.HomeDir}.Root(), cwd)
+		s.sessionRole(&ev.Session, policy.Context{ProjectRoot: s.projectRootFor(cwd), HomeDir: s.cfg.HomeDir}.Root(), cwd, false)
 	} else {
-		s.sessionRole(&ev.Session, "", "")
+		s.sessionRole(&ev.Session, "", "", false)
 	}
 	state := "recorded"
 	if ev.Kind == "question" && s.pending.HasSession(ev.Session.CLISessionID) {

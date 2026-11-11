@@ -490,46 +490,74 @@ func TestRoleDirsNormalized(t *testing.T) {
 	}
 }
 
-// 角色按会话钉住：解析出非空角色后，cwd 变了也不降为未分配、不换成别的目录角色；只有指向存在角色的 RAILSE_ROLE 能改；
-// 角色从文件里删掉时解除钉住。
+// 角色解析顺序：RAILSE_ROLE 指向存在的角色 > 当前目录命中的角色（并更新钉住）> 会话钉住的角色（当前目录不属于任何角色时沿用，
+// 不降为未分配）。钉住只在判定审批时建立与更新，答题与事件只读取；角色从文件里删掉时解除。
 func TestRolePinnedPerSession(t *testing.T) {
 	env := startServer(t, LocalDecider{}, nil)
-	other := filepath.Join(filepath.Dir(env.repo), "other")
+	other := filepath.Join(filepath.Dir(env.repo), "other") // 宽松角色“别处”的目录；env.repo 是严格的“写作”
 	os.MkdirAll(filepath.Join(other, ".git"), 0o755)
 	realOther, _ := filepath.EvalSymlinks(other)
 	rolesFor(t, env, "  - name: 别处\n    dirs: [\""+realOther+"\"]\n")
+	nowhere := t.TempDir()
 	role := func(cwd, envRole, session string) string {
 		r := withRole(permission(cwd, "git status"), envRole)
 		r.Session.CLISessionID = session
 		send(t, env, r)
 		return lastAudit(t, env).Session.Role
 	}
-	if got := role(env.repo, "", "s1"); got != "写作" {
-		t.Fatalf("先按目录绑定到写作: %q", got)
+	// 宽松目录 → 严格目录：换成严格的
+	if got := role(other, "", "a"); got != "别处" {
+		t.Fatalf("先在宽松目录: %q", got)
 	}
-	if got := role(other, "", "s1"); got != "写作" {
-		t.Fatalf("cwd 换到别的角色的目录也不换: %q", got)
+	if got := role(env.repo, "", "a"); got != "写作" {
+		t.Fatalf("宽松目录 → 严格目录应换成严格角色: %q", got)
 	}
-	if got := role(t.TempDir(), "", "s1"); got != "写作" {
-		t.Fatalf("cwd 换到没有角色的目录也不降为未分配: %q", got)
+	// 严格目录 → 无角色目录：沿用钉住的严格角色，不降为未分配
+	if got := role(nowhere, "", "a"); got != "写作" {
+		t.Fatalf("严格目录 → 无角色目录应沿用严格角色: %q", got)
 	}
-	if got := role(other, "", "s2"); got != "别处" {
-		t.Fatalf("别的会话不受影响: %q", got)
+	// 严格目录 → 宽松目录：当前目录的角色优先
+	if got := role(other, "", "a"); got != "别处" {
+		t.Fatalf("严格目录 → 宽松目录按当前目录: %q", got)
 	}
-	if got := role(env.repo, "不存在", "s1"); got != "写作" {
-		t.Fatalf("不存在的 RAILSE_ROLE 不能改: %q", got)
+	if got := role(nowhere, "", "a"); got != "别处" {
+		t.Fatalf("钉住随之更新: %q", got)
 	}
-	if got := role(env.repo, "运维", "s1"); got != "运维" {
-		t.Fatalf("显式 RAILSE_ROLE 能改: %q", got)
+	// RAILSE_ROLE 指向存在的角色优先；不存在的不算
+	if got := role(other, "运维", "a"); got != "运维" {
+		t.Fatalf("显式 RAILSE_ROLE 优先: %q", got)
 	}
-	if got := role(env.repo, "", "s1"); got != "运维" {
-		t.Fatalf("改过之后钉在运维: %q", got)
+	if got := role(nowhere, "不存在", "a"); got != "运维" {
+		t.Fatalf("不存在的 RAILSE_ROLE 不算，沿用钉住: %q", got)
 	}
-	// 运维从文件里删掉：解除钉住，回到按目录
-	rolesFor2 := strings.Replace(mustRead(t, env.cfg.RolesPath), "  - name: 运维\n    ceiling: destructive\n", "", 1)
-	writeRoles(t, env.cfg.RolesPath, rolesFor2)
-	if got := role(other, "", "s1"); got != "别处" {
-		t.Fatalf("角色删掉后应解除钉住、按目录: %q", got)
+	// 别的会话不受影响
+	if got := role(nowhere, "", "b"); got != "" {
+		t.Fatalf("别的会话没钉过，未分配: %q", got)
+	}
+	// 运维从文件里删掉：解除钉住
+	writeRoles(t, env.cfg.RolesPath, strings.Replace(mustRead(t, env.cfg.RolesPath), "  - name: 运维\n    ceiling: destructive\n", "", 1))
+	if got := role(nowhere, "", "a"); got != "" {
+		t.Fatalf("角色删掉后解除钉住: %q", got)
+	}
+}
+
+// 答题与事件只读取钉住，不建立。
+func TestRolePinOnlyFromPermissions(t *testing.T) {
+	env := startServer(t, LocalDecider{}, nil)
+	rolesFor(t, env, "")
+	nowhere := t.TempDir()
+	ask := askRequest(env.repo)
+	ask.Session.CLISessionID = "q"
+	send(t, env, ask)
+	if e := lastAudit(t, env); e.Session.Role != "写作" {
+		t.Fatalf("答题按目录带角色: %+v", e.Session)
+	}
+	roundTrip(t, env.cfg.SocketPath, proto.Event{V: proto.Version, Kind: "done", Session: proto.Session{Tool: "claude", CLISessionID: "q", Cwd: env.repo}})
+	r := permission(nowhere, "git status")
+	r.Session.CLISessionID = "q"
+	send(t, env, r)
+	if e := lastAudit(t, env); e.Session.Role != "" {
+		t.Fatalf("答题与事件不该建立钉住: %+v", e.Session)
 	}
 }
 
