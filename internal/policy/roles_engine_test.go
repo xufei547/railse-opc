@@ -445,7 +445,8 @@ func TestBraceScanLinear(t *testing.T) {
 	cmd := "echo " + strings.Repeat("{", 120<<10)
 	start := time.Now()
 	Classify(Payload{Type: PayloadShell, Command: cmd, Cwd: roleHome + "/proj"}, Context{ProjectRoot: roleHome + "/proj", HomeDir: roleHome})
-	if el := time.Since(start); el > 2*time.Second {
+	// 平方级时这里要 28 秒以上（不带 -race）；线性时孤立跑 -race 约 0.35 秒。预算留给并行跑全部测试时的负载波动
+	if el := time.Since(start); el > 10*time.Second {
 		t.Errorf("120 KiB 的 { 用了 %v", el)
 	}
 }
