@@ -57,6 +57,7 @@ func (s *Server) apiRoutes() {
 	s.mux.HandleFunc("DELETE /api/machines/{id}", write(s.handleMachineRevoke))
 	s.mux.HandleFunc("GET /api/trusts", read(s.handleTrusts))
 	s.mux.HandleFunc("DELETE /api/trusts/{id}", write(s.handleTrustRevoke))
+	s.mux.HandleFunc("GET /api/desk", read(s.handleDesk))
 	// WebSocket 握手是 GET，但浏览器跨站也能发起（带 cookie），同样查 Origin
 	s.mux.HandleFunc("GET /ws/client", sameOrigin(s.requireClient(s.handleClientWS)))
 }
