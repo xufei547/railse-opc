@@ -2,6 +2,7 @@ package policy
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -407,21 +408,88 @@ func nextCwd(seg segment, cwd string, ctx Context) (string, bool) {
 	return resolvePath(args[0], cwd, ctx.HomeDir), true
 }
 
-// stripWrappers 去掉开头的环境变量赋值和 env、time、nohup、nice、caffeinate 这类包装。
-// 只剩一个 token 时不再剥，避免把 "env" 本身剥成空。
+// stripWrappers 去掉开头的环境变量赋值和 env、time、nohup、nice、caffeinate 这类包装（按 basename 认，/usr/bin/env 等同 env），
+// 连同它们的选项（env 的 -i、-u 名字、--unset=名字、-C 目录、-S 串等，nice 的 -n 数，time 的 -p）。
+// 只剩一个 token 时不再剥，避免把 "env" 本身剥成空。总是返回 argv 的后缀（commandWords 靠这一点对齐标志）；
+// env -S 的串要拆成新的词，不是后缀，由 peelWrappers 处理。
 func stripWrappers(argv []string) []string {
+	out, _ := peelWrappers(argv, false)
+	return out
+}
+
+// deepWrappers 是只在“看穿”时剥掉的包装：定级时它们自有档位（sudo、doas 按 destructive，xargs 不在名单里按 unknown），
+// 不能剥；禁用清单、改 Railse 设置、sh -c 识别与配置目录检查要看它们里面跑的是什么。
+var deepWrappers = map[string]bool{"sudo": true, "doas": true, "xargs": true, "timeout": true, "command": true, "exec": true}
+
+// wrapperArgOptions 是各包装带一个参数的选项（参数是下一个词，或以 = 连写）：剥选项时连参数一起跳过。
+var wrapperArgOptions = map[string][]string{
+	"env":     {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+	"nice":    {"-n", "--adjustment"},
+	"time":    {"-f", "--format", "-o", "--output"},
+	"sudo":    {"-u", "--user", "-g", "--group", "-C", "--close-from", "-h", "--host", "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user", "-D", "--chdir", "-R", "--chroot", "-T", "--command-timeout"},
+	"doas":    {"-u", "-C"},
+	"xargs":   {"-I", "-i", "-n", "--max-args", "-P", "--max-procs", "-L", "--max-lines", "-d", "--delimiter", "-E", "-e", "--eof", "-s", "--max-chars", "-a", "--arg-file"},
+	"timeout": {"-s", "--signal", "-k", "--kill-after"},
+	"exec":    {"-a"},
+}
+
+// deepArgv 是一段剥掉全部包装（含 sudo、xargs、timeout 等，见 deepWrappers）之后的命令词，供 deny、ask 匹配与“看穿”用。
+func deepArgv(seg segment) []string {
+	out, _ := peelWrappers(seg.argv, true)
+	return out
+}
+
+// peelWrappers 剥掉开头的赋值与包装（deep 为真时连 deepWrappers 一起），返回剩下的命令词；env -S（--split-string）的串按
+// shell 规则拆成词接在前面（于是不再是 argv 的后缀，split 为真）。timeout 剥掉选项后还要跳过时长。
+func peelWrappers(argv []string, deep bool) (out []string, split bool) {
 	for len(argv) > 1 {
 		a := argv[0]
-		switch {
-		case isEnvAssignment(a):
+		if isEnvAssignment(a) {
 			argv = argv[1:]
-		case a == "env" || a == "time" || a == "nohup" || a == "nice" || a == "caffeinate":
-			argv = argv[1:]
-		default:
-			return argv
+			continue
 		}
+		name := filepath.Base(a)
+		switch {
+		case name == "env" || name == "time" || name == "nohup" || name == "nice" || name == "caffeinate":
+		case deep && deepWrappers[name]:
+		default:
+			return argv, split
+		}
+		rest := argv[1:]
+		for len(rest) > 0 && strings.HasPrefix(rest[0], "-") && rest[0] != "-" {
+			opt := rest[0]
+			rest = rest[1:]
+			if opt == "--" {
+				break
+			}
+			key, val, hasVal := strings.Cut(opt, "=")
+			takes := slices.Contains(wrapperArgOptions[name], key)
+			if !takes && len(key) > 2 && key[1] != '-' && slices.Contains(wrapperArgOptions[name], key[:2]) {
+				key, val, hasVal, takes = key[:2], key[2:], true, true // -uNAME、-n5 这类连写
+			}
+			if !takes {
+				continue
+			}
+			if !hasVal && len(rest) > 0 {
+				val, rest = rest[0], rest[1:]
+			}
+			if name == "env" && (key == "-S" || key == "--split-string") {
+				// 串里是命令（可带赋值）：拆成词，接在剩下的前面再接着剥
+				words := parseSegment(val).argv
+				rest = append(append([]string(nil), words...), rest...)
+				split = true
+				break
+			}
+		}
+		if name == "timeout" && len(rest) > 0 {
+			rest = rest[1:] // 时长
+		}
+		if len(rest) == 0 {
+			return argv, split
+		}
+		argv = rest
 	}
-	return argv
+	return argv, split
 }
 
 func isEnvAssignment(s string) bool {
@@ -564,7 +632,7 @@ func effectiveSegmentsDepth(command string, depth int) (out []segment, truncated
 	for _, s := range splitSegments(command) {
 		seg := parseSegment(s)
 		out = append(out, seg)
-		argv := stripWrappers(seg.argv)
+		argv := deepArgv(seg) // sudo sh -c、timeout 5 bash -c 也看进去
 		if len(argv) == 0 {
 			continue
 		}

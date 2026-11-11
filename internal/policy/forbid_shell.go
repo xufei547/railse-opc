@@ -50,13 +50,16 @@ func forbidCommands(cmd string) (cmds []string, opaque bool) {
 			opaque = true
 		}
 		for _, seg := range segs {
-			argv := stripWrappers(seg.argv)
+			argv, split := peelWrappers(seg.argv, true)
 			if len(argv) == 0 {
 				continue
 			}
 			flags := seg.argvFlags
-			if off := len(seg.argv) - len(argv); off >= 0 && off <= len(flags) {
+			if off := len(seg.argv) - len(argv); !split && off >= 0 && off <= len(flags) {
 				flags = flags[off:]
+			} else if split {
+				opaque = true // env -S 拆出来的词没有引号信息，看不出是不是字面量
+				flags = nil
 			}
 			name := filepath.Base(argv[0])
 			// eval 与 sh -c 类的命令参数要是完整的字面量才看得见：含变量展开、通配（eval "git ${OP}"、bash -c "$CMD"）时，
@@ -299,7 +302,7 @@ func controlWalk(command, cwd string, lost bool, ctx Context, depth int) bool {
 		if segTouchesControl(seg, cwd, lost, ctx) {
 			return true
 		}
-		if argv := stripWrappers(seg.argv); len(argv) > 0 && isShell(filepath.Base(argv[0])) {
+		if argv := deepArgv(seg); len(argv) > 0 && isShell(filepath.Base(argv[0])) {
 			if depth >= maxShellNesting {
 				return true // 嵌套过深，看不完，偏严
 			}

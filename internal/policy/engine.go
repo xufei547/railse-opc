@@ -285,7 +285,8 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 			if segmentHasPrefix(seg, m.CommandPrefix) {
 				return true
 			}
-			return anySeg && wordsHavePrefix(normalizedArgv(seg, cwd, ctx), m.CommandPrefix)
+			// deny 与 ask 还看穿 sudo、xargs、timeout 这类包装（见 peelWrappers）；allow 不看，sudo git push 不该被 git push 的放行放过
+			return anySeg && (wordsHavePrefix(normalizedArgv(seg, cwd, ctx), m.CommandPrefix) || wordsHavePrefix(deepArgv(seg), m.CommandPrefix))
 		}) {
 			return false
 		}
@@ -296,7 +297,11 @@ func matchRequest(r *compiledRule, p Payload, risk Risk, ctx Context) bool {
 				return true
 			}
 			norm := normalizedArgv(seg, cwd, ctx)
-			return anySeg && len(norm) > 0 && r.re.MatchString(strings.Join(norm, " "))
+			if anySeg && len(norm) > 0 && r.re.MatchString(strings.Join(norm, " ")) {
+				return true
+			}
+			deep := deepArgv(seg)
+			return anySeg && len(deep) > 0 && r.re.MatchString(strings.Join(deep, " "))
 		}) {
 			return false
 		}

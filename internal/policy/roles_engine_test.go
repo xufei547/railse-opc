@@ -474,3 +474,52 @@ func TestControlPlaneFollowsCd(t *testing.T) {
 		}
 	}
 }
+
+// 包装命令按 basename 识别，env 的选项解析完整，sudo、xargs、timeout、nohup、nice、command、exec 包一层照样看进去
+// （与定级共用 stripWrappers；sudo 本身在定级里仍按 destructive）。
+func TestWrappersSeenThrough(t *testing.T) {
+	e := mustEngine(t, roleEngineRules)
+	nested := `/usr/bin/env sh -c 'export RAILSE_ROLE=ops; gemini -p hi'`
+	if r := Classify(shellAt(nested), Context{ProjectRoot: roleHome + "/proj", HomeDir: roleHome}); r == RiskRead {
+		t.Errorf("/usr/bin/env sh -c … 不该定为只读")
+	}
+	if r := Classify(shellAt("sudo ls"), Context{ProjectRoot: roleHome + "/proj", HomeDir: roleHome}); r != RiskDestructive {
+		t.Errorf("sudo 仍应 destructive: %s", r)
+	}
+	for _, cmd := range []string{
+		nested,
+		"env -i RAILSE_ROLE=x claude",
+		"env -u HOME RAILSE_ROLE=x claude",
+		"env --unset=HOME RAILSE_ROLE=x claude",
+		"env --unset HOME RAILSE_ROLE=x claude",
+		"env -S 'RAILSE_ROLE=x claude -p hi'",
+		"/usr/bin/env -i RAILSE_TRUST=8h claude",
+		"sudo RAILSE_ROLE=x claude",
+		"sudo -u bob env RAILSE_ROLE=x claude",
+		"xargs -I{} sh -c 'RAILSE_ROLE=x claude {}'",
+		"timeout 5 sh -c 'RAILSE_ROLE=x gemini'",
+		"timeout -s KILL 5 env RAILSE_ROLE=x claude",
+		"nohup env RAILSE_ROLE=x claude",
+		"nice -n 5 env RAILSE_ROLE=x claude",
+		"command env RAILSE_ROLE=x claude",
+		"exec env RAILSE_ROLE=x claude",
+	} {
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "运维")); !d.BeyondRole || !strings.Contains(d.Reason, "试图更改") {
+			t.Errorf("%s: 应看出改 Railse 设置: %+v", cmd, d)
+		}
+	}
+	for _, cmd := range []string{
+		"sudo git push origin main",
+		"timeout 10 git push origin main",
+		"/usr/bin/env git push origin main",
+		"xargs git push origin",
+		"nohup git push origin main",
+		"nice -n 5 git push origin main",
+		"command git push origin main",
+		"env -u HOME git push origin main",
+	} {
+		if d := e.Evaluate(shellAt(cmd), roleCtx(t, "写作")); !d.Forbidden {
+			t.Errorf("%s: 禁用应看穿包装: %+v", cmd, d)
+		}
+	}
+}
