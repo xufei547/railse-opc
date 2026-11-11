@@ -775,7 +775,7 @@ func (s *Server) handlePermission(ctx context.Context, req proto.Request) proto.
 	redacted := redact.Payload(reported)
 	entry := AuditEntry{TS: time.Now(), RequestID: id, Kind: "permission", Session: req.Session, ToolName: req.ToolName, Payload: &redacted, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason,
 		Source: req.Source, PermissionMode: req.PermissionMode, ToolUseID: req.ToolUseID, Role: d.Role, BeyondRole: d.BeyondRole, Ancestry: req.AncestrySource}
-	if !(len(req.Ancestors) > 0 || req.AncestrySource == ancestryUnverified) {
+	if len(req.Ancestors) == 0 && req.AncestrySource != ancestryUnverified {
 		entry.Ancestry = ""
 	}
 	resp := proto.Response{V: proto.Version, RequestID: id, Risk: d.Risk.String(), RuleID: d.RuleID, Reason: d.Reason}
