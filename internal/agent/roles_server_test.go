@@ -443,7 +443,16 @@ func TestPausedForbidStillDenies(t *testing.T) {
 
 // 守护进程目录在项目里（--dir、RAILSE_HOME 指过去）时，agent 改 roles.yaml、rules.yaml、trusts.json 按 destructive，不当项目内写入放行。
 func TestDaemonDirWritesAreDestructive(t *testing.T) {
-	env := startServer(t, LocalDecider{}, nil)
+	// 家目录放到项目目录之外：startServer 默认把它放在 <proj>/home，项目根成了家目录的祖先，引擎按没有项目根处理
+	// （Context.Root），普通文件就成了 write_outside。macOS 的临时目录带符号链接，解析过的 proj 与没解析的家目录字符串对不上，
+	// 碰巧不触发；Linux 上没有符号链接就失败。这里两边都用真实路径，布局不依赖平台。
+	env := startServer(t, LocalDecider{}, func(c *Config) {
+		home, err := filepath.EvalSymlinks(shortTempDir(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.HomeDir = home
+	})
 	proj, err := filepath.EvalSymlinks(filepath.Dir(env.cfg.Dir)) // 守护进程目录是 <proj>/h；写入路径用真实路径，同 cwd 的口径
 	if err != nil {
 		t.Fatal(err)
