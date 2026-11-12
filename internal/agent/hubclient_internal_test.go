@@ -826,6 +826,8 @@ func TestHubClientLogsOnlyHubOrigin(t *testing.T) {
 	if uri != "/base/ws/agent" {
 		t.Fatalf("拨号路径应为 /base/ws/agent 且不带 query: %q", uri)
 	}
+	// “已连接”那行日志打在标记已连接之后（WaitConnected 先返回）：等它出现再看，慢机器上否则会读到还没写完的日志
+	waitFor(t, func() bool { return strings.Contains(tc.logs.String(), f.http.URL) })
 	logs := tc.logs.String()
 	if !strings.Contains(logs, f.http.URL) || strings.Contains(logs, "secretquery") || strings.Contains(logs, "/base") {
 		t.Fatalf("日志里的 hub 地址只应有 scheme://host: %s", logs)
